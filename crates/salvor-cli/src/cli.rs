@@ -1,0 +1,100 @@
+//! The command-line surface, as `clap` derive types.
+//!
+//! Keeping the parse tree in one module (separate from the handlers in
+//! [`crate::commands`]) means the shape of the CLI reads top to bottom here,
+//! and the handlers take already-parsed, typed arguments. The one global
+//! option, `--store`, is defined once and shared by every subcommand.
+
+use std::path::PathBuf;
+
+use clap::{Args, Parser, Subcommand};
+
+/// Salvor: a durable execution runtime for AI agents.
+#[derive(Debug, Parser)]
+#[command(name = "salvor", version, about, long_about = None)]
+pub struct Cli {
+    /// Path to the SQLite event store.
+    ///
+    /// The precedence is flag, then the `SALVOR_STORE` environment variable,
+    /// then the default: an explicit `--store` wins, else `SALVOR_STORE`,
+    /// else `./salvor.db`.
+    //
+    // clap resolves that precedence itself from the `env` and `default_value`
+    // attributes below; nothing in the handlers re-implements it.
+    #[arg(
+        long,
+        global = true,
+        env = "SALVOR_STORE",
+        default_value = "./salvor.db",
+        value_name = "PATH"
+    )]
+    pub store: PathBuf,
+
+    /// The subcommand to run.
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+/// The five verbs of the v0.1 CLI.
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Start a fresh run of an agent.
+    Run(RunArgs),
+    /// Continue an existing run: resume a parked one, or recover a crashed one.
+    Resume(ResumeArgs),
+    /// List every run in the store.
+    List,
+    /// Print a run's event log.
+    History(HistoryArgs),
+    /// Re-derive a run's state from its log without executing anything.
+    Replay(ReplayArgs),
+}
+
+/// Arguments to `run`.
+#[derive(Debug, Args)]
+pub struct RunArgs {
+    /// Path to the agent definition (TOML).
+    #[arg(long, value_name = "FILE")]
+    pub agent: PathBuf,
+    /// The run input: a JSON value, or `@path` to read JSON from a file.
+    #[arg(long, value_name = "JSON|@FILE")]
+    pub input: String,
+}
+
+/// Arguments to `resume`.
+#[derive(Debug, Args)]
+pub struct ResumeArgs {
+    /// The run id (a UUID) to continue.
+    #[arg(value_name = "RUN_ID")]
+    pub run_id: String,
+    /// Path to the agent definition (TOML), needed to rebuild the agent.
+    #[arg(long, value_name = "FILE")]
+    pub agent: PathBuf,
+    /// The resume input, required for a parked run: a JSON value, or `@path`.
+    /// Ignored (with a warning) when recovering a crashed run.
+    #[arg(long, value_name = "JSON|@FILE")]
+    pub input: Option<String>,
+}
+
+/// Arguments to `history`.
+#[derive(Debug, Args)]
+pub struct HistoryArgs {
+    /// The run id (a UUID) whose log to print.
+    #[arg(value_name = "RUN_ID")]
+    pub run_id: String,
+    /// Print the raw event envelopes as JSON instead of the pretty log.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments to `replay`.
+#[derive(Debug, Args)]
+pub struct ReplayArgs {
+    /// The run id (a UUID) to re-derive state for.
+    #[arg(value_name = "RUN_ID")]
+    pub run_id: String,
+    /// Re-derive state from the log without executing anything. Required in
+    /// this version: live replay is not yet available.
+    #[arg(long)]
+    pub dry_run: bool,
+}

@@ -35,6 +35,16 @@ tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 wiremock = "0.6"
 tracing = "0.1"
+# CLI surface. clap parses the command tree with its derive API; toml
+# parses the agent-definition file (agents are data); tracing-subscriber
+# renders the human-readable run/seq progress to stderr.
+clap = { version = "4", features = ["derive", "env"] }
+toml = "0.8"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Dev-only CLI test tooling: drive the real binary and assert on its output.
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
 rusqlite = { version = "0.32", features = ["bundled"] }
 async-trait = "0.1"
 sha2 = "0.10"

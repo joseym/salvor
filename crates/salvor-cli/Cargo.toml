@@ -6,15 +6,59 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# `fixture` builds the in-repo counting MCP server the CLI integration tests
+# spawn (`src/bin/mcp_count_fixture.rs`), pulling in the server half of the
+# rmcp SDK and schemars only for that binary. It is on by default so a plain
+# `cargo test --workspace` builds the fixture and Cargo sets
+# CARGO_BIN_EXE_salvor-mcp-count-fixture for the tests, exactly the pattern
+# salvor-tools uses for its own fixture. `--no-default-features` drops it, and
+# with it the server-side rmcp surface, leaving only the client MCP support
+# the product uses (which arrives transitively through salvor-tools). Adding
+# these deps costs the workspace nothing: salvor-tools already compiles rmcp
+# with the server features on, so feature unification means no new crate.
+default = ["fixture"]
+fixture = ["dep:rmcp", "dep:schemars"]
+
 [[bin]]
 name = "salvor"
 path = "src/main.rs"
+
+# The counting MCP fixture server. Test-support only; gated on `fixture` so a
+# no-default-features build never compiles it. See the feature comment above.
+[[bin]]
+name = "salvor-mcp-count-fixture"
+path = "src/bin/mcp_count_fixture.rs"
+required-features = ["fixture"]
 
 [dependencies]
 salvor-core.workspace = true
 salvor-store.workspace = true
 salvor-llm.workspace = true
 salvor-tools.workspace = true
+salvor-runtime.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+toml.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+time.workspace = true
+uuid.workspace = true
+# Only the fixture binary uses these; optional and behind the `fixture` feature.
+rmcp = { workspace = true, optional = true, features = [
+    "server",
+    "transport-io",
+    "macros",
+    "schemars",
+] }
+schemars = { workspace = true, optional = true }
+
+[dev-dependencies]
+assert_cmd.workspace = true
+predicates.workspace = true
+tempfile.workspace = true
+wiremock.workspace = true
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
