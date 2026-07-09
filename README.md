@@ -18,13 +18,13 @@ Event-sourced runs, typed tool contracts with side-effect classification, crash-
 
 ## Development
 
-Run this once after cloning:
+Run this once after cloning (install cocogitto first with `brew install cocogitto` if you do not have it):
 
 ```
-git config core.hooksPath .githooks
+cog install-hook --all
 ```
 
-Commit messages follow Conventional Commits, and this is checked by a commit-msg hook.
+Commit messages follow Conventional Commits, enforced by `cog verify` in the commit-msg hook. Releases are cut with `cog bump`.
 
 ## License
 

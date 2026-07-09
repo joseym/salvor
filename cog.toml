@@ -1,0 +1,25 @@
+# Conventional-commit enforcement via cocogitto (https://docs.cocogitto.io).
+# After cloning, install the hook with: cog install-hook --all
+
+ignore_merge_commits = true
+
+# Tags are prefixed with `v` (v0.2.0, ...).
+tag_prefix = "v"
+
+# `cog bump` runs these before it writes the version commit and tag. {{version}}
+# expands to the target version cog computed. set-version.sh stamps that version
+# into the root Cargo.toml's [workspace.package] (every crate inherits it) and
+# refreshes the lock; the build then proves the bumped workspace still compiles.
+# Both run in the repo root. No post_bump_hooks: pushing the tag is left to the
+# operator. If a hook fails mid-bump, cog aborts and leaves the stamped manifest
+# in the tree; recover with git checkout -- . before retrying.
+pre_bump_hooks = [
+  "scripts/set-version.sh {{version}}",
+  "cargo build",
+]
+
+[git_hooks.commit-msg]
+script = """#!/bin/sh
+set -e
+cog verify --file "$1"
+"""
