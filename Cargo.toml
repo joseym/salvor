@@ -1,0 +1,28 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/salvor-core",
+    "crates/salvor-store",
+    "crates/salvor-llm",
+    "crates/salvor-tools",
+    "crates/salvor-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/joseym/salvor"
+
+[workspace.dependencies]
+salvor-core = { path = "crates/salvor-core" }
+salvor-store = { path = "crates/salvor-store" }
+salvor-llm = { path = "crates/salvor-llm" }
+salvor-tools = { path = "crates/salvor-tools" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
