@@ -11,3 +11,11 @@ salvor-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+time.workspace = true
+uuid.workspace = true
+rusqlite.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
