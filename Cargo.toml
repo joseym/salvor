@@ -29,6 +29,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 time = { version = "0.3", features = ["serde-well-known", "macros"] }
 anyhow = "1"
 tokio = { version = "1", features = ["full"] }
+# rustls only: reqwest's default native-tls feature would add a system OpenSSL dependency.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+wiremock = "0.6"
 tracing = "0.1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 async-trait = "0.1"
