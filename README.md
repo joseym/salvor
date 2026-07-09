@@ -16,6 +16,16 @@ Event-sourced runs, typed tool contracts with side-effect classification, crash-
 | `salvor-tools` | `ToolHandler` trait, effect classification, MCP client |
 | `salvor-cli` | The `salvor` binary: `run`, `resume`, `list`, `history`, `replay` |
 
+## Development
+
+Run this once after cloning:
+
+```
+git config core.hooksPath .githooks
+```
+
+Commit messages follow Conventional Commits, and this is checked by a commit-msg hook.
+
 ## License
 
 MIT OR Apache-2.0
