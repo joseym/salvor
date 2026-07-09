@@ -1,0 +1,24 @@
+[package]
+name = "salvor-tools-macros"
+description = "The #[derive(Tool)] procedural macro for the Salvor agent runtime; re-exported by salvor-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn.workspace = true
+quote.workspace = true
+proc-macro2.workspace = true
+
+[dev-dependencies]
+trybuild.workspace = true
+# A dev-dependency on salvor-tools (which depends on this crate) so the
+# compile-pass UI fixture can drive the derive through the real
+# `salvor_tools::Tool` surface a user sees. Cargo permits this cycle because it
+# runs only through dev-dependencies: building this crate's library never needs
+# salvor-tools, only its tests do.
+salvor-tools.workspace = true

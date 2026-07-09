@@ -1,0 +1,41 @@
+error: `#[derive(Tool)]` needs a `#[tool(...)]` attribute with at least `description = "..."` and `effect = "..."`
+ --> tests/ui/fail_tool_attr.rs:9:8
+  |
+9 | struct NoAttr;
+  |        ^^^^^^
+
+error: `#[tool(...)]` is missing `description = "..."`
+  --> tests/ui/fail_tool_attr.rs:13:1
+   |
+13 | #[tool(effect = "read")]
+   | ^
+
+error: `#[tool(...)]` is missing `effect = "..."`; expected one of "read", "idempotent", "write"
+  --> tests/ui/fail_tool_attr.rs:18:1
+   |
+18 | #[tool(description = "no effect given")]
+   | ^
+
+error: invalid effect `delete`; expected one of "read", "idempotent", "write"
+  --> tests/ui/fail_tool_attr.rs:23:17
+   |
+23 | #[tool(effect = "delete", description = "an invalid effect")]
+   |                 ^^^^^^^^
+
+error: unknown `#[tool(...)]` key; expected one of `name`, `description`, `effect`
+  --> tests/ui/fail_tool_attr.rs:28:58
+   |
+28 | #[tool(effect = "read", description = "has a stray key", color = "blue")]
+   |                                                          ^^^^^
+
+error: duplicate `#[tool(...)]` key `effect`
+  --> tests/ui/fail_tool_attr.rs:33:25
+   |
+33 | #[tool(effect = "read", effect = "write", description = "keyed twice")]
+   |                         ^^^^^^^^^^^^^^^^
+
+error: expected string literal
+  --> tests/ui/fail_tool_attr.rs:38:39
+   |
+38 | #[tool(effect = "read", description = 42)]
+   |                                       ^^

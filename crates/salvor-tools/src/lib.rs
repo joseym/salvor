@@ -42,6 +42,16 @@ mod outcome;
 mod registry;
 mod retry;
 
+/// Derives the [`ToolMeta`] impl for a tool struct from `#[tool(...)]`
+/// attributes. See the macro's own documentation for the attribute keys, the
+/// default-name rule, and what it rejects.
+pub use salvor_tools_macros::Tool;
+
+/// The side-effect classification a tool declares, re-exported from
+/// `salvor_core` so a tool author needs only this crate. Both the hand-written
+/// [`ToolMeta::EFFECT`] and the [`Tool`] derive name it through here.
+pub use salvor_core::Effect;
+
 pub use context::ToolCtx;
 pub use erased::{DynTool, ToolDescriptor, TypedTool};
 pub use error::{HandlerError, ToolError};

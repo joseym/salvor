@@ -1,0 +1,11 @@
+error: `#[derive(Tool)]` applies to a struct, not an enum
+ --> tests/ui/fail_data_shape.rs:9:1
+  |
+9 | enum NotAStruct {
+  | ^^^^
+
+error: `#[derive(Tool)]` applies to a struct, not a union
+  --> tests/ui/fail_data_shape.rs:16:1
+   |
+16 | union AlsoNotAStruct {
+   | ^^^^^
