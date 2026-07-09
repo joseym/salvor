@@ -17,6 +17,23 @@ use crate::id::{RunId, SequenceNumber};
 ///
 /// Present from the first event ever written, so an old log is always
 /// self-describing and a future reader can branch on it. Start at 1.
+///
+/// # Why adding event variants does not bump this
+///
+/// `schema_version` exists so a reader knows how to interpret events that are
+/// already on disk. Adding a variant to [`Event`] changes nothing about how
+/// any previously written event is encoded or understood: a log written
+/// before the addition contains none of the new kinds, and every event in it
+/// parses to the identical value under the new build. The
+/// deterministic-context events ([`Event::NowObserved`] and
+/// [`Event::RandomObserved`]) were added this way and the version stayed 1.
+///
+/// A bump is reserved for changes that alter the meaning or shape of events a
+/// version-1 writer may have already produced: renaming a field, changing the
+/// envelope, or re-encoding a payload. An older binary cannot read a log that
+/// contains the newer variants, but that direction is not part of the
+/// contract: the store is embedded, so the reader always upgrades together
+/// with the binary that owns the log.
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// One record in a run's append-only log.
@@ -137,6 +154,36 @@ pub enum Event {
         seq: SequenceNumber,
         /// The tool's output.
         output: serde_json::Value,
+    },
+    /// The value `ctx.now()` returned, captured once while the run executed
+    /// live. On replay the recorded value is returned again, bit for bit; the
+    /// clock is never consulted a second time. This is how orchestration code
+    /// gets to observe time without breaking the determinism constraint.
+    ///
+    /// # Wire compatibility
+    ///
+    /// This variant (together with [`Event::RandomObserved`]) was added after
+    /// the original ten. Adding variants is a read-compatible change, so
+    /// [`SCHEMA_VERSION`] stayed at 1; the constant's docs carry the full
+    /// argument.
+    NowObserved {
+        /// The observed time. RFC 3339 on the wire with nanosecond
+        /// precision, so the value replays exactly as recorded.
+        #[serde(with = "time::serde::rfc3339")]
+        now: OffsetDateTime,
+    },
+    /// The value `ctx.random()` returned, captured once while the run
+    /// executed live. On replay the recorded value is returned again, bit for
+    /// bit; the random source is never consulted a second time.
+    RandomObserved {
+        /// Sixty-four raw bits from the runtime's random source.
+        ///
+        /// A `u64` is the deliberate representation: JSON integers carry the
+        /// full 64-bit range exactly, so replay returns the identical bits.
+        /// Richer values (a float in a range, a choice from a list) must be
+        /// derived from these bits deterministically by the caller, never
+        /// drawn fresh.
+        value: u64,
     },
     /// The run parked durably, awaiting input (for example, human approval).
     /// Records why and the schema the resume input must satisfy.
@@ -269,6 +316,10 @@ mod tests {
             seq: SequenceNumber::new(2),
             output: serde_json::json!({"id": "TICKET-1"}),
         });
+        assert_round_trips(Event::NowObserved {
+            now: datetime!(2026-07-09 12:00:00.123456789 UTC),
+        });
+        assert_round_trips(Event::RandomObserved { value: u64::MAX });
         assert_round_trips(Event::Suspended {
             reason: "awaiting approval".into(),
             input_schema: serde_json::json!({"type": "object"}),
@@ -308,6 +359,31 @@ mod tests {
         assert_eq!(
             json,
             r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"ModelCallCompleted","payload":{"seq":2,"response":{"text":"hi"},"usage":{"input_tokens":12,"output_tokens":7}}}}"#
+        );
+    }
+
+    /// Pins the exact serialized form of the two deterministic-context
+    /// events. These variants were added after the original ten, which is a
+    /// read-compatible change (see [`SCHEMA_VERSION`]); this test extends the
+    /// pinned-snapshot coverage to them deliberately, choosing values that
+    /// stress the representation: a timestamp with all nine fractional
+    /// digits, and the largest `u64`.
+    #[test]
+    fn context_events_serialize_to_pinned_json() {
+        let now_env = envelope(Event::NowObserved {
+            now: datetime!(2026-07-09 12:00:00.123456789 UTC),
+        });
+        let json = serde_json::to_string(&now_env).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"NowObserved","payload":{"now":"2026-07-09T12:00:00.123456789Z"}}}"#
+        );
+
+        let random_env = envelope(Event::RandomObserved { value: u64::MAX });
+        let json = serde_json::to_string(&random_env).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"RandomObserved","payload":{"value":18446744073709551615}}}"#
         );
     }
 

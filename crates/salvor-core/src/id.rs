@@ -5,6 +5,8 @@
 //! `Uuid` and the other a `u64`. A function that wants a run identifier cannot
 //! be handed a sequence number by mistake.
 
+use core::fmt;
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -79,5 +81,13 @@ impl SequenceNumber {
     #[must_use]
     pub const fn next(self) -> Self {
         Self(self.0 + 1)
+    }
+}
+
+impl fmt::Display for SequenceNumber {
+    /// Displays as the bare position (`7`), so error messages and logs can
+    /// name a log position without the newtype wrapper showing through.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
     }
 }
