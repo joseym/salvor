@@ -6,6 +6,7 @@ members = [
     "crates/salvor-llm",
     "crates/salvor-tools",
     "crates/salvor-tools-macros",
+    "crates/salvor-runtime",
     "crates/salvor-cli",
 ]
 
@@ -21,6 +22,7 @@ salvor-store = { path = "crates/salvor-store" }
 salvor-llm = { path = "crates/salvor-llm" }
 salvor-tools = { path = "crates/salvor-tools" }
 salvor-tools-macros = { path = "crates/salvor-tools-macros" }
+salvor-runtime = { path = "crates/salvor-runtime" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -35,6 +37,7 @@ wiremock = "0.6"
 tracing = "0.1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 async-trait = "0.1"
+sha2 = "0.10"
 schemars = "1"
 syn = "2"
 quote = "1"
