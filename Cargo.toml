@@ -37,3 +37,12 @@ syn = "2"
 quote = "1"
 proc-macro2 = "1"
 trybuild = "1"
+# rmcp: the official Model Context Protocol SDK. Verified against crates.io on
+# 2026-07-09; 2.2.0 was the latest release (published 2026-07-08). Hard-pinned
+# with `=` because rmcp is a young, fast-moving SDK (rmcp/MCP protocol churn
+# is a standing risk) and its client/server API still shifts between minor
+# releases; a floating requirement would let a churny minor break the build
+# unbidden. MCP stays isolated behind the `mcp` feature of salvor-tools, so this
+# is the one crate that touches it. Bump this pin deliberately, re-reading the
+# API each time, never automatically.
+rmcp = { version = "=2.2.0", default-features = false }

@@ -25,6 +25,13 @@
 //!   [`RegistryError`].
 //! - **Retry policy.** [`RetryPolicy`] encodes the per-effect rule for
 //!   retrying a failed *live* execution. It classifies; the runtime loop enforces.
+//! - **MCP tools.** Behind the `mcp` cargo feature (on by default), the
+//!   [`mcp`] module connects to an MCP server over stdio and surfaces each of
+//!   its tools as a [`DynTool`], registering alongside native tools. All of the
+//!   MCP dependency surface (the rmcp SDK, a Tokio runtime) is gated behind
+//!   that feature, so the contract layer above still builds with
+//!   `--no-default-features`. MCP stays isolated to that one module by
+//!   design: rmcp/MCP protocol churn is a standing risk.
 //!
 //! # Errors
 //!
@@ -38,6 +45,8 @@ mod context;
 mod erased;
 mod error;
 mod handler;
+#[cfg(feature = "mcp")]
+pub mod mcp;
 mod outcome;
 mod registry;
 mod retry;

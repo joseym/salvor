@@ -6,6 +6,23 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# `mcp` gates the entire Model Context Protocol integration: the `mcp` module,
+# the rmcp SDK, and the Tokio runtime rmcp needs. It is on by default so the
+# batteries-included build has MCP, but the contract layer (ToolHandler,
+# DynTool, ToolSet, the derive) must still build without it. CI-equivalent
+# check: `cargo build -p salvor-tools --no-default-features` succeeds.
+#
+# Enabling `mcp` turns on both the client-side rmcp features the product uses
+# (connecting to a server over stdio, listing and calling tools) and the
+# server-side features (server, transport-io, macros). The server-side half is
+# not product surface: it exists only to build the in-repo test fixture server
+# (`src/bin/salvor-mcp-fixture.rs`), which the integration tests spawn. Keeping
+# one feature avoids a second, non-default feature that `cargo test` defaults
+# would then miss.
+default = ["mcp"]
+mcp = ["dep:rmcp", "dep:tokio"]
+
 [dependencies]
 salvor-core.workspace = true
 salvor-tools-macros.workspace = true
@@ -14,6 +31,27 @@ serde_json.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
 schemars.workspace = true
+rmcp = { workspace = true, optional = true, features = [
+    "client",
+    "transport-child-process",
+    "server",
+    "transport-io",
+    "macros",
+    "schemars",
+] }
+tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt", "macros"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+
+# The hermetic MCP test fixture. It is a real server binary spawned over stdio
+# by the integration tests, not an in-process mock, because the product path is
+# "spawn a child process and speak MCP over its stdio" and respawn-on-resume
+# means constructing a fresh child. `required-features = ["mcp"]` means it is
+# skipped under `--no-default-features`, keeping the contract-layer build clean.
+# Cargo sets CARGO_BIN_EXE_salvor-mcp-fixture for the integration tests, so they
+# locate the built binary with no path guessing and no external dependency.
+[[bin]]
+name = "salvor-mcp-fixture"
+path = "src/bin/salvor-mcp-fixture.rs"
+required-features = ["mcp"]
