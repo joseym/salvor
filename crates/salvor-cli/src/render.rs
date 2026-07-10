@@ -8,100 +8,17 @@
 //! progress (to the tracing log on stderr), so a tool call reads the same
 //! way whether you watch a run or inspect it later.
 
-use salvor_core::{BudgetKind, Event, EventEnvelope, PendingCall, RunState, RunStatus};
-use salvor_runtime::{ParkReason, decode_failure, decode_suspension};
+use salvor_core::{BudgetKind, EventEnvelope, PendingCall, RunState, RunStatus};
+use salvor_runtime::{ParkReason, event_detail, event_kind};
 use salvor_store::RunSummary;
 use serde_json::Value;
 use std::path::Path;
 use time::OffsetDateTime;
 
-/// The stable `kind` label for one event, matching the enum variant name so
-/// it reads the same as the wire form's `kind` tag.
-#[must_use]
-pub fn event_kind(event: &Event) -> &'static str {
-    match event {
-        Event::RunStarted { .. } => "RunStarted",
-        Event::ModelCallRequested { .. } => "ModelCallRequested",
-        Event::ModelCallCompleted { .. } => "ModelCallCompleted",
-        Event::ToolCallRequested { .. } => "ToolCallRequested",
-        Event::ToolCallCompleted { .. } => "ToolCallCompleted",
-        Event::NowObserved { .. } => "NowObserved",
-        Event::RandomObserved { .. } => "RandomObserved",
-        Event::Suspended { .. } => "Suspended",
-        Event::Resumed { .. } => "Resumed",
-        Event::BudgetExceeded { .. } => "BudgetExceeded",
-        Event::RunCompleted { .. } => "RunCompleted",
-        Event::RunFailed { .. } => "RunFailed",
-    }
-}
-
-/// The informative payload of one event, rendered as a single line. Picks the
-/// fields that matter per kind: a tool call shows its name and effect, a model
-/// completion its token usage, a suspension its reason. Hashes are shortened
-/// and payloads truncated so the line stays scannable; the `--json` mode of
-/// `history` is the escape hatch for the untruncated envelope.
-#[must_use]
-pub fn event_detail(event: &Event) -> String {
-    match event {
-        Event::RunStarted {
-            agent_def_hash,
-            input,
-        } => format!(
-            "agent {} input {}",
-            short_hash(agent_def_hash),
-            truncate_json(input)
-        ),
-        Event::ModelCallRequested { request_hash, .. } => {
-            format!("request {}", short_hash(request_hash))
-        }
-        Event::ModelCallCompleted { usage, .. } => format!(
-            "usage in {} out {}",
-            usage.input_tokens, usage.output_tokens
-        ),
-        Event::ToolCallRequested {
-            tool,
-            input,
-            effect,
-            idempotency_key,
-            ..
-        } => {
-            let key = idempotency_key
-                .as_deref()
-                .map_or_else(String::new, |k| format!(" key {k}"));
-            format!("{tool} [{effect:?}]{key} input {}", truncate_json(input))
-        }
-        Event::ToolCallCompleted { output, .. } => {
-            if let Some(suspension) = decode_suspension(output) {
-                format!("suspends: {}", suspension.reason)
-            } else if let Some(failure) = decode_failure(output) {
-                format!(
-                    "error ({}, {} attempt(s)): {}",
-                    failure.kind.as_str(),
-                    failure.attempts,
-                    truncate_str(&failure.message)
-                )
-            } else {
-                format!("output {}", truncate_json(output))
-            }
-        }
-        Event::NowObserved { now } => format_ts(*now),
-        Event::RandomObserved { value } => format!("value {value}"),
-        Event::Suspended { reason, .. } => format!("reason: {reason}"),
-        Event::Resumed { input } => format!("input {}", truncate_json(input)),
-        Event::BudgetExceeded { budget, observed } => {
-            format!(
-                "{} limit {}, observed {}",
-                budget_kind(budget.kind),
-                fmt_num(budget.limit),
-                fmt_num(*observed)
-            )
-        }
-        Event::RunCompleted { output } => format!("output {}", truncate_json(output)),
-        Event::RunFailed { error } => format!("error: {}", truncate_str(error)),
-    }
-}
-
-/// One `history` line: sequence, recorded time, kind, and the detail.
+/// One `history` line: sequence, recorded time, kind, and the detail. The
+/// per-event `kind` and `detail` come from `salvor-runtime`, the same functions
+/// that format the live progress stream, so a step reads identically whether
+/// you watch it as it happens or inspect it here afterward.
 #[must_use]
 pub fn history_line(envelope: &EventEnvelope) -> String {
     format!(
@@ -148,11 +65,20 @@ pub fn parked_report(run_uuid: &str, reason: &ParkReason, agent_path: &Path) -> 
 }
 
 /// The refusal report for a run that derived to
-/// [`RunStatus::NeedsReconciliation`](salvor_core::RunStatus::NeedsReconciliation):
-/// the recorded write intent, shown as the evidence a human needs to decide
-/// whether the write reached its target. Printed before a non-zero exit.
+/// [`RunStatus::NeedsReconciliation`](salvor_core::RunStatus::NeedsReconciliation).
+///
+/// It gives a human what they need to actually resolve the run: the full
+/// recorded write intent (tool, pretty-printed input, idempotency key, seq,
+/// and when it was recorded), a plain statement of what the write may have
+/// done externally, and the two honest ways forward, each written out as the
+/// exact command to type. `recorded_at` is the timestamp of the intent
+/// envelope; the caller finds it in the log. Printed before a non-zero exit.
 #[must_use]
-pub fn reconciliation_report(run_uuid: &str, pending: Option<&PendingCall>) -> String {
+pub fn reconciliation_report(
+    run_uuid: &str,
+    pending: Option<&PendingCall>,
+    recorded_at: Option<OffsetDateTime>,
+) -> String {
     let mut out = format!(
         "Run {run_uuid} needs reconciliation and cannot be resumed automatically.\n\
          A write tool call was recorded but never completed, so it may or may not have taken effect.\n"
@@ -166,19 +92,41 @@ pub fn reconciliation_report(run_uuid: &str, pending: Option<&PendingCall>) -> S
     }) = pending
     {
         let key = idempotency_key.as_deref().unwrap_or("<none>");
+        let when = recorded_at.map_or_else(|| "<unknown>".to_owned(), format_ts);
         out.push_str(&format!(
-            "  seq:             {seq}\n  \
+            "\nThe recorded intent:\n  \
+             seq:             {seq}\n  \
+             recorded at:     {when}\n  \
              tool:            {tool}\n  \
              effect:          {effect:?}\n  \
-             input:           {}\n  \
-             idempotency key: {key}\n",
-            pretty_json(input),
+             idempotency key: {key}\n  \
+             input:\n{}\n",
+            indent(&pretty_json(input), 4),
         ));
     }
-    out.push_str(
-        "A human must decide whether this write reached its target; only then can the run continue.\n",
-    );
+    out.push_str(&format!(
+        "\nBecause the intent was durably recorded before the tool ran, the write may have\n\
+         reached its target, partially applied, or never run at all. Salvor will not guess.\n\
+         \n\
+         There are two honest outcomes. Both begin by verifying externally whether the write\n\
+         took effect, and both end by recording the completion so replay never re-runs it:\n  \
+         1. The write took effect. Record what the tool returned:\n       \
+         salvor resolve {run_uuid} --output '<json the tool returned>'\n  \
+         2. The write did not take effect and still needs to happen. Perform it yourself\n     \
+         first, then record its result the same way. There is no automatic retry for a write.\n"
+    ));
     out
+}
+
+/// The report `salvor resolve` prints once it has recorded the missing write
+/// completion by hand: the run has left reconciliation and can be continued.
+#[must_use]
+pub fn resolved_report(run_uuid: &str) -> String {
+    format!(
+        "Run {run_uuid} resolved: recorded the missing write completion by hand.\n\
+         The run no longer needs reconciliation. Continue it with:\n  \
+         salvor resume {run_uuid} --agent <agent.toml>\n"
+    )
 }
 
 /// The `list` table: a header plus one row per run. `rows` pairs each summary
@@ -320,22 +268,6 @@ fn format_ts(ts: OffsetDateTime) -> String {
         utc.minute(),
         utc.second(),
     )
-}
-
-/// Compact one-line JSON, truncated so a payload never blows out a log line.
-fn truncate_json(value: &Value) -> String {
-    truncate_str(&value.to_string())
-}
-
-/// Truncates a string to a scannable length with an ellipsis.
-fn truncate_str(text: &str) -> String {
-    const CAP: usize = 80;
-    if text.chars().count() > CAP {
-        let head: String = text.chars().take(CAP).collect();
-        format!("{head}\u{2026}")
-    } else {
-        text.to_owned()
-    }
 }
 
 /// Indents every line of `text` by `spaces`, for nesting a pretty JSON block

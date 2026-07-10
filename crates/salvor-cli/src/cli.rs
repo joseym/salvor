@@ -35,13 +35,15 @@ pub struct Cli {
     pub command: Command,
 }
 
-/// The five verbs of the v0.1 CLI.
+/// The verbs of the CLI.
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Start a fresh run of an agent.
     Run(RunArgs),
     /// Continue an existing run: resume a parked one, or recover a crashed one.
     Resume(ResumeArgs),
+    /// Record the completion of a dangling write by hand, after verifying it.
+    Resolve(ResolveArgs),
     /// List every run in the store.
     List,
     /// Print a run's event log.
@@ -74,6 +76,20 @@ pub struct ResumeArgs {
     /// Ignored (with a warning) when recovering a crashed run.
     #[arg(long, value_name = "JSON|@FILE")]
     pub input: Option<String>,
+}
+
+/// Arguments to `resolve`.
+#[derive(Debug, Args)]
+pub struct ResolveArgs {
+    /// The run id (a UUID) that needs reconciliation.
+    #[arg(value_name = "RUN_ID")]
+    pub run_id: String,
+    /// The output to record for the dangling write, after verifying externally
+    /// what it did: a JSON value, or `@path` to read JSON from a file. It is
+    /// recorded verbatim as the tool's output, so replay never re-runs the
+    /// write.
+    #[arg(long, value_name = "JSON|@FILE")]
+    pub output: String,
 }
 
 /// Arguments to `history`.

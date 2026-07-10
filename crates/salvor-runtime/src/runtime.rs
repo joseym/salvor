@@ -1,6 +1,6 @@
 //! [`Runtime`]: the batteries-included entry points over the built-in loop.
 //!
-//! Three verbs, one per way a run can need driving:
+//! Four verbs, one per way a run can need driving:
 //!
 //! - [`start`](Runtime::start) mints a run id and drives a fresh run.
 //! - [`recover`](Runtime::recover) re-drives an interrupted (crashed) run
@@ -14,6 +14,13 @@
 //!   budget-extension shape (see [`crate::budgets`]). Only then is it handed
 //!   to the loop, which records it as the `Resumed` event at the parked
 //!   position, through the cursor like every other event.
+//! - [`resolve`](Runtime::resolve) is the one human-driven override: it
+//!   records the completion of a dangling `Write` intent by hand, after a
+//!   human has verified externally what the write actually did. It executes
+//!   nothing and drives nothing; it appends exactly one `ToolCallCompleted`
+//!   so the run leaves `NeedsReconciliation` and a later `recover` can
+//!   continue it. Every other verb refuses a dangling write, by design; this
+//!   verb is the sanctioned way past it.
 //!
 //! A `Runtime` owns the store handle plus the injected clock and random
 //! source it builds each [`RunCtx`](crate::RunCtx) with. It holds no
@@ -22,7 +29,7 @@
 
 use std::sync::Arc;
 
-use salvor_core::{Budget, EventEnvelope, RunId, RunStatus, derive_state};
+use salvor_core::{Budget, Event, EventEnvelope, PendingCall, RunId, RunStatus, derive_state};
 use salvor_store::EventStore;
 use serde_json::Value;
 
@@ -190,6 +197,56 @@ impl Runtime {
         let mut ctx = self.ctx(run_id, log)?;
         ctx.set_resume_input(input);
         finish(run_id, driver::drive(&mut ctx, agent, &Value::Null).await?)
+    }
+
+    /// Records, by hand, the completion of a dangling `Write` intent, after a
+    /// human has verified externally what the write did.
+    ///
+    /// This is the concrete form of human resolution. A crash
+    /// between a write's recorded intent and its completion derives to
+    /// [`RunStatus::NeedsReconciliation`], which every automatic verb refuses:
+    /// the write may or may not have reached its target, and the runtime will
+    /// not guess. Once a human has checked, `resolve` appends the completion
+    /// they observed (or the completion of the write they performed by hand),
+    /// so replay treats the call as done and never re-executes it. The run is
+    /// then recoverable through [`recover`](Self::recover) like any other.
+    ///
+    /// It takes the same care as [`resume`](Self::resume): the state is
+    /// validated *before* anything is written, and exactly one event is
+    /// appended. `output` is recorded verbatim as the tool's output; nothing
+    /// executes and nothing else is driven.
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeError::UnknownRun`] when the id has no history;
+    /// [`RuntimeError::NotReconcilable`] when the run's log does not end at a
+    /// dangling write intent (so there is no completion to record);
+    /// [`RuntimeError::Store`] when the append fails.
+    pub async fn resolve(&self, run_id: RunId, output: Value) -> Result<RunId, RuntimeError> {
+        let log = self.read_existing(run_id).await?;
+        let state = derive_state(&log);
+        // Only a dangling write derives to NeedsReconciliation, and it always
+        // carries the pending tool intent whose completion is missing.
+        let intent_seq = match (&state.status, &state.pending_call) {
+            (RunStatus::NeedsReconciliation, Some(PendingCall::Tool { seq, .. })) => *seq,
+            (other, _) => {
+                return Err(RuntimeError::NotReconcilable {
+                    run_id,
+                    status: status_name(other).to_owned(),
+                });
+            }
+        };
+        // The completion correlates to the intent's sequence number and takes
+        // the next contiguous log position, exactly as the cursor would have
+        // recorded it had the process not died in between.
+        let completion = Event::ToolCallCompleted {
+            seq: intent_seq,
+            output,
+        };
+        let envelope = EventEnvelope::new(run_id, state.next_seq, (self.clock)(), completion);
+        self.store.append(&envelope).await?;
+        crate::progress::emit_step(run_id, envelope.seq, &envelope.event);
+        Ok(run_id)
     }
 
     /// Reads a run's log, insisting it exists.

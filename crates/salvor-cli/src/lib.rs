@@ -66,6 +66,7 @@ pub async fn dispatch(cli: Cli) -> Result<u8> {
     match cli.command {
         Command::Run(args) => commands::run(store, args).await,
         Command::Resume(args) => commands::resume(store, args).await,
+        Command::Resolve(args) => commands::resolve(store, args).await,
         Command::List => commands::list(store).await,
         Command::History(args) => commands::history(store, args).await,
         Command::Replay(args) => commands::replay(store, args).await,

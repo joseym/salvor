@@ -17,26 +17,28 @@
 //! cleanly. The run id is printed to stdout **first**, before the run drives,
 //! so an operator can copy it and `resume` even after a `kill -9`.
 //!
-//! The v0.1 runtime emits no tracing of its own, and its `start`/`recover`/
-//! `resume` calls drive the whole loop before returning, so this module cannot
-//! observe steps mid-flight through the runtime API. It instead reads the
-//! persisted log after the drive and emits one info line per recorded event,
-//! carrying the run id and sequence number. That is honest progress with the
-//! required correlation fields; live per-step streaming would mean
-//! instrumenting the runtime, which is out of scope here.
+//! Progress streams live. `salvor-runtime` emits one info-level record at each
+//! persist (see `salvor_runtime`'s progress module), carrying the run id and
+//! sequence number, the instant the event becomes durable. So this module does
+//! not walk the log after the drive: it just lets the runtime's records flow to
+//! the subscriber on stderr as the run drives. A resumed or recovered run
+//! replays its recorded prefix silently (those events are not re-persisted) and
+//! streams only its genuinely new activity, which is what progress should mean.
+//! The full recorded log, replayed prefix and all, is always available through
+//! `salvor history`.
 
 use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use salvor_core::{RunId, RunStatus, derive_state};
-use salvor_runtime::{RunOutcome, Runtime};
+use salvor_core::{PendingCall, RunId, RunStatus, derive_state};
+use salvor_runtime::{RunOutcome, Runtime, RuntimeError};
 use salvor_store::{EventStore, SqliteStore};
 use serde_json::Value;
 use uuid::Uuid;
 
 use crate::agent_config::{self, AgentConfig};
-use crate::cli::{HistoryArgs, ReplayArgs, ResumeArgs, RunArgs};
+use crate::cli::{HistoryArgs, ReplayArgs, ResolveArgs, ResumeArgs, RunArgs};
 use crate::render;
 
 /// `salvor run`: start a fresh run, print its id, drive it, and report.
@@ -54,8 +56,10 @@ pub async fn run(store_path: &Path, args: RunArgs) -> Result<u8> {
     println!("run {uuid}");
     tracing::info!(run_id = %uuid, "starting run");
 
+    // Progress streams live from the runtime as the loop drives; this call
+    // returns only once the run has completed or parked. `close_servers` runs
+    // regardless of the outcome, so a teardown always happens before the `?`.
     let outcome = runtime.start_with_id(&agent, run_id, input).await;
-    emit_progress(&store, run_id).await;
     close_servers(servers).await;
 
     report_outcome(outcome?, &uuid, &args.agent)
@@ -81,9 +85,18 @@ pub async fn resume(store_path: &Path, args: ResumeArgs) -> Result<u8> {
     // before paying to build the agent.
     match &state.status {
         RunStatus::NeedsReconciliation => {
+            // The intent's timestamp is part of the evidence; find it in the
+            // log by the pending call's sequence number.
+            let recorded_at = match state.pending_call.as_ref() {
+                Some(PendingCall::Tool { seq, .. }) => log
+                    .iter()
+                    .find(|envelope| envelope.seq == *seq)
+                    .map(|envelope| envelope.recorded_at),
+                _ => None,
+            };
             print!(
                 "{}",
-                render::reconciliation_report(&uuid, state.pending_call.as_ref())
+                render::reconciliation_report(&uuid, state.pending_call.as_ref(), recorded_at)
             );
             return Ok(1);
         }
@@ -126,9 +139,43 @@ pub async fn resume(store_path: &Path, args: ResumeArgs) -> Result<u8> {
         }
     };
 
-    emit_progress(&store, run_id).await;
     close_servers(servers).await;
     report_outcome(outcome?, &uuid, &args.agent)
+}
+
+/// `salvor resolve`: record the completion of a dangling write by hand.
+///
+/// This is the operator side of reconciliation. A run whose log ends at a
+/// write intent with no completion (status `NeedsReconciliation`) cannot be
+/// recovered automatically: the write may or may not have taken effect. After
+/// a human has verified externally what happened, `resolve` records the
+/// completion they observed, so a later `resume` replays it and never re-runs
+/// the write. It needs no agent and drives nothing.
+pub async fn resolve(store_path: &Path, args: ResolveArgs) -> Result<u8> {
+    let run_id = parse_run_id(&args.run_id)?;
+    let uuid = run_id.as_uuid().to_string();
+    let output = parse_input(&args.output)?;
+    let store = open_store(store_path)?;
+    if store.read_log(run_id).await?.is_empty() {
+        bail!("no run {uuid} in this store");
+    }
+
+    let runtime = Runtime::new(store);
+    match runtime.resolve(run_id, output).await {
+        Ok(_) => {
+            print!("{}", render::resolved_report(&uuid));
+            Ok(0)
+        }
+        // Refusing to resolve a run that is not awaiting reconciliation is a
+        // deliberate refusal, not an internal error: exit 1 with an explanation.
+        Err(RuntimeError::NotReconcilable { status, .. }) => {
+            eprintln!(
+                "run {uuid} does not need reconciliation (status: {status}); there is no dangling write to resolve"
+            );
+            Ok(1)
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// `salvor list`: one row per run, with status folded from each log.
@@ -203,28 +250,6 @@ fn report_outcome(outcome: RunOutcome, uuid: &str, agent_path: &Path) -> Result<
             print!("{}", render::parked_report(uuid, &reason, agent_path));
             Ok(0)
         }
-    }
-}
-
-/// Reads the persisted log and emits one info-level line per event, carrying
-/// the run id and sequence number. Best-effort: a read failure here does not
-/// change the run's outcome, so it is logged and swallowed rather than
-/// propagated.
-async fn emit_progress(store: &Arc<dyn EventStore>, run_id: RunId) {
-    let uuid = run_id.as_uuid().to_string();
-    match store.read_log(run_id).await {
-        Ok(log) => {
-            for envelope in &log {
-                tracing::info!(
-                    run_id = %uuid,
-                    seq = envelope.seq.get(),
-                    "{} {}",
-                    render::event_kind(&envelope.event),
-                    render::event_detail(&envelope.event),
-                );
-            }
-        }
-        Err(error) => tracing::warn!(run_id = %uuid, %error, "could not read log for progress"),
     }
 }
 

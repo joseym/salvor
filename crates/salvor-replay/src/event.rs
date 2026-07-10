@@ -204,7 +204,10 @@ pub enum Event {
     BudgetExceeded {
         /// The budget dimension and the limit that was crossed.
         budget: Budget,
-        /// The observed value, interpreted in the units of `budget.kind`.
+        /// The observed value, interpreted in the units of `budget.kind`. An
+        /// `f64` for the same reason [`Budget::limit`] is: exact for integral
+        /// token and step counts up to 2^53, and inherently fractional for
+        /// cost and wall time.
         observed: f64,
     },
     /// The run finished successfully with this output.
@@ -253,11 +256,40 @@ pub enum BudgetKind {
 /// Minimal on purpose. Budget enforcement owns the richer
 /// model; this type exists only so [`Event::BudgetExceeded`] can name what was
 /// crossed. `limit` is interpreted in the units implied by `kind`.
+///
+/// # Why every dimension is an `f64`
+///
+/// [`BudgetKind::CostUsd`] and [`BudgetKind::WallTime`] are inherently
+/// fractional, so they need a float. [`BudgetKind::Tokens`] and
+/// [`BudgetKind::Steps`] are integral in nature, yet they ride the wire as
+/// `f64` too, and that is a deliberate, kept decision rather than an
+/// oversight.
+///
+/// The concern with a float for a counter is silent rounding. It does not
+/// arise here: an IEEE 754 double represents every integer exactly up to
+/// 2^53, which is 9_007_199_254_740_992 (about 9.0e15). A run's token and step
+/// counts do not approach that bound. A billion-token run is 1e9, six orders
+/// of magnitude below the point where consecutive integers stop being exactly
+/// representable, and a step is one model turn. So a limit or an observed
+/// value that is integral in these dimensions round-trips through the wire and
+/// through every comparison exactly. The one caller-facing rule is that a
+/// declared token or step limit stay under 2^53, which no realistic budget
+/// violates.
+///
+/// The alternative, splitting the type so integral dimensions carried a `u64`
+/// and fractional ones an `f64`, was weighed and declined: it would fracture
+/// one uniform budget value into two, complicate the single crossing-check
+/// comparison that treats every dimension the same way, and change the wire
+/// format (with the snapshot and stored-log churn that implies) for no
+/// practical gain, since f64 already holds these integers exactly. The uniform
+/// `f64` is the honest representation given the bound above.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Budget {
     /// The dimension this limit applies to.
     pub kind: BudgetKind,
-    /// The ceiling, in the units implied by `kind`.
+    /// The ceiling, in the units implied by `kind`. An `f64` for every
+    /// dimension; integral for `Tokens`/`Steps` and exact there up to 2^53
+    /// (see the type docs).
     pub limit: f64,
 }
 

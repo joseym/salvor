@@ -77,4 +77,17 @@ pub enum RuntimeError {
     /// for a budget crossing, the budget-extension shape).
     #[error("resume input rejected: {0}")]
     ResumeInputRejected(String),
+
+    /// `resolve` was called on a run that is not awaiting reconciliation. The
+    /// hand-recorded completion is only ever appended to a run whose log ends
+    /// at a dangling write intent; every other state is a caller mistake.
+    #[error(
+        "run {run_id:?} does not need reconciliation (status: {status}); resolve records the completion of a dangling write intent, and this run has none"
+    )]
+    NotReconcilable {
+        /// The run that was not awaiting reconciliation.
+        run_id: RunId,
+        /// A short description of the status the run was actually in.
+        status: String,
+    },
 }

@@ -520,6 +520,12 @@ async fn persist(
 ) -> Result<(), RuntimeError> {
     let envelope = EventEnvelope::new(run_id, emitted.seq, (clock)(), emitted.event.clone());
     store.append(&envelope).await?;
+    // The event is durable now, so this is the honest moment to report it.
+    // Live progress streams from here as the run drives; replayed events take
+    // the cursor's early return above and never reach this edge, so they never
+    // re-emit. The detail is truncated (see `crate::progress`), so no full
+    // payload rides the progress stream.
+    crate::progress::emit_step(run_id, envelope.seq, &envelope.event);
     Ok(())
 }
 
