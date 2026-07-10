@@ -1,0 +1,26 @@
+[package]
+name = "salvor-store-conformance"
+description = "Store-agnostic conformance kit that proves an EventStore implementation satisfies the salvor-store trait contract"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+salvor-core.workspace = true
+salvor-store.workspace = true
+serde_json.workspace = true
+time.workspace = true
+# The kit spawns racing tasks and gates them behind a barrier to force the
+# concurrency check's contention, so it needs a task spawner (`rt`) and an
+# async barrier (`sync`). `macros` is for the crate's own self-test below. A
+# consumer supplies the runtime; the kit only borrows the current one.
+tokio = { version = "1", features = ["rt", "sync", "macros"] }
+
+[dev-dependencies]
+# The self-test drives the checks against an in-crate reference store, and its
+# concurrency check wants real threads, so the multi-threaded scheduler is
+# added here. `async-trait` is only needed to write that reference store's
+# `EventStore` impl, matching how the real backends implement the trait.
+tokio = { version = "1", features = ["rt-multi-thread"] }
+async-trait.workspace = true

@@ -1622,6 +1622,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "salvor-core",
+ "salvor-store-conformance",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1630,6 +1631,18 @@ dependencies = [
  "time",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "salvor-store-conformance"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "salvor-core",
+ "salvor-store",
+ "serde_json",
+ "time",
+ "tokio",
 ]
 
 [[package]]
