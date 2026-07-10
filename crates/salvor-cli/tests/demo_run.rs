@@ -27,29 +27,18 @@
 //! 1..=18), one `get_finding_count` (turn 19), and a final text summary
 //! (turn 20). Responses are selected by the number of messages in the
 //! request (turn k carries 2k - 1), the same replay-safe scheme the other
-//! CLI tests use.
+//! CLI tests use. The script itself lives in
+//! [`salvor_cli::demo_script`](salvor_cli::demo_script), shared verbatim with
+//! the `salvor-demo-model` server that records the GIF, so the rehearsal and
+//! the recording can never drift apart.
 
 mod common;
 
 use std::path::{Path, PathBuf};
 
-use common::{GateModel, text_response, tool_use_response};
-use serde_json::json;
+use common::GateModel;
+use salvor_cli::demo_script::{SUBTOPICS, finding_line, script};
 use tempfile::tempdir;
-
-/// The nine subtopics, in prompt order. Must match `demo/agent.toml`'s
-/// system prompt and the canned library in `demo_research.rs`.
-const SUBTOPICS: [&str; 9] = [
-    "event sourcing",
-    "write-ahead logging",
-    "idempotency keys",
-    "crash recovery",
-    "replay determinism",
-    "suspension and approval",
-    "budget enforcement",
-    "side-effect classification",
-    "process supervision",
-];
 
 /// The workspace root, two levels above this crate's manifest. The demo is
 /// documented as running from here, so the test does too.
@@ -76,12 +65,6 @@ fn ensure_demo_server_at_documented_path(root: &Path) {
     std::fs::copy(&built, &documented).expect("demo server copies into place");
 }
 
-/// The one finding line the scripted model saves per subtopic. The
-/// findings-file assertion is built from the same function.
-fn finding_line(subtopic: &str) -> String {
-    format!("{subtopic}: noted for the report")
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn demo_assets_drive_a_twenty_step_run_to_completion() {
     let root = workspace_root();
@@ -91,42 +74,10 @@ async fn demo_assets_drive_a_twenty_step_run_to_completion() {
     let store = dir.path().join("salvor.db");
     let findings = dir.path().join("findings.txt");
 
-    // Turn k carries 2k - 1 messages. Searches land on turns 1,3,..,17 and
-    // saves on 2,4,..,18; then the count check and the final summary.
-    let mut script = Vec::new();
-    for (index, subtopic) in SUBTOPICS.iter().enumerate() {
-        let search_turn = 2 * index + 1;
-        let save_turn = search_turn + 1;
-        script.push((
-            2 * search_turn - 1,
-            tool_use_response(
-                &format!("tu_search_{}", index + 1),
-                "search_notes",
-                json!({"query": subtopic}),
-                200,
-                20,
-            ),
-        ));
-        script.push((
-            2 * save_turn - 1,
-            tool_use_response(
-                &format!("tu_save_{}", index + 1),
-                "save_finding",
-                json!({"finding": finding_line(subtopic)}),
-                210,
-                21,
-            ),
-        ));
-    }
-    script.push((
-        2 * 19 - 1,
-        tool_use_response("tu_count", "get_finding_count", json!({}), 220, 22),
-    ));
-    script.push((
-        2 * 20 - 1,
-        text_response("Research complete: 9 findings saved.", 230, 30),
-    ));
-    let model = GateModel::mount(script).await;
+    // The twenty-turn script (turn k keyed by 2k - 1 messages) is the shared
+    // one the recording server also serves; mounting it here proves the demo
+    // assets drive the same conversation the GIF shows.
+    let model = GateModel::mount(script()).await;
 
     // Drive the real binary from the workspace root with the unmodified
     // demo assets, off the async runtime so the in-process wiremock server

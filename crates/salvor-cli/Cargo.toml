@@ -42,6 +42,15 @@ name = "salvor-demo-research"
 path = "src/bin/demo_research.rs"
 required-features = ["fixture"]
 
+# The scripted HTTP model server behind the demo GIF: it serves the same
+# twenty-turn conversation as the demo_run test (from src/demo_script.rs) so
+# `docs/demo.tape` records hermetically with no network or key. Demo-support,
+# gated exactly like the two MCP fixtures above.
+[[bin]]
+name = "salvor-demo-model"
+path = "src/bin/salvor_demo_model.rs"
+required-features = ["fixture"]
+
 [dependencies]
 salvor-core.workspace = true
 salvor-store.workspace = true

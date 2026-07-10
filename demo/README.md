@@ -85,6 +85,21 @@ Run it with:
 cargo test -p salvor-cli --test demo_run
 ```
 
+## Recording the GIF
+
+The GIF at the top of the repository README is recorded from `docs/demo.tape`
+with [vhs](https://github.com/charmbracelet/vhs), driving this same
+`agent.toml` against `salvor-demo-model`, a small scripted HTTP server that
+serves the identical twenty-turn conversation the `demo_run` test uses (both
+read it from `crates/salvor-cli/src/demo_script.rs`). It runs under a scratch
+`HOME`, needs no key and no network, and lands the `kill -9` while the run
+waits on a model call, which is the recoverable state a resume expects.
+Re-record from the repository root with:
+
+```sh
+vhs docs/demo.tape
+```
+
 ## The property test behind the GIF
 
 The demo is one kill at one boundary. The release gate behind it is

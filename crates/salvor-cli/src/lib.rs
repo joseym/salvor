@@ -28,6 +28,8 @@
 pub mod agent_config;
 pub mod cli;
 pub mod commands;
+#[cfg(feature = "fixture")]
+pub mod demo_script;
 pub mod render;
 
 use anyhow::Result;
