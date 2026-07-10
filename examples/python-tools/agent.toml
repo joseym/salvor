@@ -1,0 +1,67 @@
+# A Salvor agent whose entire tool layer is a Python MCP server (server.py).
+# Nothing here imports Salvor or knows Rust: the agent is data (model, prompt,
+# budgets, one MCP server), and the tools are ordinary Python functions the
+# runtime reaches over stdio. This is the v0.1 polyglot story:
+# a Python developer extends a Salvor agent by writing an MCP server, with no
+# bindings and no SDK.
+#
+# Run from the repository root: the paths below (the venv python, server.py,
+# and the ledger) are all relative to the directory salvor is invoked from.
+# See README.md for setup, the run, and the kill/resume walkthrough.
+
+model = "claude-opus-4-8"
+
+system_prompt = """
+You are an expense assistant backed by three tools: `add_expense`,
+`list_expenses`, and `total_by_category`.
+
+Your input is a JSON object with one field, `entries`: a list of
+natural-language expenses to log. Work in this order:
+
+1. For each entry in `entries`, call `add_expense` exactly once, parsing the
+   amount, a short category (one lowercase word like `food`, `transit`,
+   `lodging`), and an optional note. Log each entry once and only once; do not
+   re-log an entry you have already recorded.
+2. After every entry is logged, call `total_by_category` once to get the
+   per-category totals.
+3. Reply with a short plain-text summary: how many expenses you logged, the
+   total spent, and the per-category breakdown. Then stop. Do not call any tool
+   after the summary.
+"""
+
+[llm]
+# The key is read from this variable at run time and never stored in any file.
+api_key_env = "DEMO_ANTHROPIC_API_KEY"
+
+[budgets]
+# Logging a handful of expenses is a short run: one model call per entry, one
+# for the totals, one for the summary. These rails leave headroom while still
+# parking a run that has clearly run away rather than letting it spend on.
+steps = 20
+tokens = 200000
+cost_usd = 0.50
+wall_time_seconds = 300
+
+[pricing]
+# claude-opus-4-8 list price, dollars per million tokens. Required because a
+# cost budget is declared; the two together let the runtime stop the run on
+# spend, not just on step count.
+input_per_mtok = 5.0
+output_per_mtok = 25.0
+
+[[mcp_servers]]
+# The Python server, run through the example's virtualenv interpreter so the
+# `mcp` package it imports is on the path. EXPENSE_LEDGER tells the server where
+# to append; that file is the durable state and the duplicate-witness the
+# README's kill/resume check inspects.
+command = "examples/python-tools/.venv/bin/python"
+args = ["examples/python-tools/server.py"]
+env = { EXPENSE_LEDGER = "examples/python-tools/ledger.jsonl" }
+# The server annotates `add_expense` with `idempotentHint: true`, which Salvor's
+# default mapping would read as Idempotent (auto-retry an interrupted call under
+# the same key). That is wrong for this tool: it APPENDS a line, so a retry
+# writes a second, duplicate expense. We know better than the hint and pin it to
+# `write`. On resume, an interrupted append then surfaces for a human instead of
+# being retried blind. The two read tools annotate `readOnlyHint: true` and map
+# to Read on their own, so they need no override here.
+effect_overrides = { add_expense = "write" }

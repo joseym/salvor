@@ -1,0 +1,5 @@
+# The virtualenv is created by `python3 -m venv .venv` (see README); never
+# committed.
+.venv/
+# The ledger is run state, written by the server as the agent logs expenses.
+ledger.jsonl

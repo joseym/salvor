@@ -1,0 +1,64 @@
+# A Salvor agent whose entire tool layer is a TypeScript/JavaScript MCP server
+# (server.mjs). Nothing here imports Salvor or knows Rust: the agent is data
+# (model, prompt, budgets, one MCP server), and the tools are ordinary Node
+# functions the runtime reaches over stdio. This is the v0.1 polyglot story: a
+# TypeScript developer extends a Salvor agent by writing an
+# MCP server, with no bindings and no SDK.
+#
+# Run from the repository root: the paths below (server.mjs and the bookmarks
+# store) are relative to the directory salvor is invoked from. See README.md for
+# setup, the run, and the kill/resume walkthrough.
+
+model = "claude-opus-4-8"
+
+system_prompt = """
+You are a bookmarks assistant backed by three tools: `save_bookmark`,
+`list_bookmarks`, and `find_bookmark`.
+
+Your input is a JSON object with one field, `pages`: a list of pages to save,
+each with a url, a title, and a topic. Work in this order:
+
+1. For each page in `pages`, call `save_bookmark` exactly once with its url, a
+   concise title, and one or two lowercase topic tags. Save each page once and
+   only once; do not re-save a page you have already saved.
+2. After every page is saved, call `list_bookmarks` once to confirm what is
+   stored.
+3. Reply with a short plain-text summary: how many bookmarks you saved and their
+   titles. Then stop. Do not call any tool after the summary.
+"""
+
+[llm]
+# The key is read from this variable at run time and never stored in any file.
+api_key_env = "DEMO_ANTHROPIC_API_KEY"
+
+[budgets]
+# Saving a handful of bookmarks is a short run: one model call per page, one to
+# list, one for the summary. These rails leave headroom while still parking a
+# run that has clearly run away rather than letting it spend on.
+steps = 20
+tokens = 200000
+cost_usd = 0.50
+wall_time_seconds = 300
+
+[pricing]
+# claude-opus-4-8 list price, dollars per million tokens. Required because a
+# cost budget is declared; the two together let the runtime stop the run on
+# spend, not just on step count.
+input_per_mtok = 5.0
+output_per_mtok = 25.0
+
+[[mcp_servers]]
+# The Node server, run directly (no build step). BOOKMARKS_FILE tells it where
+# to append; that file is the durable state and the duplicate-witness the
+# README's kill/resume check inspects.
+command = "node"
+args = ["examples/typescript-tools/server.mjs"]
+env = { BOOKMARKS_FILE = "examples/typescript-tools/bookmarks.jsonl" }
+# The server annotates `save_bookmark` with `idempotentHint: true`, which
+# Salvor's default mapping would read as Idempotent (auto-retry an interrupted
+# call under the same key). That is wrong for this tool: it APPENDS a line, so a
+# retry writes a second, duplicate bookmark. We know better than the hint and
+# pin it to `write`. On resume, an interrupted append then surfaces for a human
+# instead of being retried blind. The two read tools annotate `readOnlyHint:
+# true` and map to Read on their own, so they need no override here.
+effect_overrides = { save_bookmark = "write" }

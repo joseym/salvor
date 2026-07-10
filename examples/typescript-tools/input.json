@@ -1,0 +1,9 @@
+{
+  "pages": [
+    { "url": "https://raft.github.io", "title": "The Raft Consensus Algorithm", "topic": "distributed systems" },
+    { "url": "https://sqlite.org/wal.html", "title": "SQLite Write-Ahead Logging", "topic": "databases" },
+    { "url": "https://modelcontextprotocol.io", "title": "Model Context Protocol", "topic": "ai tooling" },
+    { "url": "https://doc.rust-lang.org/book/", "title": "The Rust Programming Language", "topic": "rust" },
+    { "url": "https://tokio.rs", "title": "Tokio async runtime", "topic": "rust" }
+  ]
+}

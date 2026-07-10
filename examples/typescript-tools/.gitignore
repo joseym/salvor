@@ -1,0 +1,4 @@
+# Installed by `npm install` (see README); never committed.
+node_modules/
+# The bookmarks store is run state, written by the server as the agent saves.
+bookmarks.jsonl

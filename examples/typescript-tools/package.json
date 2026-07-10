@@ -1,0 +1,10 @@
+{
+  "name": "salvor-example-typescript-tools",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A bookmarks-manager MCP server that extends a Salvor agent, with no Salvor code.",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.4.3"
+  }
+}

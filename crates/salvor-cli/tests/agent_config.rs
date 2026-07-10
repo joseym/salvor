@@ -1,9 +1,15 @@
 //! Unit tests for the agent-definition TOML schema, driven through the
 //! library API rather than the binary. They pin the round-trip, the clear
 //! failure when a cost budget lacks pricing, and that an unknown field is
-//! rejected (not silently ignored). One case loads the committed
-//! `examples/web-research/agent.toml` through the real loader, so that
-//! documented example cannot drift out of a shape the parser accepts.
+//! rejected (not silently ignored). Three cases load committed example
+//! `agent.toml` files through the real loader, so those documented examples
+//! cannot drift out of a shape the parser accepts: `web-research` (two official
+//! MCP servers) and the two polyglot examples, `python-tools` and
+//! `typescript-tools`, each an agent whose whole tool layer is a Python or
+//! TypeScript MCP server. Every one of the three pins the effect override its
+//! README explains, so these tests guard that the documented trust decision
+//! survives a schema change; the live runs (real key, real network) stay out of
+//! CI.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -122,6 +128,86 @@ fn web_research_example_parses() {
         .expect("filesystem server present");
     assert_eq!(
         filesystem.effect_overrides.get("write_file"),
+        Some(&Effect::Write)
+    );
+}
+
+/// The committed `examples/python-tools/agent.toml` loads through the real
+/// config loader and has the shape its README documents: one MCP server (the
+/// venv Python running `server.py`), budgets with pricing, and the single
+/// grounded effect override pinning `add_expense` to Write. The server
+/// advertises `add_expense` with `idempotentHint: true`, which the default
+/// mapping would read as Idempotent; the pin corrects that, because the tool
+/// appends a line and a retry would duplicate it.
+#[test]
+fn python_tools_example_parses() {
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/python-tools/agent.toml");
+    let config = AgentConfig::load(&path).expect("example agent.toml parses");
+
+    assert_eq!(config.model, "claude-opus-4-8");
+    assert_eq!(
+        config.llm.api_key_env.as_deref(),
+        Some("DEMO_ANTHROPIC_API_KEY")
+    );
+
+    // A cost budget with the pricing it requires: the validation constraint the
+    // walkthrough runs stay under.
+    assert_eq!(config.budgets.cost_usd, Some(0.50));
+    let pricing = config.pricing.as_ref().expect("pricing present");
+    assert_eq!(pricing.input_per_mtok, 5.0);
+    assert_eq!(pricing.output_per_mtok, 25.0);
+
+    // One server: the venv Python interpreter running server.py, with the
+    // ledger path handed to it via the environment.
+    assert_eq!(config.mcp_servers.len(), 1);
+    let server = &config.mcp_servers[0];
+    assert_eq!(server.command, "examples/python-tools/.venv/bin/python");
+    assert_eq!(server.args, vec!["examples/python-tools/server.py"]);
+    assert_eq!(
+        server.env.get("EXPENSE_LEDGER").map(String::as_str),
+        Some("examples/python-tools/ledger.jsonl")
+    );
+    // The append tool pinned to Write over its optimistic idempotent hint.
+    assert_eq!(
+        server.effect_overrides.get("add_expense"),
+        Some(&Effect::Write)
+    );
+}
+
+/// The committed `examples/typescript-tools/agent.toml` loads through the real
+/// config loader and has the shape its README documents: one MCP server (Node
+/// running `server.mjs`), budgets with pricing, and the single grounded effect
+/// override pinning `save_bookmark` to Write, for the same append-duplicates
+/// reason as the Python example.
+#[test]
+fn typescript_tools_example_parses() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/typescript-tools/agent.toml");
+    let config = AgentConfig::load(&path).expect("example agent.toml parses");
+
+    assert_eq!(config.model, "claude-opus-4-8");
+    assert_eq!(
+        config.llm.api_key_env.as_deref(),
+        Some("DEMO_ANTHROPIC_API_KEY")
+    );
+
+    assert_eq!(config.budgets.cost_usd, Some(0.50));
+    let pricing = config.pricing.as_ref().expect("pricing present");
+    assert_eq!(pricing.input_per_mtok, 5.0);
+    assert_eq!(pricing.output_per_mtok, 25.0);
+
+    // One server: Node running server.mjs, with the store path via environment.
+    assert_eq!(config.mcp_servers.len(), 1);
+    let server = &config.mcp_servers[0];
+    assert_eq!(server.command, "node");
+    assert_eq!(server.args, vec!["examples/typescript-tools/server.mjs"]);
+    assert_eq!(
+        server.env.get("BOOKMARKS_FILE").map(String::as_str),
+        Some("examples/typescript-tools/bookmarks.jsonl")
+    );
+    assert_eq!(
+        server.effect_overrides.get("save_bookmark"),
         Some(&Effect::Write)
     );
 }
