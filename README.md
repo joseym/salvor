@@ -39,7 +39,7 @@ For a live version against real tools, `examples/web-research/` runs an agent ov
 
 ### Use it as a library
 
-Salvor is also usable as a library, at two tiers you build against directly. The batteries-included tier is `Agent::builder()` plus a `Runtime`: you write typed tools and let the built-in loop drive them. The library-first tier is a hand-written async function over the public `RunCtx`, which gets the same durability and replay without the built-in loop. Each has a runnable example (and a same-name `.teach.md` walking through it) under `crates/salvor-runtime/examples/`:
+Salvor is also usable as a library, at two tiers you build against directly. The batteries-included tier is `Agent::builder()` plus a `Runtime`: you write typed tools and let the built-in loop drive them. The library-first tier is a hand-written async function over the public `RunCtx`, which gets the same durability and replay without the built-in loop. Each has a runnable example (and a `main.teach.md` walking through it) under `examples/todo-agent/` and `examples/approval-loop/`, wired into `salvor-runtime`'s `Cargo.toml` as out-of-package `[[example]]` targets:
 
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...

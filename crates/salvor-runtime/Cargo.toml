@@ -25,3 +25,11 @@ wiremock.workspace = true
 async-trait.workspace = true
 schemars.workspace = true
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+
+[[example]]
+name = "todo_agent"
+path = "../../examples/todo-agent/main.rs"
+
+[[example]]
+name = "approval_loop"
+path = "../../examples/approval-loop/main.rs"

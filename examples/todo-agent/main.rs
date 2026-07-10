@@ -8,8 +8,8 @@
 //! The agent is a tiny todo-triage assistant. You give it a brain dump; it
 //! calls `add_todo` a few times to break the dump into actionable items, then
 //! finishes with a one-line summary. Two native tools are defined with
-//! `#[derive(Tool)]` plus a hand-written `ToolHandler`:
-//! `add_todo` is a `Write`-effect tool (it appends a line
+//! `#[derive(Tool)]` plus a hand-written `ToolHandler`, the two canonical
+//! shapes: `add_todo` is a `Write`-effect tool (it appends a line
 //! to a file) and `list_todos` is a `Read`-effect tool.
 //!
 //! # The durability story, in one binary
