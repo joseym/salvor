@@ -1,0 +1,37 @@
+# A model-only agent: no tools, no MCP servers. It reads a JSON input with a
+# `question` field and answers it in one short reply, then stops. This is the
+# smallest useful agent, and it is enough to exercise the whole control plane
+# from an SDK: register, start, stream to completion, read the final state.
+#
+# The agent is pure data. This file is submitted once to POST /v1/agents; the
+# server hashes it and every run references it by that hash.
+
+model = "claude-haiku-4-5"
+
+# Keep the reply short. Two or three sentences, so a small cap is plenty and
+# bounds the output cost. A top-level key, so it sits above the tables below.
+max_response_tokens = 300
+
+system_prompt = """
+You answer one question. Your input is a JSON object with a `question` field.
+Reply with a short, direct answer in two or three sentences, then stop. Do not
+ask follow-up questions.
+"""
+
+[llm]
+# The key is read from this environment variable at run time, on the server, and
+# never stored in any file.
+api_key_env = "ANTHROPIC_API_KEY"
+
+# Small rails keep a single answer cheap. A model-only answer is one model call;
+# these limits leave headroom while stopping anything that runs away.
+[budgets]
+steps = 4
+tokens = 20000
+cost_usd = 0.05
+
+# claude-haiku-4-5 list price, dollars per million tokens. Required because a
+# cost budget is declared, so the runtime can stop on spend, not just on steps.
+[pricing]
+input_per_mtok = 1.0
+output_per_mtok = 5.0

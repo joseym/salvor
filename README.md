@@ -51,6 +51,10 @@ cargo run -p salvor-runtime --example approval_loop   # library-first: your own 
 
 `todo_agent` prints a run id you can kill and recover with `RESUME_RUN_ID=<id>`; `approval_loop` parks awaiting approval on the first run and completes on a second run with `APPROVAL` set.
 
+### Client SDKs
+
+Thin Python and TypeScript clients over the `salvor serve` control plane live under `sdks/` (`sdks/python`, `sdks/typescript`): register an agent, start a run, stream events, resume, all over HTTP. The durability stays in the one Rust process; each SDK is a few hundred lines. See each directory's README.
+
 ## Workspace
 
 | Crate | Purpose |

@@ -25,3 +25,8 @@ into `crates/salvor-runtime/Cargo.toml` as out-of-package `[[example]]`
 targets, so `cargo build`/`cargo test --workspace` still compile-gate them
 without running anything. Each carries a same-name `main.teach.md` walking
 through what it demonstrates and why.
+
+For driving the same runtime over HTTP instead of the CLI, the thin Python and
+TypeScript client SDKs under [`../sdks/`](../sdks/) each ship a runnable
+model-only example that mirrors this walkthrough against a `salvor serve`
+control plane.

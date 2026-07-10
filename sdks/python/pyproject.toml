@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "salvor"
+version = "0.3.0"
+description = "Thin Python client for the Salvor durable-agent control plane"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT OR Apache-2.0"
+authors = [{ name = "Salvor" }]
+# One runtime dependency. httpx handles both the JSON calls and the streaming
+# read the event tail needs; nothing else is required.
+dependencies = ["httpx>=0.24"]
+
+[project.urls]
+Repository = "https://github.com/joseym/salvor"
+
+[tool.hatch.build.targets.wheel]
+packages = ["salvor"]

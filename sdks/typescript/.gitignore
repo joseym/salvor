@@ -1,0 +1,5 @@
+# Node build and dependency artifacts
+node_modules/
+dist/
+*.tsbuildinfo
+npm-debug.log*
