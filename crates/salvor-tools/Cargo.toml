@@ -14,12 +14,13 @@ repository.workspace = true
 # check: `cargo build -p salvor-tools --no-default-features` succeeds.
 #
 # Enabling `mcp` turns on both the client-side rmcp features the product uses
-# (connecting to a server over stdio, listing and calling tools) and the
-# server-side features (server, transport-io, macros). The server-side half is
-# not product surface: it exists only to build the in-repo test fixture server
-# (`src/bin/salvor-mcp-fixture.rs`), which the integration tests spawn. Keeping
-# one feature avoids a second, non-default feature that `cargo test` defaults
-# would then miss.
+# (connecting to a server over stdio OR streamable HTTP, listing and calling
+# tools) and the server-side features (server, transport-io, macros, and the
+# streamable-HTTP server). The server-side half is not product surface: it
+# exists only to build the in-repo test fixtures (`src/bin/salvor-mcp-fixture.rs`
+# over stdio, and the in-process HTTP server the HTTP integration tests spin
+# up), which the tests drive. Keeping one feature avoids a second, non-default
+# feature that `cargo test` defaults would then miss.
 default = ["mcp"]
 mcp = ["dep:rmcp", "dep:tokio"]
 
@@ -34,15 +35,26 @@ schemars.workspace = true
 rmcp = { workspace = true, optional = true, features = [
     "client",
     "transport-child-process",
+    # The remote-server product path: connect to an MCP server by URL over the
+    # streamable-HTTP transport, using the bundled reqwest client. This pulls in
+    # `transport-streamable-http-client` transitively.
+    "transport-streamable-http-client-reqwest",
     "server",
     "transport-io",
+    # The server half of the streamable-HTTP transport, test-support only: the
+    # HTTP integration tests serve an MCP server in-process on a loopback port.
+    "transport-streamable-http-server",
     "macros",
     "schemars",
 ] }
 tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+# `net` is added over the base test features so the HTTP integration test can
+# bind a loopback `TcpListener`; `axum` serves the in-process fixture server
+# that rmcp's `StreamableHttpService` plugs into. Both are test-only.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net"] }
+axum = "0.8"
 
 # The hermetic MCP test fixture. It is a real server binary spawned over stdio
 # by the integration tests, not an in-process mock, because the product path is

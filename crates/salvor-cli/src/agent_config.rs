@@ -49,16 +49,33 @@
 //! input_per_mtok = 3.0
 //! output_per_mtok = 15.0
 //!
-//! # Optional, repeatable. Each MCP server is spawned as a child process and
-//! # its tools join the agent. `effect_overrides` is the operator's trust
-//! # decision: MCP effect annotations are hints a server may
-//! # misstate, so an operator who knows a tool's true side-effect class pins
+//! # Optional, repeatable. Each MCP server contributes its tools to the agent.
+//! # A server is reached over EXACTLY ONE of two transports:
+//! #  - `command` (+ optional `args`/`env`) spawns a local child process and
+//! #    speaks MCP over its stdio;
+//! #  - `url` reaches a remote server over streamable HTTP.
+//! # Setting both, or neither, is a loud parse error, as is pairing `args`/`env`
+//! # with `url` or `bearer_token_env` with `command`.
+//! #
+//! # `effect_overrides` is valid with either transport: it is the operator's
+//! # trust decision, since MCP effect annotations are hints a server
+//! # may misstate, so an operator who knows a tool's true side-effect class pins
 //! # it here and the runtime honors it over the wire hints.
+//!
+//! # A local stdio server:
 //! [[mcp_servers]]
 //! command = "python"
 //! args = ["-m", "my_server"]
 //! env = { API_TOKEN = "..." }
 //! effect_overrides = { delete = "write", fetch = "read" }
+//!
+//! # A remote HTTP server. `bearer_token_env` NAMES an env var holding a bearer
+//! # token (never the token itself); when set and non-empty it is sent as
+//! # `Authorization: Bearer <token>`. Omit it for a server that needs no auth.
+//! [[mcp_servers]]
+//! url = "https://mcp.example.com/mcp"
+//! bearer_token_env = "MY_MCP_TOKEN"
+//! effect_overrides = { delete = "write" }
 //! ```
 //!
 //! Native Rust tools are code, not config, so the CLI does not register them:
@@ -187,22 +204,80 @@ pub struct PricingConfig {
     pub output_per_mtok: f64,
 }
 
-/// One MCP server: how to spawn it and any per-tool effect overrides.
+/// One MCP server, reached over one of two transports and carrying any per-tool
+/// effect overrides.
+///
+/// Exactly one of `command` and `url` selects the transport: `command` (with
+/// its `args`/`env`) spawns a local child process spoken to over stdio, `url`
+/// reaches a remote server over streamable HTTP. Setting both, or neither, is a
+/// loud parse error, as is pairing a field with the wrong transport (`args` or
+/// `env` with `url`, `bearer_token_env` with `command`). `effect_overrides` is
+/// valid with either. The exclusivity is enforced by
+/// [`validate`](AgentConfig::validate), not by serde, so the error messages can
+/// name the specific conflict.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpServerConfig {
-    /// The program to spawn.
-    pub command: String,
-    /// Arguments passed to the program.
+    /// The program to spawn (stdio transport). Mutually exclusive with `url`.
+    #[serde(default)]
+    pub command: Option<String>,
+    /// Arguments passed to the program. Valid only with `command`.
     #[serde(default)]
     pub args: Vec<String>,
-    /// Extra environment variables for the child process.
+    /// Extra environment variables for the child process. Valid only with
+    /// `command`.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// The URL of a remote MCP server (streamable-HTTP transport). Mutually
+    /// exclusive with `command`.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// The name of an environment variable holding a bearer token, sent as
+    /// `Authorization: Bearer <token>` on every request to a `url` server.
+    /// Never the token itself, mirroring `api_key_env`. Valid only with `url`;
+    /// when the variable is unset or empty, the server is reached without auth.
+    #[serde(default)]
+    pub bearer_token_env: Option<String>,
     /// Per-tool [`Effect`] overrides: the operator's trust decision, winning
-    /// over the server's annotations.
+    /// over the server's annotations. Valid with either transport.
     #[serde(default)]
     pub effect_overrides: BTreeMap<String, Effect>,
+}
+
+impl McpServerConfig {
+    /// Checks the transport-exclusivity rules for one server entry.
+    ///
+    /// # Errors
+    ///
+    /// Fails when neither or both of `command`/`url` are set, when `args` or
+    /// `env` accompany a `url`, or when `bearer_token_env` accompanies a
+    /// `command`.
+    fn validate(&self) -> Result<()> {
+        match (self.command.is_some(), self.url.is_some()) {
+            (false, false) => {
+                bail!(
+                    "an [[mcp_servers]] entry needs exactly one of `command` or `url`; neither is set"
+                )
+            }
+            (true, true) => {
+                bail!("an [[mcp_servers]] entry sets both `command` and `url`; use exactly one")
+            }
+            (true, false) => {
+                if self.bearer_token_env.is_some() {
+                    bail!("`bearer_token_env` applies only to a `url` server, not a `command` one");
+                }
+            }
+            (false, true) => {
+                if !self.args.is_empty() {
+                    bail!("`args` applies only to a `command` server, not a `url` one");
+                }
+                if !self.env.is_empty() {
+                    bail!("`env` applies only to a `command` server, not a `url` one");
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl AgentConfig {
@@ -222,15 +297,20 @@ impl AgentConfig {
         Ok(config)
     }
 
-    /// The prompt-exclusivity check `load` applies. Kept separate so a
-    /// constructed config (as in unit tests) can be validated too.
+    /// The cross-field checks `load` applies. Kept separate so a constructed
+    /// config (as in unit tests) can be validated too.
     ///
     /// # Errors
     ///
-    /// Fails when both prompt fields are set.
+    /// Fails when both prompt fields are set, or when any `[[mcp_servers]]`
+    /// entry breaks the `command`/`url` transport-exclusivity rules (see
+    /// [`McpServerConfig`]).
     pub fn validate(&self) -> Result<()> {
         if self.system_prompt.is_some() && self.system_prompt_path.is_some() {
             bail!("set only one of `system_prompt` or `system_prompt_path`, not both");
+        }
+        for server in &self.mcp_servers {
+            server.validate()?;
         }
         Ok(())
     }
@@ -344,18 +424,41 @@ pub async fn build_agent(
 
     let mut servers = Vec::new();
     for server_config in &config.mcp_servers {
-        let mut command = tokio::process::Command::new(&server_config.command);
-        command.args(&server_config.args);
-        for (key, value) in &server_config.env {
-            command.env(key, value);
-        }
         let mut overrides = EffectOverrides::new();
         for (name, effect) in &server_config.effect_overrides {
             overrides.insert(name.clone(), *effect);
         }
-        let mut server = McpServer::connect(command, &overrides)
-            .await
-            .with_context(|| format!("connecting to MCP server `{}`", server_config.command))?;
+
+        // `validate` (run at load) guarantees exactly one transport is set, so
+        // the `url`-first branch is exhaustive: a config that reaches here with
+        // neither would already have failed to load.
+        let mut server = if let Some(url) = &server_config.url {
+            // The bearer token, if any, is read from the named environment
+            // variable, never the file. An unset or empty variable means no
+            // auth, matching how `api_key_env` treats a missing key.
+            let token = server_config
+                .bearer_token_env
+                .as_deref()
+                .and_then(|name| std::env::var(name).ok())
+                .filter(|t| !t.is_empty());
+            McpServer::connect_http(url, token.as_deref(), &overrides)
+                .await
+                .with_context(|| format!("connecting to MCP server at `{url}`"))?
+        } else {
+            let command_name = server_config
+                .command
+                .as_deref()
+                .expect("validate guarantees a command when there is no url");
+            let mut command = tokio::process::Command::new(command_name);
+            command.args(&server_config.args);
+            for (key, value) in &server_config.env {
+                command.env(key, value);
+            }
+            McpServer::connect(command, &overrides)
+                .await
+                .with_context(|| format!("connecting to MCP server `{command_name}`"))?
+        };
+
         for tool in server.take_tools() {
             builder = builder.tool_dyn(Box::new(tool));
         }

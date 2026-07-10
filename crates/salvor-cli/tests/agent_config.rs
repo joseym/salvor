@@ -77,7 +77,7 @@ effect_overrides = { delete = "write", fetch = "read" }
     assert_eq!(pricing.input_per_mtok, 3.0);
     assert_eq!(config.mcp_servers.len(), 1);
     let server = &config.mcp_servers[0];
-    assert_eq!(server.command, "python");
+    assert_eq!(server.command.as_deref(), Some("python"));
     assert_eq!(server.args, vec!["-m", "server"]);
     assert_eq!(server.env.get("TOKEN").map(String::as_str), Some("abc"));
     assert_eq!(server.effect_overrides.len(), 2);
@@ -118,13 +118,13 @@ fn web_research_example_parses() {
     let fetch = config
         .mcp_servers
         .iter()
-        .find(|s| s.command == "uvx")
+        .find(|s| s.command.as_deref() == Some("uvx"))
         .expect("fetch server present");
     assert_eq!(fetch.effect_overrides.get("fetch"), Some(&Effect::Read));
     let filesystem = config
         .mcp_servers
         .iter()
-        .find(|s| s.command == "npx")
+        .find(|s| s.command.as_deref() == Some("npx"))
         .expect("filesystem server present");
     assert_eq!(
         filesystem.effect_overrides.get("write_file"),
@@ -162,7 +162,10 @@ fn python_tools_example_parses() {
     // ledger path handed to it via the environment.
     assert_eq!(config.mcp_servers.len(), 1);
     let server = &config.mcp_servers[0];
-    assert_eq!(server.command, "examples/python-tools/.venv/bin/python");
+    assert_eq!(
+        server.command.as_deref(),
+        Some("examples/python-tools/.venv/bin/python")
+    );
     assert_eq!(server.args, vec!["examples/python-tools/server.py"]);
     assert_eq!(
         server.env.get("EXPENSE_LEDGER").map(String::as_str),
@@ -200,7 +203,7 @@ fn typescript_tools_example_parses() {
     // One server: Node running server.mjs, with the store path via environment.
     assert_eq!(config.mcp_servers.len(), 1);
     let server = &config.mcp_servers[0];
-    assert_eq!(server.command, "node");
+    assert_eq!(server.command.as_deref(), Some("node"));
     assert_eq!(server.args, vec!["examples/typescript-tools/server.mjs"]);
     assert_eq!(
         server.env.get("BOOKMARKS_FILE").map(String::as_str),
@@ -328,4 +331,76 @@ fn both_prompt_sources_is_rejected() {
         .expect("write");
     let error = AgentConfig::load(file.path()).expect_err("ambiguous prompt rejected");
     assert!(format!("{error:#}").contains("system_prompt"));
+}
+
+/// A `url` MCP server parses into the URL and bearer-token-env fields, with the
+/// stdio-only fields at their empty defaults.
+#[test]
+fn url_mcp_server_parses() {
+    let toml = "model = \"m\"\n\n[[mcp_servers]]\nurl = \"https://mcp.example.com/mcp\"\nbearer_token_env = \"MY_MCP_TOKEN\"\neffect_overrides = { delete = \"write\" }\n";
+    let (config, _f) = load_from_str(toml);
+    assert_eq!(config.mcp_servers.len(), 1);
+    let server = &config.mcp_servers[0];
+    assert_eq!(server.command, None);
+    assert_eq!(server.url.as_deref(), Some("https://mcp.example.com/mcp"));
+    assert_eq!(server.bearer_token_env.as_deref(), Some("MY_MCP_TOKEN"));
+    assert_eq!(server.effect_overrides.get("delete"), Some(&Effect::Write));
+    assert!(server.args.is_empty());
+    assert!(server.env.is_empty());
+}
+
+/// An entry that sets neither `command` nor `url` is a loud error: there is no
+/// transport to reach the server over.
+#[test]
+fn mcp_server_with_neither_command_nor_url_is_rejected() {
+    let mut file = NamedTempFile::new().expect("temp file");
+    file.write_all(b"model = \"m\"\n\n[[mcp_servers]]\neffect_overrides = { x = \"read\" }\n")
+        .expect("write");
+    let error = AgentConfig::load(file.path()).expect_err("no transport rejected");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("command") && message.contains("url"),
+        "error should name both transport keys: {message}"
+    );
+}
+
+/// An entry that sets both `command` and `url` is a loud error: the transport
+/// would be ambiguous.
+#[test]
+fn mcp_server_with_both_command_and_url_is_rejected() {
+    let mut file = NamedTempFile::new().expect("temp file");
+    file.write_all(
+        b"model = \"m\"\n\n[[mcp_servers]]\ncommand = \"python\"\nurl = \"https://x/mcp\"\n",
+    )
+    .expect("write");
+    let error = AgentConfig::load(file.path()).expect_err("both transports rejected");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("both") || (message.contains("command") && message.contains("url")),
+        "error should flag the command/url conflict: {message}"
+    );
+}
+
+/// `args` alongside a `url` server is rejected: arguments belong to a spawned
+/// command, not an HTTP endpoint.
+#[test]
+fn args_with_a_url_server_is_rejected() {
+    let mut file = NamedTempFile::new().expect("temp file");
+    file.write_all(b"model = \"m\"\n\n[[mcp_servers]]\nurl = \"https://x/mcp\"\nargs = [\"-x\"]\n")
+        .expect("write");
+    let error = AgentConfig::load(file.path()).expect_err("args with url rejected");
+    assert!(format!("{error:#}").contains("args"));
+}
+
+/// `bearer_token_env` alongside a `command` server is rejected: stdio has no
+/// authorization header to carry a token.
+#[test]
+fn bearer_token_env_with_a_command_server_is_rejected() {
+    let mut file = NamedTempFile::new().expect("temp file");
+    file.write_all(
+        b"model = \"m\"\n\n[[mcp_servers]]\ncommand = \"python\"\nbearer_token_env = \"T\"\n",
+    )
+    .expect("write");
+    let error = AgentConfig::load(file.path()).expect_err("bearer with command rejected");
+    assert!(format!("{error:#}").contains("bearer_token_env"));
 }

@@ -1,6 +1,7 @@
 //! Model Context Protocol (MCP) integration: connect to an MCP server over
-//! stdio, and surface each tool it reports as a [`DynTool`](crate::DynTool)
-//! the runtime dispatches through like any native tool.
+//! stdio (a spawned child process) or streamable HTTP (a remote server by URL),
+//! and surface each tool it reports as a [`DynTool`](crate::DynTool) the runtime
+//! dispatches through like any native tool.
 //!
 //! This whole module sits behind the `mcp` cargo feature. Everything MCP lives
 //! here and nowhere else in the workspace: the rmcp SDK, the Tokio runtime it
@@ -12,9 +13,12 @@
 //!
 //! # Layout
 //!
-//! - [`McpServer`] (in the `server` submodule) owns one server connection: it
-//!   spawns the server as a child process, initializes the MCP session, lists
-//!   the tools, and shuts the child down cleanly on close or drop.
+//! - [`McpServer`] (in the `server` submodule) owns one server connection over
+//!   either transport: [`connect`](McpServer::connect) spawns a child process
+//!   and speaks stdio, [`connect_http`](McpServer::connect_http) reaches a
+//!   remote server by URL over streamable HTTP. Either way it initializes the
+//!   MCP session, lists the tools, and shuts the session down cleanly on close
+//!   or drop.
 //! - [`McpTool`] (in the `tool` submodule) is one MCP tool, implementing
 //!   [`DynTool`](crate::DynTool) directly. Its name, description, and JSON
 //!   schema are the server's own; its [`Effect`] is decided by the mapping
