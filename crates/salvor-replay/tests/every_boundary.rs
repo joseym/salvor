@@ -12,7 +12,7 @@
 //! refuse with needs-reconciliation rather than re-execute the write, and
 //! the test asserts exactly that.
 
-use salvor_core::{
+use salvor_replay::{
     Budget, BudgetKind, Effect, Emitted, Event, EventEnvelope, Outcome, PendingCall, ReplayCursor,
     ReplayError, RunId, RunStatus, SequenceNumber, TokenTotals, TokenUsage, derive_state,
 };

@@ -32,3 +32,13 @@ jobs:
 
       - name: Test
         run: cargo test --workspace --locked
+
+      # Proves salvor-replay stays pure: the crate builds for the browser target
+      # with its randomness-drawing constructor (RunId::new, behind the `rng`
+      # feature) turned off. This is the prerequisite for the v0.3 client-side
+      # replay, which folds event logs with the same code in wasm.
+      - name: Add wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Build salvor-replay for wasm32 (purity proof)
+        run: cargo build -p salvor-replay --target wasm32-unknown-unknown --no-default-features

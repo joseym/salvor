@@ -4,8 +4,9 @@
 //!
 //! Everything here is pure data. No constructor reads the clock, draws
 //! randomness, or performs IO: the recorded timestamp and any identity are
-//! passed in by the caller. That purity is load-bearing, because the replay
-//! engine must later move into an IO-free crate.
+//! passed in by the caller. That purity is load-bearing, because these types
+//! live in the IO-free `salvor-replay` crate that the runtime and the v0.3
+//! browser inspector both fold events with.
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;

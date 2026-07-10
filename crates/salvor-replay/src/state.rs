@@ -9,9 +9,9 @@
 //! # Purity
 //!
 //! No IO, no clock, no randomness, no dependency on storage or executors.
-//! Like the replay cursor, this module is written to lift unchanged into the
-//! pure `salvor-replay` crate planned for v0.2 (and from there to a wasm32
-//! build for in-browser inspection).
+//! Like the replay cursor, this fold lives in the pure `salvor-replay` crate,
+//! which builds for wasm32 so the v0.3 browser inspector can derive a run's
+//! state from its log in-browser, from this same code.
 //!
 //! # The write rule
 //!

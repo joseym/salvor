@@ -19,18 +19,24 @@ use uuid::Uuid;
 /// # Purity
 ///
 /// [`RunId::new`] draws randomness to mint a fresh UUID, so it is an explicit
-/// constructor the caller invokes on purpose. Nothing in this crate calls it
-/// implicitly; the event types never generate identity on their own.
+/// constructor the caller invokes on purpose, and it sits behind the default-on
+/// `rng` feature. Nothing else in this crate draws randomness; the event types
+/// never generate identity on their own. A build with `--no-default-features`
+/// (the wasm32 build) drops `new` entirely, which is how the crate proves it
+/// contains no randomness source.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct RunId(Uuid);
 
+#[cfg(feature = "rng")]
 impl RunId {
     /// Mints a fresh, random run identifier.
     ///
     /// This draws from the system random source, so treat it as a deliberate
     /// side effect at the edge of the runtime, never something the pure event
-    /// or replay paths reach for.
+    /// or replay paths reach for. It lives behind the `rng` feature because the
+    /// underlying `getrandom` source does not build for
+    /// `wasm32-unknown-unknown`.
     // `new` here is a randomness-drawing constructor, not a cheap default, so a
     // `Default` impl would misrepresent it.
     #[allow(clippy::new_without_default)]
@@ -38,7 +44,9 @@ impl RunId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
+}
 
+impl RunId {
     /// Wraps an existing UUID as a run identifier.
     ///
     /// Use this to reconstruct a `RunId` read back from storage, where the

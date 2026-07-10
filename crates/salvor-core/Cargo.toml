@@ -7,9 +7,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-serde.workspace = true
-serde_json.workspace = true
-thiserror.workspace = true
-tracing.workspace = true
-uuid.workspace = true
-time.workspace = true
+# The event model, replay cursor, and state fold live in salvor-replay (a pure,
+# wasm32-buildable crate); this crate re-exports them so every existing
+# `salvor_core::` path keeps resolving. Default features keep `rng` on, so
+# `RunId::new` stays available to native consumers exactly as before.
+salvor-replay.workspace = true

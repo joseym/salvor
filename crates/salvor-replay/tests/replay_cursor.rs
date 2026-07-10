@@ -8,7 +8,7 @@
 //! full serialize/deserialize round trip of the log, the exact handoff point
 //! from replay to live, and the typed divergence errors.
 
-use salvor_core::{
+use salvor_replay::{
     Effect, Emitted, Event, EventEnvelope, LoggedStep, ModelReply, Outcome, ReplayCursor,
     ReplayError, RequestedStep, RunId, RunStatus, SequenceNumber, TokenUsage, derive_state,
 };

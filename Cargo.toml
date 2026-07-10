@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/salvor-replay",
     "crates/salvor-core",
     "crates/salvor-store",
     "crates/salvor-llm",
@@ -17,6 +18,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/joseym/salvor"
 
 [workspace.dependencies]
+salvor-replay = { path = "crates/salvor-replay" }
 salvor-core = { path = "crates/salvor-core" }
 salvor-store = { path = "crates/salvor-store" }
 salvor-llm = { path = "crates/salvor-llm" }

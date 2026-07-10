@@ -18,9 +18,9 @@
 //! values are supplied by the caller when a permit is redeemed. The cursor
 //! never touches `salvor-store` or any executor: it consumes an in-memory
 //! `Vec<EventEnvelope>` and emits [`Emitted`] values the caller persists.
-//! This is deliberate. The v0.2 roadmap extracts replay into a pure
-//! `salvor-replay` crate with a wasm32 target, and this module is written to
-//! lift out unchanged.
+//! This is deliberate. It is why the cursor lives in the pure `salvor-replay`
+//! crate, which builds for wasm32 so the v0.3 browser inspector can drive
+//! replay client-side from the same code the runtime uses.
 //!
 //! # Divergence detection is always on
 //!

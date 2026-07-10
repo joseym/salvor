@@ -1,0 +1,35 @@
+[package]
+name = "salvor-replay"
+description = "Pure, IO-free event model, replay cursor, and state fold for the Salvor agent runtime, with a wasm32 target for in-browser inspection"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time.workspace = true
+# uuid without its `v4` feature by default, so this crate draws no randomness
+# and pulls in no `getrandom` backend. That is what lets the crate build for
+# wasm32-unknown-unknown, where `getrandom` has no default source. The `rng`
+# feature (below, on by default for native builds) adds `v4` back and turns on
+# the one randomness-drawing constructor, `RunId::new`. The `serde` feature is
+# unconditional because `RunId` serializes into every event envelope.
+uuid = { version = "1", features = ["serde"] }
+
+[features]
+# On by default so every native consumer (salvor-core and everything above it)
+# keeps `RunId::new` and behaves exactly as before. A wasm32 build turns it off
+# with `--no-default-features`, which is the proof that nothing outside this
+# gate draws randomness.
+default = ["rng"]
+rng = ["uuid/v4"]
+
+[dev-dependencies]
+serde_json.workspace = true
+time.workspace = true
+# The tests reconstruct run ids from fixed UUID strings (`RunId::from_uuid`),
+# which needs the parser but not `v4`.
+uuid = { version = "1", features = ["serde"] }
