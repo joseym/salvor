@@ -23,4 +23,5 @@ sha2.workspace = true
 [dev-dependencies]
 wiremock.workspace = true
 async-trait.workspace = true
+schemars.workspace = true
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }

@@ -37,6 +37,18 @@ The demo's MCP server appends one line to a findings file per real write, so `wc
 
 For a live version against real tools, `examples/web-research/` runs an agent over the official fetch and filesystem MCP servers and applies the same kill/resume story to real HTTP fetches and a real report write.
 
+### Use it as a library
+
+Salvor is also usable as a library, at two tiers you build against directly. The batteries-included tier is `Agent::builder()` plus a `Runtime`: you write typed tools and let the built-in loop drive them. The library-first tier is a hand-written async function over the public `RunCtx`, which gets the same durability and replay without the built-in loop. Each has a runnable example (and a same-name `.teach.md` walking through it) under `crates/salvor-runtime/examples/`:
+
+```sh
+export ANTHROPIC_API_KEY=sk-ant-...
+cargo run -p salvor-runtime --example todo_agent      # batteries-included: Agent::builder + native tools
+cargo run -p salvor-runtime --example approval_loop   # library-first: your own loop over RunCtx
+```
+
+`todo_agent` prints a run id you can kill and recover with `RESUME_RUN_ID=<id>`; `approval_loop` parks awaiting approval on the first run and completes on a second run with `APPROVAL` set.
+
 ## Workspace
 
 | Crate | Purpose |
