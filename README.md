@@ -35,6 +35,8 @@ kill -9 $!
 
 The demo's MCP server appends one line to a findings file per real write, so `wc -l` before the kill and after the resume is the zero-duplicate proof. `salvor list` shows the crashed run and its id; `salvor history <run-id>` prints the event log. `demo/README.md` has the full walkthrough, including a hermetic mock-model mode that needs no key and no network (the same mode records the GIF above).
 
+For a live version against real tools, `examples/web-research/` runs an agent over the official fetch and filesystem MCP servers and applies the same kill/resume story to real HTTP fetches and a real report write.
+
 ## Workspace
 
 | Crate | Purpose |

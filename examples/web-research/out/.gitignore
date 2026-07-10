@@ -1,0 +1,4 @@
+# The agent writes its report here at run time. Keep the directory in git (the
+# filesystem server refuses to start if it is missing) but not the reports.
+*
+!.gitignore

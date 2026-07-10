@@ -1,0 +1,9 @@
+{
+  "question": "How does the Raft consensus algorithm reach agreement across a cluster, and how does its design differ from Paxos?",
+  "seed_urls": [
+    "https://en.wikipedia.org/wiki/Raft_(algorithm)",
+    "https://en.wikipedia.org/wiki/Paxos_(computer_science)",
+    "https://en.wikipedia.org/wiki/Consensus_(computer_science)"
+  ],
+  "report_path": "examples/web-research/out/raft-vs-paxos.md"
+}

@@ -1,11 +1,15 @@
 //! Unit tests for the agent-definition TOML schema, driven through the
 //! library API rather than the binary. They pin the round-trip, the clear
 //! failure when a cost budget lacks pricing, and that an unknown field is
-//! rejected (not silently ignored).
+//! rejected (not silently ignored). One case loads the committed
+//! `examples/web-research/agent.toml` through the real loader, so that
+//! documented example cannot drift out of a shape the parser accepts.
 
 use std::io::Write;
+use std::path::PathBuf;
 
 use salvor_cli::agent_config::{AgentConfig, build_agent};
+use salvor_core::Effect;
 use tempfile::NamedTempFile;
 
 /// Writes `toml` to a temp file and loads it, returning both so the caller can
@@ -70,6 +74,50 @@ effect_overrides = { delete = "write", fetch = "read" }
     assert_eq!(server.args, vec!["-m", "server"]);
     assert_eq!(server.env.get("TOKEN").map(String::as_str), Some("abc"));
     assert_eq!(server.effect_overrides.len(), 2);
+}
+
+/// The committed `examples/web-research/agent.toml` loads through the real
+/// config loader and has the shape its README documents: both official MCP
+/// servers, the two grounded effect overrides, and budgets with the pricing a
+/// cost budget requires. This is the only CI-facing piece of that example (the
+/// live run needs a real API key and network), so it guards the parse contract
+/// the walkthrough depends on, not the run itself.
+#[test]
+fn web_research_example_parses() {
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/web-research/agent.toml");
+    let config = AgentConfig::load(&path).expect("example agent.toml parses");
+
+    assert_eq!(config.model, "claude-opus-4-8");
+    assert_eq!(config.llm.api_key_env.as_deref(), Some("ANTHROPIC_API_KEY"));
+
+    // Budgets and the pricing that a cost budget requires are all present.
+    assert_eq!(config.budgets.steps, Some(30));
+    assert_eq!(config.budgets.tokens, Some(500_000));
+    assert_eq!(config.budgets.cost_usd, Some(3.00));
+    assert_eq!(config.budgets.wall_time_seconds, Some(600.0));
+    let pricing = config.pricing.as_ref().expect("pricing present");
+    assert_eq!(pricing.input_per_mtok, 5.0);
+    assert_eq!(pricing.output_per_mtok, 25.0);
+
+    // Both servers, keyed by command, with the effect overrides the README
+    // explains: fetch pinned to Read, the report write pinned to Write.
+    assert_eq!(config.mcp_servers.len(), 2);
+    let fetch = config
+        .mcp_servers
+        .iter()
+        .find(|s| s.command == "uvx")
+        .expect("fetch server present");
+    assert_eq!(fetch.effect_overrides.get("fetch"), Some(&Effect::Read));
+    let filesystem = config
+        .mcp_servers
+        .iter()
+        .find(|s| s.command == "npx")
+        .expect("filesystem server present");
+    assert_eq!(
+        filesystem.effect_overrides.get("write_file"),
+        Some(&Effect::Write)
+    );
 }
 
 /// A terse config (only the required `model`) parses, with everything else at
