@@ -57,6 +57,10 @@ salvor-store.workspace = true
 salvor-llm.workspace = true
 salvor-tools.workspace = true
 salvor-runtime.workspace = true
+# Sandboxed wasm tools ([[wasm_tools]] in the agent file). A direct, unguarded
+# dependency: the CLI is the batteries-included tier; library users who must
+# not compile a wasm runtime depend on the library crates, never on this one.
+salvor-wasm.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true

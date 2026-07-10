@@ -76,15 +76,47 @@
 //! url = "https://mcp.example.com/mcp"
 //! bearer_token_env = "MY_MCP_TOKEN"
 //! effect_overrides = { delete = "write" }
+//!
+//! # Optional, repeatable. Each entry is one sandboxed WebAssembly tool: an
+//! # untrusted component (the `salvor:tool@0.1.0` world) run under wasmtime
+//! # with no capabilities beyond what `grants` hands it. EVERY model-facing
+//! # fact here is operator-authored; the binary is never asked to describe
+//! # itself.
+//! #
+//! # `effect` is REQUIRED, with no default: one notch stricter than MCP.
+//! # An MCP server legitimately self-describes, so its silence needs a safe
+//! # reading (Write); a sandboxed binary gets no voice at all, so a missing
+//! # `effect` is a missing operator decision and the parser refuses it.
+//! [[wasm_tools]]
+//! path = "tools/wordcount.wasm"       # resolved relative to this file
+//! sha256 = "9f3a..."                  # optional integrity pin; mismatch = refuse to load
+//! name = "wordcount"                  # the name the model calls
+//! description = "Counts words in text"
+//! effect = "read"                     # required: "read" | "idempotent" | "write"
+//! # Exactly one of `input_schema` (inline JSON) or `input_schema_path`
+//! # (a JSON file, resolved relative to this file).
+//! input_schema = '{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}'
+//!
+//! [wasm_tools.limits]                 # optional; these are the defaults
+//! wall_time_ms = 5000                 # per-call wall/CPU cap (epoch deadline)
+//! memory_bytes = 134217728            # per-call linear-memory cap (128 MiB)
+//! # fuel = 500000000                  # optional deterministic metering; unlimited when absent
+//!
+//! [wasm_tools.grants]                 # optional; absent = the guest can open nothing
+//! # `host` is resolved relative to this file; `guest` is where the guest sees
+//! # it; `perms` is "read" or "read_write".
+//! preopen = [{ host = "./data", guest = "/data", perms = "read" }]
 //! ```
 //!
 //! Native Rust tools are code, not config, so the CLI does not register them:
-//! MCP is the config-reachable tool boundary and covers the demo. Unknown
-//! fields are **rejected**, not ignored, so a typo like `step` instead of
-//! `steps` is a loud parse error rather than a silently dropped budget.
+//! MCP servers and sandboxed wasm components are the config-reachable tool
+//! boundary. Unknown fields are **rejected**, not ignored, so a typo like
+//! `step` instead of `steps` is a loud parse error rather than a silently
+//! dropped budget.
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -92,6 +124,7 @@ use salvor_core::Effect;
 use salvor_llm::{AuthKind, Config};
 use salvor_runtime::{Agent, AgentBuildError, Budgets, Pricing};
 use salvor_tools::mcp::{EffectOverrides, McpServer};
+use salvor_wasm::{DirGrant, WasmEngine, WasmTool, WasmToolSpec};
 use serde::Deserialize;
 
 /// The full agent definition, parsed from the TOML file. Every optional field
@@ -125,6 +158,9 @@ pub struct AgentConfig {
     /// MCP servers whose tools the agent may call.
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
+    /// Sandboxed WebAssembly component tools the agent may call.
+    #[serde(default)]
+    pub wasm_tools: Vec<WasmToolConfig>,
 }
 
 /// How the API key authenticates, as named in the `[llm]` section. Mirrors
@@ -280,6 +316,205 @@ impl McpServerConfig {
     }
 }
 
+/// One sandboxed WebAssembly tool: an untrusted component file plus the
+/// operator's complete declaration of what the model is told about it and
+/// what the sandbox lets it do.
+///
+/// Everything model-facing (`name`, `description`, the input schema) and the
+/// side-effect class (`effect`) is operator-authored, never read from the
+/// binary: a hostile component's self-description would be a prompt-injection
+/// surface, and its effect class is a trust decision the sandboxed code
+/// cannot be allowed to make about itself. `effect` is therefore **required
+/// with no default**, deliberately stricter than MCP's default-to-Write: an
+/// MCP server legitimately self-describes, so silence needs a safe fallback;
+/// a wasm binary has no channel to speak on, so silence can only mean the
+/// operator has not decided yet, and [`validate`](Self::validate) refuses it
+/// loudly.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WasmToolConfig {
+    /// The component file, resolved relative to the agent file's directory.
+    pub path: String,
+    /// Optional sha256 integrity pin (lowercase or uppercase hex). When set,
+    /// a file whose bytes hash differently is refused before it is compiled,
+    /// let alone instantiated.
+    #[serde(default)]
+    pub sha256: Option<String>,
+    /// The name the model calls the tool by.
+    pub name: String,
+    /// The model-facing description. Operator-authored: the guest is never
+    /// asked.
+    pub description: String,
+    /// The side-effect class. Required, no default; `None` here only survives
+    /// until [`validate`](Self::validate).
+    #[serde(default)]
+    pub effect: Option<Effect>,
+    /// The input JSON Schema, inline. Exactly one of this and
+    /// `input_schema_path` must be set.
+    #[serde(default)]
+    pub input_schema: Option<String>,
+    /// A path to a JSON Schema file, resolved relative to the agent file's
+    /// directory. Exactly one of this and `input_schema` must be set.
+    #[serde(default)]
+    pub input_schema_path: Option<String>,
+    /// Per-call resource caps; defaults apply to any left unset.
+    #[serde(default)]
+    pub limits: WasmLimitsConfig,
+    /// Capability grants; absent means the guest can open nothing.
+    #[serde(default)]
+    pub grants: WasmGrantsConfig,
+}
+
+/// Per-call resource caps for one wasm tool. Mirrors
+/// [`salvor_wasm::ToolLimits`], with every field optional so a terse entry
+/// gets the documented defaults.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WasmLimitsConfig {
+    /// Wall-clock cap per call, in milliseconds (default 5000).
+    pub wall_time_ms: Option<u64>,
+    /// Linear-memory cap per call, in bytes (default 134217728 = 128 MiB).
+    pub memory_bytes: Option<u64>,
+    /// Optional deterministic fuel budget; unlimited when absent.
+    pub fuel: Option<u64>,
+}
+
+impl WasmLimitsConfig {
+    /// The runtime limits these settings resolve to, with defaults filled in.
+    fn tool_limits(&self) -> salvor_wasm::ToolLimits {
+        let defaults = salvor_wasm::ToolLimits::default();
+        salvor_wasm::ToolLimits {
+            wall_time_ms: self.wall_time_ms.unwrap_or(defaults.wall_time_ms),
+            memory_bytes: self.memory_bytes.unwrap_or(defaults.memory_bytes),
+            fuel: self.fuel,
+        }
+    }
+}
+
+/// Capability grants for one wasm tool. The only v0.2 grant is directory
+/// preopens; network access is deliberately not offered (tools that need the
+/// network use MCP).
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WasmGrantsConfig {
+    /// Directories exposed to the guest.
+    #[serde(default)]
+    pub preopen: Vec<PreopenConfig>,
+}
+
+/// One preopened directory grant.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreopenConfig {
+    /// The host directory, resolved relative to the agent file's directory.
+    pub host: String,
+    /// The path the guest sees it at (for example `/data`).
+    pub guest: String,
+    /// What the guest may do inside it.
+    pub perms: PreopenPermsConfig,
+}
+
+/// The permission level of a preopen, as spelled in the file: `"read"` or
+/// `"read_write"`. An unknown value is a loud parse error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreopenPermsConfig {
+    /// List and read only.
+    Read,
+    /// List, read, create, write, and delete.
+    ReadWrite,
+}
+
+impl PreopenPermsConfig {
+    /// The runtime grant level this spelling maps to.
+    fn grant_perms(self) -> salvor_wasm::GrantPerms {
+        match self {
+            PreopenPermsConfig::Read => salvor_wasm::GrantPerms::Read,
+            PreopenPermsConfig::ReadWrite => salvor_wasm::GrantPerms::ReadWrite,
+        }
+    }
+}
+
+impl WasmToolConfig {
+    /// Checks the per-tool rules: a declared effect and exactly one schema
+    /// source. Every message names the offending tool, because an agent file
+    /// can carry many `[[wasm_tools]]` entries.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `effect` is missing (it has no default on purpose), when
+    /// neither or both of `input_schema`/`input_schema_path` are set, or when
+    /// an inline `input_schema` is not valid JSON.
+    fn validate(&self) -> Result<()> {
+        if self.effect.is_none() {
+            bail!(
+                "wasm tool `{}`: `effect` is required (\"read\", \"idempotent\", or \"write\") \
+                 and has no default. The sandboxed binary gets no say in its own side-effect \
+                 class, so a missing effect is a missing operator decision, not something to \
+                 guess",
+                self.name
+            );
+        }
+        match (
+            self.input_schema.is_some(),
+            self.input_schema_path.is_some(),
+        ) {
+            (false, false) => bail!(
+                "wasm tool `{}`: set exactly one of `input_schema` or `input_schema_path`; \
+                 neither is set",
+                self.name
+            ),
+            (true, true) => bail!(
+                "wasm tool `{}`: set exactly one of `input_schema` or `input_schema_path`, \
+                 not both",
+                self.name
+            ),
+            _ => {}
+        }
+        if let Some(inline) = &self.input_schema {
+            serde_json::from_str::<serde_json::Value>(inline).with_context(|| {
+                format!(
+                    "wasm tool `{}`: `input_schema` is not valid JSON",
+                    self.name
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    /// The input schema as a JSON value, reading the schema file when
+    /// `input_schema_path` is set (relative to `agent_dir`).
+    fn resolved_input_schema(&self, agent_dir: &Path) -> Result<serde_json::Value> {
+        if let Some(inline) = &self.input_schema {
+            return serde_json::from_str(inline).with_context(|| {
+                format!(
+                    "wasm tool `{}`: `input_schema` is not valid JSON",
+                    self.name
+                )
+            });
+        }
+        let rel = self
+            .input_schema_path
+            .as_ref()
+            .expect("validate guarantees a schema source");
+        let path = agent_dir.join(rel);
+        let text = std::fs::read_to_string(&path).with_context(|| {
+            format!(
+                "wasm tool `{}`: reading input schema file {}",
+                self.name,
+                path.display()
+            )
+        })?;
+        serde_json::from_str(&text).with_context(|| {
+            format!(
+                "wasm tool `{}`: input schema file {} is not valid JSON",
+                self.name,
+                path.display()
+            )
+        })
+    }
+}
+
 impl AgentConfig {
     /// Parses an agent file, rejecting unknown fields and mutually exclusive
     /// prompt settings.
@@ -302,15 +537,20 @@ impl AgentConfig {
     ///
     /// # Errors
     ///
-    /// Fails when both prompt fields are set, or when any `[[mcp_servers]]`
+    /// Fails when both prompt fields are set, when any `[[mcp_servers]]`
     /// entry breaks the `command`/`url` transport-exclusivity rules (see
-    /// [`McpServerConfig`]).
+    /// [`McpServerConfig`]), or when any `[[wasm_tools]]` entry is missing
+    /// its required `effect` or breaks the schema-source rule (see
+    /// [`WasmToolConfig`]).
     pub fn validate(&self) -> Result<()> {
         if self.system_prompt.is_some() && self.system_prompt_path.is_some() {
             bail!("set only one of `system_prompt` or `system_prompt_path`, not both");
         }
         for server in &self.mcp_servers {
             server.validate()?;
+        }
+        for tool in &self.wasm_tools {
+            tool.validate()?;
         }
         Ok(())
     }
@@ -463,6 +703,51 @@ pub async fn build_agent(
             builder = builder.tool_dyn(Box::new(tool));
         }
         servers.push(server);
+    }
+
+    // Sandboxed wasm tools. One engine (compiler, WASI linker, epoch ticker)
+    // is shared by every tool; each tool holds an Arc to it, so nothing extra
+    // needs to stay alive after this function returns. Loading verifies any
+    // sha256 pin against the file's bytes before compiling, so a tampered
+    // component fails the build here, not mid-run.
+    if !config.wasm_tools.is_empty() {
+        let engine = WasmEngine::new().context("initializing the wasm sandbox engine")?;
+        for tool_config in &config.wasm_tools {
+            let component_path = agent_dir.join(&tool_config.path);
+            let spec = WasmToolSpec {
+                name: tool_config.name.clone(),
+                description: tool_config.description.clone(),
+                effect: tool_config
+                    .effect
+                    .expect("validate (run at load) guarantees an effect"),
+                input_schema: tool_config.resolved_input_schema(agent_dir)?,
+                limits: tool_config.limits.tool_limits(),
+                grants: tool_config
+                    .grants
+                    .preopen
+                    .iter()
+                    .map(|preopen| DirGrant {
+                        host: agent_dir.join(&preopen.host),
+                        guest: preopen.guest.clone(),
+                        perms: preopen.perms.grant_perms(),
+                    })
+                    .collect(),
+            };
+            let tool = WasmTool::load(
+                Arc::clone(&engine),
+                &component_path,
+                tool_config.sha256.as_deref(),
+                spec,
+            )
+            .with_context(|| {
+                format!(
+                    "loading wasm tool `{}` from {}",
+                    tool_config.name,
+                    component_path.display()
+                )
+            })?;
+            builder = builder.tool_dyn(Box::new(tool));
+        }
     }
 
     let agent = builder.build().map_err(build_error_context)?;

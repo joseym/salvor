@@ -30,8 +30,20 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # salvor-wasm's integration tests build their fixture guest (a WASI p2
+      # component under crates/salvor-wasm/tests/fixture-guest) with this
+      # target, so it must exist before `cargo test` runs.
+      - name: Add wasm32-wasip2 target (salvor-wasm guest fixture)
+        run: rustup target add wasm32-wasip2
+
       - name: Test
         run: cargo test --workspace --locked
+
+      # Compile-gates the wasm-tools example guest the same way the workspace
+      # build compile-gates the Rust examples: the committed guest source must
+      # keep producing a component, or the example's walkthrough is broken.
+      - name: Build the wasm-tools example guest
+        run: cargo build --manifest-path examples/wasm-tools/guest/Cargo.toml --target wasm32-wasip2 --release --target-dir target/wasm-guests
 
       # Proves salvor-replay stays pure: the crate builds for the browser target
       # with its randomness-drawing constructor (RunId::new, behind the `rng`

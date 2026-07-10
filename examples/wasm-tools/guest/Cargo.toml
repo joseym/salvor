@@ -1,0 +1,35 @@
+# The example guest: a word-count tool compiled to a WASI p2 component. NOT a
+# workspace member (the root manifest excludes it): it only compiles for the
+# wasm32-wasip2 target. The empty [workspace] table marks it standalone so
+# cargo stops walking up to the root workspace.
+#
+# Build it from the repository root with:
+#   cargo build --manifest-path examples/wasm-tools/guest/Cargo.toml \
+#     --target wasm32-wasip2 --release --target-dir target/wasm-guests
+# (add the target once with `rustup target add wasm32-wasip2`)
+#
+# The explicit --target-dir keeps build output in the workspace's own target/
+# directory instead of nesting a second target/ inside examples/; agent.toml
+# points at the artifact there. Outside this repository, a plain
+# `cargo build --target wasm32-wasip2 --release` works fine.
+
+[package]
+name = "wordcount-guest"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+# A component exports functions instead of running a `main`; `cdylib` is what
+# makes the wasm32-wasip2 target emit the linkable module that the toolchain
+# wraps into a component.
+crate-type = ["cdylib"]
+
+[dependencies]
+# Generates the export scaffolding for the `salvor:tool@0.1.0` world in wit/.
+# That directory is a verbatim copy of crates/salvor-wasm/wit, kept here so
+# this guest works when copied out of the repository.
+wit-bindgen = "0.59"
+serde_json = "1"

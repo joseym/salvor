@@ -1,0 +1,18 @@
+// The entire guest contract for a sandboxed Salvor tool, versioned so a later
+// world (rich WIT types, guest self-description) can be added without
+// breaking v0.2 guests.
+//
+// One export, JSON strings both ways: the boundary stays identical to
+// DynTool::call_json (Value in, Value out), so a wasm tool slots behind the
+// existing dispatch seam with no new type machinery. `result<string, string>`
+// carries a guest-level failure (the err side) distinctly from a successful
+// output; host-enforced limit traps never pass through here at all.
+//
+// Deliberately absent: any channel for the guest to describe itself (name,
+// description, schema, effect). Those are operator trust decisions declared
+// in the agent file; a hostile binary gets no voice in them.
+package salvor:tool@0.1.0;
+
+world tool {
+    export call: func(input: string) -> result<string, string>;
+}

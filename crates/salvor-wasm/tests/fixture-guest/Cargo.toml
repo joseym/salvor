@@ -1,0 +1,35 @@
+# The sandbox test fixture: a deliberately misbehaving guest component the
+# salvor-wasm integration tests build (with `cargo build --target wasm32-wasip2
+# --release`) and run against the real host. It is NOT a workspace member (see
+# the root manifest's `exclude`): it only compiles for the component target.
+# The empty [workspace] table below is what marks it standalone, so cargo
+# stops walking up to the root workspace.
+
+[package]
+name = "fixture-guest"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+# A component export has no `main`; the guest is a reactor-style library, and
+# `cdylib` is what makes the wasm32-wasip2 target emit a linkable module (the
+# toolchain then wraps it into a component with the WASI adapter).
+crate-type = ["cdylib"]
+
+[dependencies]
+# Generates the export scaffolding for the `salvor:tool@0.1.0` world at
+# ../../wit, the same WIT source the host's bindgen! reads, so guest and host
+# cannot drift. 0.59 verified current on crates.io 2026-07-10.
+wit-bindgen = "0.59"
+serde_json = "1"
+
+# The limit tests need real machine code that actually loops and allocates:
+# `--release` plus `std::hint::black_box` in the guest (a debug build would
+# also work, but release is what real guests ship and what the measured spike
+# numbers used).
+[profile.release]
+# Defaults are fine; declared to pin intent if defaults shift.
+opt-level = 3

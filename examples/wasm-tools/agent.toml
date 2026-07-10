@@ -1,0 +1,78 @@
+# A Salvor agent whose only tool is an untrusted WebAssembly component, run in
+# a wasmtime sandbox. The component (guest/) exports one function against the
+# `salvor:tool@0.1.0` WIT world; EVERYTHING the model is told about it, and
+# everything it is allowed to do, is declared right here by the operator. The
+# binary is never asked to describe itself.
+#
+# Build the guest first, from the repository root (see README.md):
+#   cargo build --manifest-path examples/wasm-tools/guest/Cargo.toml \
+#     --target wasm32-wasip2 --release --target-dir target/wasm-guests
+#
+# Unlike MCP server commands (which resolve against the directory you run
+# salvor from), every path in [[wasm_tools]] resolves relative to THIS file, so
+# the run works from any working directory.
+
+model = "claude-opus-4-8"
+
+system_prompt = """
+You are a text-analysis assistant with one tool: `wordcount`, which takes a
+string field `text` and returns its statistics (words, chars, lines, longest
+word).
+
+Your input is a JSON object with one field, `texts`: a map of labels to text
+snippets. Work in this order:
+
+1. Call `wordcount` exactly once per snippet.
+2. Reply with a short plain-text comparison: per snippet, its word count,
+   character count, and longest word; then one sentence naming which snippet
+   is longer and by how many words. Then stop. Do not call any tool after the
+   comparison.
+"""
+
+[llm]
+# The key is read from this variable at run time and never stored in any file.
+# For a subscription OAuth token instead of an API key, add:
+#   api_key_kind = "oauth"
+api_key_env = "DEMO_ANTHROPIC_API_KEY"
+
+[budgets]
+# Two tool calls and a summary is a short run; these rails park anything that
+# runs away instead of letting it spend on.
+steps = 10
+tokens = 100000
+cost_usd = 0.25
+wall_time_seconds = 120
+
+[pricing]
+# claude-opus-4-8 list price, dollars per million tokens; required because a
+# cost budget is declared.
+input_per_mtok = 5.0
+output_per_mtok = 25.0
+
+[[wasm_tools]]
+# The component built from guest/. Untrusted by premise: the sandbox grants it
+# nothing (no filesystem, no env, no network; stderr goes to tracing), so this
+# entry declares no [wasm_tools.grants] at all, which IS the default posture.
+# The path (relative to this file) climbs to the workspace's target/ because
+# the build command above deliberately keeps guest build output out of the
+# example tree.
+path = "../../target/wasm-guests/wasm32-wasip2/release/wordcount_guest.wasm"
+# Optional integrity pin. Compute it after building and uncomment to make the
+# runtime refuse any other bytes at this path:
+#   shasum -a 256 target/wasm-guests/wasm32-wasip2/release/wordcount_guest.wasm
+# sha256 = "..."
+name = "wordcount"
+description = "Counts words, characters, and lines in a text and finds its longest word."
+# REQUIRED, no default: the side-effect class is the operator's trust
+# decision, and a sandboxed binary gets no say in it (stricter than MCP,
+# where a server may at least self-describe). This guest computes over its
+# input and can touch nothing, so `read` is honest, and it lets the runtime
+# retry an interrupted call safely.
+effect = "read"
+input_schema = '{"type":"object","properties":{"text":{"type":"string","description":"The text to analyze"}},"required":["text"]}'
+
+[wasm_tools.limits]
+# Per-call caps, disjoint from the run [budgets] above: a call that hits one
+# fails (the model sees the error and can adapt); it never parks the run.
+wall_time_ms = 2000
+memory_bytes = 67108864 # 64 MiB

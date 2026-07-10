@@ -57,6 +57,7 @@ cargo run -p salvor-runtime --example approval_loop   # library-first: your own 
 | `salvor-store` | `EventStore` trait + SQLite (WAL) implementation |
 | `salvor-llm` | Messages API client (Anthropic hosted and local endpoints) |
 | `salvor-tools` | `ToolHandler` trait, effect classification, MCP client |
+| `salvor-wasm` | Sandboxed WebAssembly component tools (wasmtime, WASI p2, deny-all capabilities) |
 | `salvor-cli` | The `salvor` binary: `run`, `resume`, `list`, `history`, `replay` |
 
 ## Correctness

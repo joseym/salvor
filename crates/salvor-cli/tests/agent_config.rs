@@ -14,7 +14,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use salvor_cli::agent_config::{AgentConfig, ApiKeyKind, build_agent};
+use salvor_cli::agent_config::{AgentConfig, ApiKeyKind, PreopenPermsConfig, build_agent};
 use salvor_core::Effect;
 use salvor_llm::AuthKind;
 use tempfile::NamedTempFile;
@@ -403,4 +403,293 @@ fn bearer_token_env_with_a_command_server_is_rejected() {
     .expect("write");
     let error = AgentConfig::load(file.path()).expect_err("bearer with command rejected");
     assert!(format!("{error:#}").contains("bearer_token_env"));
+}
+
+/// A full `[[wasm_tools]]` entry parses: identity, pin, required effect,
+/// inline schema, limits, and a preopen grant.
+#[test]
+fn wasm_tool_config_parses() {
+    let toml = r#"
+model = "m"
+
+[[wasm_tools]]
+path = "tools/wordcount.wasm"
+sha256 = "9f3a"
+name = "wordcount"
+description = "Counts words in text"
+effect = "read"
+input_schema = '{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}'
+
+[wasm_tools.limits]
+wall_time_ms = 2000
+memory_bytes = 33554432
+fuel = 500000000
+
+[wasm_tools.grants]
+preopen = [{ host = "./data", guest = "/data", perms = "read" }]
+"#;
+    let (config, _file) = load_from_str(toml);
+    assert_eq!(config.wasm_tools.len(), 1);
+    let tool = &config.wasm_tools[0];
+    assert_eq!(tool.path, "tools/wordcount.wasm");
+    assert_eq!(tool.sha256.as_deref(), Some("9f3a"));
+    assert_eq!(tool.name, "wordcount");
+    assert_eq!(tool.description, "Counts words in text");
+    assert_eq!(tool.effect, Some(Effect::Read));
+    assert!(tool.input_schema.as_deref().unwrap().contains("\"text\""));
+    assert_eq!(tool.limits.wall_time_ms, Some(2000));
+    assert_eq!(tool.limits.memory_bytes, Some(33_554_432));
+    assert_eq!(tool.limits.fuel, Some(500_000_000));
+    assert_eq!(tool.grants.preopen.len(), 1);
+    let preopen = &tool.grants.preopen[0];
+    assert_eq!(preopen.host, "./data");
+    assert_eq!(preopen.guest, "/data");
+    assert_eq!(preopen.perms, PreopenPermsConfig::Read);
+}
+
+/// `effect` has no default for a sandboxed binary. Omitting it is refused
+/// loudly, the error names the offending tool, and the message says why
+/// there is nothing to fall back on.
+#[test]
+fn wasm_tool_missing_effect_is_rejected_naming_the_tool() {
+    let toml = r#"
+model = "m"
+
+[[wasm_tools]]
+path = "t.wasm"
+name = "wordcount"
+description = "d"
+input_schema = '{"type":"object"}'
+"#;
+    let mut file = NamedTempFile::new().expect("temp file");
+    file.write_all(toml.as_bytes()).expect("write toml");
+    let error = AgentConfig::load(file.path()).expect_err("missing effect rejected");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("wasm tool `wordcount`"),
+        "error should name the tool: {message}"
+    );
+    assert!(
+        message.contains("`effect` is required"),
+        "error should name the missing key: {message}"
+    );
+}
+
+/// Exactly one schema source: neither is a loud error naming the tool.
+#[test]
+fn wasm_tool_with_no_schema_source_is_rejected() {
+    let toml = "model = \"m\"\n\n[[wasm_tools]]\npath = \"t.wasm\"\nname = \"w\"\ndescription = \"d\"\neffect = \"read\"\n";
+    let mut file = NamedTempFile::new().expect("temp file");
+    file.write_all(toml.as_bytes()).expect("write toml");
+    let error = AgentConfig::load(file.path()).expect_err("no schema source rejected");
+    let message = format!("{error:#}");
+    assert!(message.contains("wasm tool `w`"), "{message}");
+    assert!(message.contains("neither is set"), "{message}");
+}
+
+/// Exactly one schema source: both is a loud error naming the tool.
+#[test]
+fn wasm_tool_with_both_schema_sources_is_rejected() {
+    let toml = "model = \"m\"\n\n[[wasm_tools]]\npath = \"t.wasm\"\nname = \"w\"\ndescription = \"d\"\neffect = \"read\"\ninput_schema = '{}'\ninput_schema_path = \"s.json\"\n";
+    let mut file = NamedTempFile::new().expect("temp file");
+    file.write_all(toml.as_bytes()).expect("write toml");
+    let error = AgentConfig::load(file.path()).expect_err("both schema sources rejected");
+    let message = format!("{error:#}");
+    assert!(message.contains("wasm tool `w`"), "{message}");
+    assert!(message.contains("not both"), "{message}");
+}
+
+/// An unknown field inside a `[[wasm_tools]]` entry is rejected like any
+/// other typo, not silently dropped.
+#[test]
+fn wasm_tool_unknown_field_is_rejected() {
+    let toml = "model = \"m\"\n\n[[wasm_tools]]\npath = \"t.wasm\"\nname = \"w\"\ndescription = \"d\"\neffect = \"read\"\ninput_schema = '{}'\nnetwork = true\n";
+    let mut file = NamedTempFile::new().expect("temp file");
+    file.write_all(toml.as_bytes()).expect("write toml");
+    let error = AgentConfig::load(file.path()).expect_err("unknown field rejected");
+    assert!(format!("{error:#}").contains("network"));
+}
+
+/// A preopen permission outside the two spellings is a loud parse error.
+#[test]
+fn wasm_tool_unknown_perms_value_is_rejected() {
+    let toml = "model = \"m\"\n\n[[wasm_tools]]\npath = \"t.wasm\"\nname = \"w\"\ndescription = \"d\"\neffect = \"read\"\ninput_schema = '{}'\n\n[wasm_tools.grants]\npreopen = [{ host = \".\", guest = \"/d\", perms = \"write\" }]\n";
+    let mut file = NamedTempFile::new().expect("temp file");
+    file.write_all(toml.as_bytes()).expect("write toml");
+    let error = AgentConfig::load(file.path()).expect_err("unknown perms rejected");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("read_write") || message.contains("unknown variant"),
+        "{message}"
+    );
+}
+
+/// The committed `examples/wasm-tools/agent.toml` loads through the real
+/// config loader with the shape its README documents: one sandboxed tool
+/// with a required effect, per-call limits, and no grants.
+#[test]
+fn wasm_tools_example_parses() {
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/wasm-tools/agent.toml");
+    let config = AgentConfig::load(&path).expect("example agent.toml parses");
+
+    assert_eq!(config.model, "claude-opus-4-8");
+    assert_eq!(
+        config.llm.api_key_env.as_deref(),
+        Some("DEMO_ANTHROPIC_API_KEY")
+    );
+    let pricing = config.pricing.as_ref().expect("pricing present");
+    assert_eq!(pricing.input_per_mtok, 5.0);
+
+    assert_eq!(config.wasm_tools.len(), 1);
+    let tool = &config.wasm_tools[0];
+    assert_eq!(tool.name, "wordcount");
+    // The operator's trust decision the README explains: pure computation,
+    // no grants, so Read is honest and lets an interrupted call retry.
+    assert_eq!(tool.effect, Some(Effect::Read));
+    assert!(tool.grants.preopen.is_empty());
+    assert_eq!(tool.limits.wall_time_ms, Some(2000));
+}
+
+/// Builds the salvor-wasm fixture guest and returns the component path, so
+/// the build test below exercises a real component end to end.
+fn wasm_fixture_component() -> PathBuf {
+    let guest_dir =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../salvor-wasm/tests/fixture-guest");
+    // Same shared build location salvor-wasm's own tests use (the workspace
+    // root's target/, not a nested target/ inside crates/); cargo's directory
+    // locking makes the two suites building concurrently safe, and the second
+    // build is a cache hit.
+    let target_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/wasm-guests");
+    let status = std::process::Command::new(env!("CARGO"))
+        .args(["build", "--target", "wasm32-wasip2", "--release", "--quiet"])
+        .arg("--target-dir")
+        .arg(&target_dir)
+        .current_dir(&guest_dir)
+        .status()
+        .expect("spawning cargo to build the fixture guest");
+    assert!(
+        status.success(),
+        "building the fixture guest failed; if the target is missing, run \
+         `rustup target add wasm32-wasip2`"
+    );
+    target_dir.join("wasm32-wasip2/release/fixture_guest.wasm")
+}
+
+/// `build_agent` registers a sandboxed wasm tool beside an MCP server's
+/// tools in the same agent: the two config-reachable tool boundaries share
+/// one registry, and the wasm tool actually executes through it.
+#[tokio::test]
+async fn wasm_tool_builds_beside_mcp_tools() {
+    let component = wasm_fixture_component();
+    let count_file = NamedTempFile::new().expect("count file");
+    let toml = format!(
+        r#"
+model = "m"
+
+[[mcp_servers]]
+command = "{fixture}"
+args = ["{count_file}"]
+effect_overrides = {{ record = "write" }}
+
+[[wasm_tools]]
+path = "{component}"
+name = "fixture_wasm"
+description = "the salvor-wasm test guest"
+effect = "read"
+input_schema = '{{"type":"object"}}'
+"#,
+        fixture = env!("CARGO_BIN_EXE_salvor-mcp-count-fixture"),
+        count_file = count_file.path().display(),
+        component = component.display(),
+    );
+    let mut file = NamedTempFile::new().expect("temp file");
+    file.write_all(toml.as_bytes()).expect("write toml");
+    let config = AgentConfig::load(file.path()).expect("config parses");
+
+    let (agent, servers) = build_agent(&config, file.path())
+        .await
+        .expect("agent builds with both tool kinds");
+
+    let names: Vec<&str> = agent.tools().tools().map(|tool| tool.name()).collect();
+    assert!(names.contains(&"record"), "mcp tool registered: {names:?}");
+    assert!(
+        names.contains(&"fixture_wasm"),
+        "wasm tool registered: {names:?}"
+    );
+
+    // The wasm tool is not just listed; it dispatches through the shared
+    // registry seam.
+    let tool = agent.tools().get("fixture_wasm").expect("wasm tool");
+    let outcome = tool
+        .call_json(
+            &salvor_tools::ToolCtx::default(),
+            serde_json::json!({ "mode": "wordcount", "text": "a b c" }),
+        )
+        .await
+        .expect("wasm call succeeds");
+    match outcome {
+        salvor_tools::ToolOutcome::Output(value) => {
+            assert_eq!(value, serde_json::json!({ "words": 3, "chars": 5 }));
+        }
+        salvor_tools::ToolOutcome::Suspend(_) => panic!("wasm tools cannot suspend"),
+    }
+
+    for server in servers {
+        server.close().await.expect("server closes");
+    }
+}
+
+/// The committed example does not just parse: its guest builds and its
+/// `wordcount` tool executes through the real `build_agent` path, called with
+/// the JSON shape the example's schema documents. This is the example's
+/// compile-and-run gate; the live walkthrough (real key, real model) stays
+/// out of CI.
+#[tokio::test]
+async fn wasm_tools_example_guest_runs() {
+    // Build the example guest exactly as its README instructs, into the
+    // workspace target/ the committed agent.toml points at.
+    let guest_dir =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/wasm-tools/guest");
+    let target_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/wasm-guests");
+    let status = std::process::Command::new(env!("CARGO"))
+        .args(["build", "--target", "wasm32-wasip2", "--release", "--quiet"])
+        .arg("--target-dir")
+        .arg(&target_dir)
+        .current_dir(&guest_dir)
+        .status()
+        .expect("spawning cargo to build the example guest");
+    assert!(
+        status.success(),
+        "building the example guest failed; if the target is missing, run \
+         `rustup target add wasm32-wasip2`"
+    );
+
+    let agent_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/wasm-tools/agent.toml");
+    let config = AgentConfig::load(&agent_path).expect("example agent.toml parses");
+    let (agent, servers) = build_agent(&config, &agent_path)
+        .await
+        .expect("example agent builds");
+    assert!(servers.is_empty(), "the example declares no MCP servers");
+
+    let tool = agent
+        .tools()
+        .get("wordcount")
+        .expect("wordcount registered");
+    let outcome = tool
+        .call_json(
+            &salvor_tools::ToolCtx::default(),
+            serde_json::json!({ "text": "counting words is honest work" }),
+        )
+        .await
+        .expect("wordcount call succeeds");
+    match outcome {
+        salvor_tools::ToolOutcome::Output(value) => {
+            assert_eq!(value["words"], 5);
+            assert_eq!(value["lines"], 1);
+            assert_eq!(value["longest_word"], "counting");
+        }
+        salvor_tools::ToolOutcome::Suspend(_) => panic!("wasm tools cannot suspend"),
+    }
 }

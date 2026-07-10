@@ -9,7 +9,16 @@ members = [
     "crates/salvor-tools",
     "crates/salvor-tools-macros",
     "crates/salvor-runtime",
+    "crates/salvor-wasm",
     "crates/salvor-cli",
+]
+# Guest crates are excluded, not members: they compile only for the
+# wasm32-wasip2 component target (which the host workspace never builds for),
+# carry their own lockfiles, and are built by salvor-wasm's test harness / the
+# example's build step, never by `cargo build --workspace`.
+exclude = [
+    "crates/salvor-wasm/tests/fixture-guest",
+    "examples/wasm-tools/guest",
 ]
 
 [workspace.package]
@@ -27,6 +36,7 @@ salvor-llm = { path = "crates/salvor-llm" }
 salvor-tools = { path = "crates/salvor-tools" }
 salvor-tools-macros = { path = "crates/salvor-tools-macros" }
 salvor-runtime = { path = "crates/salvor-runtime" }
+salvor-wasm = { path = "crates/salvor-wasm" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -66,3 +76,28 @@ trybuild = "1"
 # is the one crate that touches it. Bump this pin deliberately, re-reading the
 # API each time, never automatically.
 rmcp = { version = "=2.2.0", default-features = false }
+# wasmtime: the sandbox behind salvor-wasm's untrusted-tool execution.
+# Verified against crates.io on 2026-07-10; 46.0.1 was the latest release
+# (published 2026-06-24), with wasmtime-wasi versioned in lockstep. Hard-pinned
+# with `=` for the same reason as rmcp, with more weight behind it: wasmtime is
+# a 200+-crate dependency tree that ships a new MAJOR version roughly monthly,
+# so a floating requirement would take major-version churn unbidden. The pin
+# still needs routine, deliberate bumps: wasmtime has had CVEs, and staying
+# current is part of the sandbox's security story. All of it stays isolated in
+# salvor-wasm, so a bump touches one crate.
+wasmtime = { version = "=46.0.1", default-features = false, features = [
+    # The trimmed feature set for a sync component host: compile (cranelift)
+    # and run (runtime) WebAssembly components, with std for file loading.
+    # Deliberately absent: async (calls are sync under spawn_blocking), gc,
+    # profiling, cache, and the pooling allocator.
+    "runtime",
+    "cranelift",
+    "component-model",
+    "std",
+    "parallel-compilation",
+] }
+wasmtime-wasi = { version = "=46.0.1", default-features = false, features = [
+    # p2 is the WASI 0.2 host implementation the `salvor:tool` world's guests
+    # import; p1 (preview 1) support is deliberately absent.
+    "p2",
+] }

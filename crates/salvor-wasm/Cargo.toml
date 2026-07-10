@@ -1,0 +1,39 @@
+[package]
+name = "salvor-wasm"
+description = "wasmtime-sandboxed WebAssembly component tools for the Salvor agent runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+salvor-core.workspace = true
+# Only the executor-agnostic contract layer (DynTool, ToolCtx, ToolError):
+# default features would pull the whole MCP stack in, which this crate has no
+# use for. The two integrations stay siblings, not a chain. A direct path
+# dependency rather than `workspace = true` because cargo forbids a member
+# from overriding the workspace entry's default-features, and the workspace
+# entry keeps defaults on for the consumers that want MCP.
+salvor-tools = { path = "../salvor-tools", default-features = false }
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+sha2.workspace = true
+tracing.workspace = true
+# spawn_blocking only: wasmtime calls here are sync (per-call epoch deadlines
+# already bound how long the blocking call can live), so the async posture is
+# "one blocking task per call", not wasmtime's own async support.
+tokio = { workspace = true }
+wasmtime.workspace = true
+wasmtime-wasi.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+# The integration tests hash the fixture component for the sha256-pin cases
+# and define one minimal native ToolHandler (serde + schemars input) to prove
+# a wasm tool registers beside native tools.
+sha2.workspace = true
+serde.workspace = true
+schemars.workspace = true
+async-trait.workspace = true
