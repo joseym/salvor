@@ -1,0 +1,15 @@
+[package]
+name = "salvor"
+# Deliberately 0.0.0: this is the name-holding seed of the umbrella crate.
+# The full release republishes this as a re-export facade over the salvor-*
+# crates at 0.1.0. Not workspace-inherited so the family's version moves
+# independently until then.
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Durable execution runtime for AI agents in Rust: event-sourced runs, typed tool effects, crash-exact resume. This is the umbrella crate; the runtime currently ships as the salvor-* crates and the salvor binary."
+readme = "README.md"
+
+[lib]
+path = "src/lib.rs"

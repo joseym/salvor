@@ -11,6 +11,7 @@ members = [
     "crates/salvor-runtime",
     "crates/salvor-wasm",
     "crates/salvor-cli",
+    "crates/salvor",
 ]
 # Guest crates are excluded, not members: they compile only for the
 # wasm32-wasip2 component target (which the host workspace never builds for),
