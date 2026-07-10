@@ -22,8 +22,8 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
 use async_trait::async_trait;
-use salvor_core::{EventEnvelope, RunId};
 use rusqlite::{Connection, ErrorCode, params};
+use salvor_core::{EventEnvelope, RunId};
 use time::OffsetDateTime;
 use uuid::Uuid;
 

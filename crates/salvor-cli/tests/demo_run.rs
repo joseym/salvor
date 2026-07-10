@@ -88,7 +88,8 @@ async fn demo_assets_drive_a_twenty_step_run_to_completion() {
         let store = store.clone();
         let findings = findings.clone();
         tokio::task::spawn_blocking(move || {
-            let mut command = assert_cmd::Command::cargo_bin("salvor").expect("salvor binary builds");
+            let mut command =
+                assert_cmd::Command::cargo_bin("salvor").expect("salvor binary builds");
             command
                 .current_dir(&root)
                 .arg("--store")

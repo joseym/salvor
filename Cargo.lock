@@ -2050,160 +2050,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "salvor-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "assert_cmd",
- "clap",
- "predicates",
- "rmcp",
- "salvor-core",
- "salvor-llm",
- "salvor-runtime",
- "salvor-store",
- "salvor-tools",
- "salvor-wasm",
- "schemars",
- "serde",
- "serde_json",
- "tempfile",
- "time",
- "tokio",
- "toml 0.8.23",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "wiremock",
-]
-
-[[package]]
-name = "salvor-core"
-version = "0.1.0"
-dependencies = [
- "salvor-replay",
-]
-
-[[package]]
-name = "salvor-llm"
-version = "0.1.0"
-dependencies = [
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "wiremock",
-]
-
-[[package]]
-name = "salvor-replay"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror",
- "time",
- "uuid",
-]
-
-[[package]]
-name = "salvor-runtime"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "salvor-core",
- "salvor-llm",
- "salvor-store",
- "salvor-tools",
- "schemars",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
- "time",
- "tokio",
- "tracing",
- "uuid",
- "wiremock",
-]
-
-[[package]]
-name = "salvor-store"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "salvor-core",
- "salvor-store-conformance",
- "rusqlite",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "time",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "salvor-store-conformance"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "salvor-core",
- "salvor-store",
- "serde_json",
- "time",
- "tokio",
-]
-
-[[package]]
-name = "salvor-tools"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum",
- "rmcp",
- "salvor-core",
- "salvor-tools-macros",
- "schemars",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
-]
-
-[[package]]
-name = "salvor-tools-macros"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "salvor-tools",
- "syn",
- "trybuild",
-]
-
-[[package]]
-name = "salvor-wasm"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "salvor-core",
- "salvor-tools",
- "schemars",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
- "wasmtime",
- "wasmtime-wasi",
-]
-
-[[package]]
 name = "rusqlite"
 version = "0.32.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2298,6 +2144,160 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
+name = "salvor-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "clap",
+ "predicates",
+ "rmcp",
+ "salvor-core",
+ "salvor-llm",
+ "salvor-runtime",
+ "salvor-store",
+ "salvor-tools",
+ "salvor-wasm",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "time",
+ "tokio",
+ "toml 0.8.23",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "wiremock",
+]
+
+[[package]]
+name = "salvor-core"
+version = "0.1.0"
+dependencies = [
+ "salvor-replay",
+]
+
+[[package]]
+name = "salvor-llm"
+version = "0.1.0"
+dependencies = [
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
+name = "salvor-replay"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "time",
+ "uuid",
+]
+
+[[package]]
+name = "salvor-runtime"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "salvor-core",
+ "salvor-llm",
+ "salvor-store",
+ "salvor-tools",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "time",
+ "tokio",
+ "tracing",
+ "uuid",
+ "wiremock",
+]
+
+[[package]]
+name = "salvor-store"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "rusqlite",
+ "salvor-core",
+ "salvor-store-conformance",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "time",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "salvor-store-conformance"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "salvor-core",
+ "salvor-store",
+ "serde_json",
+ "time",
+ "tokio",
+]
+
+[[package]]
+name = "salvor-tools"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "rmcp",
+ "salvor-core",
+ "salvor-tools-macros",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "salvor-tools-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "salvor-tools",
+ "syn",
+ "trybuild",
+]
+
+[[package]]
+name = "salvor-wasm"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "salvor-core",
+ "salvor-tools",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "wasmtime",
+ "wasmtime-wasi",
+]
 
 [[package]]
 name = "schemars"
