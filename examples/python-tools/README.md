@@ -115,6 +115,30 @@ re-run. That refusal to guess is exactly what pinning the tool to `write` buys,
 and why an Idempotent classification (which would retry the append and duplicate
 the line) would be wrong here.
 
+Reconciliation requires a human first, then the run continues. Check what
+actually happened before telling Salvor anything: open
+`examples/python-tools/ledger.jsonl` and compare its last line against the
+amount and category `salvor history <run-id>` shows for the pending
+`add_expense` call.
+
+- If the line is there, the append reached disk before the kill landed. The
+  write happened; record what it wrote:
+
+  ```sh
+  ./target/debug/salvor --store /tmp/salvor-python.db \
+      resolve <run-id> --output '{"content":[{"type":"text","text":"Recorded $8.75 in Food."}]}'
+  ```
+
+- If the line is missing, the append never reached the ledger. Append it by
+  hand, with the same amount and category the model was recording, then
+  record that same completion with the same `resolve` call.
+
+Either way `resolve` appends exactly one event, the missing
+`ToolCallCompleted`, and executes nothing itself: it takes a human's word for
+what happened, not a guess. The run is no longer stuck. Continue it with
+`salvor resume <run-id> --agent examples/python-tools/agent.toml`, exactly as
+`resolve` tells you to.
+
 ## The effect override, and why it is the operator's call
 
 MCP tool annotations are hints, and the protocol is explicit that a server may

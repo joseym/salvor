@@ -14,6 +14,12 @@ TypeScript, and untrusted code running as a sandboxed WebAssembly tool.
 | [`todo-agent/`](todo-agent/) | The batteries-included library tier: `Agent::builder()` plus a `Runtime`, with typed native tools and the built-in loop driving them. | `cargo run -p salvor-runtime --example todo_agent` |
 | [`approval-loop/`](approval-loop/) | The library-first tier: a hand-written async function over the public `RunCtx`, with no built-in loop, and with the same durability, replay, and human-in-the-loop suspension. | `cargo run -p salvor-runtime --example approval_loop` |
 
+Every `[[mcp_servers]]` entry above spawns a local child process over stdio;
+an entry can instead reach a server hosted elsewhere with `url` (plus
+`bearer_token_env` for auth), shown commented-out in
+[`web-research/agent.toml`](web-research/agent.toml) and explained in
+[`web-research/README.md`](web-research/README.md#remote-mcp-servers).
+
 `todo-agent` and `approval-loop` are ordinary Rust files (`main.rs`) wired
 into `crates/salvor-runtime/Cargo.toml` as out-of-package `[[example]]`
 targets, so `cargo build`/`cargo test --workspace` still compile-gate them

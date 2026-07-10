@@ -66,6 +66,16 @@ args = ["mcp-server-fetch"]
 # was recorded simply re-runs, instead of parking the whole run for a human to
 # reconcile a "write" that never wrote anything. See README.md.
 effect_overrides = { fetch = "read" }
+# Alternative: a hosted fetch server reached over streamable HTTP instead of a
+# local child process. `command`/`args` and `url`/`bearer_token_env` are
+# mutually exclusive per server, so this replaces the two lines above, not
+# supplements them. `bearer_token_env` names an env var holding the bearer
+# token (never the token itself, mirroring `api_key_env`); the runtime sends
+# it as `Authorization: Bearer <token>` on every request to the server.
+# Everything else about the server, including `effect_overrides` and the
+# kill/resume story, is unchanged.
+# url = "https://mcp.example.com/fetch"
+# bearer_token_env = "FETCH_MCP_TOKEN"
 
 [[mcp_servers]]
 # The official filesystem server, run through npx. The trailing argument is

@@ -117,6 +117,28 @@ Here is what that buys you, in real terms rather than demo terms:
   whose outcome is genuinely unknown, and it is exactly why the effect class
   of `write_file` matters (below).
 
+Resolving that reconciliation is a human verifying reality first, not Salvor
+guessing. Check whether `examples/web-research/out/raft-vs-paxos.md` exists
+and holds the report `salvor history <run-id>` shows the agent was mid-write
+on:
+
+- If it does, the write reached disk before the kill landed. The write
+  happened; record what it wrote:
+
+  ```sh
+  ./target/debug/salvor --store /tmp/salvor-web.db \
+      resolve <run-id> --output '{"content":[{"type":"text","text":"Successfully wrote to examples/web-research/out/raft-vs-paxos.md"}],"structuredContent":{"content":"Successfully wrote to examples/web-research/out/raft-vs-paxos.md"}}'
+  ```
+
+- If the file is missing or incomplete, the write never landed. Write it by
+  hand (the report `salvor history` shows the model composing is your source),
+  then record that same completion with the same `resolve` call.
+
+Either way `resolve` appends exactly one event, the missing
+`ToolCallCompleted`, and executes nothing itself. The run is no longer stuck:
+continue it with `salvor resume <run-id> --agent examples/web-research/agent.toml`,
+exactly as `resolve` tells you to.
+
 `salvor history <run-id>` after the resume shows one continuous log: everything
 up to the kill is byte-identical to what was recorded before it.
 `salvor replay --dry-run <run-id>` re-derives the run's state from the log
@@ -150,6 +172,28 @@ confirmed by listing the servers' real tools:
 The shape of the rule: annotations come from a server you did not write and do
 not fully trust; the override is where you record what you actually know, and
 it takes precedence over the wire hint.
+
+## Remote MCP servers
+
+Both servers here run as local child processes over stdio, but that is a
+choice, not a requirement. An `[[mcp_servers]]` entry can instead reach a
+server hosted elsewhere over streamable HTTP: swap `command`/`args` for `url`,
+and, if the server requires auth, `bearer_token_env` naming the environment
+variable that holds the bearer token, in the same style as `api_key_env`: the
+variable name goes in the agent file, never the token itself. `agent.toml`
+shows the commented-out alternative on the fetch server:
+
+```toml
+url = "https://mcp.example.com/fetch"
+bearer_token_env = "FETCH_MCP_TOKEN"
+```
+
+`command`/`args`/`env` and `url`/`bearer_token_env` are mutually exclusive per
+server; setting both, or neither, is a parse error. Nothing else about a
+server changes with the transport: `effect_overrides` is set the same way, the
+operator's trust decision about what a tool really does is the same decision,
+and kill/resume/resolve behave identically, because none of it depends on how
+the server was reached, only on what the event log recorded.
 
 ## Cost estimate for one run
 
