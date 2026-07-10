@@ -104,6 +104,32 @@ async fn cost_budget_without_pricing_is_a_clear_error() {
     );
 }
 
+/// `base_url_env` resolution: the named variable overrides `base_url` when
+/// set and non-empty, and falls back to `base_url` otherwise. One test body
+/// covers all cases so the process-global environment mutation cannot race
+/// a parallel test over the same variable.
+#[test]
+fn base_url_env_overrides_when_set_and_falls_back_when_not() {
+    let toml = "model = \"m\"\n\n[llm]\nbase_url = \"http://from-file:1\"\nbase_url_env = \"SALVOR_TEST_BASE_URL_OVERRIDE\"\n";
+    let (config, _file) = load_from_str(toml);
+
+    // Unset: the file's base_url wins.
+    // SAFETY: this test is the only reader and writer of this uniquely
+    // named variable, and all uses are within this single test body.
+    unsafe { std::env::remove_var("SALVOR_TEST_BASE_URL_OVERRIDE") };
+    assert_eq!(config.client_config().base_url, "http://from-file:1");
+
+    // Empty: treated as unset.
+    unsafe { std::env::set_var("SALVOR_TEST_BASE_URL_OVERRIDE", "") };
+    assert_eq!(config.client_config().base_url, "http://from-file:1");
+
+    // Set and non-empty: the variable wins.
+    unsafe { std::env::set_var("SALVOR_TEST_BASE_URL_OVERRIDE", "http://from-env:2") };
+    assert_eq!(config.client_config().base_url, "http://from-env:2");
+
+    unsafe { std::env::remove_var("SALVOR_TEST_BASE_URL_OVERRIDE") };
+}
+
 /// An unknown field is rejected, so a typo cannot silently drop a setting.
 #[test]
 fn unknown_field_is_rejected() {

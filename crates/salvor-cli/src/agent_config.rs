@@ -20,9 +20,13 @@
 //! # Optional. How to reach the model. Defaults target the public Anthropic
 //! # endpoint. The file names the ENV VAR the key is read from; it never holds
 //! # the secret itself. The key is optional so local endpoints (LM Studio,
-//! # Ollama) work with no key at all.
+//! # Ollama) work with no key at all. `base_url_env` names an env var that,
+//! # when set and non-empty, overrides `base_url`: one agent file can then
+//! # target the real endpoint by default and a mock or local endpoint when
+//! # the variable is exported (the demo/ agent uses this).
 //! [llm]
 //! base_url = "https://api.anthropic.com"
+//! base_url_env = "SALVOR_DEMO_BASE_URL"
 //! api_key_env = "ANTHROPIC_API_KEY"
 //! max_retries = 2
 //! timeout_seconds = 60
@@ -109,6 +113,11 @@ pub struct LlmConfig {
     /// The base URL. Defaults to the public Anthropic endpoint via
     /// [`Config::new`].
     pub base_url: Option<String>,
+    /// The name of an environment variable that, when set and non-empty,
+    /// overrides `base_url`. Lets one agent file serve two modes: the real
+    /// endpoint when the variable is unset, a mock or local endpoint when it
+    /// is exported. Never the URL itself.
+    pub base_url_env: Option<String>,
     /// The name of the environment variable the API key is read from
     /// (default `ANTHROPIC_API_KEY`). Never the key itself.
     pub api_key_env: Option<String>,
@@ -201,12 +210,23 @@ impl AgentConfig {
         }
     }
 
-    /// The client [`Config`] from the `[llm]` section. Reads the API key from
-    /// the named environment variable, leaving it unset (fine for local
-    /// endpoints) when the variable is unset or empty.
-    fn client_config(&self) -> Config {
+    /// The client [`Config`] the `[llm]` section resolves to. Reads the API
+    /// key from the named environment variable, leaving it unset (fine for
+    /// local endpoints) when the variable is unset or empty. When
+    /// `base_url_env` names a set, non-empty variable, its value overrides
+    /// `base_url`. Public so the resolution itself is testable.
+    #[must_use]
+    pub fn client_config(&self) -> Config {
         let mut config = Config::new();
-        if let Some(base_url) = &self.llm.base_url {
+        let override_url = self
+            .llm
+            .base_url_env
+            .as_deref()
+            .and_then(|name| std::env::var(name).ok())
+            .filter(|url| !url.is_empty());
+        if let Some(url) = override_url {
+            config = config.with_base_url(url);
+        } else if let Some(base_url) = &self.llm.base_url {
             config = config.with_base_url(base_url);
         }
         let key_env = self

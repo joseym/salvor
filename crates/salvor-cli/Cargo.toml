@@ -7,16 +7,19 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-# `fixture` builds the in-repo counting MCP server the CLI integration tests
-# spawn (`src/bin/mcp_count_fixture.rs`), pulling in the server half of the
-# rmcp SDK and schemars only for that binary. It is on by default so a plain
-# `cargo test --workspace` builds the fixture and Cargo sets
-# CARGO_BIN_EXE_salvor-mcp-count-fixture for the tests, exactly the pattern
-# salvor-tools uses for its own fixture. `--no-default-features` drops it, and
-# with it the server-side rmcp surface, leaving only the client MCP support
-# the product uses (which arrives transitively through salvor-tools). Adding
-# these deps costs the workspace nothing: salvor-tools already compiles rmcp
-# with the server features on, so feature unification means no new crate.
+# `fixture` builds the two in-repo MCP servers: the counting server the CLI
+# integration tests spawn (`src/bin/mcp_count_fixture.rs`) and the research
+# server behind the demo/ reference agent (`src/bin/demo_research.rs`). Both
+# pull in the server half of the rmcp SDK and schemars only for those
+# binaries. The feature is on by default so a plain `cargo test --workspace`
+# builds them and Cargo sets CARGO_BIN_EXE_salvor-mcp-count-fixture and
+# CARGO_BIN_EXE_salvor-demo-research for the tests, exactly the pattern
+# salvor-tools uses for its own fixture. `--no-default-features` drops both,
+# and with them the server-side rmcp surface, leaving only the client MCP
+# support the product uses (which arrives transitively through salvor-tools).
+# Adding these deps costs the workspace nothing: salvor-tools already compiles
+# rmcp with the server features on, so feature unification means no new
+# crate.
 default = ["fixture"]
 fixture = ["dep:rmcp", "dep:schemars"]
 
@@ -29,6 +32,14 @@ path = "src/main.rs"
 [[bin]]
 name = "salvor-mcp-count-fixture"
 path = "src/bin/mcp_count_fixture.rs"
+required-features = ["fixture"]
+
+# The research MCP server behind the demo/ reference agent.
+# Demo-support, gated exactly like the counting fixture: a default-features
+# `cargo build` produces it, `--no-default-features` drops it.
+[[bin]]
+name = "salvor-demo-research"
+path = "src/bin/demo_research.rs"
 required-features = ["fixture"]
 
 [dependencies]

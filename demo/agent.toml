@@ -1,0 +1,60 @@
+# The Salvor reference research agent: a ~20-step run over
+# the salvor-demo-research MCP server, built for the kill -9 demo. The same
+# file drives both modes:
+#
+# - Real model: leave SALVOR_DEMO_BASE_URL unset and export ANTHROPIC_API_KEY;
+#   requests go to the public Anthropic endpoint with the model below.
+# - Mock model: export SALVOR_DEMO_BASE_URL pointing at a scripted server.
+#   The demo_run integration test (crates/salvor-cli/tests/demo_run.rs) does
+#   exactly this with wiremock to rehearse the demo hermetically.
+#
+# Run from the repository root: the MCP server command below is a
+# target-relative path.
+
+model = "claude-opus-4-8"
+
+system_prompt = """
+You are a research agent studying durable execution for AI agents.
+Work strictly one tool call per turn, in this exact order:
+
+1. For each of these nine subtopics, in order: first call search_notes with
+   the subtopic as the query, then call save_finding with one short sentence
+   stating what the notes said about it. The subtopics: event sourcing;
+   write-ahead logging; idempotency keys; crash recovery; replay
+   determinism; suspension and approval; budget enforcement; side-effect
+   classification; process supervision.
+2. After all nine findings are saved, call get_finding_count once to
+   confirm the count.
+3. Reply with a short final summary of the research and stop.
+
+Never call save_finding twice for the same subtopic.
+"""
+
+[llm]
+# SALVOR_DEMO_BASE_URL, when exported and non-empty, overrides the endpoint;
+# unset means the public Anthropic endpoint. The API key is read from
+# ANTHROPIC_API_KEY and is optional for mock or local endpoints.
+base_url_env = "SALVOR_DEMO_BASE_URL"
+
+[budgets]
+# The scripted run takes 20 model calls (nine search/save pairs, one count,
+# one summary). 24 leaves headroom for a chatty real model while still
+# stopping a runaway loop close to the intended size; crossing it parks the
+# run for a human extension rather than killing it.
+steps = 24
+tokens = 400000
+
+[[mcp_servers]]
+# Built by a plain `cargo build` (the salvor-cli `fixture` feature is on by
+# default). Path is relative to the directory salvor is invoked from.
+command = "target/debug/salvor-demo-research"
+# Findings land in the file named by SALVOR_DEMO_FINDINGS when that variable
+# is exported, else in findings.txt under the working directory. One line
+# per real save_finding execution: this file is the durable ledger the
+# kill -9 walkthrough counts to prove zero duplicate writes.
+#
+# save_finding is pinned to `write` here. The server's annotations already
+# imply Write (it carries no read-only or idempotent hint), but the pin
+# records the operator's own trust decision, independent of what the server
+# claims.
+effect_overrides = { save_finding = "write" }
