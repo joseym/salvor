@@ -25,7 +25,17 @@ can point at your own question.
 ## Prerequisites
 
 1. **An Anthropic API key.** This run bills your account. Export it as
-   `ANTHROPIC_API_KEY`; it is read at run time and never written to any file.
+   `DEMO_ANTHROPIC_API_KEY`; it is read at run time and never written to any
+   file. The variable name is the agent file's choice via `api_key_env` in
+   `agent.toml`; this example names a dedicated demo variable so a walkthrough
+   run cannot accidentally spend your primary `ANTHROPIC_API_KEY`.
+
+   A subscription OAuth token works too, in place of a standard API key: set
+   `api_key_kind = "oauth"` in the `[llm]` section of `agent.toml` and export
+   the token as `DEMO_ANTHROPIC_API_KEY`. The runtime then authenticates with a
+   bearer header and the OAuth beta opt-in instead of `x-api-key`. Mint one with
+   `ant auth print-credentials --access-token` (an `sk-ant-oat...` value); these
+   tokens expire, so refresh it when a run starts failing to authenticate.
 2. **Node**, for `npx`, which runs the filesystem server. Any current Node
    works; `npx` ships with it.
 3. **A way to run the Python fetch server.** Two options:
@@ -50,7 +60,7 @@ From the repository root:
 
 ```sh
 cargo build
-export ANTHROPIC_API_KEY=sk-ant-...
+export DEMO_ANTHROPIC_API_KEY=sk-ant-...
 mkdir -p examples/web-research/out    # the filesystem server needs this to exist
 
 ./target/debug/salvor --store /tmp/salvor-web.db \

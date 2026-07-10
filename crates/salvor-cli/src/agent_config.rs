@@ -28,6 +28,11 @@
 //! base_url = "https://api.anthropic.com"
 //! base_url_env = "SALVOR_DEMO_BASE_URL"
 //! api_key_env = "ANTHROPIC_API_KEY"
+//! # How the key authenticates. "api_key" (default) sends it as `x-api-key`,
+//! # for standard API keys. "oauth" sends it as an `Authorization: Bearer`
+//! # credential with the oauth beta header, for subscription OAuth tokens
+//! # (`sk-ant-oat...`). Any other value is a loud parse error.
+//! api_key_kind = "api_key"
 //! max_retries = 2
 //! timeout_seconds = 60
 //!
@@ -67,7 +72,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use salvor_core::Effect;
-use salvor_llm::Config;
+use salvor_llm::{AuthKind, Config};
 use salvor_runtime::{Agent, AgentBuildError, Budgets, Pricing};
 use salvor_tools::mcp::{EffectOverrides, McpServer};
 use serde::Deserialize;
@@ -105,6 +110,31 @@ pub struct AgentConfig {
     pub mcp_servers: Vec<McpServerConfig>,
 }
 
+/// How the API key authenticates, as named in the `[llm]` section. Mirrors
+/// [`salvor_llm::AuthKind`] but stays a config-layer type so the wire spelling
+/// (`"api_key"` / `"oauth"`) lives with the schema. An unknown value is a loud
+/// parse error, not a silent fallback.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiKeyKind {
+    /// Send the key as `x-api-key`. The default, for standard API keys.
+    #[default]
+    ApiKey,
+    /// Send the key as an `Authorization: Bearer` credential with the oauth
+    /// beta header, for subscription OAuth tokens.
+    Oauth,
+}
+
+impl ApiKeyKind {
+    /// The [`AuthKind`] this maps to in the client config.
+    fn auth_kind(self) -> AuthKind {
+        match self {
+            ApiKeyKind::ApiKey => AuthKind::ApiKey,
+            ApiKeyKind::Oauth => AuthKind::Bearer,
+        }
+    }
+}
+
 /// Model transport settings. All optional; the defaults target the public
 /// Anthropic endpoint.
 #[derive(Debug, Default, Deserialize)]
@@ -121,6 +151,11 @@ pub struct LlmConfig {
     /// The name of the environment variable the API key is read from
     /// (default `ANTHROPIC_API_KEY`). Never the key itself.
     pub api_key_env: Option<String>,
+    /// How the key authenticates: `"api_key"` (default) for a standard API key
+    /// on `x-api-key`, or `"oauth"` for a subscription OAuth token on the
+    /// bearer scheme. An unknown value is rejected.
+    #[serde(default)]
+    pub api_key_kind: ApiKeyKind,
     /// Retry attempts for a retryable model-call failure.
     pub max_retries: Option<u32>,
     /// Per-request timeout, in seconds.
@@ -239,6 +274,7 @@ impl AgentConfig {
         {
             config = config.with_api_key(key);
         }
+        config = config.with_auth_kind(self.llm.api_key_kind.auth_kind());
         if let Some(max_retries) = self.llm.max_retries {
             config = config.with_max_retries(max_retries);
         }

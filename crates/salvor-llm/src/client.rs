@@ -9,12 +9,16 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
-use crate::config::Config;
+use crate::config::{AuthKind, Config};
 use crate::error::{ApiError, Error};
 use crate::types::{MessageRequest, MessageResponse};
 
 /// The `anthropic-version` header value this client speaks.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+
+/// The `anthropic-beta` opt-in that lets a subscription OAuth token
+/// authenticate against `/v1/messages`. Sent only in [`AuthKind::Bearer`] mode.
+const OAUTH_BETA: &str = "oauth-2025-04-20";
 
 /// The base backoff delay, doubled on each successive retry.
 const BACKOFF_BASE_MS: u64 = 500;
@@ -117,10 +121,22 @@ impl Client {
             .post(&self.url)
             .header("anthropic-version", ANTHROPIC_VERSION)
             .json(request);
-        // Omit `x-api-key` entirely when no key is configured; local endpoints
-        // expect no key and reject an empty one.
+        // Omit every auth header when no key is configured; local endpoints
+        // expect no key and reject an empty one. When a key is present, the
+        // scheme decides which headers carry it: a standard API key rides
+        // `x-api-key`, while an OAuth token needs `Authorization: Bearer` plus
+        // the oauth beta opt-in and must not send `x-api-key` at all.
         if let Some(api_key) = &self.config.api_key {
-            builder = builder.header("x-api-key", api_key);
+            match self.config.auth_kind {
+                AuthKind::ApiKey => {
+                    builder = builder.header("x-api-key", api_key);
+                }
+                AuthKind::Bearer => {
+                    builder = builder
+                        .header("authorization", format!("Bearer {api_key}"))
+                        .header("anthropic-beta", OAUTH_BETA);
+                }
+            }
         }
 
         let response = builder.send().await.map_err(Error::Transport)?;

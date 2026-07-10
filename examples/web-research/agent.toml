@@ -34,7 +34,7 @@ Work in this order:
 
 [llm]
 # The key is read from this variable at run time and never stored in any file.
-api_key_env = "ANTHROPIC_API_KEY"
+api_key_env = "DEMO_ANTHROPIC_API_KEY"
 
 [budgets]
 # A focused run is roughly ten to twenty model calls: a few fetches, a few

@@ -11,6 +11,25 @@ use std::time::Duration;
 /// The public Anthropic Messages API base URL.
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 
+/// How the configured key authenticates a request.
+///
+/// The two Anthropic auth schemes differ in more than a header name. A standard
+/// API key (`sk-ant-api...`) goes in `x-api-key`. A subscription OAuth token
+/// (`sk-ant-oat...`, as minted by `ant auth`) is rejected on `x-api-key` and
+/// must instead be sent as an `Authorization: Bearer` credential together with
+/// the `anthropic-beta: oauth-2025-04-20` header. This enum selects between the
+/// two; the client reads it when deciding which auth headers to attach.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AuthKind {
+    /// Send the key as the `x-api-key` header. The default, for standard API
+    /// keys.
+    #[default]
+    ApiKey,
+    /// Send the key as `Authorization: Bearer <key>` and add the
+    /// `anthropic-beta: oauth-2025-04-20` header, for subscription OAuth tokens.
+    Bearer,
+}
+
 /// Settings shared across every request a [`crate::Client`] makes.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -18,9 +37,14 @@ pub struct Config {
     /// Point this at a local server (LM Studio, Ollama) to talk to a local
     /// model over the same wire protocol.
     pub base_url: String,
-    /// The API key sent as the `x-api-key` header. When `None`, the header is
-    /// omitted entirely, which is what local endpoints expect.
+    /// The API key sent to authenticate the request. When `None`, no auth
+    /// header is sent at all, which is what local endpoints expect. How a
+    /// present key is sent is governed by [`Config::auth_kind`].
     pub api_key: Option<String>,
+    /// Which scheme authenticates the key. Defaults to [`AuthKind::ApiKey`]
+    /// (the `x-api-key` header); [`AuthKind::Bearer`] switches to the OAuth
+    /// bearer scheme. Ignored when `api_key` is `None`.
+    pub auth_kind: AuthKind,
     /// How many times to retry a retryable failure before giving up. `0`
     /// disables retrying.
     pub max_retries: u32,
@@ -33,6 +57,7 @@ impl Default for Config {
         Self {
             base_url: DEFAULT_BASE_URL.to_string(),
             api_key: None,
+            auth_kind: AuthKind::ApiKey,
             max_retries: 2,
             timeout: Duration::from_secs(60),
         }
@@ -66,6 +91,15 @@ impl Config {
     #[must_use]
     pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
         self.api_key = Some(api_key.into());
+        self
+    }
+
+    /// Set the authentication scheme, consuming and returning `self`. Leave it
+    /// at the default [`AuthKind::ApiKey`] for standard API keys; pass
+    /// [`AuthKind::Bearer`] for subscription OAuth tokens.
+    #[must_use]
+    pub fn with_auth_kind(mut self, auth_kind: AuthKind) -> Self {
+        self.auth_kind = auth_kind;
         self
     }
 

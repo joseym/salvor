@@ -24,6 +24,17 @@
 //! [`ContentBlock::ToolUse`] blocks and answers them with
 //! [`Message::tool_result`].
 //!
+//! # Authentication
+//!
+//! Two schemes are supported, selected by [`Config::auth_kind`]. The default
+//! [`AuthKind::ApiKey`] sends a standard API key (`sk-ant-api...`) as the
+//! `x-api-key` header. [`AuthKind::Bearer`] sends the key as `Authorization:
+//! Bearer <key>` and adds `anthropic-beta: oauth-2025-04-20`, which is what an
+//! Anthropic subscription OAuth token (`sk-ant-oat...`, minted by `ant auth`)
+//! requires: such a token is rejected on `x-api-key` and accepted only under
+//! the bearer scheme. In bearer mode `x-api-key` is never sent. When
+//! [`Config::api_key`] is `None`, no auth header is sent under either scheme.
+//!
 //! # Local endpoints
 //!
 //! LM Studio (0.4.1+) and Ollama (0.14+) speak the same Messages wire protocol.
@@ -69,7 +80,7 @@ mod error;
 mod types;
 
 pub use client::Client;
-pub use config::Config;
+pub use config::{AuthKind, Config};
 pub use error::{ApiError, Error};
 pub use types::{
     Content, ContentBlock, Message, MessageRequest, MessageResponse, Role, StopReason, Tool,

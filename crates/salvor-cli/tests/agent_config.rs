@@ -8,8 +8,9 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use salvor_cli::agent_config::{AgentConfig, build_agent};
+use salvor_cli::agent_config::{AgentConfig, ApiKeyKind, build_agent};
 use salvor_core::Effect;
+use salvor_llm::AuthKind;
 use tempfile::NamedTempFile;
 
 /// Writes `toml` to a temp file and loads it, returning both so the caller can
@@ -89,7 +90,12 @@ fn web_research_example_parses() {
     let config = AgentConfig::load(&path).expect("example agent.toml parses");
 
     assert_eq!(config.model, "claude-opus-4-8");
-    assert_eq!(config.llm.api_key_env.as_deref(), Some("ANTHROPIC_API_KEY"));
+    // The example names a dedicated demo variable so a walkthrough run cannot
+    // accidentally spend the primary ANTHROPIC_API_KEY.
+    assert_eq!(
+        config.llm.api_key_env.as_deref(),
+        Some("DEMO_ANTHROPIC_API_KEY")
+    );
 
     // Budgets and the pricing that a cost budget requires are all present.
     assert_eq!(config.budgets.steps, Some(30));
@@ -190,6 +196,41 @@ fn unknown_field_is_rejected() {
     assert!(
         message.contains("step") || message.contains("unknown"),
         "error should point at the unknown field: {message}"
+    );
+}
+
+/// `api_key_kind` parses both accepted spellings, defaults to the api-key
+/// scheme when absent, and resolves into the matching client `AuthKind`.
+#[test]
+fn api_key_kind_parses_both_values_and_default() {
+    // Absent: defaults to the api-key scheme.
+    let (config, _f) = load_from_str("model = \"m\"\n");
+    assert_eq!(config.llm.api_key_kind, ApiKeyKind::ApiKey);
+    assert_eq!(config.client_config().auth_kind, AuthKind::ApiKey);
+
+    // Explicit "api_key".
+    let (config, _f) = load_from_str("model = \"m\"\n\n[llm]\napi_key_kind = \"api_key\"\n");
+    assert_eq!(config.llm.api_key_kind, ApiKeyKind::ApiKey);
+    assert_eq!(config.client_config().auth_kind, AuthKind::ApiKey);
+
+    // "oauth" maps to the bearer scheme.
+    let (config, _f) = load_from_str("model = \"m\"\n\n[llm]\napi_key_kind = \"oauth\"\n");
+    assert_eq!(config.llm.api_key_kind, ApiKeyKind::Oauth);
+    assert_eq!(config.client_config().auth_kind, AuthKind::Bearer);
+}
+
+/// An unrecognized `api_key_kind` is a loud parse error, never a silent
+/// fallback to the default scheme.
+#[test]
+fn unknown_api_key_kind_is_rejected() {
+    let mut file = NamedTempFile::new().expect("temp file");
+    file.write_all(b"model = \"m\"\n\n[llm]\napi_key_kind = \"bearer\"\n")
+        .expect("write");
+    let error = AgentConfig::load(file.path()).expect_err("unknown api_key_kind rejected");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("api_key_kind") || message.contains("bearer"),
+        "error should point at the bad value: {message}"
     );
 }
 

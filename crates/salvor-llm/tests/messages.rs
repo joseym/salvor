@@ -7,7 +7,9 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use salvor_llm::{Client, Config, ContentBlock, Error, Message, MessageRequest, StopReason, Tool};
+use salvor_llm::{
+    AuthKind, Client, Config, ContentBlock, Error, Message, MessageRequest, StopReason, Tool,
+};
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
@@ -24,11 +26,19 @@ fn text_response() -> Value {
     })
 }
 
-/// Build a client pointed at the mock server, with an optional API key.
+/// Build a client pointed at the mock server, with an optional API key sent
+/// under the default `x-api-key` scheme.
 fn client_for(server: &MockServer, api_key: Option<&str>) -> Client {
+    client_for_auth(server, api_key, AuthKind::ApiKey)
+}
+
+/// Build a client pointed at the mock server, with an optional API key sent
+/// under an explicit authentication scheme.
+fn client_for_auth(server: &MockServer, api_key: Option<&str>, auth_kind: AuthKind) -> Client {
     let mut config = Config::new()
         .with_base_url(server.uri())
-        .with_max_retries(2);
+        .with_max_retries(2)
+        .with_auth_kind(auth_kind);
     if let Some(key) = api_key {
         config = config.with_api_key(key);
     }
@@ -62,6 +72,16 @@ async fn sends_correct_path_headers_and_body() {
     assert_eq!(recorded.method.as_str(), "POST");
     assert_eq!(recorded.url.path(), "/v1/messages");
     assert_eq!(header(recorded, "x-api-key").as_deref(), Some("secret-key"));
+    // The default scheme is x-api-key only: the bearer-mode headers must not
+    // leak into it.
+    assert!(
+        header(recorded, "authorization").is_none(),
+        "authorization must be absent under the api-key scheme"
+    );
+    assert!(
+        header(recorded, "anthropic-beta").is_none(),
+        "the oauth beta header must be absent under the api-key scheme"
+    );
     assert_eq!(
         header(recorded, "anthropic-version").as_deref(),
         Some("2023-06-01")
@@ -100,6 +120,73 @@ async fn omits_api_key_header_when_unconfigured() {
     let requests = server.received_requests().await.expect("recorded requests");
     assert!(
         header(&requests[0], "x-api-key").is_none(),
+        "x-api-key must be absent when no key is configured"
+    );
+}
+
+// 1 (continued). Bearer mode sends the OAuth headers and no x-api-key.
+#[tokio::test]
+async fn bearer_mode_sends_oauth_headers_and_no_api_key() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(text_response()))
+        .mount(&server)
+        .await;
+
+    let client = client_for_auth(&server, Some("sk-ant-oat-token"), AuthKind::Bearer);
+    let request = MessageRequest::new("claude-opus-4-8", 1024).push_message(Message::user("Hello"));
+    client
+        .send_message(&request)
+        .await
+        .expect("request succeeds");
+
+    let requests = server.received_requests().await.expect("recorded requests");
+    let recorded = &requests[0];
+    assert_eq!(
+        header(recorded, "authorization").as_deref(),
+        Some("Bearer sk-ant-oat-token")
+    );
+    assert_eq!(
+        header(recorded, "anthropic-beta").as_deref(),
+        Some("oauth-2025-04-20")
+    );
+    assert!(
+        header(recorded, "x-api-key").is_none(),
+        "x-api-key must be absent under the bearer scheme"
+    );
+}
+
+// 1 (continued). Bearer mode with no key configured sends no auth headers at
+// all, exactly like the api-key scheme.
+#[tokio::test]
+async fn bearer_mode_omits_all_auth_headers_when_unconfigured() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(text_response()))
+        .mount(&server)
+        .await;
+
+    let client = client_for_auth(&server, None, AuthKind::Bearer);
+    let request = MessageRequest::new("claude-opus-4-8", 1024).push_message(Message::user("Hello"));
+    client
+        .send_message(&request)
+        .await
+        .expect("request succeeds");
+
+    let requests = server.received_requests().await.expect("recorded requests");
+    let recorded = &requests[0];
+    assert!(
+        header(recorded, "authorization").is_none(),
+        "authorization must be absent when no key is configured"
+    );
+    assert!(
+        header(recorded, "anthropic-beta").is_none(),
+        "the oauth beta header must be absent when no key is configured"
+    );
+    assert!(
+        header(recorded, "x-api-key").is_none(),
         "x-api-key must be absent when no key is configured"
     );
 }
