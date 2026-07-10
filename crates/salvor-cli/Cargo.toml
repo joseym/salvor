@@ -57,6 +57,10 @@ salvor-store.workspace = true
 salvor-llm.workspace = true
 salvor-tools.workspace = true
 salvor-runtime.workspace = true
+# The control-plane server behind `salvor serve`. The CLI depends on it one
+# way: it supplies the agent-building function (so the TOML schema stays owned
+# here) and runs the server. The `serve` subcommand is the only consumer.
+salvor-server.workspace = true
 # Sandboxed wasm tools ([[wasm_tools]] in the agent file). A direct, unguarded
 # dependency: the CLI is the batteries-included tier; library users who must
 # not compile a wasm runtime depend on the library crates, never on this one.

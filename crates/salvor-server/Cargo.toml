@@ -1,0 +1,39 @@
+[package]
+name = "salvor-server"
+description = "Salvor control plane: an HTTP + server-sent-events server over the durable runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+salvor-core.workspace = true
+salvor-store.workspace = true
+salvor-runtime.workspace = true
+# The server drives MCP-backed agents, so a built agent hands back the live
+# `McpServer` sessions its tools hold; the run driver keeps them alive for the
+# life of the run and closes them after. That type is the only thing this crate
+# needs from the tools layer.
+salvor-tools.workspace = true
+axum.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+# The tests drive the bound server over real loopback HTTP with reqwest, script
+# the model with wiremock, and read server-sent events from the raw byte
+# stream, so reqwest gains its `stream` feature here.
+reqwest = { workspace = true, features = ["stream"] }
+wiremock.workspace = true
+salvor-llm.workspace = true
+tempfile.workspace = true
+futures-util = "0.3"
+bytes = "1"
+async-trait.workspace = true
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "time"] }

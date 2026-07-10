@@ -10,6 +10,7 @@ members = [
     "crates/salvor-tools-macros",
     "crates/salvor-runtime",
     "crates/salvor-wasm",
+    "crates/salvor-server",
     "crates/salvor-cli",
     "crates/salvor",
 ]
@@ -38,6 +39,7 @@ salvor-tools = { path = "crates/salvor-tools" }
 salvor-tools-macros = { path = "crates/salvor-tools-macros" }
 salvor-runtime = { path = "crates/salvor-runtime" }
 salvor-wasm = { path = "crates/salvor-wasm" }
+salvor-server = { path = "crates/salvor-server" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -49,6 +51,13 @@ tokio = { version = "1", features = ["full"] }
 # rustls only: reqwest's default native-tls feature would add a system OpenSSL dependency.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 wiremock = "0.6"
+# The control-plane HTTP server (salvor-server, M14). axum is the router and
+# extractor layer; it was already compiled in the workspace as a salvor-tools
+# test dependency, so promoting it to a real workspace dependency adds no new
+# crate to the tree. tokio-stream wraps an mpsc receiver as the `Stream` axum's
+# server-sent-events response consumes.
+axum = "0.8"
+tokio-stream = "0.1"
 tracing = "0.1"
 # CLI surface. clap parses the command tree with its derive API; toml
 # parses the agent-definition file (agents are data); tracing-subscriber

@@ -70,5 +70,6 @@ pub async fn dispatch(cli: Cli) -> Result<u8> {
         Command::List => commands::list(store).await,
         Command::History(args) => commands::history(store, args).await,
         Command::Replay(args) => commands::replay(store, args).await,
+        Command::Serve(args) => commands::serve(store, args).await,
     }
 }

@@ -532,6 +532,34 @@ impl AgentConfig {
         Ok(config)
     }
 
+    /// Parses an agent definition from a TOML string, then validates it. This
+    /// is the same schema and checks as [`load`](Self::load), for a definition
+    /// that arrives as text (from the control plane) rather than a file.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the text is not valid TOML or breaks a cross-field rule.
+    pub fn from_toml_str(text: &str) -> Result<Self> {
+        let config: AgentConfig =
+            toml::from_str(text).context("parsing agent definition as TOML")?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Parses an agent definition from a JSON string, then validates it. The
+    /// JSON keys are the same as the TOML ones, so a thin SDK can submit the
+    /// definition as JSON and get an identical agent.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the text is not valid JSON or breaks a cross-field rule.
+    pub fn from_json_str(text: &str) -> Result<Self> {
+        let config: AgentConfig =
+            serde_json::from_str(text).context("parsing agent definition as JSON")?;
+        config.validate()?;
+        Ok(config)
+    }
+
     /// The cross-field checks `load` applies. Kept separate so a constructed
     /// config (as in unit tests) can be validated too.
     ///

@@ -50,6 +50,8 @@ pub enum Command {
     History(HistoryArgs),
     /// Re-derive a run's state from its log without executing anything.
     Replay(ReplayArgs),
+    /// Run the control-plane HTTP + server-sent-events server over the store.
+    Serve(ServeArgs),
 }
 
 /// Arguments to `run`.
@@ -113,4 +115,19 @@ pub struct ReplayArgs {
     /// this version: live replay is not yet available.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+/// Arguments to `serve`.
+#[derive(Debug, Args)]
+pub struct ServeArgs {
+    /// The address to bind, host and port.
+    #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:8080")]
+    pub bind: String,
+    /// The NAME of an environment variable holding a shared-secret bearer
+    /// token. When set (and the variable is non-empty), every request must
+    /// carry `Authorization: Bearer <that value>`. When omitted, the server
+    /// runs without auth, trusting a reverse proxy to guard it. Never the
+    /// token itself, matching how agent files name key variables.
+    #[arg(long, value_name = "ENV_VAR")]
+    pub auth_token: Option<String>,
 }

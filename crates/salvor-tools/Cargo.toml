@@ -54,7 +54,7 @@ tokio = { workspace = true, optional = true }
 # bind a loopback `TcpListener`; `axum` serves the in-process fixture server
 # that rmcp's `StreamableHttpService` plugs into. Both are test-only.
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net"] }
-axum = "0.8"
+axum.workspace = true
 
 # The hermetic MCP test fixture. It is a real server binary spawned over stdio
 # by the integration tests, not an in-process mock, because the product path is

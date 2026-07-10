@@ -27,18 +27,21 @@
 //! The full recorded log, replayed prefix and all, is always available through
 //! `salvor history`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use salvor_core::{PendingCall, RunId, RunStatus, derive_state};
+use salvor_core::{PendingCall, RunId, derive_state};
 use salvor_runtime::{RunOutcome, Runtime, RuntimeError};
+use salvor_server::dispatch::{Disposition, classify};
+use salvor_server::{AgentDefinition, AgentFactory, AppState, BuiltAgent, DefFormat};
 use salvor_store::{EventStore, SqliteStore};
 use serde_json::Value;
+use tokio::net::TcpListener;
 use uuid::Uuid;
 
 use crate::agent_config::{self, AgentConfig};
-use crate::cli::{HistoryArgs, ReplayArgs, ResolveArgs, ResumeArgs, RunArgs};
+use crate::cli::{HistoryArgs, ReplayArgs, ResolveArgs, ResumeArgs, RunArgs, ServeArgs};
 use crate::render;
 
 /// `salvor run`: start a fresh run, print its id, drive it, and report.
@@ -81,10 +84,13 @@ pub async fn resume(store_path: &Path, args: ResumeArgs) -> Result<u8> {
     }
     let state = derive_state(&log);
 
-    // These branches need no agent and spawn no MCP servers, so decide them
-    // before paying to build the agent.
-    match &state.status {
-        RunStatus::NeedsReconciliation => {
+    // The state-to-verb mapping is the shared `classify` the control-plane
+    // server uses too, so the CLI and the HTTP resume endpoint can never
+    // disagree on what a given state means. These first arms need no agent and
+    // spawn no MCP servers, so decide them before paying to build the agent.
+    let disposition = classify(&state);
+    match disposition {
+        Disposition::Reconcile(_) => {
             // The intent's timestamp is part of the evidence; find it in the
             // log by the pending call's sequence number.
             let recorded_at = match state.pending_call.as_ref() {
@@ -100,25 +106,25 @@ pub async fn resume(store_path: &Path, args: ResumeArgs) -> Result<u8> {
             );
             return Ok(1);
         }
-        RunStatus::Completed { output } => {
+        Disposition::Completed(output) => {
             println!("run {uuid} already completed. Final output:");
-            println!("{}", render::pretty_json(output));
+            println!("{}", render::pretty_json(&output));
             return Ok(0);
         }
-        RunStatus::Failed { error } => {
+        Disposition::Failed(error) => {
             println!("run {uuid} already failed: {error}");
             return Ok(0);
         }
-        RunStatus::NotStarted => bail!("run {uuid} has no recorded events"),
-        _ => {}
+        Disposition::NotStarted => bail!("run {uuid} has no recorded events"),
+        Disposition::Resume(_) | Disposition::Recover => {}
     }
 
     let config = AgentConfig::load(&args.agent)?;
     let (agent, servers) = agent_config::build_agent(&config, &args.agent).await?;
     let runtime = Runtime::new(store.clone());
 
-    let outcome = match &state.status {
-        RunStatus::Suspended { .. } | RunStatus::BudgetExceeded { .. } => {
+    let outcome = match disposition {
+        Disposition::Resume(_) => {
             let raw = args.input.as_deref().context(
                 "this run is parked awaiting input; pass --input <json|@file> to resume it",
             )?;
@@ -126,7 +132,7 @@ pub async fn resume(store_path: &Path, args: ResumeArgs) -> Result<u8> {
             tracing::info!(run_id = %uuid, "resuming parked run");
             runtime.resume(&agent, run_id, input).await
         }
-        // Running / AwaitingModel / AwaitingTool: the process died mid-step.
+        // Recover: the process died mid-step (running or awaiting a step).
         _ => {
             if args.input.is_some() {
                 tracing::warn!(
@@ -236,6 +242,68 @@ pub async fn replay(store_path: &Path, args: ReplayArgs) -> Result<u8> {
     let state = derive_state(&log);
     print!("{}", render::replay_summary(&state));
     Ok(0)
+}
+
+/// `salvor serve`: run the control-plane HTTP + server-sent-events server.
+///
+/// The server owns the same store every other command uses and drives runs
+/// through the same runtime, so durability is identical to the local verbs.
+/// The one piece the server does not own is the agent-definition format: this
+/// command supplies the factory that parses a submitted definition (TOML or
+/// JSON) with the CLI's own [`AgentConfig`] and builds it, so the schema keeps
+/// its single home here. A submitted definition's relative paths (a prompt
+/// file, a wasm component) resolve against the server's working directory.
+pub async fn serve(store_path: &Path, args: ServeArgs) -> Result<u8> {
+    let store = open_store(store_path)?;
+
+    let factory: AgentFactory = Arc::new(|definition: AgentDefinition| {
+        Box::pin(async move { build_from_definition(definition).await })
+    });
+
+    let mut state = AppState::new(store, factory);
+    if let Some(env_name) = &args.auth_token {
+        match std::env::var(env_name) {
+            Ok(token) if !token.is_empty() => {
+                state = state.with_auth_token(token);
+                tracing::info!("bearer auth required (token read from ${env_name})");
+            }
+            _ => tracing::warn!(
+                "--auth-token names ${env_name}, but it is unset or empty; serving without auth"
+            ),
+        }
+    }
+
+    let listener = TcpListener::bind(&args.bind)
+        .await
+        .with_context(|| format!("binding {}", args.bind))?;
+    let addr = listener.local_addr().context("reading the bound address")?;
+    println!("salvor control plane listening on http://{addr}");
+    tracing::info!(%addr, "serving the control plane");
+    salvor_server::serve(listener, state)
+        .await
+        .context("serving the control plane")?;
+    Ok(0)
+}
+
+/// Builds a live agent from a submitted definition, for the `serve` factory.
+/// Turns any failure into a human message the server maps to a `400`.
+async fn build_from_definition(definition: AgentDefinition) -> Result<BuiltAgent, String> {
+    let text = String::from_utf8(definition.body)
+        .map_err(|_| "agent definition is not valid UTF-8".to_owned())?;
+    let config = match definition.format {
+        DefFormat::Toml => AgentConfig::from_toml_str(&text),
+        DefFormat::Json => AgentConfig::from_json_str(&text),
+    }
+    .map_err(|error| format!("{error:#}"))?;
+
+    // Relative paths in a submitted definition resolve against the server's
+    // working directory; the pseudo path's parent is that directory.
+    let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let pseudo_path = base.join("agent-definition");
+    let (agent, servers) = agent_config::build_agent(&config, &pseudo_path)
+        .await
+        .map_err(|error| format!("{error:#}"))?;
+    Ok(BuiltAgent { agent, servers })
 }
 
 /// Prints the final result of a completed run, or the parked report of a
