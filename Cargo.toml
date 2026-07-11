@@ -21,6 +21,12 @@ members = [
 exclude = [
     "crates/salvor-wasm/tests/fixture-guest",
     "examples/wasm-tools/guest",
+    # The v0.3 web dashboard. A client-side Leptos app compiled to
+    # wasm32-unknown-unknown, so it is excluded for the same reason the guest
+    # crates are: the host workspace builds native, this crate never does, and
+    # it carries its own lockfile. It path-depends on crates/salvor-replay
+    # (default-features off) to fold event logs with the real state code.
+    "dashboard",
 ]
 
 [workspace.package]

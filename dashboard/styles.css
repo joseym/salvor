@@ -1,0 +1,72 @@
+/* Structural skeleton only. The visual design (palette, type, spacing scale)
+   comes later; this file lays out the shell and marks the data hooks the
+   design will style, without inventing a look. */
+
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.app-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid currentColor;
+}
+
+.app-nav-links {
+  display: flex;
+  gap: 1rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* A nav entry that names a view without linking to it (the inspector opens
+   per-run). */
+.app-nav-passive {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.app-main {
+  flex: 1;
+  padding: 1rem;
+}
+
+/* Identifiers read as monospace for density and alignment. */
+.run-ref,
+.run-ref-id {
+  font-family: ui-monospace, monospace;
+}
+
+.run-ref {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.25rem;
+}
+
+/* The status badge and connection indicator carry their state on data-
+   attributes so the design layer can key styles off them. */
+.status-badge,
+.connection-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.status-dot,
+.connection-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: currentColor;
+  display: inline-block;
+}
+
+.view-placeholder {
+  opacity: 0.7;
+}

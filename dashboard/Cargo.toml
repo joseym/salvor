@@ -1,0 +1,42 @@
+[package]
+name = "salvor-dashboard"
+description = "The Salvor v0.3 control-plane web dashboard: a client-side Leptos app, compiled to wasm, that folds a run's event log with the real salvor-replay code"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/joseym/salvor"
+
+# This crate is excluded from the host workspace (see the root Cargo.toml) because
+# it targets wasm32-unknown-unknown, so it does not inherit workspace settings and
+# carries its own Cargo.lock. Versions are pinned here, not in [workspace.dependencies].
+
+[dependencies]
+# The real state model and fold. default-features = false turns off the host-only
+# `rng` feature (RunId::new draws randomness via getrandom, which has no backend on
+# wasm32-unknown-unknown). The dashboard reads ids that are already recorded in the
+# log, so it never mints one and never needs `rng`.
+salvor-replay = { path = "../crates/salvor-replay", default-features = false }
+
+# Leptos in client-side-rendering mode. 0.8.20 is the current stable line (0.9 is
+# still alpha as of 2026-07); the `csr` feature selects the browser-only build with
+# no server integration. leptos_router 0.8.x is the matching router for this line.
+leptos = { version = "0.8.20", features = ["csr"] }
+leptos_router = "0.8.14"
+
+# Browser bindings for the SSE client. web-sys exposes the native EventSource, which
+# is the browser primitive for server-sent events (it parses frames and dispatches
+# id / data / named events for us); wasm-bindgen provides the closure glue.
+web-sys = { version = "0.3.103", features = [
+    "EventSource",
+    "MessageEvent",
+    "Event",
+    "Window",
+    "Navigator",
+    "Clipboard",
+] }
+wasm-bindgen = "0.2.126"
+
+# serde_json parses each SSE frame's `data` into salvor_replay::EventEnvelope and the
+# `event: end` frame's status payload. gloo-timers schedules the reconnect backoff.
+serde_json = "1.0.150"
+gloo-timers = { version = "0.4.0", features = ["futures"] }
