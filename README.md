@@ -78,7 +78,7 @@ Run this once after cloning (install cocogitto first with `brew install cocogitt
 cog install-hook --all
 ```
 
-Commit messages follow Conventional Commits, enforced by `cog verify` in the commit-msg hook. Releases are cut with `cog bump`.
+Commit messages follow Conventional Commits, enforced by `cog verify` in the commit-msg hook. Releases are cut with `cog bump`; see [docs/RELEASING.md](docs/RELEASING.md) for the distribution pipeline and how a release becomes prebuilt binaries.
 
 ## License
 

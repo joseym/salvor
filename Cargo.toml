@@ -111,3 +111,8 @@ wasmtime-wasi = { version = "=46.0.1", default-features = false, features = [
     # import; p1 (preview 1) support is deliberately absent.
     "p2",
 ] }
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

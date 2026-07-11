@@ -5,6 +5,27 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+# Homebrew formulae require a homepage; without it the tap-publish job warns.
+homepage = "https://github.com/joseym/salvor"
+
+# dist metadata for the released artifact. Building with default features OFF
+# drops salvor-cli's `fixture` feature, and with it the three fixture-gated
+# binaries (salvor-mcp-count-fixture, salvor-demo-research, salvor-demo-model)
+# that exist only for tests and the demo. That leaves the real `salvor` binary
+# as the sole artifact. The binary stays fully functional: MCP-client support
+# and the wasm sandbox arrive through the unconditional lib dependencies
+# (salvor-tools, salvor-wasm), not through this crate's own features.
+#
+# `binaries` is an explicit allowlist: dist enumerates a package's binaries from
+# the manifest without evaluating required-features, so it would otherwise try
+# to package the three fixture binaries and fail when the default-features-off
+# build never produced them. Naming `salvor` alone ships exactly that binary.
+[package.metadata.dist]
+default-features = false
+
+# `"*"` applies to every target triple.
+[package.metadata.dist.binaries]
+"*" = ["salvor"]
 
 [features]
 # `fixture` builds the two in-repo MCP servers: the counting server the CLI

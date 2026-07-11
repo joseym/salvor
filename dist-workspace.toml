@@ -1,0 +1,39 @@
+[workspace]
+members = ["cargo:."]
+
+# Config for 'dist'
+[dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.32.0"
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+installers = ["shell", "powershell", "npm", "homebrew"]
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+# Path that installers should place binaries in
+install-path = "CARGO_HOME"
+# Where to host releases
+hosting = "github"
+# Whether to install an updater program
+install-updater = false
+# Feature selection (default-features off, to ship only the real `salvor`
+# binary) and the salvor-tools opt-out live in the per-package
+# [package.metadata.dist] tables in crates/salvor-cli/Cargo.toml and
+# crates/salvor-tools/Cargo.toml, since feature keys apply per package.
+# Do not run this workflow on pull requests. It fires only on a pushed version
+# tag (see the tag pattern in the generated release.yml). This keeps the
+# pipeline dormant: nothing builds or publishes until a `v*` tag exists.
+pr-run-mode = "skip"
+# Publish the generated Homebrew formula to the tap repo and the npm installer
+# package to the npm registry. Both jobs run only on a tag and only when their
+# tokens are present, so they stay inert until the first real release.
+publish-jobs = ["homebrew", "npm"]
+# The Homebrew tap the formula is pushed to, giving `brew install joseym/tap/salvor`.
+tap = "joseym/homebrew-tap"
+# The Homebrew formula name.
+formula = "salvor"
+# The npm package name for the binary-installer package. Unscoped `salvor` was
+# unclaimed on the registry at setup time; the name is provisional until the
+# first npm publish actually reserves it.
+npm-package = "salvor"

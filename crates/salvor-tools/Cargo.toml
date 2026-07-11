@@ -6,6 +6,14 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+# salvor-tools declares one binary, `salvor-mcp-fixture`, which is a test
+# fixture gated behind `required-features = ["mcp"]`. It is not product surface,
+# so it must never ship in a release. dist auto-distributes any workspace
+# package that has a binary; this opts salvor-tools out entirely, leaving
+# salvor-cli's `salvor` as the only released binary.
+[package.metadata.dist]
+dist = false
+
 [features]
 # `mcp` gates the entire Model Context Protocol integration: the `mcp` module,
 # the rmcp SDK, and the Tokio runtime rmcp needs. It is on by default so the
