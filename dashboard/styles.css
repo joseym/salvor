@@ -259,3 +259,179 @@
   opacity: 0.6;
   font-size: 0.9em;
 }
+
+/* Run list, inbox, and spend. Structure only: layout, table lines, form
+   stacking, and the data- hooks (status group, card kind, view state) the
+   design layer will style. No palette or type scale is invented here. */
+
+.view-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.view-header h1 {
+  margin: 0 0 0.5rem;
+}
+
+/* Loading / empty / error / all-clear all ride one class with a data-state
+   hook, so the design layer can distinguish them without new markup. */
+.view-state {
+  opacity: 0.7;
+  padding: 0.5rem 0;
+}
+
+/* Tables read as a grid of thin rules; alignment left, ids monospace. */
+.run-table,
+.burn-table,
+.aggregate-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.run-table th,
+.run-table td,
+.burn-table th,
+.burn-table td,
+.aggregate-table th,
+.aggregate-table td {
+  text-align: left;
+  padding: 0.35rem 0.6rem;
+  border-bottom: 1px solid currentColor;
+  vertical-align: baseline;
+}
+
+.run-table th,
+.burn-table th,
+.aggregate-table th {
+  opacity: 0.7;
+  font-weight: inherit;
+}
+
+/* A column the endpoint cannot supply; shown, not hidden, so the gap is honest. */
+.cell-unavailable {
+  opacity: 0.5;
+}
+
+.table-note,
+.estimate-note {
+  opacity: 0.6;
+  font-size: 0.85em;
+  margin: 0.5rem 0;
+}
+
+/* Inbox cards stack; each carries its kind and attention group on data- hooks. */
+.inbox-card {
+  border: 1px solid currentColor;
+  padding: 0.75rem;
+  margin: 0.75rem 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.card-kind {
+  font-size: 0.8em;
+  letter-spacing: 0.03em;
+  opacity: 0.7;
+}
+
+.card-detail {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.15rem 1rem;
+  margin: 0;
+}
+
+.card-detail dt {
+  opacity: 0.7;
+}
+
+.card-detail dd {
+  margin: 0;
+  min-width: 0;
+}
+
+.card-detail pre {
+  overflow-x: auto;
+  max-width: 100%;
+  margin: 0;
+}
+
+.card-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.form-field-bool {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.form-field span {
+  opacity: 0.7;
+  font-size: 0.9em;
+}
+
+.raw-json {
+  width: 100%;
+  min-height: 6rem;
+  font-family: ui-monospace, monospace;
+}
+
+.card-error {
+  margin: 0;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid currentColor;
+}
+
+.card-action {
+  align-self: flex-start;
+}
+
+/* Spend: burn-down then aggregates; the two aggregate tables sit side by side
+   and stack below a comfortable width. */
+.spend {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.aggregate-tables {
+  display: flex;
+  gap: 1.5rem;
+  align-items: flex-start;
+}
+
+.aggregate-block {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.aggregate-block h3,
+.burn-down h2,
+.aggregate h2 {
+  margin: 0 0 0.5rem;
+  font-size: 0.95em;
+}
+
+@media (max-width: 40rem) {
+  .aggregate-tables {
+    flex-direction: column;
+  }
+}

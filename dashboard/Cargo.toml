@@ -44,3 +44,14 @@ js-sys = "0.3.103"
 # `event: end` frame's status payload. gloo-timers schedules the reconnect backoff.
 serde_json = "1.0.150"
 gloo-timers = { version = "0.4.0", features = ["futures"] }
+
+# serde derive backs the typed request/response structs in the HTTP client (api.rs):
+# the run summaries, the folded status object, the pending write intent, and the
+# server's error envelope all deserialize from the documented wire JSON.
+serde = { version = "1.0.150", features = ["derive"] }
+
+# gloo-net is the standard wasm fetch wrapper. The `http` feature gives the
+# Request builder the api.rs client uses for GET /v1/runs, GET /v1/runs/{id}, and
+# the resume / resolve POSTs. Streaming stays on the browser EventSource (see sse.rs);
+# this is the one-shot request client the list, inbox, and spend views need.
+gloo-net = { version = "0.6.0", features = ["http"] }

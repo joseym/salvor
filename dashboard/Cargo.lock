@@ -1249,11 +1249,13 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 name = "salvor-dashboard"
 version = "0.1.0"
 dependencies = [
+ "gloo-net",
  "gloo-timers",
  "js-sys",
  "leptos",
  "leptos_router",
  "salvor-replay",
+ "serde",
  "serde_json",
  "wasm-bindgen",
  "web-sys",

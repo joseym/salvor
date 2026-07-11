@@ -8,6 +8,7 @@
 //! - [`config`]: which control-plane server to talk to.
 //! - [`replay`]: the reuse layer over `salvor-replay`; the real state fold.
 //! - [`sse`]: the server-sent-events client and connection state.
+//! - [`api`]: the one-shot HTTP client for runs, resume, and resolve.
 //! - [`status`]: the run-status model and the `StatusBadge` / `RunRef` atoms.
 //! - [`pricing`]: the dollar-cost estimate layer over exact token counts.
 //! - [`inspector`]: the run inspector view, its rows, and the scrubber.
@@ -22,6 +23,7 @@
 // test or a documented role, and the allow comes off as the views land.
 #![allow(dead_code)]
 
+mod api;
 mod app;
 mod config;
 mod inspector;
