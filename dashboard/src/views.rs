@@ -7,7 +7,8 @@
 //! router.
 
 use leptos::prelude::*;
-use leptos_router::hooks::use_params_map;
+
+use crate::inspector::RunInspector;
 
 /// Run list (landing), route `/`. To come: the run table.
 #[component]
@@ -15,18 +16,13 @@ pub fn RunList() -> impl IntoView {
     view! { <p class="view-placeholder">"Run list (slice 2)"</p> }
 }
 
-/// Run inspector, route `/runs/:id`. To come: the event timeline, the
-/// per-event rows, and the scrubber bound to [`crate::replay::state_as_of`].
-///
-/// Reads the `:id` param already, so the placeholder names the run it will
-/// inspect; nothing else about the view is implemented.
+/// Run inspector, route `/runs/:id`. Now real: it delegates to
+/// [`RunInspector`](crate::inspector::RunInspector), which reads the `:id`
+/// param, opens the run's stream, and renders the header, timeline, and
+/// scrubber. The remaining views stay placeholders.
 #[component]
 pub fn Inspector() -> impl IntoView {
-    let params = use_params_map();
-    let run_id = move || params.read().get("id").unwrap_or_default();
-    view! {
-        <p class="view-placeholder">"Run inspector (slice 3) for run " {run_id}</p>
-    }
+    view! { <RunInspector /> }
 }
 
 /// Approval & reconciliation inbox, route `/inbox`. To come: the parked-run

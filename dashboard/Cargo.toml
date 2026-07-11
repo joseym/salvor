@@ -36,6 +36,10 @@ web-sys = { version = "0.3.103", features = [
 ] }
 wasm-bindgen = "0.2.126"
 
+# js-sys exposes the browser Date, used to compute a run's age against the wall
+# clock. It rides the same wasm-bindgen line as web-sys and adds no new backend.
+js-sys = "0.3.103"
+
 # serde_json parses each SSE frame's `data` into salvor_replay::EventEnvelope and the
 # `event: end` frame's status payload. gloo-timers schedules the reconnect backoff.
 serde_json = "1.0.150"

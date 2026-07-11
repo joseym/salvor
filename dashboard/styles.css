@@ -70,3 +70,192 @@
 .view-placeholder {
   opacity: 0.7;
 }
+
+/* Run inspector. Structure only: layout, gutters, and the data- hooks the
+   design layer will style (event kind, effect class, connection/status group).
+   No palette or type scale is invented here. */
+.inspector {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.run-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  border-bottom: 1px solid currentColor;
+  padding-bottom: 0.75rem;
+}
+
+.run-header-top {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.run-header-agent,
+.agent-hash,
+.req-hash,
+.idem-key,
+.model,
+.seq-gutter {
+  font-family: ui-monospace, monospace;
+}
+
+.hint {
+  opacity: 0.6;
+  font-size: 0.85em;
+}
+
+.muted {
+  opacity: 0.6;
+}
+
+.run-header-totals {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.15rem 1rem;
+  margin: 0;
+}
+
+.run-header-totals dt {
+  opacity: 0.7;
+}
+
+.run-header-totals dd {
+  margin: 0;
+}
+
+.cost-meter {
+  display: inline-flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.parked-pointer {
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid currentColor;
+}
+
+/* Timeline and scrubber sit side by side, the scrubber panel beside the list.
+   Below a comfortable width they stack. */
+.inspector-body {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+}
+
+.event-timeline {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.scrubber {
+  flex: 0 0 18rem;
+  position: sticky;
+  top: 1rem;
+  border: 1px solid currentColor;
+  padding: 0.75rem;
+}
+
+@media (max-width: 40rem) {
+  .inspector-body {
+    flex-direction: column;
+  }
+
+  .scrubber {
+    flex-basis: auto;
+    position: static;
+    width: 100%;
+  }
+}
+
+.event-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.event-row {
+  display: flex;
+  gap: 0.75rem;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid currentColor;
+  align-items: baseline;
+}
+
+.seq-gutter {
+  flex: 0 0 3ch;
+  text-align: right;
+  opacity: 0.6;
+}
+
+.event-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.event-kind {
+  font-size: 0.8em;
+  letter-spacing: 0.03em;
+  opacity: 0.7;
+}
+
+.effect-badge {
+  display: inline-block;
+  padding: 0 0.4rem;
+  border: 1px solid currentColor;
+  font-size: 0.8em;
+}
+
+.event-body pre {
+  overflow-x: auto;
+  max-width: 100%;
+  margin: 0.25rem 0 0;
+}
+
+.scrubber-control {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.scrubber-control input[type="range"] {
+  width: 100%;
+}
+
+.point-in-time {
+  margin-top: 0.75rem;
+  border-top: 1px solid currentColor;
+  padding-top: 0.5rem;
+}
+
+.point-in-time h3 {
+  margin: 0 0 0.5rem;
+  font-size: 0.9em;
+}
+
+.pit-detail {
+  margin: 0.5rem 0 0;
+}
+
+.pit-detail dt {
+  opacity: 0.7;
+}
+
+.pit-detail dd {
+  margin: 0 0 0.4rem;
+}
+
+.timeline-state {
+  opacity: 0.7;
+}
+
+.ctx {
+  opacity: 0.6;
+  font-size: 0.9em;
+}
