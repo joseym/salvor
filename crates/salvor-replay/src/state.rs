@@ -153,7 +153,9 @@ pub fn derive_state(log: &[EventEnvelope]) -> RunState {
             Event::RunStarted { .. } => {
                 state.status = RunStatus::Running;
             }
-            Event::ModelCallRequested { seq, request_hash } => {
+            Event::ModelCallRequested {
+                seq, request_hash, ..
+            } => {
                 state.pending_call = Some(PendingCall::Model {
                     seq: *seq,
                     request_hash: request_hash.clone(),
@@ -293,6 +295,7 @@ mod tests {
             Event::ModelCallRequested {
                 seq: SequenceNumber::new(1),
                 request_hash: "sha256:req".into(),
+                request_body: None,
             },
         ]));
         assert_eq!(state.status, RunStatus::AwaitingModel);
@@ -504,6 +507,7 @@ mod tests {
             Event::ModelCallRequested {
                 seq: SequenceNumber::new(1),
                 request_hash: "sha256:a".into(),
+                request_body: None,
             },
             Event::ModelCallCompleted {
                 seq: SequenceNumber::new(1),
@@ -516,6 +520,7 @@ mod tests {
             Event::ModelCallRequested {
                 seq: SequenceNumber::new(3),
                 request_hash: "sha256:b".into(),
+                request_body: None,
             },
             Event::ModelCallCompleted {
                 seq: SequenceNumber::new(3),

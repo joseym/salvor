@@ -134,6 +134,10 @@ pub struct RunCtx {
     clock: ClockFn,
     random: RandomFn,
     resume_input: Option<Value>,
+    /// Whether to record the full model request body on each
+    /// `ModelCallRequested`. Off unless [`with_record_prompts`](Self::with_record_prompts)
+    /// turns it on. See that method for the PII rationale.
+    record_prompts: bool,
 }
 
 impl RunCtx {
@@ -186,7 +190,30 @@ impl RunCtx {
             clock,
             random,
             resume_input: None,
+            record_prompts: false,
         })
+    }
+
+    /// Turns on recording of the full model request body into the durable log.
+    ///
+    /// Additive and off by default: the existing [`new`](Self::new) and
+    /// [`with_hooks`](Self::with_hooks) constructors leave it off, so no
+    /// caller that predates this method changes behavior. Chained builder
+    /// style keeps those signatures intact, which is why the flag arrives this
+    /// way rather than as a new constructor argument.
+    ///
+    /// When on, each live [`model_call`](Self::model_call) records the exact
+    /// request it sent on the `ModelCallRequested` event, so the v0.3 dashboard
+    /// inspector can show the prompt. This is PII-sensitive: the body can hold
+    /// user data and secrets, which is why the default is off and turning it on
+    /// is a deliberate per-agent or operator choice. The recorded body lands
+    /// only in the event log; it never reaches the progress stream or any
+    /// console output. It does not affect replay: the request hash is computed
+    /// the same either way, and replay ignores the body.
+    #[must_use]
+    pub fn with_record_prompts(mut self, record_prompts: bool) -> Self {
+        self.record_prompts = record_prompts;
+        self
     }
 
     /// Provides the input a parked run is being resumed with. The next
@@ -291,6 +318,12 @@ impl RunCtx {
     /// process died inside) is re-issued safely: the fresh completion
     /// correlates to the recorded intent.
     ///
+    /// When [`with_record_prompts`](Self::with_record_prompts) is on, the exact
+    /// request body is recorded alongside the hash on the fresh live intent.
+    /// It is the same value the hash was computed over, it never feeds into the
+    /// hash, and replay ignores it, so recording it changes nothing about how
+    /// the run replays.
+    ///
     /// # Errors
     ///
     /// [`RuntimeError::Replay`] on divergence, [`RuntimeError::Store`] when
@@ -305,7 +338,16 @@ impl RunCtx {
     ) -> Result<ModelTurn, RuntimeError> {
         let request_value = serde_json::to_value(request).map_err(RuntimeError::RequestEncode)?;
         let request_hash = hash_value(&request_value);
-        match self.cursor.model_call(&request_hash)? {
+        // The hash is computed above from `request_value` and is unaffected by
+        // what follows. When prompt recording is on, the body handed to the
+        // cursor is that same `request_value`, so the recorded body is exactly
+        // what was hashed; when off it is `None` and nothing is recorded.
+        let request_body = if self.record_prompts {
+            Some(request_value)
+        } else {
+            None
+        };
+        match self.cursor.model_call(&request_hash, request_body)? {
             Outcome::Replayed(ModelReply { response, usage }) => {
                 let response = serde_json::from_value(response)
                     .map_err(RuntimeError::RecordedResponseDecode)?;

@@ -443,6 +443,12 @@ impl ReplayCursor {
     /// fresh completion correlates to the recorded intent. Live: the permit
     /// carries the intent event to persist before calling the provider.
     ///
+    /// `request_body` is the optional full request to record on the intent,
+    /// off by default (see the field on [`Event::ModelCallRequested`]). It is
+    /// stored only on a genuinely fresh live intent and is ignored everywhere
+    /// else: correlation keys on `request_hash` alone, so passing a body never
+    /// changes which recorded call matches or what replays.
+    ///
     /// # Errors
     ///
     /// [`ReplayError::Divergence`] on a hash mismatch or a different recorded
@@ -451,16 +457,22 @@ impl ReplayCursor {
     pub fn model_call(
         &mut self,
         request_hash: &str,
+        request_body: Option<Value>,
     ) -> Result<Outcome<ModelReply, ModelCallPermit<'_>>, ReplayError> {
         let requested = RequestedStep::ModelCall {
             request_hash: request_hash.to_owned(),
         };
         self.guard_terminal(&requested)?;
         if self.pos < self.log.len() {
+            // The recorded body plays no part in correlation: only the hash is
+            // matched, and the `request_body` the caller passed is ignored on
+            // this replay path. That is what keeps a log captured with bodies
+            // replaying identically to one captured without.
             let correlation = match &self.log[self.pos].event {
                 Event::ModelCallRequested {
                     seq,
                     request_hash: recorded,
+                    ..
                 } if recorded == request_hash => *seq,
                 _ => return Err(self.mismatch(requested)),
             };
@@ -505,6 +517,11 @@ impl ReplayCursor {
             event: Event::ModelCallRequested {
                 seq: correlation,
                 request_hash: request_hash.to_owned(),
+                // The only place the body is recorded: a genuinely fresh live
+                // intent. Recording off leaves this `None` (byte-identical to
+                // before the field existed); recording on stores the same
+                // value that was hashed.
+                request_body,
             },
         };
         Ok(Outcome::Live(ModelCallPermit {

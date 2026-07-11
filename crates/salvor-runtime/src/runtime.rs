@@ -84,6 +84,10 @@ pub struct Runtime {
     store: Arc<dyn EventStore>,
     clock: ClockFn,
     random: RandomFn,
+    /// Whether the [`RunCtx`](crate::RunCtx) this runtime builds records the
+    /// full model request body. Off unless
+    /// [`with_record_prompts`](Runtime::with_record_prompts) turns it on.
+    record_prompts: bool,
 }
 
 impl Runtime {
@@ -106,7 +110,24 @@ impl Runtime {
             store,
             clock,
             random,
+            record_prompts: false,
         }
+    }
+
+    /// Turns on recording of the full model request body for every run this
+    /// runtime drives, passed through to each [`RunCtx`](crate::RunCtx) it
+    /// builds. Off by default. Chained builder style so
+    /// [`new`](Self::new)/[`with_hooks`](Self::with_hooks) keep their
+    /// signatures and every existing caller stays at off.
+    ///
+    /// This is PII-sensitive (the body may hold user data or secrets), which is
+    /// why it is off unless an operator opts in. See
+    /// [`RunCtx::with_record_prompts`](crate::RunCtx::with_record_prompts) for
+    /// what recording means and the guarantee that it does not affect replay.
+    #[must_use]
+    pub fn with_record_prompts(mut self, record_prompts: bool) -> Self {
+        self.record_prompts = record_prompts;
+        self
     }
 
     /// Starts a fresh run of `agent` with `input`, under a newly minted
@@ -260,13 +281,14 @@ impl Runtime {
 
     /// Builds the per-run context with this runtime's hooks.
     fn ctx(&self, run_id: RunId, log: Vec<EventEnvelope>) -> Result<RunCtx, RuntimeError> {
-        RunCtx::with_hooks(
+        Ok(RunCtx::with_hooks(
             self.store.clone(),
             run_id,
             log,
             self.clock.clone(),
             self.random.clone(),
-        )
+        )?
+        .with_record_prompts(self.record_prompts))
     }
 }
 

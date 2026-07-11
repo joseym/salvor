@@ -61,6 +61,7 @@ pub struct Agent {
     pricing: Option<Pricing>,
     max_response_tokens: u32,
     def_hash: String,
+    record_prompts: bool,
 }
 
 impl Agent {
@@ -118,6 +119,16 @@ impl Agent {
     pub fn max_response_tokens(&self) -> u32 {
         self.max_response_tokens
     }
+
+    /// Whether runs of this agent record the full model request body into the
+    /// durable log. Off by default; see [`AgentBuilder::record_prompts`]. This
+    /// is operator/transport policy, not part of the definition, so it is
+    /// deliberately excluded from [`def_hash`](Self::def_hash): flipping it
+    /// must not orphan an agent's recorded runs.
+    #[must_use]
+    pub fn record_prompts(&self) -> bool {
+        self.record_prompts
+    }
 }
 
 /// Builds an [`Agent`]:
@@ -148,6 +159,7 @@ pub struct AgentBuilder {
     budgets: Budgets,
     pricing: Option<Pricing>,
     max_response_tokens: Option<u32>,
+    record_prompts: bool,
 }
 
 impl AgentBuilder {
@@ -223,6 +235,18 @@ impl AgentBuilder {
         self
     }
 
+    /// Turns on recording of the full model request body for runs of this
+    /// agent (default off). This is the resolved effective setting; the CLI
+    /// and server compute it from the per-agent `record_prompts` config and the
+    /// `SALVOR_RECORD_PROMPTS` default before calling this. It is PII-sensitive
+    /// (the body may hold user data or secrets) and is deliberately kept out of
+    /// the definition hash. See [`Agent::record_prompts`].
+    #[must_use]
+    pub fn record_prompts(mut self, record_prompts: bool) -> Self {
+        self.record_prompts = record_prompts;
+        self
+    }
+
     /// Builds the agent, computing its definition hash.
     ///
     /// # Errors
@@ -271,6 +295,7 @@ impl AgentBuilder {
                 .max_response_tokens
                 .unwrap_or(DEFAULT_MAX_RESPONSE_TOKENS),
             def_hash,
+            record_prompts: self.record_prompts,
         })
     }
 }

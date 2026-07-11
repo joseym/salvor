@@ -51,7 +51,10 @@ pub async fn run(store_path: &Path, args: RunArgs) -> Result<u8> {
     let store = open_store(store_path)?;
 
     let (agent, servers) = agent_config::build_agent(&config, &args.agent).await?;
-    let runtime = Runtime::new(store.clone());
+    // The agent carries the resolved prompt-recording flag (per-agent config
+    // over SALVOR_RECORD_PROMPTS over off); hand it to the runtime so the
+    // RunCtx driving this run records the body only when opted in.
+    let runtime = Runtime::new(store.clone()).with_record_prompts(agent.record_prompts());
 
     let run_id = RunId::new();
     let uuid = run_id.as_uuid().to_string();
@@ -121,7 +124,7 @@ pub async fn resume(store_path: &Path, args: ResumeArgs) -> Result<u8> {
 
     let config = AgentConfig::load(&args.agent)?;
     let (agent, servers) = agent_config::build_agent(&config, &args.agent).await?;
-    let runtime = Runtime::new(store.clone());
+    let runtime = Runtime::new(store.clone()).with_record_prompts(agent.record_prompts());
 
     let outcome = match disposition {
         Disposition::Resume(_) => {

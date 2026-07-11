@@ -35,6 +35,17 @@ use crate::id::{RunId, SequenceNumber};
 /// contains the newer variants, but that direction is not part of the
 /// contract: the store is embedded, so the reader always upgrades together
 /// with the binary that owns the log.
+///
+/// # Why an additive optional field does not bump this either
+///
+/// The optional `request_body` on [`Event::ModelCallRequested`] follows the
+/// same rule. It carries `#[serde(default, skip_serializing_if =
+/// "Option::is_none")]`, so with recording off (the default) the field is
+/// omitted from the wire form entirely and the event serializes byte for byte
+/// as it did before the field existed. An old log, written before the field,
+/// deserializes with the field defaulted to `None`. An older reader that meets
+/// a log where the field *is* present ignores the unknown `request_body` key.
+/// So no version-1 event changes shape or meaning, and the version stays 1.
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// One record in a run's append-only log.
@@ -110,8 +121,28 @@ pub enum Event {
     ModelCallRequested {
         /// Correlates this request with its [`Event::ModelCallCompleted`].
         seq: SequenceNumber,
-        /// Content hash of the request sent to the model.
+        /// Content hash of the request sent to the model. This is the sole
+        /// replay-correlation key for the call; it is computed the same way
+        /// whether or not `request_body` is recorded, and the body never feeds
+        /// into it.
         request_hash: String,
+        /// The full model request body, verbatim, recorded only when prompt
+        /// recording is opted into (per-agent `record_prompts` or the
+        /// `SALVOR_RECORD_PROMPTS` default). It exists so the v0.3 dashboard
+        /// inspector can show the exact prompt sent.
+        ///
+        /// Off by default, and for a reason: the body can hold user data and
+        /// secrets. When recording is off the field is `None` and, thanks to
+        /// `skip_serializing_if`, is omitted from the wire form, so the event
+        /// serializes byte for byte as it did before this field existed. The
+        /// body is purely informational: replay correlates on `request_hash`
+        /// alone and ignores whatever is (or is not) recorded here, so a log
+        /// captured with bodies replays identically to one captured without.
+        // A future redaction pass, if one is ever built, would belong here at
+        // the recording edge, transforming the value before it is stored. No
+        // such transform exists today; recording is all-or-nothing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_body: Option<serde_json::Value>,
     },
     /// A model call completed. This is the captured nondeterministic boundary:
     /// once recorded, replay reads the response from here and never calls the
@@ -329,6 +360,12 @@ mod tests {
         assert_round_trips(Event::ModelCallRequested {
             seq: SequenceNumber::new(1),
             request_hash: "sha256:req".into(),
+            request_body: None,
+        });
+        assert_round_trips(Event::ModelCallRequested {
+            seq: SequenceNumber::new(1),
+            request_hash: "sha256:req".into(),
+            request_body: Some(serde_json::json!({"model": "test", "messages": []})),
         });
         assert_round_trips(Event::ModelCallCompleted {
             seq: SequenceNumber::new(1),
@@ -393,6 +430,40 @@ mod tests {
             json,
             r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"ModelCallCompleted","payload":{"seq":2,"response":{"text":"hi"},"usage":{"input_tokens":12,"output_tokens":7}}}}"#
         );
+    }
+
+    /// With prompt recording off, `ModelCallRequested` serializes with no
+    /// `request_body` key at all: byte for byte what it produced before the
+    /// field existed. This is the additive-optional contract the
+    /// [`SCHEMA_VERSION`] docs promise, checked directly.
+    #[test]
+    fn model_call_requested_without_body_omits_the_key() {
+        let env = envelope(Event::ModelCallRequested {
+            seq: SequenceNumber::new(2),
+            request_hash: "sha256:req".into(),
+            request_body: None,
+        });
+        let json = serde_json::to_string(&env).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"ModelCallRequested","payload":{"seq":2,"request_hash":"sha256:req"}}}"#
+        );
+        assert!(
+            !json.contains("request_body"),
+            "recording-off must not emit the key: {json}"
+        );
+    }
+
+    /// With recording on, the body rides alongside the hash under its own key.
+    #[test]
+    fn model_call_requested_with_body_carries_it() {
+        let env = envelope(Event::ModelCallRequested {
+            seq: SequenceNumber::new(2),
+            request_hash: "sha256:req".into(),
+            request_body: Some(serde_json::json!({"model": "m"})),
+        });
+        let json = serde_json::to_string(&env).expect("serialize");
+        assert!(json.contains(r#""request_body":{"model":"m"}"#), "{json}");
     }
 
     /// Pins the exact serialized form of the two deterministic-context

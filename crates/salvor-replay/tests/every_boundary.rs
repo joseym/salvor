@@ -132,7 +132,7 @@ fn drive(script: &[Step], prefix: &[EventEnvelope]) -> Result<Drive, ReplayError
                 request_hash,
                 response,
                 usage,
-            } => match cursor.model_call(request_hash)? {
+            } => match cursor.model_call(request_hash, None)? {
                 Outcome::Replayed(reply) => {
                     assert_eq!(&reply.response, response);
                     assert_eq!(&reply.usage, usage);

@@ -106,7 +106,39 @@
 //! # `host` is resolved relative to this file; `guest` is where the guest sees
 //! # it; `perms` is "read" or "read_write".
 //! preopen = [{ host = "./data", guest = "/data", perms = "read" }]
+//!
+//! # Optional. Records the FULL model request body (the exact prompt sent) into
+//! # the durable event log, so the dashboard inspector can show it. OFF by
+//! # default, on purpose: a request body can contain user data and secrets, so
+//! # enabling this stores that verbatim in the log. Turn it on only when you
+//! # accept that.
+//! record_prompts = false
 //! ```
+//!
+//! # Recording the prompt body (`record_prompts`)
+//!
+//! `record_prompts` opts one agent into storing the full model request body on
+//! each `ModelCallRequested` event. It is off by default because the body can
+//! carry user data and secrets, and enabling it writes that verbatim to the
+//! durable log. The recorded body lands only in the log; it never reaches the
+//! progress stream, stderr, or any console output, and it never affects replay
+//! (the request hash, which correlation keys on, is computed the same either
+//! way and the body is ignored on replay).
+//!
+//! Two settings decide the effective flag, in this precedence:
+//!
+//! 1. the per-agent `record_prompts` key in this file, when set (`true` or
+//!    `false`); it wins over everything below, so a file can force recording
+//!    off even where the environment default is on;
+//! 2. otherwise the `SALVOR_RECORD_PROMPTS` environment variable as the global
+//!    default: `1`, `true`, or `yes` (case-insensitive) turn recording on;
+//!    unset, empty, or any other value leave the default unset, so the env var
+//!    can only raise the default, never force a per-agent opt-in back off;
+//! 3. otherwise off.
+//!
+//! In short: per-agent over environment over off. There is deliberately no
+//! automatic redaction. If a redaction pass is ever wanted, the recording edge
+//! in the runtime is where it would go; today recording is all-or-nothing.
 //!
 //! Native Rust tools are code, not config, so the CLI does not register them:
 //! MCP servers and sandboxed wasm components are the config-reachable tool
@@ -126,6 +158,40 @@ use salvor_runtime::{Agent, AgentBuildError, Budgets, Pricing};
 use salvor_tools::mcp::{EffectOverrides, McpServer};
 use salvor_wasm::{DirGrant, WasmEngine, WasmTool, WasmToolSpec};
 use serde::Deserialize;
+
+/// The environment variable naming the global default for prompt-body
+/// recording. Set to `1`/`true`/`yes` (case-insensitive) to default recording
+/// on; anything else leaves the default unset. Per-agent `record_prompts`
+/// overrides it either way. See the module docs.
+const RECORD_PROMPTS_ENV: &str = "SALVOR_RECORD_PROMPTS";
+
+/// Resolves the effective prompt-recording flag from the per-agent setting and
+/// the global env default. Per-agent wins over env, env over off:
+/// `per_agent.or(env_default).unwrap_or(false)`. Kept pure (both inputs are
+/// passed in) so the precedence is unit-testable without touching the real
+/// environment.
+fn resolve_record_prompts(per_agent: Option<bool>, env_default: Option<bool>) -> bool {
+    per_agent.or(env_default).unwrap_or(false)
+}
+
+/// Parses the `SALVOR_RECORD_PROMPTS` spelling into a default. `1`, `true`, or
+/// `yes` (case-insensitive, surrounding whitespace ignored) mean on; unset,
+/// empty, or anything else yield `None`, so the env var never forces a
+/// per-agent opt-in back off. It can only raise the default, never lower it.
+fn parse_record_prompts_env(raw: Option<&str>) -> Option<bool> {
+    match raw
+        .map(|value| value.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("1" | "true" | "yes") => Some(true),
+        _ => None,
+    }
+}
+
+/// Reads the global recording default from the real environment.
+fn env_record_prompts_default() -> Option<bool> {
+    parse_record_prompts_env(std::env::var(RECORD_PROMPTS_ENV).ok().as_deref())
+}
 
 /// The full agent definition, parsed from the TOML file. Every optional field
 /// carries `#[serde(default)]` so a terse file is valid; `deny_unknown_fields`
@@ -161,6 +227,11 @@ pub struct AgentConfig {
     /// Sandboxed WebAssembly component tools the agent may call.
     #[serde(default)]
     pub wasm_tools: Vec<WasmToolConfig>,
+    /// Whether to record the full model request body into the durable event
+    /// log. Optional and off unless set. See the module docs (`record_prompts`)
+    /// for the precedence against `SALVOR_RECORD_PROMPTS` and the PII warning.
+    #[serde(default)]
+    pub record_prompts: Option<bool>,
 }
 
 /// How the API key authenticates, as named in the `[llm]` section. Mirrors
@@ -632,6 +703,15 @@ impl AgentConfig {
         config
     }
 
+    /// The effective prompt-recording flag: the per-agent `record_prompts`
+    /// setting resolved against the `SALVOR_RECORD_PROMPTS` env default. Per
+    /// agent wins over env, env over off (see the module docs). Reads the real
+    /// environment, so both the CLI and the server factory get the same answer.
+    #[must_use]
+    pub fn record_prompts_enabled(&self) -> bool {
+        resolve_record_prompts(self.record_prompts, env_record_prompts_default())
+    }
+
     /// The system prompt text, reading the file when `system_prompt_path` is
     /// set (relative to `agent_dir`).
     fn system_prompt(&self, agent_dir: &Path) -> Result<Option<String>> {
@@ -689,6 +769,9 @@ pub async fn build_agent(
     if let Some(max_tokens) = config.max_response_tokens {
         builder = builder.max_response_tokens(max_tokens);
     }
+    // Resolve the prompt-recording flag once, here, so both the CLI and the
+    // server factory (which both call this function) get the same precedence.
+    builder = builder.record_prompts(config.record_prompts_enabled());
 
     let mut servers = Vec::new();
     for server_config in &config.mcp_servers {
@@ -791,5 +874,61 @@ fn build_error_context(error: AgentBuildError) -> anyhow::Error {
             "budgets.cost_usd is set but there is no [pricing] table; add pricing with input_per_mtok and output_per_mtok, or remove the cost budget"
         ),
         other => anyhow::Error::new(other),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The precedence rule, exercised over the four cases that matter. Per
+    /// agent wins over the env default, which wins over off. The env default is
+    /// always `Some(true)` or `None` (see [`parse_record_prompts_env`]), so
+    /// these cover every reachable combination.
+    #[test]
+    fn record_prompts_precedence() {
+        // Per-agent true with env unset: on.
+        assert!(resolve_record_prompts(Some(true), None));
+        // Per-agent unset with env default true: on.
+        assert!(resolve_record_prompts(None, Some(true)));
+        // Both unset: off.
+        assert!(!resolve_record_prompts(None, None));
+        // Per-agent false overrides an env default of true: off.
+        assert!(!resolve_record_prompts(Some(false), Some(true)));
+    }
+
+    /// The env spellings that turn recording on, and everything that leaves the
+    /// default unset (so it can never force a per-agent opt-in back off).
+    #[test]
+    fn record_prompts_env_parsing() {
+        for on in ["1", "true", "TRUE", "Yes", "  yes  "] {
+            assert_eq!(parse_record_prompts_env(Some(on)), Some(true), "{on:?}");
+        }
+        for unset in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("false"),
+            Some("no"),
+            Some("x"),
+        ] {
+            assert_eq!(parse_record_prompts_env(unset), None, "{unset:?}");
+        }
+    }
+
+    /// `record_prompts` parses from the agent TOML: absent leaves it `None`, and
+    /// an explicit `true`/`false` is read through.
+    #[test]
+    fn record_prompts_parses_from_toml() {
+        let absent = AgentConfig::from_toml_str("model = \"m\"\n").expect("parses");
+        assert_eq!(absent.record_prompts, None);
+
+        let on =
+            AgentConfig::from_toml_str("model = \"m\"\nrecord_prompts = true\n").expect("parses");
+        assert_eq!(on.record_prompts, Some(true));
+
+        let off =
+            AgentConfig::from_toml_str("model = \"m\"\nrecord_prompts = false\n").expect("parses");
+        assert_eq!(off.record_prompts, Some(false));
     }
 }

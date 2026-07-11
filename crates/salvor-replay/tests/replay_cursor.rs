@@ -166,7 +166,7 @@ fn research_run(
         }
     };
 
-    let reply = match cursor.model_call("sha256:req-1")? {
+    let reply = match cursor.model_call("sha256:req-1", None)? {
         Outcome::Replayed(reply) => reply,
         Outcome::Live(permit) => {
             if let Some(intent) = permit.intent() {
@@ -372,7 +372,7 @@ fn divergence_on_payload_mismatch() {
     cursor.random().expect("random replays");
 
     let err = cursor
-        .model_call("sha256:req-DIFFERENT")
+        .model_call("sha256:req-DIFFERENT", None)
         .expect_err("payload mismatch must diverge");
     assert_eq!(
         err,
@@ -381,6 +381,7 @@ fn divergence_on_payload_mismatch() {
             recorded: Box::new(LoggedStep::Event(Event::ModelCallRequested {
                 seq: SequenceNumber::new(3),
                 request_hash: "sha256:req-1".into(),
+                request_body: None,
             })),
             requested: Box::new(RequestedStep::ModelCall {
                 request_hash: "sha256:req-DIFFERENT".into(),
@@ -541,5 +542,90 @@ fn dangling_idempotent_intent_retries_under_recorded_key() {
             seq: SequenceNumber::new(1),
             output: json!({"stored": true}),
         }
+    );
+}
+
+/// A `request_body` recorded on `ModelCallRequested` is inert on replay. A log
+/// that carries the full request body folds to the identical derived state and
+/// replays the identical model reply as the same log without a body: the
+/// cursor correlates on the hash alone and ignores the body. This is the
+/// determinism guarantee that a log captured with bodies (recording on) and
+/// one captured without (recording off) replay to the same states and
+/// completions, with no divergence.
+#[test]
+fn recorded_request_body_does_not_change_replay() {
+    // Builds a four-event log for the same run, differing only in whether the
+    // model intent carries a request body.
+    fn build_log(body: Option<Value>) -> Vec<EventEnvelope> {
+        let events = vec![
+            Event::RunStarted {
+                agent_def_hash: AGENT_HASH.into(),
+                input: json!({"topic": "otters"}),
+            },
+            Event::ModelCallRequested {
+                seq: SequenceNumber::new(1),
+                request_hash: "sha256:req-1".into(),
+                request_body: body,
+            },
+            Event::ModelCallCompleted {
+                seq: SequenceNumber::new(1),
+                response: json!({"text": "otters are semi-aquatic"}),
+                usage: TokenUsage {
+                    input_tokens: 120,
+                    output_tokens: 45,
+                },
+            },
+            Event::RunCompleted {
+                output: json!({"text": "otters are semi-aquatic"}),
+            },
+        ];
+        events
+            .into_iter()
+            .enumerate()
+            .map(|(index, event)| {
+                let seq = SequenceNumber::new(u64::try_from(index).unwrap());
+                EventEnvelope::new(run_id(), seq, ts(seq), event)
+            })
+            .collect()
+    }
+
+    // Folds the log and replays every step, returning the observable results.
+    // Nothing executes: each request is answered from the log.
+    fn replay_all(log: Vec<EventEnvelope>) -> (RunStatus, Value, ModelReply) {
+        let status = derive_state(&log).status;
+        let mut cursor = ReplayCursor::new(log).expect("log is valid");
+        let Outcome::Replayed(input) = cursor.begin(AGENT_HASH).expect("begin replays") else {
+            panic!("begin should replay from a recorded log");
+        };
+        // Pass no body here on purpose: replay ignores the argument, so a log
+        // recorded with a body still matches a caller that supplies none.
+        let Outcome::Replayed(reply) = cursor
+            .model_call("sha256:req-1", None)
+            .expect("model_call replays")
+        else {
+            panic!("model_call should replay from a recorded log");
+        };
+        let output = json!({"text": "otters are semi-aquatic"});
+        cursor.complete_run(&output).expect("complete_run replays");
+        (status, input, reply)
+    }
+
+    let with_body = replay_all(build_log(Some(json!({
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "otters"}]
+    }))));
+    let without_body = replay_all(build_log(None));
+
+    assert_eq!(
+        with_body.0, without_body.0,
+        "derived status must be identical"
+    );
+    assert_eq!(
+        with_body.1, without_body.1,
+        "replayed run input must be identical"
+    );
+    assert_eq!(
+        with_body.2, without_body.2,
+        "replayed model reply must be identical"
     );
 }

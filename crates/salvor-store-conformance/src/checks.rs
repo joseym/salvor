@@ -59,6 +59,7 @@ fn all_event_kinds() -> Vec<Event> {
         Event::ModelCallRequested {
             seq: SequenceNumber::new(1),
             request_hash: "sha256:req".into(),
+            request_body: None,
         },
         Event::ModelCallCompleted {
             seq: SequenceNumber::new(1),

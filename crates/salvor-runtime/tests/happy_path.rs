@@ -102,3 +102,73 @@ async fn multi_step_run_completes_with_recorded_shape_and_usage() {
     };
     assert_eq!(output, &json!({"echo": {"q": "otters"}}));
 }
+
+/// Recording the request body is opt-in and never touches the hash. The same
+/// run driven with recording on and with recording off records the identical
+/// `request_hash`; only the presence of `request_body` differs. When present
+/// the body is the request that was sent, which is the same value the hash is
+/// computed over. Covers the opt-in behavior and the hash invariant.
+#[tokio::test]
+async fn recording_prompts_stores_body_without_changing_the_hash() {
+    // Drives a one-model-call run and returns the recorded `ModelCallRequested`
+    // event. The inputs (agent, input, clock, random) are identical across
+    // calls, so the request, and therefore its hash, is identical too.
+    async fn drive_once(record_prompts: bool, tag: u8) -> Event {
+        let server = ScriptedModel::mount(vec![(1, text_response("done", 10, 5))]).await;
+        let agent = agent_builder(&server.uri()).build().expect("agent builds");
+        let store = Arc::new(SqliteStore::in_memory().expect("store opens"));
+        let runtime = Runtime::with_hooks(store.clone(), fixed_clock(), fixed_random())
+            .with_record_prompts(record_prompts);
+        let run_id = fixed_run_id(tag);
+        runtime
+            .start_with_id(&agent, run_id, json!("hello"))
+            .await
+            .expect("run completes");
+        let log = store.read_log(run_id).await.expect("log reads");
+        log.into_iter()
+            .find_map(|envelope| match envelope.event {
+                event @ Event::ModelCallRequested { .. } => Some(event),
+                _ => None,
+            })
+            .expect("a model intent was recorded")
+    }
+
+    let recorded_on = drive_once(true, 40).await;
+    let recorded_off = drive_once(false, 41).await;
+
+    let Event::ModelCallRequested {
+        request_hash: hash_on,
+        request_body: body_on,
+        ..
+    } = &recorded_on
+    else {
+        panic!("expected a model intent from the recording-on run");
+    };
+    let Event::ModelCallRequested {
+        request_hash: hash_off,
+        request_body: body_off,
+        ..
+    } = &recorded_off
+    else {
+        panic!("expected a model intent from the recording-off run");
+    };
+
+    // The hash is identical whether or not the body is recorded.
+    assert_eq!(
+        hash_on, hash_off,
+        "recording the body must not change the request hash"
+    );
+
+    // Recording off stores no body; recording on stores the request itself.
+    assert!(body_off.is_none(), "recording off must not store a body");
+    let body = body_on.as_ref().expect("recording on stores the body");
+    assert_eq!(
+        body["model"],
+        json!("test-model"),
+        "the recorded body is the real request that was hashed"
+    );
+    assert!(
+        body["messages"].is_array(),
+        "the recorded body carries the request messages"
+    );
+}

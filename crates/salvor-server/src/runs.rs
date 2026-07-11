@@ -310,8 +310,13 @@ fn spawn_drive(state: AppState, run_id: RunId, built: BuiltAgent, verb: DriveVer
     state.begin_run(run_id);
     let task_state = state.clone();
     let handle = tokio::spawn(async move {
-        let runtime = task_state.runtime();
         let BuiltAgent { agent, servers } = built;
+        // The agent carries the resolved prompt-recording flag (per-agent
+        // config over SALVOR_RECORD_PROMPTS over off), computed by the factory
+        // when it built the agent; pass it to the runtime driving this run.
+        let runtime = task_state
+            .runtime()
+            .with_record_prompts(agent.record_prompts());
         let result = match verb {
             DriveVerb::Start(input) => runtime.start_with_id(&agent, run_id, input).await,
             DriveVerb::Resume(input) => runtime.resume(&agent, run_id, input).await,
