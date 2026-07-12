@@ -24,8 +24,9 @@
 //! pure path.
 
 pub use salvor_replay::{
-    BeginPermit, Budget, BudgetKind, Effect, Emitted, Event, EventEnvelope, LoggedStep,
-    ModelCallPermit, ModelReply, NowPermit, Outcome, Parked, PendingCall, RandomPermit,
+    BeginPermit, Budget, BudgetKind, Effect, Emitted, Event, EventEnvelope, LogValidator,
+    LoggedStep, ModelCallPermit, ModelReply, NowPermit, Outcome, Parked, PendingCall, RandomPermit,
     ReplayCursor, ReplayError, RequestedStep, RunId, RunState, RunStatus, SCHEMA_VERSION,
-    SequenceNumber, TokenTotals, TokenUsage, ToolCallPermit, derive_state,
+    SequenceNumber, TokenTotals, TokenUsage, ToolCallPermit, ValidationError, derive_state,
+    validate_next,
 };

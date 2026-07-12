@@ -109,6 +109,27 @@ struct Inner {
     // harmless.
     active: Mutex<HashSet<RunId>>,
     handles: Mutex<HashMap<RunId, JoinHandle<()>>>,
+    // The client-driven runs this process has opened, each with its current
+    // drive-token lease. This registry is what keeps the client-driven and
+    // server-driven modes from colliding over one store: the client-driven
+    // endpoints operate only on runs recorded here, so a server-driven run is
+    // never reachable through them, and a foreign run id with existing history
+    // is refused rather than adopted. It is in-memory because the drive token
+    // is a single-writer lease with a process lifetime:
+    // re-opening a run mints a fresh lease.
+    client_runs: Mutex<HashMap<RunId, ClientRunLease>>,
+}
+
+/// The per-run lease state for a client-driven run.
+#[derive(Debug, Clone)]
+pub struct ClientRunLease {
+    /// The opaque drive token the single writer must present on every append.
+    pub drive_token: String,
+    /// Whether the opener asked for model request bodies to be recorded. Stored
+    /// at open time; it governs the server-performed model step, not yet
+    /// implemented, and carries no effect on the generic append this surface
+    /// serves.
+    pub record_prompts: bool,
 }
 
 impl AppState {
@@ -127,6 +148,7 @@ impl AppState {
                 agents: Mutex::new(HashMap::new()),
                 active: Mutex::new(HashSet::new()),
                 handles: Mutex::new(HashMap::new()),
+                client_runs: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -281,6 +303,48 @@ impl AppState {
             .lock()
             .expect("active runs lock")
             .contains(&run_id)
+    }
+
+    /// Records (or re-leases) a client-driven run, returning a fresh drive
+    /// token. Called by the open endpoint both for a new run and for a
+    /// re-open, so a resuming tab always receives a current lease and any
+    /// earlier lease is superseded (the single-writer rule from Q5).
+    pub fn lease_client_run(&self, run_id: RunId, record_prompts: bool) -> String {
+        let drive_token = format!("dt_{}", uuid::Uuid::new_v4().simple());
+        self.inner
+            .client_runs
+            .lock()
+            .expect("client runs lock")
+            .insert(
+                run_id,
+                ClientRunLease {
+                    drive_token: drive_token.clone(),
+                    record_prompts,
+                },
+            );
+        drive_token
+    }
+
+    /// The lease for a client-driven run, if this process opened one under
+    /// `run_id`.
+    #[must_use]
+    pub fn client_run(&self, run_id: RunId) -> Option<ClientRunLease> {
+        self.inner
+            .client_runs
+            .lock()
+            .expect("client runs lock")
+            .get(&run_id)
+            .cloned()
+    }
+
+    /// Whether `run_id` names a client-driven run this process opened.
+    #[must_use]
+    pub fn is_client_run(&self, run_id: RunId) -> bool {
+        self.inner
+            .client_runs
+            .lock()
+            .expect("client runs lock")
+            .contains_key(&run_id)
     }
 
     /// Aborts every in-flight driver task. Durability is unaffected: each event

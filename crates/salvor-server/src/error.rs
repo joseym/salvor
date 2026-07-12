@@ -39,6 +39,22 @@ pub enum ApiError {
     /// A verb was applied to a run in the wrong state (resuming a finished
     /// run, resolving a run that has no dangling write). HTTP 409.
     WrongState(String),
+    /// A client-driven append arrived with no drive token. HTTP 401. The drive
+    /// token is the per-run single-writer lease; every append must present it.
+    MissingDriveToken(String),
+    /// A client-driven append presented a drive token that is not the run's
+    /// current lease. HTTP 403. Only the run's current writer may drive it.
+    InvalidDriveToken(String),
+    /// A client-driven append carried an event kind this endpoint does not
+    /// accept (a model or tool event, which the model-step and tool-step
+    /// endpoints own). HTTP 422.
+    UnsupportedEventKind(String),
+    /// A client-driven append is not the legal next event for the run's log:
+    /// the re-folding append-guard rejected it, or byte-different bytes arrived
+    /// at an already-recorded position. HTTP 409.
+    Divergence(String),
+    /// A request body exceeded the size or count cap. HTTP 413.
+    PayloadTooLarge(String),
     /// A run needs human reconciliation and cannot be driven automatically.
     /// Carries the recorded write intent as evidence. HTTP 409.
     NeedsReconciliation {
@@ -64,6 +80,13 @@ impl ApiError {
             ApiError::RunExists(_) => (StatusCode::CONFLICT, "run_exists"),
             ApiError::WrongState(_) => (StatusCode::CONFLICT, "wrong_state"),
             ApiError::NeedsReconciliation { .. } => (StatusCode::CONFLICT, "needs_reconciliation"),
+            ApiError::MissingDriveToken(_) => (StatusCode::UNAUTHORIZED, "missing_drive_token"),
+            ApiError::InvalidDriveToken(_) => (StatusCode::FORBIDDEN, "invalid_drive_token"),
+            ApiError::UnsupportedEventKind(_) => {
+                (StatusCode::UNPROCESSABLE_ENTITY, "unsupported_event_kind")
+            }
+            ApiError::Divergence(_) => (StatusCode::CONFLICT, "divergence"),
+            ApiError::PayloadTooLarge(_) => (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large"),
             ApiError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         }
     }
@@ -77,6 +100,11 @@ impl ApiError {
             | ApiError::RunExists(m)
             | ApiError::WrongState(m)
             | ApiError::Internal(m)
+            | ApiError::MissingDriveToken(m)
+            | ApiError::InvalidDriveToken(m)
+            | ApiError::UnsupportedEventKind(m)
+            | ApiError::Divergence(m)
+            | ApiError::PayloadTooLarge(m)
             | ApiError::NeedsReconciliation { message: m, .. } => m.clone(),
             ApiError::Unauthorized => "missing or invalid bearer token".to_owned(),
         }

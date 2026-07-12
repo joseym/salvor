@@ -38,6 +38,7 @@
 
 pub mod agents;
 pub mod auth;
+pub mod client_runs;
 pub mod dispatch;
 pub mod error;
 pub mod json;
@@ -53,7 +54,8 @@ use tokio::net::TcpListener;
 pub use dispatch::{Disposition, ResumeKind, classify};
 pub use error::ApiError;
 pub use state::{
-    AgentDefinition, AgentFactory, AppState, BuildFuture, BuiltAgent, DefFormat, RegisteredAgent,
+    AgentDefinition, AgentFactory, AppState, BuildFuture, BuiltAgent, ClientRunLease, DefFormat,
+    RegisteredAgent,
 };
 
 /// Builds the control-plane router over `state`, with the bearer-auth layer in
@@ -68,6 +70,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/runs/{id}/events", get(sse::stream))
         .route("/v1/runs/{id}/resume", post(runs::resume))
         .route("/v1/runs/{id}/resolve", post(runs::resolve))
+        .route("/v1/client-runs", post(client_runs::open))
+        .route("/v1/client-runs/{id}/log", get(client_runs::get_log))
+        .route("/v1/client-runs/{id}/events", post(client_runs::append))
         .layer(from_fn_with_state(state.clone(), auth::require_bearer))
         .with_state(state)
 }

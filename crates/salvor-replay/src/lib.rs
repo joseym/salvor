@@ -69,6 +69,7 @@ mod event;
 mod id;
 mod replay;
 mod state;
+mod validate;
 
 pub use effect::Effect;
 pub use event::{Budget, BudgetKind, Event, EventEnvelope, SCHEMA_VERSION, TokenUsage};
@@ -78,3 +79,4 @@ pub use replay::{
     RandomPermit, ReplayCursor, ReplayError, RequestedStep, ToolCallPermit,
 };
 pub use state::{PendingCall, RunState, RunStatus, TokenTotals, derive_state};
+pub use validate::{LogValidator, ValidationError, validate_next};
