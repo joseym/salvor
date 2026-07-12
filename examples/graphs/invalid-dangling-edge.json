@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "nodes": [
+    {
+      "kind": "agent",
+      "payload": {
+        "id": "research",
+        "agent_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+      }
+    },
+    {
+      "kind": "gate",
+      "payload": {
+        "id": "approve",
+        "approval_schema": { "type": "object" }
+      }
+    }
+  ],
+  "edges": [
+    { "from": "research", "to": "aprove" }
+  ]
+}

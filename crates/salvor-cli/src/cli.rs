@@ -52,6 +52,32 @@ pub enum Command {
     Replay(ReplayArgs),
     /// Run the control-plane HTTP + server-sent-events server over the store.
     Serve(ServeArgs),
+    /// Author-time graph document tools: validate a document, or print its
+    /// JSON Schema. These read no store and drive no run.
+    Graph {
+        /// The graph subcommand to run.
+        #[command(subcommand)]
+        command: GraphCommand,
+    },
+}
+
+/// The verbs under `salvor graph`.
+#[derive(Debug, Subcommand)]
+pub enum GraphCommand {
+    /// Validate a graph document JSON file: parse it strictly and run every
+    /// check, printing a summary on success or the precise node/edge errors on
+    /// failure.
+    Validate(GraphValidateArgs),
+    /// Print the graph document JSON Schema to stdout.
+    Schema,
+}
+
+/// Arguments to `graph validate`.
+#[derive(Debug, Args)]
+pub struct GraphValidateArgs {
+    /// Path to the graph document (JSON).
+    #[arg(value_name = "FILE")]
+    pub path: PathBuf,
 }
 
 /// Arguments to `run`.

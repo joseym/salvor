@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/salvor-replay",
+    "crates/salvor-graph",
     "crates/salvor-core",
     "crates/salvor-store",
     "crates/salvor-store-conformance",
@@ -37,6 +38,7 @@ repository = "https://github.com/joseym/salvor"
 
 [workspace.dependencies]
 salvor-replay = { path = "crates/salvor-replay" }
+salvor-graph = { path = "crates/salvor-graph" }
 salvor-core = { path = "crates/salvor-core" }
 salvor-store = { path = "crates/salvor-store" }
 salvor-store-conformance = { path = "crates/salvor-store-conformance" }

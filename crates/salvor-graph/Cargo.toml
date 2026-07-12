@@ -1,0 +1,18 @@
+[package]
+name = "salvor-graph"
+description = "Pure, IO-free graph document model, strict versioned validation, and JSON Schema emission for the Salvor v0.4 graph API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+# schemars derives the graph document's JSON Schema, the single source of truth
+# editors and the future per-language builders read.
+schemars.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -71,5 +71,11 @@ pub async fn dispatch(cli: Cli) -> Result<u8> {
         Command::History(args) => commands::history(store, args).await,
         Command::Replay(args) => commands::replay(store, args).await,
         Command::Serve(args) => commands::serve(store, args).await,
+        // Graph document tooling reads no store and drives no run, so these
+        // handlers are synchronous and ignore the store path.
+        Command::Graph { command } => match command {
+            crate::cli::GraphCommand::Validate(args) => commands::graph_validate(args),
+            crate::cli::GraphCommand::Schema => commands::graph_schema(),
+        },
     }
 }

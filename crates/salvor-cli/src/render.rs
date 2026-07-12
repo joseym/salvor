@@ -180,6 +180,32 @@ pub fn replay_summary(state: &RunState) -> String {
     out
 }
 
+/// The success report for `graph validate`: the node and edge counts and the
+/// entry (no inbound) and terminal (no outbound) node ids. Pure formatting of a
+/// [`salvor_graph::GraphSummary`]; a validation failure is printed by the
+/// handler, not here.
+#[must_use]
+pub fn graph_summary(summary: &salvor_graph::GraphSummary) -> String {
+    format!(
+        "graph ok: {} node(s), {} edge(s)\n\
+         entry:    {}\n\
+         terminal: {}\n",
+        summary.node_count,
+        summary.edge_count,
+        join_ids(&summary.entry_nodes),
+        join_ids(&summary.terminal_nodes),
+    )
+}
+
+/// Joins node ids for the summary, or "(none)" when the list is empty.
+fn join_ids(ids: &[String]) -> String {
+    if ids.is_empty() {
+        "(none)".to_owned()
+    } else {
+        ids.join(", ")
+    }
+}
+
 /// A short, human status word for a run, for the `list` table and the replay
 /// summary. Terminal payloads are elided here; `history`/`replay` show them.
 #[must_use]

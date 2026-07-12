@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "nodes": [
+    {
+      "kind": "agent",
+      "payload": {
+        "id": "draft",
+        "agent_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+      }
+    },
+    {
+      "kind": "agent",
+      "payload": {
+        "id": "critique",
+        "agent_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+      }
+    }
+  ],
+  "edges": [
+    { "from": "draft", "to": "critique" },
+    { "from": "critique", "to": "draft" }
+  ]
+}

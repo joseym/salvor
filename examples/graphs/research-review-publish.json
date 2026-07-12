@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "nodes": [
+    {
+      "kind": "agent",
+      "payload": {
+        "id": "research",
+        "agent_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "output_schema": { "type": "object", "properties": { "draft": { "type": "string" } }, "required": ["draft"] }
+      }
+    },
+    {
+      "kind": "agent",
+      "payload": {
+        "id": "review",
+        "agent_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        "input_schema": { "type": "object", "properties": { "draft": { "type": "string" } }, "required": ["draft"] },
+        "output_schema": { "type": "object", "properties": { "draft": { "type": "string" } }, "required": ["draft"] }
+      }
+    },
+    {
+      "kind": "gate",
+      "payload": {
+        "id": "approve",
+        "prompt": "Approve this draft for publication?",
+        "approval_schema": {
+          "type": "object",
+          "properties": { "approved": { "type": "boolean" } },
+          "required": ["approved"]
+        }
+      }
+    },
+    {
+      "kind": "tool",
+      "payload": {
+        "id": "publish",
+        "tool": "http_post",
+        "input": { "body": "approve.draft", "url": "config.publish_url" }
+      }
+    }
+  ],
+  "edges": [
+    { "from": "research", "to": "review" },
+    { "from": "review", "to": "approve" },
+    { "from": "approve", "to": "publish" }
+  ]
+}

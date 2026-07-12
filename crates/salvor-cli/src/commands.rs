@@ -41,7 +41,9 @@ use tokio::net::TcpListener;
 use uuid::Uuid;
 
 use crate::agent_config::{self, AgentConfig};
-use crate::cli::{HistoryArgs, ReplayArgs, ResolveArgs, ResumeArgs, RunArgs, ServeArgs};
+use crate::cli::{
+    GraphValidateArgs, HistoryArgs, ReplayArgs, ResolveArgs, ResumeArgs, RunArgs, ServeArgs,
+};
 use crate::render;
 
 /// `salvor run`: start a fresh run, print its id, drive it, and report.
@@ -285,6 +287,63 @@ pub async fn serve(store_path: &Path, args: ServeArgs) -> Result<u8> {
     salvor_server::serve(listener, state)
         .await
         .context("serving the control plane")?;
+    Ok(0)
+}
+
+/// `salvor graph validate <path>`: parse a graph document strictly and run
+/// every validation check.
+///
+/// The exit-code contract matches the rest of the CLI: `Ok(0)` on a valid
+/// document, `Ok(1)` for a document the tool deliberately refuses (unreadable
+/// file, non-JSON, or a validation failure). Every failure prints a clear
+/// message to stderr and never panics. On success the summary (node/edge counts
+/// and entry/terminal nodes) prints to stdout.
+///
+/// This handler reads no store and drives no run: a graph document is
+/// validated in isolation.
+pub fn graph_validate(args: GraphValidateArgs) -> Result<u8> {
+    let path = args.path.display().to_string();
+
+    let text = match std::fs::read_to_string(&args.path) {
+        Ok(text) => text,
+        Err(error) => {
+            eprintln!("cannot read graph file {path}: {error}");
+            return Ok(1);
+        }
+    };
+
+    // Strict parse: a stray field is a rejection, not a warning, because a graph
+    // is a control document.
+    let graph: salvor_graph::Graph = match serde_json::from_str(&text) {
+        Ok(graph) => graph,
+        Err(error) => {
+            eprintln!("{path} is not a valid graph document: {error}");
+            return Ok(1);
+        }
+    };
+
+    match salvor_graph::validate(&graph) {
+        Ok(summary) => {
+            print!("{}", render::graph_summary(&summary));
+            Ok(0)
+        }
+        Err(errors) => {
+            eprintln!("{path}: {} validation error(s):", errors.len());
+            for error in &errors {
+                eprintln!("  - {error}");
+            }
+            Ok(1)
+        }
+    }
+}
+
+/// `salvor graph schema`: print the graph document JSON Schema to stdout.
+///
+/// This is the single source of truth for the document format, so it is emitted
+/// verbatim from the [`salvor_graph`] types with no store and no run involved.
+pub fn graph_schema() -> Result<u8> {
+    let schema = salvor_graph::graph_schema();
+    println!("{}", serde_json::to_string_pretty(&schema)?);
     Ok(0)
 }
 
