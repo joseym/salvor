@@ -34,9 +34,11 @@
 
 #![warn(missing_docs)]
 
+pub mod builder;
 pub mod document;
 pub mod validate;
 
+pub use builder::{AgentSpec, BranchSpec, GateSpec, GraphBuilder, MapSpec, ToolSpec};
 pub use document::{
     AgentNode, BranchCase, BranchCondition, BranchNode, Edge, GateNode, Graph, MapBody, MapNode,
     Node, SCHEMA_VERSION, ToolNode,
