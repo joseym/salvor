@@ -268,10 +268,20 @@ pub async fn serve(store_path: &Path, args: ServeArgs) -> Result<u8> {
     });
 
     // The general model executor client-driven runs perform their model step
-    // through, wired from the CLI's own client-construction path (a
-    // `salvor_llm::Client` from the environment). Another host injects its own
-    // executor; this is the out-of-the-box default, mirroring the agent factory.
-    let model_client = salvor_llm::Client::from_env()
+    // through, wired from the CLI's own client-construction path. The config is
+    // built explicitly: the key keeps `Config::from_env`'s semantics
+    // (`ANTHROPIC_API_KEY`, absent for a local endpoint, which sends no auth
+    // header), and `SALVOR_MODEL_BASE_URL`, when set and non-empty, points the
+    // executor at a local or offline endpoint speaking the same wire protocol
+    // instead of the public one. Another host injects its own executor; this is
+    // the out-of-the-box default, mirroring the agent factory.
+    let mut model_config = salvor_llm::Config::from_env();
+    if let Ok(base_url) = std::env::var("SALVOR_MODEL_BASE_URL")
+        && !base_url.is_empty()
+    {
+        model_config = model_config.with_base_url(base_url);
+    }
+    let model_client = salvor_llm::Client::new(model_config)
         .context("building the model client for the client-driven model step")?;
 
     // An empty tool registry: the mechanism is wired, but salvor serve ships no

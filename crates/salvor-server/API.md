@@ -499,12 +499,16 @@ Retry identity is `(seq, request_hash)`, mirroring `ReplayCursor::model_call`:
 
 The model executor is a general injection seam the embedding binary supplies
 (the `AgentFactory` pattern): `salvor serve` wires a default from its own model
-client out of the box, and another host injects its own. A step against a server
-with no executor wired is `503 model_executor_unavailable`, and no intent is
-written for the call it cannot make, so the run stays drivable once one exists. A
-provider failure is `502 model_execution`; no completion is recorded, so the
-write-ahead intent is left dangling (the legal crash story) and a retry re-issues
-the call safely.
+client out of the box, and another host injects its own. The default executor
+reads `ANTHROPIC_API_KEY` for its credential and targets the public endpoint;
+setting `SALVOR_MODEL_BASE_URL` points it at a local or offline endpoint
+speaking the same Messages wire protocol instead. With no key set, no auth
+header is sent at all, which is what local endpoints expect. A step against a
+server with no executor wired is `503 model_executor_unavailable`, and no intent
+is written for the call it cannot make, so the run stays drivable once one
+exists. A provider failure is `502 model_execution`; no completion is recorded,
+so the write-ahead intent is left dangling (the legal crash story) and a retry
+re-issues the call safely.
 
 #### Streaming variant
 
