@@ -9,6 +9,10 @@ repository.workspace = true
 [dependencies]
 reqwest.workspace = true
 tokio.workspace = true
+# tokio-stream drives the reqwest byte stream (Stream + StreamExt) when reading a
+# streaming Messages response. Already a workspace dependency (salvor-server), so
+# it adds nothing new to the dependency tree.
+tokio-stream.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

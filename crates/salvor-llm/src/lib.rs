@@ -49,12 +49,24 @@
 //! [`StopReason::Other`], and unknown top-level fields are ignored. A response
 //! that grows new fields never fails to parse.
 //!
+//! # Streaming
+//!
+//! [`Client::stream_message`] sends the request with `stream: true` and returns
+//! a [`MessageStream`] over the server-sent-events response. Pull typed
+//! [`StreamEvent`]s one at a time with [`MessageStream::next_event`] for a live
+//! consumer (a token or cost ticker), or fold the whole stream into a
+//! [`MessageResponse`] with [`MessageStream::get_final_message`]. Streaming does
+//! not change what a recording consumer stores: the assembled final message is
+//! byte-for-byte equal in content and usage to what [`Client::send_message`]
+//! returns for the same request, so which path produced it does not matter.
+//! Only the initial connection is retried; once bytes flow, errors are surfaced
+//! rather than retried, and an `error` event becomes an [`Error`].
+//!
 //! # Not yet included
 //!
-//! Streaming responses are deliberately out of scope for v0.1. The request
-//! struct is kept minimal: tuning parameters such as `thinking` and
+//! The request struct is kept minimal: tuning parameters such as `thinking` and
 //! `temperature` are not sent, because current Claude models reject several of
-//! them and the defaults are correct. Both are expected to arrive in a later
+//! them and the defaults are correct. They are expected to arrive in a later
 //! version, additively.
 //!
 //! # Example
@@ -79,10 +91,10 @@ mod config;
 mod error;
 mod types;
 
-pub use client::Client;
+pub use client::{Client, MessageAccumulator, MessageStream};
 pub use config::{AuthKind, Config};
 pub use error::{ApiError, Error};
 pub use types::{
-    Content, ContentBlock, Message, MessageRequest, MessageResponse, Role, StopReason, Tool,
-    ToolResultContent, Usage,
+    Content, ContentBlock, ContentDelta, Message, MessageDeltaUsage, MessageRequest,
+    MessageResponse, Role, Source, StopReason, StreamEvent, Tool, ToolResultContent, Usage,
 };

@@ -57,7 +57,9 @@ time = { version = "0.3", features = ["serde-well-known", "macros"] }
 anyhow = "1"
 tokio = { version = "1", features = ["full"] }
 # rustls only: reqwest's default native-tls feature would add a system OpenSSL dependency.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# The `stream` feature exposes Response::bytes_stream, which salvor-llm consumes
+# to read the server-sent-events body of a streaming Messages response.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 wiremock = "0.6"
 # The control-plane HTTP server (salvor-server, M14). axum is the router and
 # extractor layer; it was already compiled in the workspace as a salvor-tools

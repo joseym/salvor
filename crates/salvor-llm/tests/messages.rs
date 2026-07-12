@@ -98,6 +98,12 @@ async fn sends_correct_path_headers_and_body() {
     assert_eq!(body["system"], "You are terse.");
     assert_eq!(body["messages"][0]["role"], "user");
     assert_eq!(body["messages"][0]["content"], "Hello");
+    // The non-streaming path must not carry a `stream` key: the field defaults
+    // false and is skipped, so the recorded request shape is unchanged.
+    assert!(
+        body.get("stream").is_none(),
+        "a non-streaming request must not serialize a stream flag"
+    );
 }
 
 // 1 (continued). The x-api-key header is absent when no key is configured.
@@ -274,6 +280,86 @@ async fn builds_tool_result_follow_up_message() {
                     "content": "72F and sunny"
                 }
             ]
+        })
+    );
+}
+
+// 3 (continued). Image and document input blocks round-trip through serde,
+//    including the URL and unknown source forms.
+#[tokio::test]
+async fn image_and_document_blocks_round_trip() {
+    let blocks = vec![
+        ContentBlock::image_base64("image/png", "aGVsbG8="),
+        ContentBlock::image_url("https://example.com/cat.png"),
+        ContentBlock::document_pdf("JVBERi0="),
+        ContentBlock::document_base64("application/pdf", "cGRmYnl0ZXM="),
+        ContentBlock::document_url("https://example.com/report.pdf"),
+    ];
+    for block in blocks {
+        let json = serde_json::to_value(&block).expect("serializes");
+        let restored: ContentBlock = serde_json::from_value(json).expect("deserializes");
+        assert_eq!(restored, block, "block must survive a round trip");
+    }
+
+    // A source shape the client does not model (a Files API file_id reference)
+    // still round-trips through the Unknown fallback.
+    let file_block = json!({
+        "type": "image",
+        "source": { "type": "file", "file_id": "file_123" }
+    });
+    let parsed: ContentBlock =
+        serde_json::from_value(file_block.clone()).expect("unknown source parses");
+    assert_eq!(
+        serde_json::to_value(&parsed).expect("re-serializes"),
+        file_block,
+        "an unknown source form must re-serialize unchanged"
+    );
+}
+
+// 3 (continued). Pinned wire JSON: an image block and a document block
+//    serialize to the exact shapes the current Messages API expects.
+//
+// Shapes cited from the claude-api skill (Document & File Input quick reference
+// and the Python/TypeScript Vision examples): an image block is
+// `{"type":"image","source":{"type":"base64"|"url",...}}` and a PDF document is
+// `{"type":"document","source":{"type":"base64","media_type":"application/pdf",...}}`.
+#[test]
+fn image_block_matches_pinned_wire_shape() {
+    let block = ContentBlock::image_base64("image/png", "aGVsbG8=");
+    assert_eq!(
+        serde_json::to_value(&block).expect("serializes"),
+        json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": "aGVsbG8="
+            }
+        })
+    );
+
+    let url_block = ContentBlock::image_url("https://example.com/cat.png");
+    assert_eq!(
+        serde_json::to_value(&url_block).expect("serializes"),
+        json!({
+            "type": "image",
+            "source": { "type": "url", "url": "https://example.com/cat.png" }
+        })
+    );
+}
+
+#[test]
+fn document_block_matches_pinned_wire_shape() {
+    let block = ContentBlock::document_pdf("JVBERi0=");
+    assert_eq!(
+        serde_json::to_value(&block).expect("serializes"),
+        json!({
+            "type": "document",
+            "source": {
+                "type": "base64",
+                "media_type": "application/pdf",
+                "data": "JVBERi0="
+            }
         })
     );
 }
