@@ -1,24 +1,28 @@
 """Proves the client-driven run driver against a real ``salvor serve``.
 
-Two layers, both offline and keyless:
+Three layers, all offline and keyless:
 
-- :class:`ClientRunLoopRealServer` drives the full control-and-context loop
-  against the actual ``salvor serve`` binary over HTTP: open, the guarded
-  generic append, the log read-back, re-open (resume) with a fresh lease, the
-  byte-identical idempotent no-op, and the divergence refusal. This is the real
-  durability surface, folded by the same runtime the CLI uses.
+- :class:`ClientRunLoopRealServer` drives the full loop against the actual
+  ``salvor serve`` binary over HTTP: open, the guarded generic append, the log
+  read-back, re-open (resume) with a fresh lease, the byte-identical idempotent
+  no-op, the divergence refusal, and the LIVE model step. ``salvor serve``'s
+  client-driven model executor honors ``SALVOR_MODEL_BASE_URL``, so the step
+  runs against the scripted ``salvor-demo-model`` with no key, and the demo
+  model's own request log counts provider hits: the retry proof asserts the
+  count does not move (no re-pay).
+
+- :class:`StreamingModelStepRealServer` proves ``model_step_stream`` delivers
+  live deltas then the completion through the same real serve binary and its
+  real executor. The demo model does not implement the provider's streaming
+  wire (it ignores ``stream: true`` and answers plain JSON), so this class
+  points ``SALVOR_MODEL_BASE_URL`` at a local endpoint speaking the Messages
+  SSE protocol, the same dual-mode provider shape the server test suite uses.
 
 - :class:`DriverAgainstStub` exercises the four server-performed methods
-  (``model_step`` unary and streaming, ``tool_step``, ``resolve``) against a
-  small stdlib HTTP stub that speaks the documented wire shapes. ``salvor
-  serve`` wires its client-driven model executor from ``salvor_llm::Client``,
-  which reads only ``ANTHROPIC_API_KEY`` and targets the public endpoint (there
-  is no base-URL override), and it wires an empty tool registry, so those two
-  side-effecting steps cannot be exercised offline through ``salvor serve``
-  itself. The stub stands in for a host that injects a local model executor and
-  a tool registry (the composition pattern the design intends), and the wire
-  shapes it returns are the ones the server test suites in
-  ``crates/salvor-server/tests`` prove.
+  against a small stdlib HTTP stub speaking the documented wire shapes,
+  covering the branches the live stack cannot produce on demand (a dangling
+  write's ``needs_reconciliation``, ``resolve``); ``salvor serve`` wires an
+  empty tool registry, so the tool step is stub-only.
 
 Standard library only (``unittest``, ``http.server``, ``subprocess``), plus the
 SDK's own dependency ``httpx``. Run it with
@@ -64,12 +68,35 @@ def free_port() -> int:
         return sock.getsockname()[1]
 
 
+def wait_until_up(base: str) -> bool:
+    """Poll the control plane until it answers, within a bounded deadline."""
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        try:
+            httpx.get(f"{base}/v1/agents", timeout=0.5)
+            return True
+        except httpx.HTTPError:
+            time.sleep(0.1)
+    return False
+
+
+def terminate(*procs: "subprocess.Popen | None") -> None:
+    for proc in procs:
+        if proc is not None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+
 class ClientRunLoopRealServer(unittest.TestCase):
-    """The full control-and-context loop against the real control-plane binary."""
+    """The full loop, model step included, against the real control-plane binary."""
 
     proc: subprocess.Popen
     model: subprocess.Popen
     base: str
+    model_log: Path
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -82,14 +109,23 @@ class ClientRunLoopRealServer(unittest.TestCase):
         cls.base = f"http://127.0.0.1:{serve_port}"
         store = f"/tmp/salvor-driver-test-{serve_port}.db"
         Path(store).unlink(missing_ok=True)
-        cls.model = subprocess.Popen(
-            [str(DEMO_MODEL), "--port", str(model_port), "--delay-ms", "0"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        # The demo model logs one line per request to stderr; capturing it is
+        # what lets the retry test count provider hits (the no-re-pay proof).
+        cls.model_log = Path(f"/tmp/salvor-driver-test-model-{model_port}.log")
+        cls.model_log.unlink(missing_ok=True)
+        with cls.model_log.open("wb") as log:
+            cls.model = subprocess.Popen(
+                [str(DEMO_MODEL), "--port", str(model_port), "--delay-ms", "0"],
+                stdout=log,
+                stderr=log,
+            )
         env = {
             "PATH": "/usr/bin:/bin",
+            # The demo agent's own model route (server-driven runs).
             "SALVOR_DEMO_BASE_URL": f"http://127.0.0.1:{model_port}",
+            # The client-driven model step's executor route: the same offline
+            # scripted model, no key needed.
+            "SALVOR_MODEL_BASE_URL": f"http://127.0.0.1:{model_port}",
         }
         cls.proc = subprocess.Popen(
             [str(SALVOR), "--store", store, "serve", "--bind", f"127.0.0.1:{serve_port}"],
@@ -97,26 +133,17 @@ class ClientRunLoopRealServer(unittest.TestCase):
             stderr=subprocess.DEVNULL,
             env=env,
         )
-        deadline = time.time() + 15
-        while time.time() < deadline:
-            try:
-                httpx.get(f"{cls.base}/v1/agents", timeout=0.5)
-                break
-            except httpx.HTTPError:
-                time.sleep(0.1)
-        else:
+        if not wait_until_up(cls.base):
             cls.tearDownClass()
             raise unittest.SkipTest("salvor serve did not come up")
 
     @classmethod
     def tearDownClass(cls) -> None:
-        for proc in (getattr(cls, "proc", None), getattr(cls, "model", None)):
-            if proc is not None:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
+        terminate(getattr(cls, "proc", None), getattr(cls, "model", None))
+
+    def provider_hits(self) -> int:
+        """How many model requests the scripted demo model has served."""
+        return self.model_log.read_text().count("request #")
 
     def started(self, run: ClientRunDriver, seq: int) -> dict:
         return run.envelope(
@@ -212,33 +239,230 @@ class ClientRunLoopRealServer(unittest.TestCase):
             run.append([model_event])
         self.assertEqual(caught.exception.code, "unsupported_event_kind")
 
-    def test_model_step_reaches_executor_or_reports_the_gap(self) -> None:
+    def test_model_step_live_records_returns_and_never_re_pays(self) -> None:
+        """The live model step against the demo model, with the no-re-pay proof.
+
+        ``SALVOR_MODEL_BASE_URL`` points the serve binary's real executor at the
+        scripted demo model, so the step is a genuine server-performed provider
+        call, keyless and offline. The demo model's request log counts hits: the
+        first step costs exactly one, the retry costs zero, and a streaming
+        retry of the completed step also costs zero (it replays the recorded
+        completion as a single frame).
+        """
         run = ClientRunDriver.open(self.base)
         self.addCleanup(run.close)
         run.append([self.started(run, 0)])
+        # One user message reaches the demo model as its scripted turn 1: a
+        # search_notes tool_use response carrying usage 200 in / 20 out.
         request = {
             "model": "test-model",
             "max_tokens": 256,
             "messages": [{"role": "user", "content": "draft a plan"}],
         }
-        try:
-            result = run.model_step(1, request)
-        except SalvorAPIError as error:
-            if error.code in ("model_executor_unavailable", "model_execution"):
-                self.skipTest(
-                    "salvor serve's client-driven model executor targets the public "
-                    "endpoint (Client::from_env has no base-URL override), so the "
-                    "model step cannot reach the offline demo model; see the "
-                    "stub-backed DriverAgainstStub tests for the driver's model-step "
-                    f"logic. server said: {error.code}"
-                )
-            raise
-        # A reachable executor: assert the usage folds and the retry is a no-op
-        # returning the recorded completion (no re-pay).
-        self.assertIsNotNone(result.usage)
+
+        before = self.provider_hits()
+        result = run.model_step(1, request)
+        self.assertEqual(result.usage.input_tokens, 200)
+        self.assertEqual(result.usage.output_tokens, 20)
+        content = result.response["content"][0]
+        self.assertEqual(content["type"], "tool_use")
+        self.assertEqual(content["name"], "search_notes")
+        self.assertEqual(self.provider_hits(), before + 1, "one live provider call")
+
+        # The log holds RunStarted, the intent, and the completion.
+        log = run.log()
+        self.assertEqual(
+            [e.kind for e in log],
+            ["RunStarted", "ModelCallRequested", "ModelCallCompleted"],
+        )
+
+        # The same step again: the recorded completion comes back verbatim, the
+        # provider is not hit again, and the log does not grow. No re-pay.
         retry = run.model_step(1, request)
-        self.assertEqual(retry.response, result.response)
-        self.assertEqual(len(run.log()), 3)
+        self.assertEqual(retry.raw, result.raw, "the recorded completion, verbatim")
+        self.assertEqual(self.provider_hits(), before + 1, "retry paid nothing")
+        self.assertEqual(len(run.log()), 3, "no growth")
+
+        # A streaming retry of an already-completed step streams one complete
+        # frame carrying the recorded completion, with no deltas and no hit.
+        stream = run.model_step_stream(1, request)
+        deltas = list(stream)
+        self.assertEqual(deltas, [], "a replayed step has no live deltas")
+        self.assertEqual(stream.completion.response, result.response)
+        self.assertEqual(self.provider_hits(), before + 1, "streaming replay paid nothing")
+
+
+def sse_frame(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+def messages_sse_body() -> str:
+    """A Messages SSE body folding to the same response as the JSON one, with
+    the text arriving as two deltas so delta delivery is exercised. This is the
+    dual-mode provider shape ``crates/salvor-server/tests/model_step.rs`` uses.
+    """
+    return (
+        sse_frame(
+            "message_start",
+            {
+                "type": "message_start",
+                "message": {
+                    "id": "msg_parity",
+                    "type": "message",
+                    "model": "test-model",
+                    "role": "assistant",
+                    "content": [],
+                    "stop_reason": None,
+                    "usage": {"input_tokens": 10, "output_tokens": 0},
+                },
+            },
+        )
+        + sse_frame(
+            "content_block_start",
+            {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "text", "text": ""}},
+        )
+        + sse_frame(
+            "content_block_delta",
+            {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "text_delta", "text": "the plan: "}},
+        )
+        + sse_frame(
+            "content_block_delta",
+            {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "text_delta", "text": "study otters"}},
+        )
+        + sse_frame("content_block_stop", {"type": "content_block_stop", "index": 0})
+        + sse_frame(
+            "message_delta",
+            {"type": "message_delta",
+             "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+             "usage": {"output_tokens": 5}},
+        )
+        + sse_frame("message_stop", {"type": "message_stop"})
+    )
+
+
+class DualModeModel(BaseHTTPRequestHandler):
+    """A local model endpoint: JSON for a plain request, Messages SSE for a
+    ``stream: true`` one, both folding to the same response."""
+
+    def log_message(self, *args: object) -> None:
+        pass
+
+    def do_POST(self) -> None:  # noqa: N802 (stdlib naming)
+        length = int(self.headers.get("content-length", 0))
+        body = json.loads(self.rfile.read(length) or b"{}")
+        self.server.hits.append(self.path)  # type: ignore[attr-defined]
+        if body.get("stream") is True:
+            payload = messages_sse_body().encode()
+            self.send_response(200)
+            self.send_header("content-type", "text/event-stream")
+        else:
+            payload = json.dumps(
+                {
+                    "id": "msg_parity",
+                    "model": "test-model",
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "the plan: study otters"}],
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 10, "output_tokens": 5},
+                }
+            ).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+
+class StreamingModelStepRealServer(unittest.TestCase):
+    """``model_step_stream`` deltas through the real serve binary and executor.
+
+    The scripted demo model does not implement the provider's streaming wire
+    (it ignores ``stream: true`` and answers plain JSON), so this class points
+    ``SALVOR_MODEL_BASE_URL`` at a local endpoint speaking the Messages SSE
+    protocol. The serve binary and its executor are fully real; only the model
+    endpoint differs.
+    """
+
+    proc: subprocess.Popen
+    endpoint: ThreadingHTTPServer
+    base: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        if not SALVOR.exists():
+            raise unittest.SkipTest(f"build the binary first (cargo build): {SALVOR}")
+        cls.endpoint = ThreadingHTTPServer(("127.0.0.1", 0), DualModeModel)
+        cls.endpoint.hits = []  # type: ignore[attr-defined]
+        threading.Thread(target=cls.endpoint.serve_forever, daemon=True).start()
+        model_port = cls.endpoint.server_address[1]
+        serve_port = free_port()
+        cls.base = f"http://127.0.0.1:{serve_port}"
+        store = f"/tmp/salvor-driver-sse-{serve_port}.db"
+        Path(store).unlink(missing_ok=True)
+        cls.proc = subprocess.Popen(
+            [str(SALVOR), "--store", store, "serve", "--bind", f"127.0.0.1:{serve_port}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env={
+                "PATH": "/usr/bin:/bin",
+                "SALVOR_MODEL_BASE_URL": f"http://127.0.0.1:{model_port}",
+            },
+        )
+        if not wait_until_up(cls.base):
+            cls.tearDownClass()
+            raise unittest.SkipTest("salvor serve did not come up")
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        terminate(getattr(cls, "proc", None))
+        endpoint = getattr(cls, "endpoint", None)
+        if endpoint is not None:
+            endpoint.shutdown()
+            endpoint.server_close()
+
+    def test_stream_yields_deltas_then_completion_and_retries_free(self) -> None:
+        run = ClientRunDriver.open(self.base)
+        self.addCleanup(run.close)
+        run.append(
+            [run.envelope(0, "RunStarted", agent_def_hash="sha256:agent", input={})]
+        )
+        request = {
+            "model": "test-model",
+            "max_tokens": 256,
+            "messages": [{"role": "user", "content": "draft a plan"}],
+        }
+
+        # The live stream: text deltas arrive as they are produced, then the
+        # assembled completion closes the stream and is recorded.
+        stream = run.model_step_stream(1, request)
+        deltas = list(stream)
+        text = "".join(d["text"] for d in deltas if d["type"] == "text_delta")
+        self.assertEqual(text, "the plan: study otters")
+        self.assertTrue(any(d["type"] == "usage" for d in deltas))
+        self.assertEqual(stream.completion.usage.input_tokens, 10)
+        self.assertEqual(stream.completion.usage.output_tokens, 5)
+        hits = len(self.endpoint.hits)  # type: ignore[attr-defined]
+        self.assertEqual(hits, 1, "one live provider call")
+
+        # The recorded log holds the intent and the assembled completion.
+        log = run.log()
+        self.assertEqual(
+            [e.kind for e in log],
+            ["RunStarted", "ModelCallRequested", "ModelCallCompleted"],
+        )
+
+        # A unary retry of the streamed step returns the recorded completion
+        # without another provider call: streaming and unary share one retry
+        # identity, (seq, request_hash).
+        retry = run.model_step(1, request)
+        self.assertEqual(
+            retry.response["content"][0]["text"], "the plan: study otters"
+        )
+        self.assertEqual(len(self.endpoint.hits), hits, "retry paid nothing")  # type: ignore[attr-defined]
+        self.assertEqual(len(run.log()), 3, "no growth")
 
 
 class Stub(BaseHTTPRequestHandler):

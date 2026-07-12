@@ -246,6 +246,10 @@ test("append surfaces divergence as DivergenceError", async () => {
 let model: ChildProcess | undefined;
 let serve: ChildProcess | undefined;
 let base: string | undefined;
+// The demo model logs one line per request to stderr; accumulating it is what
+// lets the retry test count provider hits (the no-re-pay proof).
+let modelLog = "";
+const providerHits = () => (modelLog.match(/request #/g) ?? []).length;
 
 before(async () => {
   if (!existsSync(SALVOR) || !existsSync(DEMO_MODEL)) return;
@@ -253,11 +257,21 @@ before(async () => {
   const servePort = await freePort();
   base = `http://127.0.0.1:${servePort}`;
   model = spawn(DEMO_MODEL, ["--port", String(modelPort), "--delay-ms", "0"], {
-    stdio: "ignore",
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  model.stderr?.on("data", (chunk: Buffer) => {
+    modelLog += chunk.toString("utf8");
   });
   serve = spawn(SALVOR, ["--store", `/tmp/salvor-ts-driver-${servePort}.db`, "serve", "--bind", `127.0.0.1:${servePort}`], {
     stdio: "ignore",
-    env: { PATH: "/usr/bin:/bin", SALVOR_DEMO_BASE_URL: `http://127.0.0.1:${modelPort}` },
+    env: {
+      PATH: "/usr/bin:/bin",
+      // The demo agent's own model route (server-driven runs).
+      SALVOR_DEMO_BASE_URL: `http://127.0.0.1:${modelPort}`,
+      // The client-driven model step's executor route: the same offline
+      // scripted model, no key needed.
+      SALVOR_MODEL_BASE_URL: `http://127.0.0.1:${modelPort}`,
+    },
   });
   const deadline = Date.now() + 15000;
   while (Date.now() < deadline) {
@@ -328,4 +342,41 @@ test("a generic append refuses a model event", async (t) => {
     () => run.append([modelEvent]),
     (error: unknown) => error instanceof SalvorApiError && error.code === "unsupported_event_kind",
   );
+});
+
+test("live model step records, returns, and never re-pays against salvor serve", async (t) => {
+  if (!base) return t.skip("salvor serve not available");
+  // SALVOR_MODEL_BASE_URL points the serve binary's real executor at the
+  // scripted demo model, so this is a genuine server-performed provider call,
+  // keyless and offline. One user message reaches the demo model as its
+  // scripted turn 1: a search_notes tool_use response with usage 200 in / 20 out.
+  const run = await openClientRun(base);
+  await run.append([run.envelope(0, "RunStarted", { agent_def_hash: "sha256:agent", input: {} })]);
+  const request = {
+    model: "test-model",
+    max_tokens: 256,
+    messages: [{ role: "user", content: "draft a plan" }],
+  };
+
+  const before = providerHits();
+  const result = await run.modelStep(1, request);
+  strictEqual(result.usage?.inputTokens, 200);
+  strictEqual(result.usage?.outputTokens, 20);
+  const content = (result.response as any).content[0];
+  strictEqual(content.type, "tool_use");
+  strictEqual(content.name, "search_notes");
+  strictEqual(providerHits(), before + 1, "one live provider call");
+
+  const log = await run.log();
+  deepStrictEqual(
+    log.map((e) => e.kind),
+    ["RunStarted", "ModelCallRequested", "ModelCallCompleted"],
+  );
+
+  // The same step again: the recorded completion comes back verbatim, the
+  // provider is not hit again, and the log does not grow. No re-pay.
+  const retry = await run.modelStep(1, request);
+  deepStrictEqual(retry.raw, result.raw, "the recorded completion, verbatim");
+  strictEqual(providerHits(), before + 1, "retry paid nothing");
+  strictEqual((await run.log()).length, 3, "no growth");
 });
