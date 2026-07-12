@@ -55,6 +55,14 @@ pub enum ApiError {
     Divergence(String),
     /// A request body exceeded the size or count cap. HTTP 413.
     PayloadTooLarge(String),
+    /// A server-performed model step was requested but no model executor is
+    /// wired on this server (the host injected none). HTTP 503. Recording no
+    /// completion, so the run stays drivable once an executor is present.
+    ModelExecutorUnavailable(String),
+    /// The provider call for a model step failed. HTTP 502. No completion is
+    /// recorded, so the write-ahead intent is left dangling (the legal crash
+    /// story) and the run stays drivable: a retry re-issues the call safely.
+    ModelExecution(String),
     /// A run needs human reconciliation and cannot be driven automatically.
     /// Carries the recorded write intent as evidence. HTTP 409.
     NeedsReconciliation {
@@ -87,6 +95,11 @@ impl ApiError {
             }
             ApiError::Divergence(_) => (StatusCode::CONFLICT, "divergence"),
             ApiError::PayloadTooLarge(_) => (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large"),
+            ApiError::ModelExecutorUnavailable(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "model_executor_unavailable",
+            ),
+            ApiError::ModelExecution(_) => (StatusCode::BAD_GATEWAY, "model_execution"),
             ApiError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         }
     }
@@ -105,6 +118,8 @@ impl ApiError {
             | ApiError::UnsupportedEventKind(m)
             | ApiError::Divergence(m)
             | ApiError::PayloadTooLarge(m)
+            | ApiError::ModelExecutorUnavailable(m)
+            | ApiError::ModelExecution(m)
             | ApiError::NeedsReconciliation { message: m, .. } => m.clone(),
             ApiError::Unauthorized => "missing or invalid bearer token".to_owned(),
         }

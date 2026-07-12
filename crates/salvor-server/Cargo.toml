@@ -10,11 +10,20 @@ repository.workspace = true
 salvor-core.workspace = true
 salvor-store.workspace = true
 salvor-runtime.workspace = true
+# The server-performed model step (client-driven runs) reuses the model
+# transport (`Client`, its raw-value send/stream methods) and the streaming
+# accumulator this crate holds, and forwards the caller's `MessageRequest` value
+# verbatim, so `salvor-llm` is a normal dependency, not only a test one.
+salvor-llm.workspace = true
 # The server drives MCP-backed agents, so a built agent hands back the live
 # `McpServer` sessions its tools hold; the run driver keeps them alive for the
 # life of the run and closes them after. That type is the only thing this crate
 # needs from the tools layer.
 salvor-tools.workspace = true
+# The general model-executor seam is an async trait the embedding binary
+# implements (the `AgentFactory`-style injection), so the crate needs the
+# async-trait attribute in its public surface.
+async-trait.workspace = true
 axum.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
@@ -31,9 +40,7 @@ time.workspace = true
 # stream, so reqwest gains its `stream` feature here.
 reqwest = { workspace = true, features = ["stream"] }
 wiremock.workspace = true
-salvor-llm.workspace = true
 tempfile.workspace = true
 futures-util = "0.3"
 bytes = "1"
-async-trait.workspace = true
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "time"] }

@@ -30,9 +30,12 @@ use std::time::Duration;
 use salvor_runtime::{Agent, ClockFn, RandomFn, Runtime};
 use salvor_store::EventStore;
 use salvor_tools::mcp::McpServer;
+use time::OffsetDateTime;
 use tokio::task::JoinHandle;
 
 use salvor_core::RunId;
+
+use crate::executor::ModelExecutor;
 
 /// The format a submitted agent definition is written in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +100,12 @@ pub struct AppState {
 struct Inner {
     store: Arc<dyn EventStore>,
     factory: AgentFactory,
+    // The general model-executor seam the server performs a client-driven run's
+    // model step through. `None` until a host injects one (the `AgentFactory`
+    // pattern): the model-step endpoint then answers with a clear error rather
+    // than performing a call. `salvor serve` wires a default from its own
+    // client-construction path, so the feature works out of the box.
+    model_executor: Option<Arc<dyn ModelExecutor>>,
     hooks: Option<(ClockFn, RandomFn)>,
     auth_token: Option<String>,
     poll_interval: Duration,
@@ -142,6 +151,7 @@ impl AppState {
             inner: Arc::new(Inner {
                 store,
                 factory,
+                model_executor: None,
                 hooks: None,
                 auth_token: None,
                 poll_interval: Duration::from_millis(50),
@@ -160,6 +170,19 @@ impl AppState {
         Arc::get_mut(&mut self.inner)
             .expect("with_auth_token is called before the state is shared")
             .auth_token = Some(token.into());
+        self
+    }
+
+    /// Injects the general model executor the server performs a client-driven
+    /// run's model step through. Additive and off by default (the existing
+    /// [`new`](Self::new) leaves it unset), so no caller that predates it
+    /// changes behavior. `salvor serve` wires a default here; another host
+    /// injects its own, exactly as it supplies its own [`AgentFactory`].
+    #[must_use]
+    pub fn with_model_executor(mut self, executor: Arc<dyn ModelExecutor>) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("with_model_executor is called before the state is shared")
+            .model_executor = Some(executor);
         self
     }
 
@@ -200,6 +223,25 @@ impl AppState {
     #[must_use]
     pub fn poll_interval(&self) -> Duration {
         self.inner.poll_interval
+    }
+
+    /// The injected model executor, if a host wired one. `None` means the
+    /// server cannot perform a model step and the endpoint says so.
+    #[must_use]
+    pub fn model_executor(&self) -> Option<Arc<dyn ModelExecutor>> {
+        self.inner.model_executor.clone()
+    }
+
+    /// Reads the current instant from this state's injected clock, or the real
+    /// UTC clock when none was injected. This stamps envelopes the server
+    /// records itself (the model-step intent and completion), the same clock
+    /// edge a [`Runtime`] would use, so deterministic tests still compare logs.
+    #[must_use]
+    pub fn now(&self) -> OffsetDateTime {
+        match &self.inner.hooks {
+            Some((clock, _)) => clock(),
+            None => OffsetDateTime::now_utc(),
+        }
     }
 
     /// A fresh runtime over the shared store, with this state's clock and

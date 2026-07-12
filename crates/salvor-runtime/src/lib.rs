@@ -71,6 +71,7 @@ mod ctx;
 mod driver;
 mod error;
 mod hash;
+mod model;
 mod progress;
 mod runtime;
 mod validate;
@@ -89,6 +90,7 @@ pub use ctx::{
 };
 pub use error::RuntimeError;
 pub use hash::{canonical_json, hash_value, sha256_hex};
+pub use model::{clamp_tokens, response_value, usage_of};
 pub use progress::{event_detail, event_kind};
 pub use runtime::{ParkReason, RunOutcome, Runtime};
 pub use validate::validate_against_schema;

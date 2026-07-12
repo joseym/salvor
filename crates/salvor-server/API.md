@@ -72,6 +72,7 @@ is the reconciliation refusal (below). The status codes and their codes:
 | POST | `/v1/client-runs` | Open or resume a client-driven run |
 | GET | `/v1/client-runs/{id}/log` | Read a client-driven run's recorded log |
 | POST | `/v1/client-runs/{id}/events` | Append control and context events (the guarded append) |
+| POST | `/v1/client-runs/{id}/model-step` | Perform and record a model call (server-performed) |
 
 ### POST /v1/agents
 
@@ -348,12 +349,14 @@ append-guard to confirm the incoming event is the one legal next event. The two
 modes never collide: a client-driven run and a server-driven run cannot share an
 id, and each surface serves only its own runs.
 
-This is deliberately minimal. It carries only the control and deterministic-context
-events the client's cursor emits itself, which hold no secret and no side
-effect: `RunStarted`, `NowObserved`, `RandomObserved`, `Suspended`, `Resumed`,
-`BudgetExceeded`, `RunCompleted`, `RunFailed`. The side-effecting steps (the
-model call and the render tool, which the server must perform because it holds
-the key or the binary) come later; a model or tool event is refused here.
+The generic append carries only the control and deterministic-context events the
+client's cursor emits itself, which hold no secret and no side effect:
+`RunStarted`, `NowObserved`, `RandomObserved`, `Suspended`, `Resumed`,
+`BudgetExceeded`, `RunCompleted`, `RunFailed`. The side-effecting steps, which
+the server must perform because it holds the key or the binary, have their own
+endpoints: the model call is the model-step endpoint below, and a model or tool
+event is still refused on the generic append. The render tool step is a later
+slice.
 
 ### The drive token
 
@@ -445,6 +448,79 @@ Semantics, keyed by sequence number:
   run's current lease is `403 invalid_drive_token`.
 - A body over the `8 MB` cap, or a batch over 1024 events, is `413
   payload_too_large`.
+
+### POST /v1/client-runs/{id}/model-step
+
+The server-performed model call. The client owns the loop and decides when to
+call the model and with what; the server performs the call (it holds the key)
+and records it. Requires the `X-Drive-Token` header.
+
+- Request:
+
+```json
+{ "seq": 3, "request": <MessageRequest as JSON> }
+```
+
+`seq` is the log position the client's cursor reserved for the model intent.
+`request` is the client's canonical model request value. The server recomputes
+`request_hash` from `request` with the same canonical hash the runtime uses, so
+the client cannot record a hash that does not match what was sent.
+
+- Response `200`:
+
+```json
+{ "response": <MessageResponse as JSON>, "usage": { "input_tokens": 10, "output_tokens": 5 } }
+```
+
+The server appends `ModelCallRequested { seq, request_hash, request_body? }`
+write-ahead (the body is recorded only when the run was opened with
+`record_prompts: true`), performs the call through the injected model executor,
+appends `ModelCallCompleted { seq, response, usage }`, and returns the
+completion. The client feeds the response and the hash back to its cursor, which
+advances over the two now-recorded events.
+
+Retry identity is `(seq, request_hash)`, mirroring `ReplayCursor::model_call`:
+
+- A step already completed at `seq` with the same hash returns the recorded
+  completion; the provider is not called again and the log does not grow. This
+  is the no-re-pay case.
+- A dangling intent at `seq` with the same hash (the tab died mid-call) is
+  re-executed: an unanswered model request has no external effect to double, so
+  the fresh completion correlates to the recorded intent.
+- A different hash at `seq`, or a non-model event there, is `409 divergence`. A
+  `seq` beyond the log's end is `409 divergence` too.
+
+The model executor is a general injection seam the embedding binary supplies
+(the `AgentFactory` pattern): `salvor serve` wires a default from its own model
+client out of the box, and another host injects its own. A step against a server
+with no executor wired is `503 model_executor_unavailable`, and no intent is
+written for the call it cannot make, so the run stays drivable once one exists. A
+provider failure is `502 model_execution`; no completion is recorded, so the
+write-ahead intent is left dangling (the legal crash story) and a retry re-issues
+the call safely.
+
+#### Streaming variant
+
+With `Accept: text/event-stream` (or `?stream=1`) the response is a server-sent
+event stream for a live ticker:
+
+```text
+event: delta
+data: { "type": "text_delta", "index": 0, "text": "the plan: " }
+
+event: complete
+data: { "response": <MessageResponse as JSON>, "usage": { ... } }
+
+```
+
+Each provider event that carries ticker text (text and thinking deltas, and the
+final usage) rides a `delta` frame while the call runs; the assembled completion
+is recorded once at the end and carried on the closing `complete` frame. The
+recorded `ModelCallCompleted` is byte-identical to the non-streaming path for the
+same underlying response. A tab that drops mid-stream leaves a dangling intent,
+re-issued safely on resume; a mid-stream provider failure sends an `error` frame
+and records no completion. A model step that resolves to a replay (already
+recorded) streams a single `complete` frame carrying the recorded completion.
 
 ## Driving a run
 

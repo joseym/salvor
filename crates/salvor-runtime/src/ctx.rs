@@ -69,12 +69,13 @@ use salvor_core::{
 use salvor_llm::{Client, MessageAccumulator, MessageRequest, MessageResponse, StreamEvent};
 use salvor_store::EventStore;
 use salvor_tools::{DynTool, RetryPolicy, Suspension, ToolCtx, ToolError, ToolOutcome};
-use serde_json::{Value, json};
+use serde_json::Value;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::error::RuntimeError;
 use crate::hash::hash_value;
+use crate::model::{response_value, usage_of};
 use crate::wire::{
     ToolFailure, decode_failure, decode_suspension, encode_failure, encode_suspension,
 };
@@ -358,10 +359,7 @@ impl RunCtx {
                     persist(self.store.as_ref(), self.run_id, &self.clock, &intent).await?;
                 }
                 let response = client.send_message(request).await?;
-                let usage = TokenUsage {
-                    input_tokens: clamp_tokens(response.usage.input_tokens),
-                    output_tokens: clamp_tokens(response.usage.output_tokens),
-                };
+                let usage = usage_of(&response);
                 let completion = permit.record(response_value(&response), usage);
                 persist(self.store.as_ref(), self.run_id, &self.clock, &completion).await?;
                 Ok(ModelTurn { response, usage })
@@ -460,10 +458,7 @@ impl RunCtx {
                     accumulator.apply(&event)?;
                 }
                 let response = accumulator.into_message()?;
-                let usage = TokenUsage {
-                    input_tokens: clamp_tokens(response.usage.input_tokens),
-                    output_tokens: clamp_tokens(response.usage.output_tokens),
-                };
+                let usage = usage_of(&response);
                 let completion = permit.record(response_value(&response), usage);
                 persist(self.store.as_ref(), self.run_id, &self.clock, &completion).await?;
                 Ok(ModelTurn { response, usage })
@@ -683,32 +678,6 @@ fn decode_tool_output(output: Value) -> ToolCallResult {
         return ToolCallResult::Failed(failure);
     }
     ToolCallResult::Output(output)
-}
-
-/// Rebuilds the wire JSON of a response so the recorded value deserializes
-/// back into an equal [`MessageResponse`]. Built by hand because the
-/// response type is deserialize-only in `salvor-llm`.
-fn response_value(response: &MessageResponse) -> Value {
-    json!({
-        "id": response.id,
-        "model": response.model,
-        "role": response.role,
-        "content": response.content,
-        "stop_reason": response.stop_reason,
-        "stop_sequence": response.stop_sequence,
-        "usage": {
-            "input_tokens": response.usage.input_tokens,
-            "output_tokens": response.usage.output_tokens,
-            "cache_creation_input_tokens": response.usage.cache_creation_input_tokens,
-            "cache_read_input_tokens": response.usage.cache_read_input_tokens,
-        },
-    })
-}
-
-/// Narrows a provider-reported token count to the event log's `u32`,
-/// saturating rather than failing on a count that cannot occur in practice.
-fn clamp_tokens(count: u64) -> u32 {
-    u32::try_from(count).unwrap_or(u32::MAX)
 }
 
 /// The default random source: 64 bits folded from a freshly drawn version 4

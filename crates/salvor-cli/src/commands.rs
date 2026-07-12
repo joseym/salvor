@@ -34,7 +34,9 @@ use anyhow::{Context, Result, bail};
 use salvor_core::{PendingCall, RunId, derive_state};
 use salvor_runtime::{RunOutcome, Runtime, RuntimeError};
 use salvor_server::dispatch::{Disposition, classify};
-use salvor_server::{AgentDefinition, AgentFactory, AppState, BuiltAgent, DefFormat};
+use salvor_server::{
+    AgentDefinition, AgentFactory, AppState, BuiltAgent, DefFormat, LlmModelExecutor,
+};
 use salvor_store::{EventStore, SqliteStore};
 use serde_json::Value;
 use tokio::net::TcpListener;
@@ -265,7 +267,15 @@ pub async fn serve(store_path: &Path, args: ServeArgs) -> Result<u8> {
         Box::pin(async move { build_from_definition(definition).await })
     });
 
-    let mut state = AppState::new(store, factory);
+    // The general model executor client-driven runs perform their model step
+    // through, wired from the CLI's own client-construction path (a
+    // `salvor_llm::Client` from the environment). Another host injects its own
+    // executor; this is the out-of-the-box default, mirroring the agent factory.
+    let model_client = salvor_llm::Client::from_env()
+        .context("building the model client for the client-driven model step")?;
+
+    let mut state = AppState::new(store, factory)
+        .with_model_executor(Arc::new(LlmModelExecutor::new(model_client)));
     if let Some(env_name) = &args.auth_token {
         match std::env::var(env_name) {
             Ok(token) if !token.is_empty() => {

@@ -122,6 +122,36 @@ impl Client {
         }
     }
 
+    /// Send an already-serialized request value and return the parsed response.
+    ///
+    /// This is the raw-value twin of [`Client::send_message`], for a caller that
+    /// holds the request as canonical JSON rather than a typed [`MessageRequest`]
+    /// (the durable control plane forwards a client's exact request bytes so the
+    /// hash it recorded is the hash it sent). The value is posted verbatim, with
+    /// the same retry schedule and the same error mapping as the typed path.
+    ///
+    /// # Errors
+    ///
+    /// The same errors [`Client::send_message`] returns.
+    pub async fn send_message_value(&self, request: &Value) -> Result<MessageResponse, Error> {
+        // Mirrors the retry loop in `send_message`; kept separate so the typed
+        // path serializes its struct directly and its byte form never changes.
+        let mut attempt: u32 = 0;
+        loop {
+            match self.try_send_value(request).await {
+                Ok(response) => return Ok(response),
+                Err(err) => {
+                    if attempt >= self.config.max_retries || !err.is_retryable() {
+                        return Err(err);
+                    }
+                    let delay = err.retry_after().unwrap_or_else(|| backoff_delay(attempt));
+                    tokio::time::sleep(delay).await;
+                    attempt += 1;
+                }
+            }
+        }
+    }
+
     /// Open a streaming request and return a reader over its events.
     ///
     /// The request is sent with `stream: true` set internally, so the caller's
@@ -161,8 +191,65 @@ impl Client {
         }
     }
 
+    /// Open a streaming request from an already-serialized request value.
+    ///
+    /// The raw-value twin of [`Client::stream_message`]. `stream: true` is set
+    /// on a clone of the value, so the caller's `request` is untouched and the
+    /// hash it computed over `request` still matches what it recorded. Only the
+    /// initial connection is retried, exactly as in [`Client::stream_message`].
+    ///
+    /// # Errors
+    ///
+    /// The same errors [`Client::stream_message`] returns.
+    pub async fn stream_message_value(&self, request: &Value) -> Result<MessageStream, Error> {
+        let mut streaming = request.clone();
+        if let Value::Object(map) = &mut streaming {
+            map.insert("stream".to_owned(), Value::Bool(true));
+        }
+        let mut attempt: u32 = 0;
+        loop {
+            match self.try_stream_value(&streaming).await {
+                Ok(stream) => return Ok(stream),
+                Err(err) => {
+                    if attempt >= self.config.max_retries || !err.is_retryable() {
+                        return Err(err);
+                    }
+                    let delay = err.retry_after().unwrap_or_else(|| backoff_delay(attempt));
+                    tokio::time::sleep(delay).await;
+                    attempt += 1;
+                }
+            }
+        }
+    }
+
     /// Perform a single request attempt, with no retrying.
     async fn try_send(&self, request: &MessageRequest) -> Result<MessageResponse, Error> {
+        let response = self
+            .post_builder()
+            .json(request)
+            .send()
+            .await
+            .map_err(Error::Transport)?;
+        let status = response.status();
+        let request_id = header_string(response.headers(), "request-id");
+        let retry_after = retry_after_of(response.headers());
+        let body = response.bytes().await.map_err(Error::Transport)?;
+
+        if status.is_success() {
+            return serde_json::from_slice(&body).map_err(Error::Decode);
+        }
+        Err(error_from_body(
+            status.as_u16(),
+            request_id,
+            retry_after,
+            &body,
+        ))
+    }
+
+    /// One request attempt over an already-serialized value; no retrying.
+    /// Identical to [`Client::try_send`] but posts a [`Value`] rather than a
+    /// typed request.
+    async fn try_send_value(&self, request: &Value) -> Result<MessageResponse, Error> {
         let response = self
             .post_builder()
             .json(request)
@@ -199,6 +286,36 @@ impl Client {
         if status.is_success() {
             // Convert each chunk to an owned `Vec<u8>` so the boxed stream does
             // not name reqwest's `Bytes`, keeping the dependency surface small.
+            let bytes = response
+                .bytes_stream()
+                .map(|chunk| chunk.map(|b| b.to_vec()));
+            return Ok(MessageStream::new(Box::pin(bytes), request_id));
+        }
+
+        let retry_after = retry_after_of(response.headers());
+        let body = response.bytes().await.map_err(Error::Transport)?;
+        Err(error_from_body(
+            status.as_u16(),
+            request_id,
+            retry_after,
+            &body,
+        ))
+    }
+
+    /// One streaming request attempt over an already-serialized value; no
+    /// retrying. Identical to [`Client::try_stream`] but posts a [`Value`] the
+    /// caller has already marked with `stream: true`.
+    async fn try_stream_value(&self, request: &Value) -> Result<MessageStream, Error> {
+        let response = self
+            .post_builder()
+            .json(request)
+            .send()
+            .await
+            .map_err(Error::Transport)?;
+        let status = response.status();
+        let request_id = header_string(response.headers(), "request-id");
+
+        if status.is_success() {
             let bytes = response
                 .bytes_stream()
                 .map(|chunk| chunk.map(|b| b.to_vec()));

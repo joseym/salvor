@@ -31,18 +31,28 @@
 //! live driver without the current lease is refused. Re-opening a run mints a
 //! fresh lease, so a resuming tab always holds the current one.
 
+use std::convert::Infallible;
+
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
+use axum::http::header::ACCEPT;
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::IntoResponse;
-use salvor_core::{EventEnvelope, LogValidator, RunId, SequenceNumber};
+use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
+use axum::response::{IntoResponse, Response};
+use salvor_core::{Event, EventEnvelope, LogValidator, RunId, SequenceNumber, TokenUsage};
+use salvor_llm::{ContentDelta, MessageAccumulator, StreamEvent};
+use salvor_runtime::{hash_value, response_value, usage_of};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
 use crate::error::ApiError;
-use crate::state::AppState;
+use crate::executor::{ModelExecutor, ModelStream};
+use crate::state::{AppState, ClientRunLease};
+use std::sync::Arc;
 
 /// The header carrying the per-run drive token on a guarded append.
 const DRIVE_TOKEN_HEADER: &str = "x-drive-token";
@@ -88,6 +98,25 @@ pub struct LogQuery {
     /// Return only envelopes at or after this sequence number.
     #[serde(default)]
     from_seq: Option<u64>,
+}
+
+/// The body of `POST /v1/client-runs/{id}/model-step`.
+#[derive(Debug, Deserialize)]
+struct ModelStepRequest {
+    /// The log position the client's cursor reserved for the model intent.
+    seq: u64,
+    /// The client's canonical model request value (a `MessageRequest` as JSON).
+    /// The server hashes and forwards exactly these bytes.
+    request: Value,
+}
+
+/// The `?stream=` query on the model step.
+#[derive(Debug, Default, Deserialize)]
+pub struct ModelStepQuery {
+    /// When `1` or `true`, stream provider events for a live ticker. The
+    /// `Accept: text/event-stream` header selects streaming too.
+    #[serde(default)]
+    stream: Option<String>,
 }
 
 /// `POST /v1/client-runs`: open a fresh client-driven run, or re-open (resume)
@@ -179,27 +208,7 @@ pub async fn append(
     let run_id = parse_run_id(&run_id_text)?;
 
     // The per-run lease gate.
-    let lease = state
-        .client_run(run_id)
-        .ok_or_else(|| unknown_client_run(run_id))?;
-    let presented = headers
-        .get(DRIVE_TOKEN_HEADER)
-        .and_then(|value| value.to_str().ok());
-    match presented {
-        None => {
-            return Err(ApiError::MissingDriveToken(format!(
-                "run {} requires a drive token in the `{DRIVE_TOKEN_HEADER}` header",
-                run_id.as_uuid()
-            )));
-        }
-        Some(token) if token != lease.drive_token => {
-            return Err(ApiError::InvalidDriveToken(format!(
-                "the presented drive token is not the current lease for run {}",
-                run_id.as_uuid()
-            )));
-        }
-        Some(_) => {}
-    }
+    authorize_drive(&state, run_id, &headers)?;
 
     // Body-size discipline, as a fast precheck before parsing.
     if body.len() > MAX_EVENTS_BODY {
@@ -262,6 +271,379 @@ pub async fn append(
     Ok((StatusCode::OK, Json(json!({ "appended": appended }))))
 }
 
+/// `POST /v1/client-runs/{id}/model-step`: the server-performed model call.
+///
+/// The client's cursor reserved `seq` as the model intent's position and hands
+/// the server the request to perform. The server recomputes `request_hash` from
+/// the body with the same canonical hash the runtime uses (so the client cannot
+/// lie about the hash), appends `ModelCallRequested` write-ahead, performs the
+/// call through the injected [`ModelExecutor`], appends `ModelCallCompleted`,
+/// and returns the completion. It mirrors `RunCtx::model_call` server-side.
+///
+/// Retry identity is `(seq, request_hash)`, mirroring `ReplayCursor::model_call`:
+///
+/// - A completed step already recorded at `seq` with the same hash returns the
+///   recorded completion; the provider is not called and the log does not grow.
+/// - A dangling intent at `seq` with the same hash (the tab died mid-call) is
+///   re-executed: an unanswered model request has no external effect to double,
+///   so the fresh completion correlates to the recorded intent.
+/// - A different hash at `seq`, or a non-model event there, is `409 divergence`.
+///
+/// With `Accept: text/event-stream` (or `?stream=1`) the provider's events
+/// stream as server-sent frames for a live ticker, and the assembled completion
+/// is recorded once at the end (byte-identical to the non-streaming path), so a
+/// tab that drops mid-stream leaves a dangling intent, re-issued safely.
+pub async fn model_step(
+    State(state): State<AppState>,
+    Path(run_id_text): Path<String>,
+    Query(query): Query<ModelStepQuery>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let run_id = parse_run_id(&run_id_text)?;
+    let lease = authorize_drive(&state, run_id, &headers)?;
+
+    if body.len() > MAX_EVENTS_BODY {
+        return Err(ApiError::PayloadTooLarge(format!(
+            "model-step body is {} bytes, over the {MAX_EVENTS_BODY}-byte cap",
+            body.len()
+        )));
+    }
+    let ModelStepRequest { seq, request } = parse_body(&body)?;
+
+    // Recompute the hash from the submitted body with the runtime's own
+    // canonical hash: the hash the server records is the hash it will send.
+    let request_hash = hash_value(&request);
+    let log = state.store().read_log(run_id).await.map_err(store_error)?;
+    let plan = plan_model_step(&log, seq, &request_hash)?;
+    let streaming = wants_stream(&headers, &query);
+
+    match plan {
+        ModelStepPlan::Replay { response, usage } => {
+            // Already recorded: answer from the log, call nothing, grow nothing.
+            if streaming {
+                Ok(single_complete_stream(&response, usage))
+            } else {
+                Ok(completion_body(&response, usage).into_response())
+            }
+        }
+        ModelStepPlan::Perform { append_intent } => {
+            let executor = state.model_executor().ok_or_else(|| {
+                ApiError::ModelExecutorUnavailable(
+                    "this server has no model executor wired, so it cannot perform a model step"
+                        .to_owned(),
+                )
+            })?;
+
+            // Write-ahead: record the intent before the provider is contacted,
+            // so a crash mid-call leaves a dangling intent (re-issued on retry).
+            // A dangling-intent retry skips this: the intent is already recorded.
+            if append_intent {
+                let request_body = lease.record_prompts.then(|| request.clone());
+                let intent = EventEnvelope::new(
+                    run_id,
+                    SequenceNumber::new(seq),
+                    state.now(),
+                    Event::ModelCallRequested {
+                        seq: SequenceNumber::new(seq),
+                        request_hash: request_hash.clone(),
+                        request_body,
+                    },
+                );
+                let mut validator = LogValidator::new(log);
+                validator
+                    .push(intent.clone())
+                    .map_err(|error| ApiError::Divergence(error.to_string()))?;
+                state.store().append(&intent).await.map_err(append_error)?;
+            }
+
+            if streaming {
+                perform_streaming(state, run_id, seq, request, executor).await
+            } else {
+                perform_unary(&state, run_id, seq, request, executor.as_ref()).await
+            }
+        }
+    }
+}
+
+/// What a model step must do, decided from the recorded log alone.
+enum ModelStepPlan {
+    /// The step is already recorded: return this completion, execute nothing.
+    Replay {
+        /// The recorded response value.
+        response: Value,
+        /// The recorded token usage.
+        usage: TokenUsage,
+    },
+    /// The step must be performed. `append_intent` is true for a fresh call and
+    /// false for a dangling-intent re-issue (the intent is already recorded).
+    Perform {
+        /// Whether to write the intent before executing.
+        append_intent: bool,
+    },
+}
+
+/// Decides the model step from the log and the recomputed hash, mirroring
+/// `ReplayCursor::model_call`'s replay/re-issue/divergence branches.
+fn plan_model_step(
+    log: &[EventEnvelope],
+    seq: u64,
+    request_hash: &str,
+) -> Result<ModelStepPlan, ApiError> {
+    let next = log.len() as u64;
+    if seq == next {
+        // A fresh intent at the next contiguous position.
+        return Ok(ModelStepPlan::Perform {
+            append_intent: true,
+        });
+    }
+    if seq > next {
+        return Err(ApiError::Divergence(format!(
+            "model-step seq {seq} is beyond the log end {next}"
+        )));
+    }
+
+    // The position is already recorded: it must be the model intent, its hash
+    // must match, and its completion (if any) decides replay versus re-issue.
+    let recorded = &log[seq as usize];
+    let Event::ModelCallRequested {
+        request_hash: recorded_hash,
+        ..
+    } = &recorded.event
+    else {
+        return Err(ApiError::Divergence(format!(
+            "seq {seq} already holds a non-model event; it is not a model-step position"
+        )));
+    };
+    if recorded_hash != request_hash {
+        return Err(ApiError::Divergence(format!(
+            "model-step at seq {seq} carries a request hash that differs from the recorded intent"
+        )));
+    }
+    match log.get(seq as usize + 1) {
+        Some(next_env) => match &next_env.event {
+            Event::ModelCallCompleted {
+                seq: corr,
+                response,
+                usage,
+            } if corr.get() == seq => Ok(ModelStepPlan::Replay {
+                response: response.clone(),
+                usage: *usage,
+            }),
+            _ => Err(ApiError::Divergence(format!(
+                "the event after the intent at seq {seq} is not its completion"
+            ))),
+        },
+        // A dangling intent (the last event): re-issue the call.
+        None => Ok(ModelStepPlan::Perform {
+            append_intent: false,
+        }),
+    }
+}
+
+/// Performs a non-streaming model call: execute, record the completion, and
+/// return `{ response, usage }`.
+async fn perform_unary(
+    state: &AppState,
+    run_id: RunId,
+    seq: u64,
+    request: Value,
+    executor: &dyn ModelExecutor,
+) -> Result<Response, ApiError> {
+    let response = executor
+        .execute(request)
+        .await
+        .map_err(ApiError::ModelExecution)?;
+    let usage = usage_of(&response);
+    let response_value = response_value(&response);
+    append_completion(state, run_id, seq, &response_value, usage).await?;
+    Ok(completion_body(&response_value, usage).into_response())
+}
+
+/// Performs a streaming model call: open the provider stream, then hand a
+/// server-sent-events body a background task drives (ticker frames, then the
+/// recorded completion). Opening the stream synchronously means a failure to
+/// open is a proper error envelope, not a half-open stream.
+async fn perform_streaming(
+    state: AppState,
+    run_id: RunId,
+    seq: u64,
+    request: Value,
+    executor: Arc<dyn ModelExecutor>,
+) -> Result<Response, ApiError> {
+    let stream = executor
+        .open_stream(request)
+        .await
+        .map_err(ApiError::ModelExecution)?;
+    let (tx, rx) = mpsc::channel::<Result<SseEvent, Infallible>>(64);
+    tokio::spawn(drive_model_stream(state, run_id, seq, stream, tx));
+    Ok(Sse::new(ReceiverStream::new(rx))
+        .keep_alive(KeepAlive::default())
+        .into_response())
+}
+
+/// Pumps the provider stream: forward each event as a ticker frame and fold it
+/// into a [`MessageAccumulator`], then record the assembled completion once and
+/// send the final `complete` frame. A mid-stream error, an accumulation
+/// failure, or a completion-append failure sends an `error` frame and records
+/// nothing, so the write-ahead intent is left dangling and the run stays
+/// drivable.
+async fn drive_model_stream(
+    state: AppState,
+    run_id: RunId,
+    seq: u64,
+    mut stream: Box<dyn ModelStream>,
+    tx: mpsc::Sender<Result<SseEvent, Infallible>>,
+) {
+    let mut accumulator = MessageAccumulator::new();
+    loop {
+        match stream.next_event().await {
+            Some(Ok(event)) => {
+                if let Err(error) = accumulator.apply(&event) {
+                    let _ = tx.send(Ok(error_frame(&error.to_string()))).await;
+                    return;
+                }
+                if let Some(frame) = ticker_frame(&event)
+                    && tx
+                        .send(Ok(SseEvent::default()
+                            .event("delta")
+                            .data(frame.to_string())))
+                        .await
+                        .is_err()
+                {
+                    // The client hung up; stop, leaving the intent dangling.
+                    return;
+                }
+            }
+            Some(Err(message)) => {
+                let _ = tx.send(Ok(error_frame(&message))).await;
+                return;
+            }
+            None => break,
+        }
+    }
+
+    let response = match accumulator.into_message() {
+        Ok(response) => response,
+        Err(error) => {
+            let _ = tx.send(Ok(error_frame(&error.to_string()))).await;
+            return;
+        }
+    };
+    let usage = usage_of(&response);
+    let response_value = response_value(&response);
+    if append_completion(&state, run_id, seq, &response_value, usage)
+        .await
+        .is_err()
+    {
+        let _ = tx
+            .send(Ok(error_frame("recording the model completion failed")))
+            .await;
+        return;
+    }
+    let complete = completion_json(&response_value, usage);
+    let _ = tx
+        .send(Ok(SseEvent::default()
+            .event("complete")
+            .data(complete.to_string())))
+        .await;
+}
+
+/// Records the `ModelCallCompleted` at `seq + 1`, correlated to the intent at
+/// `seq`, after validating it is the legal next event.
+async fn append_completion(
+    state: &AppState,
+    run_id: RunId,
+    seq: u64,
+    response: &Value,
+    usage: TokenUsage,
+) -> Result<(), ApiError> {
+    let completion = EventEnvelope::new(
+        run_id,
+        SequenceNumber::new(seq + 1),
+        state.now(),
+        Event::ModelCallCompleted {
+            seq: SequenceNumber::new(seq),
+            response: response.clone(),
+            usage,
+        },
+    );
+    let log = state.store().read_log(run_id).await.map_err(store_error)?;
+    let mut validator = LogValidator::new(log);
+    validator
+        .push(completion.clone())
+        .map_err(|error| ApiError::Divergence(error.to_string()))?;
+    state
+        .store()
+        .append(&completion)
+        .await
+        .map_err(append_error)
+}
+
+/// Whether the request selects the streaming variant: `?stream=1`/`true`, or an
+/// `Accept: text/event-stream` header.
+fn wants_stream(headers: &HeaderMap, query: &ModelStepQuery) -> bool {
+    if let Some(flag) = &query.stream
+        && (flag == "1" || flag == "true")
+    {
+        return true;
+    }
+    headers
+        .get(ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|accept| accept.contains("text/event-stream"))
+}
+
+/// The ticker frame for a provider event, or `None` for events with nothing a
+/// live ticker shows (start/stop/ping). Text and thinking deltas and the final
+/// usage are what a token/cost ticker consumes.
+fn ticker_frame(event: &StreamEvent) -> Option<Value> {
+    match event {
+        StreamEvent::ContentBlockDelta { index, delta } => match delta {
+            ContentDelta::Text { text } => {
+                Some(json!({ "type": "text_delta", "index": index, "text": text }))
+            }
+            ContentDelta::Thinking { thinking } => {
+                Some(json!({ "type": "thinking_delta", "index": index, "thinking": thinking }))
+            }
+            _ => None,
+        },
+        StreamEvent::MessageDelta { usage, .. } => {
+            Some(json!({ "type": "usage", "output_tokens": usage.output_tokens }))
+        }
+        _ => None,
+    }
+}
+
+/// A one-frame server-sent-events body carrying an already-recorded completion,
+/// for a streaming request that resolves to a replay (no live tokens).
+fn single_complete_stream(response: &Value, usage: TokenUsage) -> Response {
+    let frame = SseEvent::default()
+        .event("complete")
+        .data(completion_json(response, usage).to_string());
+    Sse::new(tokio_stream::once(Ok::<_, Infallible>(frame)))
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+/// The `{ response, usage }` JSON both the non-streaming body and the `complete`
+/// frame carry.
+fn completion_json(response: &Value, usage: TokenUsage) -> Value {
+    json!({ "response": response, "usage": usage })
+}
+
+/// The non-streaming `200` body.
+fn completion_body(response: &Value, usage: TokenUsage) -> Json<Value> {
+    Json(completion_json(response, usage))
+}
+
+/// An `error` server-sent-events frame carrying a human message.
+fn error_frame(message: &str) -> SseEvent {
+    SseEvent::default()
+        .event("error")
+        .data(json!({ "message": message }).to_string())
+}
+
 /// The `201`/`200` open response body.
 fn open_body(run_id: RunId, drive_token: &str, log: &[EventEnvelope]) -> Value {
     json!({
@@ -287,6 +669,34 @@ fn reject_side_effecting_kind(candidate: &EventEnvelope) -> Result<(), ApiError>
         "the generic append accepts control and context events only; `{kind}` is recorded through \
          the model-step or tool-step endpoint"
     )))
+}
+
+/// The per-run lease gate shared by every driving endpoint: the run must be a
+/// client-driven run this server opened, and the request must carry its current
+/// drive token in the `X-Drive-Token` header. Returns the lease so the caller
+/// can read `record_prompts`.
+fn authorize_drive(
+    state: &AppState,
+    run_id: RunId,
+    headers: &HeaderMap,
+) -> Result<ClientRunLease, ApiError> {
+    let lease = state
+        .client_run(run_id)
+        .ok_or_else(|| unknown_client_run(run_id))?;
+    let presented = headers
+        .get(DRIVE_TOKEN_HEADER)
+        .and_then(|value| value.to_str().ok());
+    match presented {
+        None => Err(ApiError::MissingDriveToken(format!(
+            "run {} requires a drive token in the `{DRIVE_TOKEN_HEADER}` header",
+            run_id.as_uuid()
+        ))),
+        Some(token) if token != lease.drive_token => Err(ApiError::InvalidDriveToken(format!(
+            "the presented drive token is not the current lease for run {}",
+            run_id.as_uuid()
+        ))),
+        Some(_) => Ok(lease),
+    }
 }
 
 /// Parses a JSON body into `T`, mapping a decode failure to a `400`.

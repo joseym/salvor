@@ -41,6 +41,7 @@ pub mod auth;
 pub mod client_runs;
 pub mod dispatch;
 pub mod error;
+pub mod executor;
 pub mod json;
 pub mod runs;
 pub mod sse;
@@ -53,6 +54,7 @@ use tokio::net::TcpListener;
 
 pub use dispatch::{Disposition, ResumeKind, classify};
 pub use error::ApiError;
+pub use executor::{LlmModelExecutor, ModelExecutor, ModelStream};
 pub use state::{
     AgentDefinition, AgentFactory, AppState, BuildFuture, BuiltAgent, ClientRunLease, DefFormat,
     RegisteredAgent,
@@ -73,6 +75,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/client-runs", post(client_runs::open))
         .route("/v1/client-runs/{id}/log", get(client_runs::get_log))
         .route("/v1/client-runs/{id}/events", post(client_runs::append))
+        .route(
+            "/v1/client-runs/{id}/model-step",
+            post(client_runs::model_step),
+        )
         .layer(from_fn_with_state(state.clone(), auth::require_bearer))
         .with_state(state)
 }

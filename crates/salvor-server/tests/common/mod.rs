@@ -25,9 +25,9 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use salvor_core::Effect;
-use salvor_llm::Config;
+use salvor_llm::{Client, Config};
 use salvor_runtime::{Agent, ClockFn, RandomFn};
-use salvor_server::{AgentFactory, AppState, BuiltAgent};
+use salvor_server::{AgentFactory, AppState, BuiltAgent, LlmModelExecutor, ModelExecutor};
 use salvor_store::{EventStore, SqliteStore};
 use salvor_tools::{DynTool, HandlerError, Suspension, ToolCtx, ToolError, ToolOutcome};
 use serde_json::{Value, json};
@@ -187,6 +187,16 @@ pub fn agent_factory(
 /// A fresh execution counter.
 pub fn counter() -> Arc<AtomicUsize> {
     Arc::new(AtomicUsize::new(0))
+}
+
+/// The default model executor pointed at a mock provider `uri`, for the
+/// server-performed model step. Retries are off (the scripts are
+/// deterministic). Wraps the general `salvor_llm::Client`, exactly as
+/// `salvor serve` wires its own out of the box.
+pub fn model_executor(uri: &str) -> Arc<dyn ModelExecutor> {
+    let client = Client::new(Config::new().with_base_url(uri).with_max_retries(0))
+        .expect("model client builds");
+    Arc::new(LlmModelExecutor::new(client))
 }
 
 /// A canned text response with fixed usage.
