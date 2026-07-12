@@ -15,9 +15,9 @@ from typing import Any, Iterator, Optional, Union
 import httpx
 
 from .errors import (
-    NeedsReconciliationError,
     SalvorAPIError,
     SalvorStreamError,
+    decode_error,
 )
 from .models import (
     EndFrame,
@@ -317,13 +317,33 @@ class Client:
         return resp.json()
 
     def _error(self, status: int, body: bytes) -> SalvorAPIError:
-        try:
-            envelope = json.loads(body).get("error", {})
-        except (ValueError, AttributeError):
-            envelope = {}
-        code = envelope.get("code", "unknown")
-        message = envelope.get("message", body.decode("utf-8", "replace"))
-        details = envelope.get("details")
-        if code == "needs_reconciliation":
-            return NeedsReconciliationError(code, message, status, details)
-        return SalvorAPIError(code, message, status, details)
+        return decode_error(status, body)
+
+    def open_client_run(
+        self,
+        *,
+        agent: Optional[str] = None,
+        input: Any = None,
+        run_id: Optional[str] = None,
+        record_prompts: bool = False,
+    ) -> "ClientRunDriver":
+        """Open or re-open a client-driven run over this client's connection.
+
+        Returns a :class:`~salvor.client_runs.ClientRunDriver`: the client owns
+        the agent loop and streams the events it produces, while the server owns
+        the durable log and guards every append. This is the second of Salvor's
+        two modes; :meth:`start_run` is the server-driven first. The driver
+        shares this client's HTTP pool and auth, so it is closed when this
+        client is.
+        """
+        from .client_runs import ClientRunDriver
+
+        return ClientRunDriver._open_over(
+            self._http,
+            owns_http=False,
+            stream_timeout=self._stream_timeout,
+            agent=agent,
+            input=input,
+            run_id=run_id,
+            record_prompts=record_prompts,
+        )

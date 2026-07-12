@@ -8,10 +8,12 @@
  */
 
 import {
-  NeedsReconciliationError,
-  SalvorApiError,
-  SalvorStreamError,
-} from "./errors.js";
+  type ClientRunDriver,
+  type OpenClientRunOptions,
+  openClientRun,
+} from "./client_runs.js";
+import { SalvorApiError, SalvorStreamError, errorFrom } from "./errors.js";
+import { readSseFrames } from "./sse.js";
 import {
   type EndFrame,
   type ReplayState,
@@ -185,6 +187,24 @@ export class SalvorClient {
     });
   }
 
+  // -- client-driven runs ---------------------------------------------------
+
+  /**
+   * Open or re-open a client-driven run over this client's base URL and auth.
+   * Returns a {@link ClientRunDriver}: the client owns the agent loop and streams
+   * the events it produces, while the server owns the durable log and guards
+   * every append. This is the second of Salvor's two modes; {@link startRun} is
+   * the server-driven first.
+   */
+  openClientRun(options: OpenClientRunOptions = {}): Promise<ClientRunDriver> {
+    const token = this.headers["Authorization"]?.replace(/^Bearer /, "");
+    return openClientRun(this.baseUrl, {
+      token,
+      timeoutMs: this.timeoutMs,
+      ...options,
+    });
+  }
+
   // -- event stream ---------------------------------------------------------
 
   /**
@@ -253,23 +273,11 @@ export class SalvorClient {
     // drop surfaces as the stream ending or an error, and reconnect handles it.
     const resp = await fetch(url, { headers: this.headers });
     if (!resp.ok || !resp.body) {
-      throw this.errorFrom(resp.status, await resp.text());
+      throw errorFrom(resp.status, await resp.text());
     }
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      // SSE frames are separated by a blank line.
-      let sep: number;
-      while ((sep = buffer.indexOf("\n\n")) !== -1) {
-        const raw = buffer.slice(0, sep);
-        buffer = buffer.slice(sep + 2);
-        const frame = parseSseFrame(raw);
-        if (frame) yield frame;
-      }
+    for await (const frame of readSseFrames(resp.body)) {
+      const obj = JSON.parse(frame.data) as Record<string, unknown>;
+      yield frame.event === "end" ? { kind: "end", obj } : { kind: "event", obj };
     }
   }
 
@@ -292,47 +300,12 @@ export class SalvorClient {
         signal: controller.signal,
       });
       const text = await resp.text();
-      if (!resp.ok) throw this.errorFrom(resp.status, text);
+      if (!resp.ok) throw errorFrom(resp.status, text);
       return text ? (JSON.parse(text) as Record<string, unknown>) : {};
     } finally {
       clearTimeout(timer);
     }
   }
-
-  private errorFrom(status: number, body: string): SalvorApiError {
-    let envelope: Record<string, unknown> = {};
-    try {
-      envelope = (JSON.parse(body).error as Record<string, unknown>) ?? {};
-    } catch {
-      // fall through with an empty envelope
-    }
-    const code = (envelope.code as string) ?? "unknown";
-    const message = (envelope.message as string) ?? body;
-    const details = envelope.details as Record<string, unknown> | undefined;
-    if (code === "needs_reconciliation") {
-      return new NeedsReconciliationError(code, message, status, details);
-    }
-    return new SalvorApiError(code, message, status, details);
-  }
-}
-
-/** Parse one SSE frame's text into an event or end frame, or null to skip it. */
-function parseSseFrame(raw: string): Frame | null {
-  let eventName: string | undefined;
-  const dataLines: string[] = [];
-  for (const line of raw.split("\n")) {
-    if (line === "" || line.startsWith(":")) continue; // blank or comment
-    const idx = line.indexOf(":");
-    const field = idx === -1 ? line : line.slice(0, idx);
-    let value = idx === -1 ? "" : line.slice(idx + 1);
-    if (value.startsWith(" ")) value = value.slice(1);
-    if (field === "event") eventName = value;
-    else if (field === "data") dataLines.push(value);
-    // `id:` carries the seq; the seq is also inside the data envelope.
-  }
-  if (dataLines.length === 0) return null;
-  const obj = JSON.parse(dataLines.join("\n")) as Record<string, unknown>;
-  return eventName === "end" ? { kind: "end", obj } : { kind: "event", obj };
 }
 
 function sleep(ms: number): Promise<void> {

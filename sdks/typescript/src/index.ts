@@ -20,10 +20,18 @@
 
 export { SalvorClient } from "./client.js";
 export type { SalvorClientOptions, EventStream } from "./client.js";
+export { openClientRun, ClientRunDriver } from "./client_runs.js";
+export type {
+  OpenClientRunOptions,
+  ModelStepResult,
+  ModelStepStream,
+  ModelStepDelta,
+} from "./client_runs.js";
 export {
   SalvorError,
   SalvorApiError,
   NeedsReconciliationError,
+  DivergenceError,
   SalvorStreamError,
 } from "./errors.js";
 export {

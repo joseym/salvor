@@ -101,6 +101,56 @@ except NeedsReconciliationError as e:
     client.resume(run_id)
 ```
 
+## The two modes
+
+Salvor has two modes, and this SDK speaks both. The one above is **server-driven**:
+`start_run` hands the agent loop to the server, which drives it in a background
+task, and you read the events it produces. The second is **client-driven**: your
+code owns the loop and streams the events it produces, while the server still
+owns the durable log and, on every append, re-folds the log to confirm the
+incoming event is the one legal next event. The two never collide: a
+client-driven run and a server-driven run cannot share an id, and each surface
+serves only its own runs.
+
+Open a client-driven run and drive it with a `ClientRunDriver`:
+
+```python
+from salvor import Client
+
+with Client("http://127.0.0.1:8080") as client:
+    run = client.open_client_run(record_prompts=False)   # -> ClientRunDriver
+
+    # The client emits its own control and context events through the guarded
+    # append; the server confirms each is the legal next event before recording.
+    run.append([run.envelope(0, "RunStarted", agent_def_hash=agent, input=task)])
+
+    # The one side-effecting step the server must perform (it holds the key):
+    result = run.model_step(1, request)          # -> ModelStepResult (response, usage)
+    # or stream it, painting a live ticker:
+    stream = run.model_step_stream(1, request)
+    for delta in stream:
+        ...                                      # {"type": "text_delta", ...}
+    completion = stream.completion               # -> ModelStepResult
+
+    # A tool the server's registry holds:
+    output = run.tool_step(3, "render", {"doc": "plan.typ"})
+
+    run.append([run.envelope(5, "RunCompleted", output=answer)])
+```
+
+The driver's full surface: `open` (also re-opens, i.e. resumes, an existing
+run), `log(from_seq=0)`, `append(events)`, `model_step`, `model_step_stream`,
+`tool_step`, and `resolve(output)`. Re-opening a run returns its recorded log on
+`run.log_envelopes` and mints a fresh drive token (the single-writer lease every
+append presents), so a refreshed client rebuilds its cursor and re-drives from
+the log, paying nothing for a step the log already covers. A client-driven
+append the log rejects raises `DivergenceError`; a tool step that lands on a
+dangling write raises `NeedsReconciliationError` (whose `.intent` is the recorded
+write), which `resolve(output)` clears.
+
+`examples/browser-client-run` drives this same client-driven surface from a
+browser page, and `example/client_run_loop.py` drives it from Python.
+
 ## Runnable example
 
 `example/agent.toml` is a model-only agent that answers one question. It is the

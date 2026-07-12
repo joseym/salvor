@@ -110,7 +110,7 @@ export interface EndFrame {
 
 type Json = Record<string, unknown>;
 
-function parseUsage(obj: unknown): Usage | undefined {
+export function parseUsage(obj: unknown): Usage | undefined {
   if (!obj || typeof obj !== "object") return undefined;
   const o = obj as Json;
   return {

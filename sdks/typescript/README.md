@@ -122,6 +122,59 @@ try {
 }
 ```
 
+## The two modes
+
+Salvor has two modes, and this client speaks both. The one above is
+**server-driven**: `startRun` hands the agent loop to the server, which drives it
+in a background task, and you read the events it produces. The second is
+**client-driven**: your code owns the loop and streams the events it produces,
+while the server still owns the durable log and, on every append, re-folds the
+log to confirm the incoming event is the one legal next event. The two never
+collide: a client-driven run and a server-driven run cannot share an id, and each
+surface serves only its own runs.
+
+Open a client-driven run and drive it with a `ClientRunDriver`:
+
+```ts
+const run = await client.openClientRun({ recordPrompts: false }); // -> ClientRunDriver
+
+// The client emits its own control and context events through the guarded
+// append; the server confirms each is the legal next event before recording.
+await run.append([run.envelope(0, "RunStarted", { agent_def_hash: agent, input: task })]);
+
+// The one side-effecting step the server must perform (it holds the key):
+const { response, usage } = await run.modelStep(1, request);
+// or stream it, painting a live ticker:
+const stream = run.modelStepStream(1, request);
+for await (const delta of stream) {
+  if (delta.type === "text_delta") paint(delta.text);
+}
+const completion = stream.completion;             // -> ModelStepResult
+
+// A tool the server's registry holds:
+const output = await run.toolStep(3, "render", { doc: "plan.typ" });
+
+await run.append([run.envelope(5, "RunCompleted", { output: answer })]);
+```
+
+The driver's full surface: `openClientRun` (also re-opens, i.e. resumes, an
+existing run), `log(fromSeq)`, `append(events)`, `modelStep`, `modelStepStream`
+(an `AsyncIterable` of ticker deltas with a `completion` after), `toolStep`, and
+`resolve(output)`. Re-opening a run returns its recorded log on
+`run.logEnvelopes` and mints a fresh drive token (the single-writer lease every
+append presents), so a refreshed client rebuilds its cursor and re-drives from
+the log, paying nothing for a step the log already covers. A client-driven append
+the log rejects throws `DivergenceError`; a tool step that lands on a dangling
+write throws `NeedsReconciliationError` (whose `.intent` is the recorded write),
+which `resolve(output)` clears.
+
+The driver uses only `fetch` and the SDK's own SSE parser, with no Node-only
+API, so it runs unchanged in a browser tab: the streaming model step is a POST
+that returns server-sent events, which `EventSource` cannot do, so the SDK parses
+the fetch body stream itself. `examples/browser-client-run` drives this same
+surface from a browser page, and `example/client_run_loop.ts` drives it from
+Node.
+
 ## Runnable example
 
 `example/agent.toml` is a model-only agent that answers one question. It is the

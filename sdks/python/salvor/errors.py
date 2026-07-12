@@ -13,6 +13,7 @@ recorded write intent.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Optional
 
 
@@ -69,6 +70,49 @@ class NeedsReconciliationError(SalvorAPIError):
         return self.details.get("intent", {})
 
 
+class DivergenceError(SalvorAPIError):
+    """Raised when a client-driven append is not the one legal next event.
+
+    The server re-folds the durable log on every append and refuses one that is
+    not the legal continuation: a wrong sequence number, a completion that does
+    not correlate to its intent, a second pending intent, an event after a
+    terminal event, or different bytes at an already-recorded position. The
+    append-guard's precise reason is on :attr:`~SalvorAPIError.message`.
+    """
+
+
 class SalvorStreamError(SalvorError):
     """Raised when the event stream drops and cannot be resumed within the
     configured retry budget."""
+
+
+def api_error(
+    code: str,
+    message: str,
+    status: int,
+    details: Optional[dict[str, Any]] = None,
+) -> SalvorAPIError:
+    """Build the typed error for one decoded error envelope.
+
+    The one refusal that carries structured evidence, a resume or tool step
+    blocked on a dangling write, becomes :class:`NeedsReconciliationError`; a
+    client-driven append the log rejects becomes :class:`DivergenceError`;
+    everything else is a plain :class:`SalvorAPIError` carrying the stable code.
+    """
+    if code == "needs_reconciliation":
+        return NeedsReconciliationError(code, message, status, details)
+    if code == "divergence":
+        return DivergenceError(code, message, status, details)
+    return SalvorAPIError(code, message, status, details)
+
+
+def decode_error(status: int, body: bytes) -> SalvorAPIError:
+    """Decode an error-envelope response body into the typed error it names."""
+    try:
+        envelope = json.loads(body).get("error", {})
+    except (ValueError, AttributeError):
+        envelope = {}
+    code = envelope.get("code", "unknown")
+    message = envelope.get("message", body.decode("utf-8", "replace"))
+    details = envelope.get("details")
+    return api_error(code, message, status, details)

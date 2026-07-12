@@ -16,6 +16,7 @@ the write-ahead reconciliation rule.
 """
 
 from .errors import (
+    DivergenceError,
     NeedsReconciliationError,
     SalvorAPIError,
     SalvorError,
@@ -51,9 +52,13 @@ from .models import (
 __all__ = [
     "Client",
     "EventStream",
+    "ClientRunDriver",
+    "ModelStepResult",
+    "ModelStepStream",
     "SalvorError",
     "SalvorAPIError",
     "NeedsReconciliationError",
+    "DivergenceError",
     "SalvorStreamError",
     "Event",
     "EndFrame",
@@ -99,5 +104,12 @@ def __getattr__(name: str):
 
         globals()["Client"] = Client
         globals()["EventStream"] = EventStream
+        return globals()[name]
+    if name in ("ClientRunDriver", "ModelStepResult", "ModelStepStream"):
+        from .client_runs import ClientRunDriver, ModelStepResult, ModelStepStream
+
+        globals()["ClientRunDriver"] = ClientRunDriver
+        globals()["ModelStepResult"] = ModelStepResult
+        globals()["ModelStepStream"] = ModelStepStream
         return globals()[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

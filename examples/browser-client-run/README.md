@@ -1,0 +1,117 @@
+# browser-client-run: a client-driven run from the browser
+
+Salvor has two modes. In the server-driven mode the server owns the agent loop
+and drives it in a background task; the SDKs and `examples/polyglot-service`
+show that one. This example is the other mode: the client owns the loop and
+streams the events it produces, while the server owns the durable log and, on
+every append, re-folds the log to confirm the incoming event is the one legal
+next event. The client here is a browser page.
+
+The page opens a client-driven run, appends its own control events, re-opens the
+run and re-drives it from the fetched log with zero live calls, drives a
+streaming model step whose tokens paint a live ticker, and attempts a tool step.
+It imports the built `@salvor/client` SDK by relative path, the same pattern
+`examples/polyglot-service` uses, so there is no bundler.
+
+## Files
+
+- `index.html`: the static page. A DOM sink renders the log and the ticker.
+- `client-run-demo.js`: the demo logic, with the DOM held behind a `sink` seam
+  so the exact same code runs in the browser and headless. It imports the SDK's
+  built `dist` by relative path.
+- `headless.mjs`: runs `client-run-demo.js` against the live stack with a
+  console sink, so the logic is verifiable without a browser.
+
+## Bring up the offline stack
+
+Build the binaries and the SDK once, from the repository root:
+
+```sh
+cargo build --bin salvor --bin salvor-demo-model
+( cd sdks/typescript && npm install && npm run build )
+```
+
+Start the scripted demo model and the control plane. `SALVOR_DEMO_BASE_URL`
+points the demo agent's own model config at the scripted server; see the note
+below on what it does and does not reach.
+
+```sh
+./target/debug/salvor-demo-model --port 8893 --delay-ms 50 &
+SALVOR_DEMO_BASE_URL=http://127.0.0.1:8893 \
+    ./target/debug/salvor --store /tmp/salvor-browser.db serve --bind 127.0.0.1:8080 &
+```
+
+### Verify the logic headless
+
+The demo logic runs end to end without a browser:
+
+```sh
+node examples/browser-client-run/headless.mjs http://127.0.0.1:8080
+```
+
+You see the control loop open a run, append RunStarted / NowObserved /
+RunCompleted, re-open the run, and replay all three events from the log with
+zero live calls. The streaming model step and the tool step then report their
+current limits (below), which is the honest offline result.
+
+## Open the page
+
+A browser needs the page, the demo module, and the SDK's `dist` all reachable
+over one origin, and it needs to reach the control plane's `/v1` on that same
+origin (see the CORS note). Serve the repository root and proxy `/v1` to the
+control plane, then open the page. Any static server plus a `/v1` proxy works;
+the shape is the one the dashboard's Trunk dev server uses.
+
+The page's relative import resolves to `/sdks/typescript/dist/index.js` when the
+repository root is the served root, so open it at a URL like
+`http://localhost:PORT/examples/browser-client-run/index.html`.
+
+## The CORS reality
+
+`salvor-server` sets no CORS headers. A browser page served from a different
+origin than the control plane is refused by the browser before the request is
+even seen server-side. There is no flag to turn CORS on, and this example does
+not patch the server to add it.
+
+So the page must be same-origin with the control plane's `/v1`: serve the static
+files and reverse-proxy `/v1` to `salvor serve` under one origin (the Trunk
+proxy the dashboard uses, or any dev proxy). Cross-origin from a bare
+`file://` or a plain static server on another port will fail with a CORS error
+in the console. Adding an opt-in CORS layer to `salvor-server` is a reasonable
+follow-up; it is out of scope for this example, which does not change the
+server.
+
+## The model step and the tool step, honestly
+
+Two legs of this demo need something `salvor serve` does not wire offline, so
+they report a clear message rather than pretend:
+
+- **The streaming model step needs a reachable model.** `salvor serve` builds
+  its client-driven model executor from `salvor_llm::Client::from_env`, which
+  reads `ANTHROPIC_API_KEY` and targets the public Anthropic endpoint. It reads
+  no base-URL environment variable, so `SALVOR_DEMO_BASE_URL` (which configures
+  the demo *agent's* own model, a server-driven concern) does not redirect this
+  executor to the scripted demo model. With no key the model step returns a
+  provider error and the demo reports "no reachable model"; the ticker paints
+  live only when the server can reach a model. Give `salvor serve` a real
+  `ANTHROPIC_API_KEY` to watch the ticker fill, or embed `salvor-server` in a
+  host that injects a local model executor (the composition the design intends).
+  Redirecting the built-in executor to a local model offline would need a
+  base-URL override in `salvor serve`; that is a server change, flagged as a
+  follow-up and not made here.
+
+- **The tool step needs a registered tool.** `salvor serve` wires an empty tool
+  registry, so every tool step is `unknown_tool` until a host registers one. The
+  demo reports that and moves on. This example is therefore scoped to the model
+  step and control events; a host that registers a render tool would see the
+  tool step dispatched and recorded.
+
+## What was and was not automated
+
+The demo logic is verified headless against the live offline stack by
+`headless.mjs` (open, append, re-open, replay, and the graceful model-step and
+tool-step degradation), and the page, the demo module, and the SDK `dist` all
+load over static HTTP. A full in-browser click-through (loading the page in a
+real browser behind a same-origin proxy and clicking Run) was not automated
+here; the logic it would exercise is exactly what `headless.mjs` runs, since the
+DOM is only a sink.

@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Salvor client-driven run in the browser</title>
+    <style>
+      body {
+        font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+        margin: 0;
+        padding: 2rem;
+        max-width: 46rem;
+        color: #1a1a1a;
+        background: #fafafa;
+      }
+      h1 {
+        font-size: 1.2rem;
+      }
+      .row {
+        display: flex;
+        gap: 0.5rem;
+        margin: 1rem 0;
+      }
+      input {
+        flex: 1;
+        padding: 0.4rem 0.6rem;
+        font: inherit;
+      }
+      button {
+        padding: 0.4rem 0.9rem;
+        font: inherit;
+        cursor: pointer;
+      }
+      #ticker {
+        min-height: 1.5rem;
+        padding: 0.5rem 0.75rem;
+        margin: 0.75rem 0;
+        background: #eef;
+        border-left: 3px solid #88a;
+        white-space: pre-wrap;
+      }
+      #log {
+        white-space: pre-wrap;
+        background: #fff;
+        border: 1px solid #ddd;
+        padding: 0.75rem;
+        min-height: 12rem;
+      }
+      .section {
+        font-weight: 700;
+        margin-top: 0.5rem;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Salvor client-driven run</h1>
+    <p>
+      This page owns an agent loop and streams the events it produces to a
+      Salvor control plane, which owns the durable log. It opens a run, appends
+      its own control events, re-opens the run and replays it from the fetched
+      log (zero live calls), then drives a streaming model step whose tokens
+      paint into the ticker below. See <code>README.md</code> for the offline
+      bring-up and the CORS note.
+    </p>
+    <div class="row">
+      <input id="base" value="http://127.0.0.1:8080" aria-label="control plane base URL" />
+      <button id="run">Run demo</button>
+    </div>
+    <div class="section">live ticker</div>
+    <div id="ticker"></div>
+    <div class="section">log</div>
+    <div id="log"></div>
+
+    <script type="module">
+      import { runClientRunDemo } from "./client-run-demo.js";
+
+      const logEl = document.getElementById("log");
+      const tickerEl = document.getElementById("ticker");
+      const button = document.getElementById("run");
+
+      // The DOM sink: the same seam headless.mjs wires to the console.
+      const sink = {
+        section(text) {
+          const el = document.createElement("div");
+          el.className = "section";
+          el.textContent = `== ${text} ==`;
+          logEl.appendChild(el);
+        },
+        line(text) {
+          logEl.appendChild(document.createTextNode(text + "\n"));
+        },
+        tick(text) {
+          tickerEl.textContent = text; // paint the live ticker as tokens arrive
+        },
+      };
+
+      button.addEventListener("click", async () => {
+        logEl.textContent = "";
+        tickerEl.textContent = "";
+        button.disabled = true;
+        try {
+          await runClientRunDemo(document.getElementById("base").value, sink);
+        } catch (error) {
+          sink.line(`error: ${error.message}`);
+        } finally {
+          button.disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>

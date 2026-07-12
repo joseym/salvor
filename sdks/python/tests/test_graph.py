@@ -13,6 +13,7 @@ Standard library only: ``unittest`` and ``json``. Run it with
 """
 
 import json
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -66,13 +67,24 @@ def build_canonical_flow():
 
 class BuildsCanonicalDocument(unittest.TestCase):
     def test_authoring_does_not_require_httpx(self):
-        # Importing the builder (done at module load above) must not pull in
-        # httpx, the client's dependency. Authoring a graph is stdlib-only.
-        self.assertNotIn(
-            "httpx",
-            sys.modules,
-            "importing the graph builder must not import httpx",
+        # Importing the builder must not pull in httpx, the client's dependency:
+        # authoring a graph is stdlib-only. Checked in a fresh interpreter so the
+        # assertion is independent of whatever else the suite already imported
+        # into this process (a driver test, for one, legitimately loads httpx).
+        code = (
+            "import sys, salvor;"
+            "salvor.GraphBuilder;"
+            "assert 'httpx' not in sys.modules, 'importing the graph builder imported httpx';"
+            "print('ok')"
         )
+        out = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=str(Path(__file__).resolve().parents[1]),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stdout.strip(), "ok")
 
     def test_matches_canonical_fixture(self):
         built = build_canonical_flow().to_dict()
