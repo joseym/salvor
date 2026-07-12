@@ -38,7 +38,17 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-import httpx
+# The driver needs the SDK's one dependency. On an interpreter without it (a
+# bare system python) this whole module skips at collection rather than
+# erroring, preserving the package's promise that only the client and the
+# driver ever need httpx: graph authoring and the graph tests still run.
+try:
+    import httpx
+except ImportError:
+    raise unittest.SkipTest(
+        "httpx is not installed; the client-run driver tests need the SDK's "
+        "one dependency (pip install -e sdks/python)"
+    ) from None
 
 from salvor import ClientRunDriver
 from salvor.errors import DivergenceError, NeedsReconciliationError, SalvorAPIError
