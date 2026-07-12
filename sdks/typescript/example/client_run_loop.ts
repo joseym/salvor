@@ -10,9 +10,11 @@
  * live calls.
  *
  * The model step is the only leg that needs a model the server can reach.
- * `salvor serve` wires its client-driven model executor from the environment
- * (`salvor_llm::Client::from_env`, reading `ANTHROPIC_API_KEY` and targeting the
- * public endpoint), so give the server a key to see the model leg run:
+ * `salvor serve`'s client-driven model executor reads `ANTHROPIC_API_KEY` for
+ * its credential and honors `SALVOR_MODEL_BASE_URL` to target a local or
+ * offline endpoint speaking the same wire protocol. This leg streams, so it
+ * paints live against an endpoint that streams (the public one, with a key on
+ * the server's environment):
  *
  *     ANTHROPIC_API_KEY=sk-ant-... \
  *         target/debug/salvor serve --bind 127.0.0.1:8080 --store /tmp/loop.db
@@ -22,10 +24,12 @@
  *     npm install && npm run build
  *     node --experimental-strip-types example/client_run_loop.ts http://127.0.0.1:8080
  *
- * With no key the control loop and the replay still run end to end, and the
- * model leg reports that the server has no reachable model, so this is runnable
- * offline as-is. In your own project you would
- * `import { SalvorClient } from "@salvor/client"`.
+ * With no reachable model, or one that does not stream (the scripted demo
+ * model answers plain JSON only), the control loop and the replay still run
+ * end to end and the model leg reports why it skipped, so this is runnable
+ * offline as-is. examples/browser-client-run shows the unary-retry fallback
+ * that completes the step against the demo model. In your own project you
+ * would `import { SalvorClient } from "@salvor/client"`.
  */
 
 import { SalvorApiError, SalvorClient, SalvorStreamError } from "../dist/index.js";
@@ -71,9 +75,9 @@ async function controlLoopThenReplay(): Promise<void> {
 
 /**
  * Reserve a model intent and ask the server to perform the call, streaming a
- * live ticker. When the server has no reachable model, this reports the gap and
- * leaves the run at its dangling model intent, which a retry against a reachable
- * model would re-issue safely.
+ * live ticker. When the server has no reachable model, or its endpoint does
+ * not stream, this reports why and leaves the run at its dangling model
+ * intent, which a retry (streaming or unary) would re-issue safely.
  */
 async function modelStepLeg(): Promise<void> {
   const run: ClientRunDriver = await client.openClientRun({ recordPrompts: true });
@@ -91,16 +95,18 @@ async function modelStepLeg(): Promise<void> {
     await run.append([run.envelope(3, "RunCompleted", { output: { answered: true } })]);
     console.log("completed the run after the model step");
   } catch (error) {
-    // No reachable model: either a pre-stream 5xx (SalvorApiError) or a
-    // mid-stream provider failure delivered as an `error` frame
-    // (SalvorStreamError). Both mean the server has no model to reach here.
-    const noModel =
+    // A model-side failure: a pre-stream 5xx (SalvorApiError), or a mid-stream
+    // failure delivered as an `error` frame (SalvorStreamError), which is also
+    // what an endpoint that does not stream produces.
+    const modelSide =
       (error instanceof SalvorApiError &&
         (error.code === "model_executor_unavailable" ||
           error.code === "model_execution")) ||
       error instanceof SalvorStreamError;
-    if (noModel) {
-      console.log("model step skipped: server has no reachable model");
+    if (modelSide) {
+      console.log(
+        "model step skipped: no reachable model, or the endpoint does not stream",
+      );
       return;
     }
     throw error;

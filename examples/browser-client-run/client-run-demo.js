@@ -15,11 +15,15 @@
  *      event replays from the log with zero live calls. This is the durable
  *      guarantee, and it runs offline with no model at all.
  *
- *   B. Streaming model step. On a second run, ask the server to perform a model
- *      call with the streaming variant, painting each ticker delta into the sink
- *      as it arrives. The server holds the key and records the completion. When
- *      the server has no reachable model (see the README on `salvor serve`'s
- *      executor) this reports the gap and the ticker stays empty.
+ *   B. Model step. On a second run, ask the server to perform a model call with
+ *      the streaming variant, painting each ticker delta into the sink as it
+ *      arrives. The server holds the credential and records the completion.
+ *      When the model endpoint cannot stream (the offline demo model answers
+ *      plain JSON only), the failed stream leaves a dangling intent and the
+ *      demo retries with the unary step, which re-issues that intent safely
+ *      and completes; the assembled text then paints at once. The README shows
+ *      pointing `salvor serve`'s executor at the offline model with
+ *      `SALVOR_MODEL_BASE_URL`.
  *
  *   C. Tool step. Attempt a server-performed tool call. `salvor serve` wires an
  *      empty tool registry, so this reports `unknown_tool`; a host that
@@ -75,10 +79,12 @@ async function controlLoopThenReplay(baseUrl, sink) {
 }
 
 async function streamingModelStep(baseUrl, sink) {
-  sink.section("B. streaming model step (live ticker)");
+  sink.section("B. model step (streaming, with a unary retry fallback)");
   const run = await openClientRun(baseUrl, { recordPrompts: true });
   sink.line(`opened run ${run.runId}`);
   await run.append([run.envelope(0, "RunStarted", { agent_def_hash: AGENT, input: {} })]);
+
+  // Prefer the streaming variant: each ticker delta paints as it arrives.
   try {
     const stream = run.modelStepStream(1, REQUEST);
     let ticker = "";
@@ -90,19 +96,40 @@ async function streamingModelStep(baseUrl, sink) {
     }
     const usage = stream.completion?.usage;
     sink.line(`model step recorded; usage ${usage?.inputTokens} in / ${usage?.outputTokens} out`);
-    await run.append([run.envelope(3, "RunCompleted", { output: { answered: true } })]);
-    sink.line("completed the run after the model step");
   } catch (error) {
-    const noModel =
+    const modelSide =
       (error instanceof SalvorApiError &&
         (error.code === "model_executor_unavailable" || error.code === "model_execution")) ||
       error instanceof SalvorStreamError;
-    if (noModel) {
+    if (!modelSide) throw error;
+    // The offline demo model answers plain JSON only, so the stream fails and
+    // leaves a dangling intent. Retry identity is (seq, request_hash): the
+    // unary step at the same position re-issues that intent safely (an
+    // unanswered model request has no external effect to double) and records
+    // the completion. This is the crash story, driven on purpose.
+    sink.line("stream unavailable from this model endpoint; retrying as a unary step");
+    try {
+      const result = await run.modelStep(1, REQUEST);
+      const text = (result.response?.content ?? [])
+        .map((block) =>
+          block.type === "text" ? block.text : `[${block.type}: ${block.name ?? ""}]`,
+        )
+        .join("");
+      sink.tick(text); // the assembled response paints at once
+      const usage = result.usage;
+      sink.line(`model step recorded; usage ${usage?.inputTokens} in / ${usage?.outputTokens} out`);
+    } catch (retryError) {
+      const noModel =
+        retryError instanceof SalvorApiError &&
+        (retryError.code === "model_executor_unavailable" ||
+          retryError.code === "model_execution");
+      if (!noModel) throw retryError;
       sink.line("model step skipped: server has no reachable model (see README)");
       return;
     }
-    throw error;
   }
+  await run.append([run.envelope(3, "RunCompleted", { output: { answered: true } })]);
+  sink.line("completed the run after the model step");
 }
 
 async function toolStep(baseUrl, sink) {

@@ -31,13 +31,14 @@ cargo build --bin salvor --bin salvor-demo-model
 ( cd sdks/typescript && npm install && npm run build )
 ```
 
-Start the scripted demo model and the control plane. `SALVOR_DEMO_BASE_URL`
-points the demo agent's own model config at the scripted server; see the note
-below on what it does and does not reach.
+Start the scripted demo model and the control plane. `SALVOR_MODEL_BASE_URL`
+points the client-driven model step's executor at the scripted server, so the
+model step runs offline with no key (the streaming note below explains the
+unary fallback the demo takes here).
 
 ```sh
 ./target/debug/salvor-demo-model --port 8893 --delay-ms 50 &
-SALVOR_DEMO_BASE_URL=http://127.0.0.1:8893 \
+SALVOR_MODEL_BASE_URL=http://127.0.0.1:8893 \
     ./target/debug/salvor --store /tmp/salvor-browser.db serve --bind 127.0.0.1:8080 &
 ```
 
@@ -51,8 +52,9 @@ node examples/browser-client-run/headless.mjs http://127.0.0.1:8080
 
 You see the control loop open a run, append RunStarted / NowObserved /
 RunCompleted, re-open the run, and replay all three events from the log with
-zero live calls. The streaming model step and the tool step then report their
-current limits (below), which is the honest offline result.
+zero live calls. The model step then performs a real server-performed call
+against the scripted model and records it (the stream falls back to a unary
+retry offline, the note below), and the tool step reports its current limit.
 
 ## Open the page
 
@@ -83,22 +85,22 @@ server.
 
 ## The model step and the tool step, honestly
 
-Two legs of this demo need something `salvor serve` does not wire offline, so
-they report a clear message rather than pretend:
-
-- **The streaming model step needs a reachable model.** `salvor serve` builds
-  its client-driven model executor from `salvor_llm::Client::from_env`, which
-  reads `ANTHROPIC_API_KEY` and targets the public Anthropic endpoint. It reads
-  no base-URL environment variable, so `SALVOR_DEMO_BASE_URL` (which configures
-  the demo *agent's* own model, a server-driven concern) does not redirect this
-  executor to the scripted demo model. With no key the model step returns a
-  provider error and the demo reports "no reachable model"; the ticker paints
-  live only when the server can reach a model. Give `salvor serve` a real
-  `ANTHROPIC_API_KEY` to watch the ticker fill, or embed `salvor-server` in a
-  host that injects a local model executor (the composition the design intends).
-  Redirecting the built-in executor to a local model offline would need a
-  base-URL override in `salvor serve`; that is a server change, flagged as a
-  follow-up and not made here.
+- **The model step runs offline; live streaming needs an endpoint that
+  streams.** `salvor serve`'s client-driven model executor reads
+  `ANTHROPIC_API_KEY` for its credential and honors `SALVOR_MODEL_BASE_URL` to
+  target a local or offline endpoint speaking the same Messages wire protocol
+  (documented in `crates/salvor-server/API.md`). With the bring-up above the
+  executor reaches the scripted demo model, which answers unary requests but
+  does not implement the provider's streaming wire (it ignores `stream: true`
+  and returns plain JSON), so the streaming attempt fails, leaves a dangling
+  intent, and the demo retries with the unary step at the same position. That
+  retry re-issues the dangling intent safely and records the completion, which
+  is the crash story driven on purpose; the assembled response then paints at
+  once. To watch the ticker fill token by token, give `salvor serve` a real
+  `ANTHROPIC_API_KEY` (and drop `SALVOR_MODEL_BASE_URL`), or point it at any
+  local endpoint that streams. Note `SALVOR_DEMO_BASE_URL` is a different knob:
+  it configures the demo *agent's* own model for server-driven runs, not this
+  executor.
 
 - **The tool step needs a registered tool.** `salvor serve` wires an empty tool
   registry, so every tool step is `unknown_tool` until a host registers one. The
@@ -109,9 +111,9 @@ they report a clear message rather than pretend:
 ## What was and was not automated
 
 The demo logic is verified headless against the live offline stack by
-`headless.mjs` (open, append, re-open, replay, and the graceful model-step and
-tool-step degradation), and the page, the demo module, and the SDK `dist` all
-load over static HTTP. A full in-browser click-through (loading the page in a
+`headless.mjs` (open, append, re-open, replay, the model step recorded through
+the unary retry, and the tool step's clean refusal), and the page, the demo
+module, and the SDK `dist` all load over static HTTP. A full in-browser click-through (loading the page in a
 real browser behind a same-origin proxy and clicking Run) was not automated
 here; the logic it would exercise is exactly what `headless.mjs` runs, since the
 DOM is only a sink.

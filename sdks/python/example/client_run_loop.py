@@ -9,20 +9,20 @@ key), then re-opens a run and re-drives it from the fetched log to show that a
 recorded run replays with zero live calls.
 
 The model step is the only leg that needs a model the server can reach.
-`salvor serve` wires its client-driven model executor from the environment
-(`salvor_llm::Client::from_env`, reading `ANTHROPIC_API_KEY` and targeting the
-public endpoint), so give the server a key to see the model leg run:
+`salvor serve`'s client-driven model executor reads `ANTHROPIC_API_KEY` for its
+credential and honors `SALVOR_MODEL_BASE_URL` to target a local or offline
+endpoint speaking the same wire protocol, so the whole script runs offline and
+keyless against the scripted demo model:
 
-    ANTHROPIC_API_KEY=sk-ant-... \
-        target/debug/salvor serve --bind 127.0.0.1:8080 --store /tmp/loop.db
-
-then:
-
+    target/debug/salvor-demo-model --port 8893 --delay-ms 0 &
+    SALVOR_MODEL_BASE_URL=http://127.0.0.1:8893 \
+        target/debug/salvor serve --bind 127.0.0.1:8080 --store /tmp/loop.db &
     python example/client_run_loop.py http://127.0.0.1:8080
 
-With no key the control loop and the replay still run end to end (they are the
-durable surface), and the model leg reports that the server has no reachable
-model, so the script is runnable offline as-is.
+or against the public endpoint with a key on the server's environment
+(`ANTHROPIC_API_KEY=sk-ant-...` and no `SALVOR_MODEL_BASE_URL`). With neither,
+the control loop and the replay still run end to end (they are the durable
+surface) and the model leg reports that the server has no reachable model.
 """
 
 import sys
