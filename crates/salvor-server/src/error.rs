@@ -63,6 +63,19 @@ pub enum ApiError {
     /// recorded, so the write-ahead intent is left dangling (the legal crash
     /// story) and the run stays drivable: a retry re-issues the call safely.
     ModelExecution(String),
+    /// A tool-step named a tool the server's registry does not hold. HTTP 404.
+    /// Nothing is written for a tool the server cannot dispatch, so the step is
+    /// retriable once the tool is registered.
+    UnknownTool(String),
+    /// A server-performed tool step was requested but no tool registry is wired
+    /// on this server (the host injected none). HTTP 503. The mirror of
+    /// [`ModelExecutorUnavailable`](Self::ModelExecutorUnavailable): no intent
+    /// is written, so the run stays drivable once a registry is present.
+    ToolRegistryUnavailable(String),
+    /// The dispatch of a tool-step's tool failed. HTTP 502. No completion is
+    /// recorded, so the write-ahead intent is left dangling (the legal crash
+    /// story) and the run stays drivable-or-reconcilable per the tool's effect.
+    ToolExecution(String),
     /// A run needs human reconciliation and cannot be driven automatically.
     /// Carries the recorded write intent as evidence. HTTP 409.
     NeedsReconciliation {
@@ -100,6 +113,11 @@ impl ApiError {
                 "model_executor_unavailable",
             ),
             ApiError::ModelExecution(_) => (StatusCode::BAD_GATEWAY, "model_execution"),
+            ApiError::UnknownTool(_) => (StatusCode::NOT_FOUND, "unknown_tool"),
+            ApiError::ToolRegistryUnavailable(_) => {
+                (StatusCode::SERVICE_UNAVAILABLE, "tool_registry_unavailable")
+            }
+            ApiError::ToolExecution(_) => (StatusCode::BAD_GATEWAY, "tool_execution"),
             ApiError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         }
     }
@@ -120,6 +138,9 @@ impl ApiError {
             | ApiError::PayloadTooLarge(m)
             | ApiError::ModelExecutorUnavailable(m)
             | ApiError::ModelExecution(m)
+            | ApiError::UnknownTool(m)
+            | ApiError::ToolRegistryUnavailable(m)
+            | ApiError::ToolExecution(m)
             | ApiError::NeedsReconciliation { message: m, .. } => m.clone(),
             ApiError::Unauthorized => "missing or invalid bearer token".to_owned(),
         }

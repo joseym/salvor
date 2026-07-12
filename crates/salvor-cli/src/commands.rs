@@ -35,7 +35,7 @@ use salvor_core::{PendingCall, RunId, derive_state};
 use salvor_runtime::{RunOutcome, Runtime, RuntimeError};
 use salvor_server::dispatch::{Disposition, classify};
 use salvor_server::{
-    AgentDefinition, AgentFactory, AppState, BuiltAgent, DefFormat, LlmModelExecutor,
+    AgentDefinition, AgentFactory, AppState, BuiltAgent, DefFormat, LlmModelExecutor, ToolRegistry,
 };
 use salvor_store::{EventStore, SqliteStore};
 use serde_json::Value;
@@ -274,8 +274,12 @@ pub async fn serve(store_path: &Path, args: ServeArgs) -> Result<u8> {
     let model_client = salvor_llm::Client::from_env()
         .context("building the model client for the client-driven model step")?;
 
+    // An empty tool registry: the mechanism is wired, but salvor serve ships no
+    // tools of its own. A tool-step for any name is a clean `unknown_tool` until
+    // a host registers one, mirroring how the model executor is wired.
     let mut state = AppState::new(store, factory)
-        .with_model_executor(Arc::new(LlmModelExecutor::new(model_client)));
+        .with_model_executor(Arc::new(LlmModelExecutor::new(model_client)))
+        .with_tool_registry(Arc::new(ToolRegistry::new()));
     if let Some(env_name) = &args.auth_token {
         match std::env::var(env_name) {
             Ok(token) if !token.is_empty() => {

@@ -40,11 +40,13 @@ use axum::http::header::ACCEPT;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use salvor_core::{Event, EventEnvelope, LogValidator, RunId, SequenceNumber, TokenUsage};
+use salvor_core::{Effect, Event, EventEnvelope, LogValidator, RunId, SequenceNumber, TokenUsage};
 use salvor_llm::{ContentDelta, MessageAccumulator, StreamEvent};
-use salvor_runtime::{hash_value, response_value, usage_of};
+use salvor_runtime::{RuntimeError, hash_value, response_value, usage_of};
+use salvor_tools::{ToolCtx, ToolOutcome};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use time::format_description::well_known::Rfc3339;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
@@ -117,6 +119,36 @@ pub struct ModelStepQuery {
     /// `Accept: text/event-stream` header selects streaming too.
     #[serde(default)]
     stream: Option<String>,
+}
+
+/// The body of `POST /v1/client-runs/{id}/tool-step`.
+#[derive(Debug, Deserialize)]
+struct ToolStepRequest {
+    /// The log position the client's cursor reserved for the tool intent.
+    seq: u64,
+    /// The registered tool's name. Unknown to the registry is an error, and no
+    /// intent is written.
+    tool: String,
+    /// The typed input passed to the tool, recorded on the intent verbatim.
+    input: Value,
+    /// The idempotency key for this attempt, when the tool has one. The client
+    /// draws it from a recorded `RandomObserved` so it reproduces on replay.
+    #[serde(default)]
+    idempotency_key: Option<String>,
+    /// A client-declared effect, accepted for shape parity but deliberately
+    /// ignored: the recorded effect is the registry's operator-declared
+    /// one, so a caller cannot up- or down-grade it.
+    #[serde(default)]
+    #[allow(dead_code)]
+    effect: Option<Effect>,
+}
+
+/// The body of `POST /v1/client-runs/{id}/resolve`.
+#[derive(Debug, Deserialize)]
+struct ResolveRequest {
+    /// The output to record for the dangling write, verbatim, exactly as the
+    /// server-driven resolve takes it.
+    output: Value,
 }
 
 /// `POST /v1/client-runs`: open a fresh client-driven run, or re-open (resume)
@@ -651,6 +683,338 @@ fn open_body(run_id: RunId, drive_token: &str, log: &[EventEnvelope]) -> Value {
         "drive_token": drive_token,
         "log": log,
     })
+}
+
+/// `POST /v1/client-runs/{id}/tool-step`: the server-performed tool call.
+///
+/// The client's cursor reserved `seq` as the tool intent's position. The server
+/// looks the tool up in its injected [`ToolRegistry`](crate::ToolRegistry),
+/// takes the operator-declared [`Effect`] from that registration (never from
+/// the client, so a caller cannot up- or down-grade it), appends
+/// `ToolCallRequested` write-ahead, dispatches the tool, appends
+/// `ToolCallCompleted`, and returns the output. It mirrors `RunCtx::tool_call`
+/// server-side, and its retry and reconciliation branches mirror
+/// `ReplayCursor::tool_call`:
+///
+/// - A completed step recorded at `seq` with the same (tool, input, effect,
+///   key) returns the recorded output; the tool is not dispatched and the log
+///   does not grow.
+/// - A dangling `Read`/`Idempotent` intent at `seq` (the tab died mid-call) is
+///   re-executed under the RECORDED idempotency key, so an idempotent retry
+///   reuses the exact key the provider collapses duplicates on.
+/// - A dangling `Write` intent is `409 needs_reconciliation` carrying the
+///   recorded intent as evidence, and nothing is dispatched: the write may have
+///   landed, and only [`resolve`] may record its completion.
+/// - A different (tool, input, effect, key) at `seq`, or a non-tool event
+///   there, is `409 divergence`.
+///
+/// An unknown tool (or no registry at all) writes nothing, mirroring the model
+/// step's no-executor rule: the step is retriable once the tool is registered.
+pub async fn tool_step(
+    State(state): State<AppState>,
+    Path(run_id_text): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<Value>, ApiError> {
+    let run_id = parse_run_id(&run_id_text)?;
+    authorize_drive(&state, run_id, &headers)?;
+
+    if body.len() > MAX_EVENTS_BODY {
+        return Err(ApiError::PayloadTooLarge(format!(
+            "tool-step body is {} bytes, over the {MAX_EVENTS_BODY}-byte cap",
+            body.len()
+        )));
+    }
+    let request: ToolStepRequest = parse_body(&body)?;
+
+    // Look the tool up before anything is written. No registry is a 503; a
+    // registry without the named tool is a 404. Either way, nothing is written.
+    let registry = state.tool_registry().ok_or_else(|| {
+        ApiError::ToolRegistryUnavailable(
+            "this server has no tool registry wired, so it cannot perform a tool step".to_owned(),
+        )
+    })?;
+    let tool = registry.get(&request.tool).ok_or_else(|| {
+        ApiError::UnknownTool(format!(
+            "no tool named `{}` is registered on this server",
+            request.tool
+        ))
+    })?;
+
+    // The effect is the registry's operator declaration, never the client's.
+    // The client-declared `effect` field on the body is dropped here.
+    let effect = tool.effect();
+    let ToolStepRequest {
+        seq,
+        tool: tool_name,
+        input,
+        idempotency_key,
+        effect: _,
+    } = request;
+
+    let log = state.store().read_log(run_id).await.map_err(store_error)?;
+    let plan = plan_tool_step(
+        &log,
+        seq,
+        &tool_name,
+        &input,
+        effect,
+        idempotency_key.as_deref(),
+    )?;
+
+    match plan {
+        ToolStepPlan::Replay { output } => Ok(tool_output_body(&output)),
+        ToolStepPlan::Reconcile { intent } => Err(ApiError::NeedsReconciliation {
+            message: format!(
+                "run {} needs reconciliation: a write was recorded but never completed, so it \
+                 may or may not have taken effect. Verify externally, then resolve it",
+                run_id.as_uuid()
+            ),
+            intent,
+        }),
+        ToolStepPlan::Perform {
+            append_intent,
+            exec_key,
+        } => {
+            // Write-ahead: record the intent before the tool runs, so a crash
+            // mid-call leaves a dangling intent (re-issued or reconciled on
+            // retry, per effect). A dangling re-issue skips this: the intent is
+            // already recorded.
+            if append_intent {
+                let intent = EventEnvelope::new(
+                    run_id,
+                    SequenceNumber::new(seq),
+                    state.now(),
+                    Event::ToolCallRequested {
+                        seq: SequenceNumber::new(seq),
+                        tool: tool_name.clone(),
+                        input: input.clone(),
+                        effect,
+                        idempotency_key: exec_key.clone(),
+                    },
+                );
+                let mut validator = LogValidator::new(log);
+                validator
+                    .push(intent.clone())
+                    .map_err(|error| ApiError::Divergence(error.to_string()))?;
+                state.store().append(&intent).await.map_err(append_error)?;
+            }
+
+            // Dispatch through the same erased contract the runtime uses, with
+            // the idempotency key on the context so an idempotent retry reuses
+            // it. A dispatch failure is an error envelope with no completion, so
+            // the intent is left dangling (legal, the crash story).
+            let ctx = ToolCtx::new(exec_key);
+            let outcome = tool
+                .call_json(&ctx, input)
+                .await
+                .map_err(|error| ApiError::ToolExecution(error.to_string()))?;
+            let output = match outcome {
+                ToolOutcome::Output(value) => value,
+                ToolOutcome::Suspend(_) => {
+                    return Err(ApiError::ToolExecution(format!(
+                        "tool `{tool_name}` suspended, which a server-performed tool step does \
+                         not support; no completion recorded"
+                    )));
+                }
+            };
+            append_tool_completion(&state, run_id, seq, &output).await?;
+            Ok(tool_output_body(&output))
+        }
+    }
+}
+
+/// What a tool step must do, decided from the recorded log and the registry's
+/// effect alone.
+enum ToolStepPlan {
+    /// The step is already recorded: return this output, dispatch nothing.
+    Replay {
+        /// The recorded tool output.
+        output: Value,
+    },
+    /// A dangling write: surface reconciliation with this intent evidence,
+    /// dispatch nothing.
+    Reconcile {
+        /// The recorded write intent, for the error body.
+        intent: Value,
+    },
+    /// The step must be performed. `append_intent` is true for a fresh call and
+    /// false for a dangling re-issue (the intent is already recorded); `exec_key`
+    /// is the idempotency key to dispatch under (the recorded key on a re-issue).
+    Perform {
+        /// Whether to write the intent before dispatching.
+        append_intent: bool,
+        /// The idempotency key handed to the tool for this attempt.
+        exec_key: Option<String>,
+    },
+}
+
+/// Decides the tool step from the log and the registry's effect, mirroring
+/// `ReplayCursor::tool_call`'s replay, re-issue, reconciliation, and divergence
+/// branches. The effect is the registry's, so a client cannot change it.
+fn plan_tool_step(
+    log: &[EventEnvelope],
+    seq: u64,
+    tool: &str,
+    input: &Value,
+    effect: Effect,
+    idempotency_key: Option<&str>,
+) -> Result<ToolStepPlan, ApiError> {
+    let next = log.len() as u64;
+    if seq == next {
+        // A fresh intent at the next contiguous position.
+        return Ok(ToolStepPlan::Perform {
+            append_intent: true,
+            exec_key: idempotency_key.map(ToOwned::to_owned),
+        });
+    }
+    if seq > next {
+        return Err(ApiError::Divergence(format!(
+            "tool-step seq {seq} is beyond the log end {next}"
+        )));
+    }
+
+    // The position is already recorded: it must be the tool intent, and its
+    // (tool, input, effect, key) must all match, exactly as the cursor checks.
+    let recorded = &log[seq as usize];
+    let Event::ToolCallRequested {
+        tool: recorded_tool,
+        input: recorded_input,
+        effect: recorded_effect,
+        idempotency_key: recorded_key,
+        ..
+    } = &recorded.event
+    else {
+        return Err(ApiError::Divergence(format!(
+            "seq {seq} already holds a non-tool event; it is not a tool-step position"
+        )));
+    };
+    if recorded_tool != tool
+        || recorded_input != input
+        || *recorded_effect != effect
+        || recorded_key.as_deref() != idempotency_key
+    {
+        return Err(ApiError::Divergence(format!(
+            "tool-step at seq {seq} diverges from the recorded intent (tool, input, effect, or key)"
+        )));
+    }
+    match log.get(seq as usize + 1) {
+        Some(next_env) => match &next_env.event {
+            Event::ToolCallCompleted { seq: corr, output } if corr.get() == seq => {
+                Ok(ToolStepPlan::Replay {
+                    output: output.clone(),
+                })
+            }
+            _ => Err(ApiError::Divergence(format!(
+                "the event after the intent at seq {seq} is not its completion"
+            ))),
+        },
+        // A dangling intent (the last event): the effect decides. Write never
+        // re-executes; Read/Idempotent re-execute under the RECORDED key.
+        None => match effect {
+            Effect::Write => Ok(ToolStepPlan::Reconcile {
+                intent: intent_evidence(recorded),
+            }),
+            Effect::Read | Effect::Idempotent => Ok(ToolStepPlan::Perform {
+                append_intent: false,
+                exec_key: recorded_key.clone(),
+            }),
+        },
+    }
+}
+
+/// The reconciliation evidence carried in a `needs_reconciliation` error body:
+/// the recorded write intent plus when it was recorded, mirroring the
+/// server-driven resolve's `reconcile_intent` and `json::pending` shapes.
+fn intent_evidence(envelope: &EventEnvelope) -> Value {
+    let Event::ToolCallRequested {
+        seq,
+        tool,
+        input,
+        effect,
+        idempotency_key,
+    } = &envelope.event
+    else {
+        return Value::Null;
+    };
+    json!({
+        "kind": "tool",
+        "seq": seq.get(),
+        "tool": tool,
+        "input": input,
+        "effect": effect,
+        "idempotency_key": idempotency_key,
+        "recorded_at": envelope.recorded_at.format(&Rfc3339).unwrap_or_default(),
+    })
+}
+
+/// Records the `ToolCallCompleted` at `seq + 1`, correlated to the intent at
+/// `seq`, after validating it is the legal next event.
+async fn append_tool_completion(
+    state: &AppState,
+    run_id: RunId,
+    seq: u64,
+    output: &Value,
+) -> Result<(), ApiError> {
+    let completion = EventEnvelope::new(
+        run_id,
+        SequenceNumber::new(seq + 1),
+        state.now(),
+        Event::ToolCallCompleted {
+            seq: SequenceNumber::new(seq),
+            output: output.clone(),
+        },
+    );
+    let log = state.store().read_log(run_id).await.map_err(store_error)?;
+    let mut validator = LogValidator::new(log);
+    validator
+        .push(completion.clone())
+        .map_err(|error| ApiError::Divergence(error.to_string()))?;
+    state
+        .store()
+        .append(&completion)
+        .await
+        .map_err(append_error)
+}
+
+/// The `200` tool-step body, `{ "output": <json> }`.
+fn tool_output_body(output: &Value) -> Json<Value> {
+    Json(json!({ "output": output }))
+}
+
+/// `POST /v1/client-runs/{id}/resolve`: record a dangling write's completion by
+/// hand for a client-driven run, the drive-token-gated twin of the
+/// server-driven `POST /v1/runs/{id}/resolve`.
+///
+/// State-validated exactly like the server-driven resolve: it is legal only
+/// when the run's log ends at a dangling `Write` intent, it correlates the
+/// caller-supplied output to that intent, and it dispatches nothing. It reuses
+/// the same `Runtime::resolve` the server-driven endpoint does, so the two
+/// share one reconciliation contract. After it records the completion the run
+/// is drivable again, so the client re-fetches the log and its cursor sails
+/// past the once-dangling intent.
+pub async fn resolve(
+    State(state): State<AppState>,
+    Path(run_id_text): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<Value>, ApiError> {
+    let run_id = parse_run_id(&run_id_text)?;
+    authorize_drive(&state, run_id, &headers)?;
+    let request: ResolveRequest = parse_body(&body)?;
+
+    match state.runtime().resolve(run_id, request.output).await {
+        Ok(_) => Ok(Json(json!({
+            "run": run_id.as_uuid().to_string(),
+            "resolved": true,
+        }))),
+        Err(RuntimeError::NotReconcilable { status, .. }) => Err(ApiError::WrongState(format!(
+            "run {} does not need reconciliation (status: {status}); there is no dangling write \
+             to resolve",
+            run_id.as_uuid()
+        ))),
+        Err(error) => Err(ApiError::Internal(error.to_string())),
+    }
 }
 
 /// Refuses a model or tool event on the generic append: those are recorded

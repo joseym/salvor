@@ -36,6 +36,7 @@ use tokio::task::JoinHandle;
 use salvor_core::RunId;
 
 use crate::executor::ModelExecutor;
+use crate::tool_registry::ToolRegistry;
 
 /// The format a submitted agent definition is written in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +107,12 @@ struct Inner {
     // than performing a call. `salvor serve` wires a default from its own
     // client-construction path, so the feature works out of the box.
     model_executor: Option<Arc<dyn ModelExecutor>>,
+    // The general tool-registry seam the server performs a client-driven run's
+    // tool step through. `None` until a host injects one (the same pattern as
+    // `model_executor`): the tool-step endpoint then answers with a clear error
+    // rather than dispatching. `salvor serve` wires an EMPTY registry, so any
+    // tool-step there is a clean `unknown_tool` until a tool is registered.
+    tool_registry: Option<Arc<ToolRegistry>>,
     hooks: Option<(ClockFn, RandomFn)>,
     auth_token: Option<String>,
     poll_interval: Duration,
@@ -152,6 +159,7 @@ impl AppState {
                 store,
                 factory,
                 model_executor: None,
+                tool_registry: None,
                 hooks: None,
                 auth_token: None,
                 poll_interval: Duration::from_millis(50),
@@ -183,6 +191,20 @@ impl AppState {
         Arc::get_mut(&mut self.inner)
             .expect("with_model_executor is called before the state is shared")
             .model_executor = Some(executor);
+        self
+    }
+
+    /// Injects the general tool registry the server performs a client-driven
+    /// run's tool step through. Additive and off by default (the existing
+    /// [`new`](Self::new) leaves it unset), so no caller that predates it
+    /// changes behavior. `salvor serve` wires an empty registry here; another
+    /// host injects one holding its own tools, exactly as it supplies its own
+    /// [`AgentFactory`] and [`ModelExecutor`](crate::ModelExecutor).
+    #[must_use]
+    pub fn with_tool_registry(mut self, registry: Arc<ToolRegistry>) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("with_tool_registry is called before the state is shared")
+            .tool_registry = Some(registry);
         self
     }
 
@@ -230,6 +252,14 @@ impl AppState {
     #[must_use]
     pub fn model_executor(&self) -> Option<Arc<dyn ModelExecutor>> {
         self.inner.model_executor.clone()
+    }
+
+    /// The injected tool registry, if a host wired one. `None` means the server
+    /// cannot perform a tool step and the endpoint says so; a wired-but-empty
+    /// registry instead reports each tool as `unknown_tool`.
+    #[must_use]
+    pub fn tool_registry(&self) -> Option<Arc<ToolRegistry>> {
+        self.inner.tool_registry.clone()
     }
 
     /// Reads the current instant from this state's injected clock, or the real

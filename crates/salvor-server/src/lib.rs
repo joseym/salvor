@@ -46,6 +46,7 @@ pub mod json;
 pub mod runs;
 pub mod sse;
 pub mod state;
+pub mod tool_registry;
 
 use axum::Router;
 use axum::middleware::from_fn_with_state;
@@ -59,6 +60,7 @@ pub use state::{
     AgentDefinition, AgentFactory, AppState, BuildFuture, BuiltAgent, ClientRunLease, DefFormat,
     RegisteredAgent,
 };
+pub use tool_registry::ToolRegistry;
 
 /// Builds the control-plane router over `state`, with the bearer-auth layer in
 /// front of every route.
@@ -79,6 +81,11 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/client-runs/{id}/model-step",
             post(client_runs::model_step),
         )
+        .route(
+            "/v1/client-runs/{id}/tool-step",
+            post(client_runs::tool_step),
+        )
+        .route("/v1/client-runs/{id}/resolve", post(client_runs::resolve))
         .layer(from_fn_with_state(state.clone(), auth::require_bearer))
         .with_state(state)
 }

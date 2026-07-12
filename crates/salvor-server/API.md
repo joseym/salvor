@@ -53,6 +53,11 @@ is the reconciliation refusal (below). The status codes and their codes:
 | 409 | `divergence` | A client-driven append that is not the legal next event, or different bytes at an already-recorded position |
 | 422 | `unsupported_event_kind` | A client-driven append carrying a model or tool event, which this surface does not accept |
 | 413 | `payload_too_large` | A client-driven append over the body-size or per-batch cap |
+| 503 | `model_executor_unavailable` | A model step against a server with no model executor wired; no intent is written |
+| 502 | `model_execution` | A model step's provider call failed; no completion is recorded, so the intent is left dangling |
+| 404 | `unknown_tool` | A tool step naming a tool the server's registry does not hold; no intent is written |
+| 503 | `tool_registry_unavailable` | A tool step against a server with no tool registry wired; no intent is written |
+| 502 | `tool_execution` | A tool step's dispatch failed; no completion is recorded, so the intent is left dangling |
 | 500 | `internal` | A store read or agent build failed unexpectedly |
 
 ## Endpoints
@@ -73,6 +78,8 @@ is the reconciliation refusal (below). The status codes and their codes:
 | GET | `/v1/client-runs/{id}/log` | Read a client-driven run's recorded log |
 | POST | `/v1/client-runs/{id}/events` | Append control and context events (the guarded append) |
 | POST | `/v1/client-runs/{id}/model-step` | Perform and record a model call (server-performed) |
+| POST | `/v1/client-runs/{id}/tool-step` | Perform and record a tool call (server-performed) |
+| POST | `/v1/client-runs/{id}/resolve` | Record a dangling write's completion by hand (client-driven) |
 
 ### POST /v1/agents
 
@@ -354,9 +361,9 @@ client's cursor emits itself, which hold no secret and no side effect:
 `RunStarted`, `NowObserved`, `RandomObserved`, `Suspended`, `Resumed`,
 `BudgetExceeded`, `RunCompleted`, `RunFailed`. The side-effecting steps, which
 the server must perform because it holds the key or the binary, have their own
-endpoints: the model call is the model-step endpoint below, and a model or tool
-event is still refused on the generic append. The render tool step is a later
-slice.
+endpoints: the model call is the model-step endpoint and the tool call is the
+tool-step endpoint below, and a model or tool event is still refused on the
+generic append.
 
 ### The drive token
 
@@ -521,6 +528,94 @@ same underlying response. A tab that drops mid-stream leaves a dangling intent,
 re-issued safely on resume; a mid-stream provider failure sends an `error` frame
 and records no completion. A model step that resolves to a replay (already
 recorded) streams a single `complete` frame carrying the recorded completion.
+
+### POST /v1/client-runs/{id}/tool-step
+
+The server-performed tool call. The client owns the loop and decides when to call
+a tool and with what; the server performs the call (it holds the binary or the
+credential the tool needs) and records it. Requires the `X-Drive-Token` header.
+
+- Request:
+
+```json
+{ "seq": 5, "tool": "render", "input": <any json>, "idempotency_key": null }
+```
+
+`seq` is the log position the client's cursor reserved for the tool intent.
+`tool` names a tool the server's registry holds. `input` is the tool's typed
+input, recorded on the intent verbatim. `idempotency_key` is optional; for an
+`Idempotent` tool the client draws it from a recorded `RandomObserved` so it
+reproduces on replay. A client-declared `effect` field is accepted for shape
+parity but ignored: the recorded effect is the tool's operator-declared one, so a
+caller cannot up- or down-grade it.
+
+- Response `200`:
+
+```json
+{ "output": <the json the tool returned> }
+```
+
+The server takes the effect from the registration, appends `ToolCallRequested {
+seq, tool, input, effect, idempotency_key }` write-ahead, dispatches the tool,
+appends `ToolCallCompleted { seq, output }`, and returns the output. The client
+feeds the output back to its cursor, which advances over the two now-recorded
+events.
+
+Retry follows the effect table, mirroring `ReplayCursor::tool_call`:
+
+- A step already completed at `seq` with the same `(tool, input, effect, key)`
+  returns the recorded output; the tool is not dispatched again and the log does
+  not grow. This is the no-re-execution case.
+- A dangling `Read` or `Idempotent` intent at `seq` (the tab died mid-call) is
+  re-executed under the RECORDED idempotency key, so an idempotent retry reuses
+  the exact key the provider collapses duplicates on. The fresh completion
+  correlates to the recorded intent.
+- A dangling `Write` intent at `seq` is `409 needs_reconciliation` carrying the
+  recorded intent in `details.intent`, and the tool is not dispatched: the write
+  may have landed, and only the resolve endpoint below may record its completion.
+- A different `(tool, input, effect, key)` at `seq`, or a non-tool event there,
+  is `409 divergence`. A `seq` beyond the log's end is `409 divergence` too.
+
+The tool registry is a general injection seam the embedding binary supplies (the
+same pattern as the model executor and the `AgentFactory`): the binary registers
+named tools whose effects it declares. `salvor serve` wires an empty registry, so
+every tool-step is `404 unknown_tool` until a host registers a tool; another host
+(for example a render server) registers its tools. A step naming an unregistered
+tool is `404 unknown_tool`, and a step against a server with no registry at all
+is `503 tool_registry_unavailable`; in both cases no intent is written, so the
+step is retriable once the tool is present. A dispatch failure is `502
+tool_execution`; no completion is recorded, so the write-ahead intent is left
+dangling (the legal crash story), drivable-or-reconcilable per the tool's effect.
+
+### POST /v1/client-runs/{id}/resolve
+
+Record the completion of a dangling write by hand for a client-driven run, the
+drive-token-gated twin of the server-driven `POST /v1/runs/{id}/resolve`.
+Requires the `X-Drive-Token` header.
+
+- Request:
+
+```json
+{ "output": <the json the tool returned> }
+```
+
+- Response `200`:
+
+```json
+{ "run": "6f...", "resolved": true }
+```
+
+State-validated exactly like the server-driven resolve: it is legal only when the
+run's log ends at a dangling `Write` intent, it correlates the caller-supplied
+output to that intent, and it dispatches nothing. After it records the completion
+the run is drivable again, so the client re-fetches the log and its cursor sails
+past the once-dangling intent.
+
+- `409 wrong_state` when the run does not need reconciliation (there is no
+  dangling write to resolve).
+- `401 missing_drive_token` / `403 invalid_drive_token` on a missing or superseded
+  lease; `404 unknown_run` when the id is not a client-driven run this server
+  opened.
 
 ## Driving a run
 
