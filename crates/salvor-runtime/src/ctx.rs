@@ -66,7 +66,7 @@ use salvor_core::{
     Budget, Emitted, EventEnvelope, ModelReply, Outcome, ReplayCursor, RunId, SequenceNumber,
     TokenUsage,
 };
-use salvor_llm::{Client, MessageRequest, MessageResponse};
+use salvor_llm::{Client, MessageAccumulator, MessageRequest, MessageResponse, StreamEvent};
 use salvor_store::EventStore;
 use salvor_tools::{DynTool, RetryPolicy, Suspension, ToolCtx, ToolError, ToolOutcome};
 use serde_json::{Value, json};
@@ -358,6 +358,108 @@ impl RunCtx {
                     persist(self.store.as_ref(), self.run_id, &self.clock, &intent).await?;
                 }
                 let response = client.send_message(request).await?;
+                let usage = TokenUsage {
+                    input_tokens: clamp_tokens(response.usage.input_tokens),
+                    output_tokens: clamp_tokens(response.usage.output_tokens),
+                };
+                let completion = permit.record(response_value(&response), usage);
+                persist(self.store.as_ref(), self.run_id, &self.clock, &completion).await?;
+                Ok(ModelTurn { response, usage })
+            }
+        }
+    }
+
+    /// A recorded model call that streams live events to `on_event` while it
+    /// runs, recording the identical completion [`model_call`](Self::model_call)
+    /// would record.
+    ///
+    /// This is a live-progress affordance layered on top of the durable record,
+    /// not a different kind of call. The recorded log is byte-for-byte what
+    /// [`model_call`](Self::model_call) writes for the same underlying response:
+    /// the request is hashed the same way (see [`crate::hash`]), the intent is
+    /// the same `ModelCallRequested`, and the completion carries the same
+    /// `response` value and `usage`. A run does not care which path recorded it,
+    /// and replay is deterministic either way.
+    ///
+    /// Replayed: the recorded response is decoded and returned, exactly as
+    /// [`model_call`](Self::model_call) does. The provider is never contacted and
+    /// `on_event` never fires, because there are no live tokens to report; the
+    /// caller gets the final result at once.
+    ///
+    /// Live: the intent event is persisted first (write-ahead, the same ordering
+    /// [`model_call`](Self::model_call) uses), then the provider stream is opened
+    /// through `client`. Each [`StreamEvent`] is handed to `on_event` for a live
+    /// ticker (text deltas ride [`StreamEvent::ContentBlockDelta`], token counts
+    /// ride [`StreamEvent::MessageDelta`]) and, in the same pass, applied to a
+    /// [`MessageAccumulator`]. When the stream ends, the assembled
+    /// [`MessageResponse`] is converted with the same `response_value` and usage
+    /// logic [`model_call`](Self::model_call) uses, the completion is persisted,
+    /// and the [`ModelTurn`] is returned.
+    ///
+    /// All persistence lives inside this method, so a caller cannot record a
+    /// partial or wrong completion: the completion is written only after the
+    /// stream is fully assembled. A caller that drops the returned future before
+    /// the stream completes leaves a dangling model intent (the write-ahead
+    /// intent with no completion), exactly like a live [`model_call`](Self::model_call)
+    /// the process died inside. That intent is re-issued safely on resume: the
+    /// fresh completion correlates to the recorded intent. `on_event` firing is
+    /// not part of the durable record, so a ticker that saw partial tokens before
+    /// the drop has no effect on what replay produces.
+    ///
+    /// When [`with_record_prompts`](Self::with_record_prompts) is on, the exact
+    /// request body is recorded on the fresh live intent, identically to
+    /// [`model_call`](Self::model_call).
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeError::Replay`] on divergence, [`RuntimeError::Store`] when
+    /// persistence fails, [`RuntimeError::Model`] when the live stream fails
+    /// (opening it, an error event or transport fault mid-stream, or a
+    /// tool-call fragment that does not parse) surfaced as the same error type
+    /// [`model_call`](Self::model_call) returns, with the log left intact and the
+    /// run recoverable, and [`RuntimeError::RequestEncode`] /
+    /// [`RuntimeError::RecordedResponseDecode`] on the JSON edges.
+    pub async fn model_call_streaming(
+        &mut self,
+        client: &Client,
+        request: &MessageRequest,
+        mut on_event: impl FnMut(&StreamEvent),
+    ) -> Result<ModelTurn, RuntimeError> {
+        let request_value = serde_json::to_value(request).map_err(RuntimeError::RequestEncode)?;
+        let request_hash = hash_value(&request_value);
+        // Hashing and body recording are identical to `model_call`: the hash is
+        // computed from `request_value` above, and the body handed to the cursor
+        // is that same value when recording is on, `None` when off. Streaming
+        // changes nothing here, which is half of why the recorded intent matches.
+        let request_body = if self.record_prompts {
+            Some(request_value)
+        } else {
+            None
+        };
+        match self.cursor.model_call(&request_hash, request_body)? {
+            Outcome::Replayed(ModelReply { response, usage }) => {
+                // No live call, so `on_event` never fires: replay has no tokens.
+                let response = serde_json::from_value(response)
+                    .map_err(RuntimeError::RecordedResponseDecode)?;
+                Ok(ModelTurn { response, usage })
+            }
+            Outcome::Live(permit) => {
+                if let Some(intent) = permit.intent().cloned() {
+                    persist(self.store.as_ref(), self.run_id, &self.clock, &intent).await?;
+                }
+                // Pump the stream once: every event feeds the ticker and the
+                // accumulator in the same pass. The accumulator assembles the
+                // exact `MessageResponse` `send_message` would have returned
+                // (salvor-llm guarantees this), so the recorded completion below
+                // is byte-identical to the non-streaming path.
+                let mut stream = client.stream_message(request).await?;
+                let mut accumulator = MessageAccumulator::new();
+                while let Some(event) = stream.next_event().await {
+                    let event = event?;
+                    on_event(&event);
+                    accumulator.apply(&event)?;
+                }
+                let response = accumulator.into_message()?;
                 let usage = TokenUsage {
                     input_tokens: clamp_tokens(response.usage.input_tokens),
                     output_tokens: clamp_tokens(response.usage.output_tokens),
