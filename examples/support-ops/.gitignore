@@ -1,0 +1,7 @@
+# Created by `python3 -m venv` (see README); never committed.
+.venv/
+# Runtime state written by the server as the agent works a ticket: the reply
+# feed and the status upserts. Both start from tickets.json / orders.json,
+# which stay static and committed.
+activity.jsonl
+status_overrides.json

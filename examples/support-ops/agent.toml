@@ -1,0 +1,91 @@
+# A support-triage agent whose entire tool layer is one Python MCP server
+# (server.py). Nothing here imports Salvor or knows Rust: the agent is data
+# (model, prompt, budgets, one MCP server), and the tools are ordinary Python
+# functions the runtime reaches over stdio.
+#
+# Run from the repository root: the paths below (the venv python, server.py,
+# and the runtime state files) are all relative to the directory salvor is
+# invoked from. See README.md for setup, the run, and what to watch for.
+
+model = "claude-opus-4-8"
+
+system_prompt = """
+You are a support-desk triage agent. You have four tools: `lookup_ticket`,
+`get_order_status`, `post_reply`, and `set_ticket_status`.
+
+Your input is a JSON object with one field, `ticket_ids`: a list of ticket ids
+to work. For each ticket id, in order:
+
+1. Call `lookup_ticket` once to read the ticket: the customer, their message,
+   and any order attached to it.
+2. If the ticket has an order attached, call `get_order_status` once to see
+   what actually happened to the order. If the customer's message names an
+   order id but the ticket has none attached, use the order id from the
+   message.
+3. Write a short, specific reply grounded in what you actually found (do not
+   invent tracking numbers or dates that were not in a tool result), and post
+   it with `post_reply`, exactly once per ticket.
+4. Decide the ticket's resulting status and set it with `set_ticket_status`,
+   exactly once per ticket:
+   - `resolved` if the reply fully answers the customer (for example, the
+     order shows delivered and the question was about delivery).
+   - `escalated` if the reply cannot fix the underlying problem (for example,
+     a stalled shipment, a wrong item, or a billing discrepancy that needs a
+     human to act on).
+   - `pending` if you posted a reply asking the customer for more information
+     you do not have.
+
+Work one ticket fully before moving to the next. Do not call `post_reply` or
+`set_ticket_status` more than once for the same ticket. When every ticket in
+`ticket_ids` has a reply and a status, reply with a short plain-text summary:
+one line per ticket, its resulting status, and a one-sentence reason. Then
+stop; do not call any tool after the summary.
+"""
+
+[llm]
+# The key is read from this variable at run time and never stored in any file.
+api_key_env = "DEMO_ANTHROPIC_API_KEY"
+
+[budgets]
+# Three tickets, up to four tool calls each (lookup, order check, reply,
+# status), plus the model's reasoning between calls and the closing summary.
+# These rails leave headroom for a chatty model while still parking a run
+# that has clearly run away, so crossing one stops the run for a human to
+# extend rather than burning on. See README.md for the safety-rail story.
+steps = 40
+tokens = 300000
+cost_usd = 1.00
+wall_time_seconds = 450
+
+[pricing]
+# claude-opus-4-8 list price, dollars per million tokens. Required because a
+# cost budget is declared; the two together let the runtime stop the run on
+# spend, not just on step count.
+input_per_mtok = 5.0
+output_per_mtok = 25.0
+
+[[mcp_servers]]
+# The Python server, run through this example's virtualenv interpreter so the
+# `mcp` package it imports is on the path. The four env vars tell the server
+# where its seed data and runtime state live; TICKETS_FILE and ORDERS_FILE
+# point at committed fixtures, ACTIVITY_LOG and STATUS_STORE are the run
+# state the README's tool-effect walkthrough inspects.
+command = "examples/support-ops/.venv/bin/python"
+args = ["examples/support-ops/server.py"]
+env = { TICKETS_FILE = "examples/support-ops/tickets.json", ORDERS_FILE = "examples/support-ops/orders.json", ACTIVITY_LOG = "examples/support-ops/activity.jsonl", STATUS_STORE = "examples/support-ops/status_overrides.json" }
+# The server annotates `post_reply` with `idempotentHint: true`, which
+# Salvor's default mapping would read as Idempotent (auto-retry an
+# interrupted call under the same key). That is wrong for this tool: it
+# APPENDS a line to the activity log, so a retry does not restore the same
+# state, it posts the customer's reply a second time. We know better than the
+# hint and pin it to `write`. On resume, an interrupted post then surfaces
+# for a human instead of being retried blind.
+#
+# `set_ticket_status` carries the identical hint and gets NO override: it
+# upserts one key in a dict rather than appending, so a retry genuinely does
+# restore the same state. The default Idempotent classification is correct
+# there, and trusting it is as much the point of this example as overriding
+# the other one. `lookup_ticket` and `get_order_status` annotate
+# `readOnlyHint: true` and only ever read, so they need no override either.
+# See README.md for the full comparison.
+effect_overrides = { post_reply = "write" }

@@ -1,0 +1,16 @@
+{
+  "O-5001": {
+    "items": ["Trail Runner Jacket - Blue, M"],
+    "shipment_status": "label_created",
+    "tracking": "1Z999AA10123456784",
+    "total": 89.00,
+    "note": "Carrier has not scanned the package in 6 days; the shipping label was created but the parcel was never picked up."
+  },
+  "O-5002": {
+    "items": ["Trail Runner Jacket - Blue, M"],
+    "shipment_status": "delivered",
+    "tracking": "1Z999AA10123456785",
+    "total": 89.00,
+    "note": "Delivered on 2026-07-07 per carrier scan."
+  }
+}

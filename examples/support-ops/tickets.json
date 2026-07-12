@@ -1,0 +1,29 @@
+{
+  "T-1001": {
+    "customer": "Dana Rowe",
+    "email": "dana.rowe@example.com",
+    "subject": "Package never arrived",
+    "order_id": "O-5001",
+    "opened": "2026-07-05",
+    "status": "open",
+    "body": "My order still says processing after 9 days. Can you check what's going on?"
+  },
+  "T-1002": {
+    "customer": "Wes Chen",
+    "email": "wes.chen@example.com",
+    "subject": "Wrong item shipped",
+    "order_id": "O-5002",
+    "opened": "2026-07-08",
+    "status": "open",
+    "body": "I ordered the blue jacket in medium but the box that arrived has a red one."
+  },
+  "T-1003": {
+    "customer": "Priya Natarajan",
+    "email": "priya.n@example.com",
+    "subject": "Billing question",
+    "order_id": null,
+    "opened": "2026-07-09",
+    "status": "open",
+    "body": "I think I was charged twice for order O-5001, can someone check my card statement against it?"
+  }
+}

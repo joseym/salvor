@@ -1,0 +1,44 @@
+# A Salvor agent built to strand a write, so the reconciliation story can be
+# shown honestly. The agent does one thing: commit a one-line report through a
+# Write tool. That tool (examples/reconciliation/server.py) performs the real
+# write and then blocks, which lets the walkthrough kill the process in the exact
+# window where the write has landed but its completion is not yet recorded, a
+# dangling write intent. See README.md for the full run -> kill -> refuse ->
+# resolve -> complete sequence.
+#
+# Run from the repository root: the paths below (server.py) are relative to the
+# directory salvor is invoked from. The model is offline; no API key is used.
+
+model = "salvor-offline-model"
+
+system_prompt = """
+You commit a single report. Call `commit_report` exactly once with the report
+content, then reply with a one-line confirmation and stop. Never call
+`commit_report` more than once.
+"""
+
+[llm]
+# SALVOR_DEMO_BASE_URL, when exported and non-empty, points every model call at
+# an offline scripted model (examples/reconciliation/model_server.py) instead of
+# a paid endpoint. This is the same offline hook the repository demo uses. No
+# api_key_env is set: the offline model needs no key.
+base_url_env = "SALVOR_DEMO_BASE_URL"
+
+[budgets]
+# The run is one write plus a summary: two model calls, one tool call. These
+# rails leave headroom while still parking a run that has clearly run away.
+steps = 8
+tokens = 100000
+
+[[mcp_servers]]
+# The one-tool Write server, pure Python standard library (no dependency, no
+# venv). RECON_REPORT_PATH is the file it appends to and the walkthrough
+# inspects; RECON_BLOCK_SECONDS is how long commit_report blocks after the write
+# lands, holding the process in the killable window.
+command = "python3"
+args = ["examples/reconciliation/server.py"]
+env = { RECON_REPORT_PATH = "/tmp/salvor-reconciliation-report.txt", RECON_BLOCK_SECONDS = "3600" }
+# commit_report carries no annotation, so Salvor's conservative default already
+# maps it to Write. Pinning it here records the operator's own trust decision:
+# an interrupted commit surfaces for a human rather than being retried blind.
+effect_overrides = { commit_report = "write" }

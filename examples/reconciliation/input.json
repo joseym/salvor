@@ -1,0 +1,3 @@
+{
+  "task": "Commit a one-line report on why write-ahead intents make a crash mid-write reconcilable."
+}

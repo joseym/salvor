@@ -33,3 +33,7 @@ path = "../../examples/todo-agent/main.rs"
 [[example]]
 name = "approval_loop"
 path = "../../examples/approval-loop/main.rs"
+
+[[example]]
+name = "compliance_gate"
+path = "../../examples/compliance/main.rs"

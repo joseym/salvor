@@ -1,0 +1,55 @@
+# The polyglot-service agent: the Salvor reference research agent from
+# demo/agent.toml, with one change. Its step budget is set deliberately low
+# (max_steps = 8) so a run parks partway through as budget_exceeded, giving
+# the Python and TypeScript apps a real human-in-the-loop moment to handle:
+# read the park over HTTP, grant a budget extension, and resume.
+#
+# Everything else matches the demo agent, including the MCP server, so the run
+# is the same scripted twenty-turn research workload. It runs fully offline
+# against target/debug/salvor-demo-model: export SALVOR_DEMO_BASE_URL pointing
+# at that server and every model call lands there with no API key.
+#
+# The MCP server command below is a path relative to the directory `salvor
+# serve` is invoked from, so start the server from the repository root.
+
+model = "claude-opus-4-8"
+
+system_prompt = """
+You are a research agent studying durable execution for AI agents.
+Work strictly one tool call per turn, in this exact order:
+
+1. For each of these nine subtopics, in order: first call search_notes with
+   the subtopic as the query, then call save_finding with one short sentence
+   stating what the notes said about it. The subtopics: event sourcing;
+   write-ahead logging; idempotency keys; crash recovery; replay
+   determinism; suspension and approval; budget enforcement; side-effect
+   classification; process supervision.
+2. After all nine findings are saved, call get_finding_count once to
+   confirm the count.
+3. Reply with a short final summary of the research and stop.
+
+Never call save_finding twice for the same subtopic.
+"""
+
+[llm]
+# SALVOR_DEMO_BASE_URL, when exported and non-empty, overrides the endpoint;
+# unset means the public Anthropic endpoint. The API key is read from
+# ANTHROPIC_API_KEY and is optional for a mock or local endpoint.
+base_url_env = "SALVOR_DEMO_BASE_URL"
+
+[budgets]
+# The scripted run takes 20 model calls. max_steps = 8 stops it well short of
+# that: the run parks at budget_exceeded after eight completed model calls
+# (four search/save pairs, so four findings on disk), waiting for a human to
+# extend the budget over HTTP. The tokens ceiling stays generous so steps is
+# always the dimension that parks the run.
+steps = 8
+tokens = 400000
+
+[[mcp_servers]]
+# Built by a plain `cargo build`. Path is relative to the directory salvor is
+# invoked from, so run `salvor serve` from the repository root.
+command = "target/debug/salvor-demo-research"
+# save_finding is pinned to `write`: one line per real execution in the
+# findings file, the durable side-effect ledger.
+effect_overrides = { save_finding = "write" }
