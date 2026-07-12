@@ -542,6 +542,177 @@ impl Tool {
     }
 }
 
+/// A prompt-cache marker for a [`SystemBlock`].
+///
+/// The Anthropic API caches the request prefix up to and including a block that
+/// carries `cache_control`. Only the `ephemeral` cache type is modelled; the
+/// optional [`ttl`](CacheControl::ttl) selects a non-default lifetime (for
+/// example `"1h"`). Serialization is hand-written so the `type` discriminant is
+/// always emitted; deserialization ignores that discriminant and any other
+/// field it does not model, keeping the type forward-tolerant.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct CacheControl {
+    /// The cache lifetime, when a non-default one is requested (for example
+    /// `"1h"`). Left unset for the default (five-minute) cache, in which case it
+    /// is omitted from the serialized block.
+    #[serde(default)]
+    pub ttl: Option<String>,
+}
+
+impl CacheControl {
+    /// An ephemeral cache marker with the default (five-minute) lifetime.
+    #[must_use]
+    pub fn ephemeral() -> Self {
+        Self { ttl: None }
+    }
+
+    /// An ephemeral cache marker with an explicit time-to-live, for example
+    /// `"1h"`.
+    pub fn ephemeral_ttl(ttl: impl Into<String>) -> Self {
+        Self {
+            ttl: Some(ttl.into()),
+        }
+    }
+}
+
+impl Serialize for CacheControl {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::ser::SerializeMap;
+        let len = if self.ttl.is_some() { 2 } else { 1 };
+        let mut map = serializer.serialize_map(Some(len))?;
+        map.serialize_entry("type", "ephemeral")?;
+        if let Some(ttl) = &self.ttl {
+            map.serialize_entry("ttl", ttl)?;
+        }
+        map.end()
+    }
+}
+
+/// One text block in a structured system prompt.
+///
+/// Serializes to the Anthropic API shape `{"type":"text","text":"..."}`, plus a
+/// `cache_control` entry when one is set. Only the text block is modelled, which
+/// mirrors [`ContentBlock::Text`] and matches the block the API documents for a
+/// system prompt; any extra field on deserialization is ignored rather than
+/// rejected, so a block that grows new fields still parses.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SystemBlock {
+    /// The block text.
+    pub text: String,
+    /// An optional prompt-cache marker. When set, the API caches the request
+    /// prefix up to and including this block.
+    pub cache_control: Option<CacheControl>,
+}
+
+impl SystemBlock {
+    /// A system text block with no cache marker.
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            cache_control: None,
+        }
+    }
+
+    /// Attach a cache-control marker to this block.
+    #[must_use]
+    pub fn with_cache_control(mut self, cache_control: CacheControl) -> Self {
+        self.cache_control = Some(cache_control);
+        self
+    }
+}
+
+// Helper struct used only while deserializing a `SystemBlock` from its JSON
+// object. The `type` discriminant is not read back (it is always `"text"`); any
+// unmodelled field is ignored, keeping the block forward-tolerant.
+#[derive(Deserialize)]
+struct RawSystemBlock {
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    cache_control: Option<CacheControl>,
+}
+
+impl Serialize for SystemBlock {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::ser::SerializeMap;
+        let len = if self.cache_control.is_some() { 3 } else { 2 };
+        let mut map = serializer.serialize_map(Some(len))?;
+        map.serialize_entry("type", "text")?;
+        map.serialize_entry("text", &self.text)?;
+        if let Some(cache_control) = &self.cache_control {
+            map.serialize_entry("cache_control", cache_control)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for SystemBlock {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawSystemBlock::deserialize(deserializer)?;
+        Ok(SystemBlock {
+            text: raw.text,
+            cache_control: raw.cache_control,
+        })
+    }
+}
+
+/// A system prompt: either a plain string or a list of text blocks.
+///
+/// The Anthropic API accepts both forms. The string form is the common case and
+/// serializes to a **bare JSON string**, byte-for-byte what this field carried
+/// when it was an `Option<String>`, so a recorded request keeps the same durable
+/// hash. The block form serializes to the JSON array the API expects, which lets
+/// a caller lead with a distinct first block. That leading block is the one
+/// parity gap the string form cannot express: on the OAuth plan-token path the
+/// system prompt must open with the Claude-Code identity as its own block.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum System {
+    /// A single run of system text. Serializes as a bare string.
+    Text(String),
+    /// An ordered list of system text blocks. Serializes as a JSON array.
+    Blocks(Vec<SystemBlock>),
+}
+
+impl System {
+    /// A system prompt built from explicit text blocks.
+    pub fn blocks(blocks: impl IntoIterator<Item = SystemBlock>) -> Self {
+        System::Blocks(blocks.into_iter().collect())
+    }
+
+    /// A system prompt whose first block is distinct from the rest.
+    ///
+    /// The `identity` block leads and the `rest` blocks follow in order. This is
+    /// the shape the OAuth plan-token path needs: a single string cannot put the
+    /// Claude-Code identity in its own leading block, but this can.
+    pub fn leading(identity: SystemBlock, rest: impl IntoIterator<Item = SystemBlock>) -> Self {
+        let mut blocks = vec![identity];
+        blocks.extend(rest);
+        System::Blocks(blocks)
+    }
+}
+
+impl From<String> for System {
+    fn from(text: String) -> Self {
+        System::Text(text)
+    }
+}
+
+impl From<&str> for System {
+    fn from(text: &str) -> Self {
+        System::Text(text.to_owned())
+    }
+}
+
 /// A request to the Messages API.
 ///
 /// Build one with [`MessageRequest::new`] and add optional pieces with the
@@ -553,9 +724,11 @@ pub struct MessageRequest {
     pub model: String,
     /// The maximum number of tokens to generate.
     pub max_tokens: u32,
-    /// An optional system prompt.
+    /// An optional system prompt, as a plain string or a list of text blocks.
+    /// A string serializes to a bare JSON string, identical on the wire to when
+    /// this field was an `Option<String>`; see [`System`].
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub system: Option<String>,
+    pub system: Option<System>,
     /// The conversation so far.
     pub messages: Vec<Message>,
     /// The tools the model may call.
@@ -593,8 +766,13 @@ impl MessageRequest {
     }
 
     /// Set the system prompt.
+    ///
+    /// Accepts anything that converts into a [`System`]: a `String` or `&str`
+    /// (the common case) becomes a plain-string system prompt, and a built
+    /// [`System::Blocks`] passes through unchanged. Every existing string call
+    /// site therefore compiles without change.
     #[must_use]
-    pub fn with_system(mut self, system: impl Into<String>) -> Self {
+    pub fn with_system(mut self, system: impl Into<System>) -> Self {
         self.system = Some(system.into());
         self
     }
@@ -1011,4 +1189,112 @@ fn stream_error(value: &Value) -> Error {
         request_id: None,
         retry_after: None,
     })
+}
+
+#[cfg(test)]
+mod system_tests {
+    use super::{CacheControl, Message, MessageRequest, System, SystemBlock};
+    use serde_json::json;
+
+    // Acceptance criterion 1 & 4: a plain-string system serializes to a BARE
+    // STRING, byte-for-byte what the field carried as `Option<String>`. The
+    // runtime hashes `serde_json::to_value(request)`, so identical bytes here
+    // mean an identical durable replay hash. This pins the exact wire form.
+    #[test]
+    fn string_system_serializes_byte_identically() {
+        let request = MessageRequest::new("claude-opus-4-8", 16).with_system("You are terse.");
+        let wire = serde_json::to_string(&request).expect("serializes");
+        assert_eq!(
+            wire,
+            r#"{"model":"claude-opus-4-8","max_tokens":16,"system":"You are terse.","messages":[]}"#
+        );
+    }
+
+    // The hash input is the serialized Value tree. A string system must land as
+    // a bare `Value::String`, exactly the node the old `Option<String>` produced,
+    // so the hash cannot change.
+    #[test]
+    fn string_system_is_a_bare_json_string_value() {
+        let request = MessageRequest::new("claude-opus-4-8", 16)
+            .with_system("hi")
+            .push_message(Message::user("Hello"));
+        let value = serde_json::to_value(&request).expect("to_value");
+        assert_eq!(value["system"], json!("hi"));
+    }
+
+    // Acceptance criterion 3: a `String` call site also compiles and produces the
+    // same bare-string wire form (proving `Into<System>` covers owned strings).
+    #[test]
+    fn owned_string_call_site_is_bare_string() {
+        let request = MessageRequest::new("claude-opus-4-8", 16).with_system(String::from("owned"));
+        let value = serde_json::to_value(&request).expect("to_value");
+        assert_eq!(value["system"], json!("owned"));
+    }
+
+    // Acceptance criterion 2: a block-array system serializes to the Anthropic
+    // API shape, and round-trips. Source for the shape: the claude-api skill
+    // (Prompt Caching sections), which documents system as
+    // `[{"type":"text","text":"..."}]`.
+    #[test]
+    fn blocks_system_matches_api_shape_and_round_trips() {
+        let system = System::blocks([SystemBlock::text("first"), SystemBlock::text("second")]);
+        let value = serde_json::to_value(&system).expect("to_value");
+        assert_eq!(
+            value,
+            json!([
+                { "type": "text", "text": "first" },
+                { "type": "text", "text": "second" },
+            ])
+        );
+        let back: System = serde_json::from_value(value).expect("round-trips");
+        assert_eq!(back, system);
+    }
+
+    // Acceptance criterion 2: a caller can build a system whose FIRST block is a
+    // distinct text block, which is the OAuth identity-leading use case.
+    #[test]
+    fn leading_block_is_the_distinct_first_block() {
+        let system = System::leading(
+            SystemBlock::text("You are Claude Code."),
+            [SystemBlock::text("Follow the user's instructions.")],
+        );
+        let value = serde_json::to_value(&system).expect("to_value");
+        assert_eq!(value[0]["text"], json!("You are Claude Code."));
+        assert_eq!(value[1]["text"], json!("Follow the user's instructions."));
+    }
+
+    // The cache-control marker is emitted on the API shape when set, and omitted
+    // otherwise (so an identity-only block stays a bare text block).
+    #[test]
+    fn cache_control_serializes_and_is_optional() {
+        let plain = serde_json::to_value(SystemBlock::text("x")).expect("to_value");
+        assert_eq!(plain, json!({ "type": "text", "text": "x" }));
+
+        let cached = SystemBlock::text("x").with_cache_control(CacheControl::ephemeral());
+        assert_eq!(
+            serde_json::to_value(&cached).expect("to_value"),
+            json!({ "type": "text", "text": "x", "cache_control": { "type": "ephemeral" } })
+        );
+
+        let ttl = SystemBlock::text("x").with_cache_control(CacheControl::ephemeral_ttl("1h"));
+        assert_eq!(
+            serde_json::to_value(&ttl).expect("to_value"),
+            json!({
+                "type": "text",
+                "text": "x",
+                "cache_control": { "type": "ephemeral", "ttl": "1h" }
+            })
+        );
+    }
+
+    // Acceptance criterion 5: an unknown field inside a system block does not
+    // break deserialization.
+    #[test]
+    fn unknown_field_in_block_is_ignored() {
+        let block: SystemBlock =
+            serde_json::from_value(json!({ "type": "text", "text": "x", "future": 42 }))
+                .expect("tolerates unknown field");
+        assert_eq!(block.text, "x");
+        assert_eq!(block.cache_control, None);
+    }
 }

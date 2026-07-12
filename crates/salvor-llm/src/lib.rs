@@ -95,6 +95,7 @@ pub use client::{Client, MessageAccumulator, MessageStream};
 pub use config::{AuthKind, Config};
 pub use error::{ApiError, Error};
 pub use types::{
-    Content, ContentBlock, ContentDelta, Message, MessageDeltaUsage, MessageRequest,
-    MessageResponse, Role, Source, StopReason, StreamEvent, Tool, ToolResultContent, Usage,
+    CacheControl, Content, ContentBlock, ContentDelta, Message, MessageDeltaUsage, MessageRequest,
+    MessageResponse, Role, Source, StopReason, StreamEvent, System, SystemBlock, Tool,
+    ToolResultContent, Usage,
 };
