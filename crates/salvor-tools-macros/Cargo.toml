@@ -3,7 +3,6 @@ name = "salvor-tools-macros"
 description = "The #[derive(Tool)] procedural macro for the Salvor agent runtime; re-exported by salvor-tools"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
 repository.workspace = true
 
 [lib]

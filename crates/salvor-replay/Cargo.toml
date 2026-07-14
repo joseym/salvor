@@ -3,7 +3,6 @@ name = "salvor-replay"
 description = "Pure, IO-free event model, replay cursor, and state fold for the Salvor agent runtime, with a wasm32 target for in-browser inspection"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
 repository.workspace = true
 
 [dependencies]

@@ -3,7 +3,6 @@ name = "salvor-dashboard"
 description = "The Salvor v0.3 control-plane web dashboard: a client-side Leptos app, compiled to wasm, that folds a run's event log with the real salvor-replay code"
 version = "0.1.0"
 edition = "2024"
-license = "MIT OR Apache-2.0"
 repository = "https://github.com/joseym/salvor"
 
 # This crate is excluded from the host workspace (see the root Cargo.toml) because

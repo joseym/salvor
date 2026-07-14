@@ -3,7 +3,6 @@ name = "salvor-store"
 description = "EventStore trait and SQLite (WAL) implementation for the Salvor agent runtime"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
 repository.workspace = true
 
 [dependencies]

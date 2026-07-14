@@ -3,7 +3,6 @@ name = "salvor-cli"
 description = "Salvor CLI: run, resume, list, history, and replay for durable agent runs"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
 repository.workspace = true
 # Homebrew formulae require a homepage; without it the tap-publish job warns.
 homepage = "https://github.com/joseym/salvor"

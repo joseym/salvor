@@ -3,7 +3,6 @@ name = "salvor-wasm"
 description = "wasmtime-sandboxed WebAssembly component tools for the Salvor agent runtime"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
 repository.workspace = true
 
 [dependencies]

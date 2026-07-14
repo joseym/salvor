@@ -3,7 +3,6 @@ name = "salvor-runtime"
 description = "The Salvor runtime IO edge: the public RunCtx durability substrate, the Agent builder, budget enforcement, and the built-in agent loop"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
 repository.workspace = true
 
 [dependencies]

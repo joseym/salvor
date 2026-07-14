@@ -3,7 +3,6 @@ name = "salvor-llm"
 description = "Messages API client for Anthropic-compatible endpoints (hosted and local), used by the Salvor agent runtime"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
 repository.workspace = true
 
 [dependencies]

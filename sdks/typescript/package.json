@@ -2,7 +2,6 @@
   "name": "@salvor/client",
   "version": "0.3.0",
   "description": "Thin TypeScript client for the Salvor durable-agent control plane",
-  "license": "MIT OR Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

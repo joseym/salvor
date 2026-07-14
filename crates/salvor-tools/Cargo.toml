@@ -3,7 +3,6 @@ name = "salvor-tools"
 description = "ToolHandler trait, derive macro, and MCP client integration for the Salvor agent runtime"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
 repository.workspace = true
 
 # salvor-tools declares one binary, `salvor-mcp-fixture`, which is a test

@@ -3,7 +3,6 @@ name = "salvor-store-conformance"
 description = "Store-agnostic conformance kit that proves an EventStore implementation satisfies the salvor-store trait contract"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
 repository.workspace = true
 
 [dependencies]
