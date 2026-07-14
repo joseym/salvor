@@ -8,7 +8,7 @@ Event-sourced runs, typed tool contracts with side-effect classification, crash-
 
 ![Salvor kills a research agent mid-run and resumes it to completion with no duplicate side effects](docs/demo.gif)
 
-**Status:** early development, pre-0.1. Nothing here is usable yet.
+**Status:** pre-0.1, unpublished. The runtime, CLI, control plane, SDKs, and web dashboard all work end to end today; none of it is published anywhere yet (see [Quickstart](#quickstart)).
 
 ## Quickstart
 
@@ -51,20 +51,45 @@ cargo run -p salvor-runtime --example approval_loop   # library-first: your own 
 
 `todo_agent` prints a run id you can kill and recover with `RESUME_RUN_ID=<id>`; `approval_loop` parks awaiting approval on the first run and completes on a second run with `APPROVAL` set.
 
+## Control plane
+
+`salvor serve` puts the runtime on a network: an HTTP and server-sent-events server that owns one event store and drives runs in the background, so a client submits an agent definition and an input, then reads the run's events as they land.
+
+```sh
+./target/debug/salvor serve --bind 127.0.0.1:8080
+```
+
+An agent is data, so registration (`POST /v1/agents`, TOML or JSON body) hashes the definition and returns that hash; every start, resume, and recover after that references the agent by hash, not by re-sending it. From there: `POST /v1/runs` starts a run, `GET /v1/runs/{id}/events` streams it over SSE with resumable cursors, `POST /v1/runs/{id}/resume` continues a parked or crashed run, and `POST /v1/runs/{id}/resolve` records a dangling write's completion by hand after a human verifies it externally. Every guarantee the CLI has (exact replay, crash-safe resume, the write-ahead reconciliation rule) holds unchanged over HTTP, because the same runtime enforces it.
+
+A second, additive surface under `/v1/client-runs` moves ownership of the agent loop to the client while the server keeps ownership of the durable log: a client (an SDK driver, or a browser folding its own log with a wasm `ReplayCursor`) drives its own loop and appends the events it produces, and the server re-folds the log on every append to confirm each one is the legal next event. The model and tool calls stay server-performed, since the server holds the key or the binary; everything else the client appends directly. The full contract, every route, status code, and event shape, is in [`crates/salvor-server/API.md`](crates/salvor-server/API.md).
+
+Prompt recording is opt-in and off by default: a per-agent `record_prompts` TOML flag (or a `SALVOR_RECORD_PROMPTS` environment default, when the flag is unset) records the exact model request body on `ModelCallRequested`. Recorded bodies land only in the durable log, never in the progress stream or console output, so turn it on only where you accept that PII and secrets in the prompt get written to the store.
+
 ### Client SDKs
 
-Thin Python and TypeScript clients over the `salvor serve` control plane live under `sdks/` (`sdks/python`, `sdks/typescript`): register an agent, start a run, stream events, resume, all over HTTP. The durability stays in the one Rust process; each SDK is a few hundred lines. See each directory's README.
+Thin Python and TypeScript clients over the control plane live under `sdks/` (`sdks/python`, `sdks/typescript`): register an agent, start a run, stream events, resume, all over HTTP. The durability stays in the one Rust process; each SDK is a few hundred lines. See each directory's README.
+
+Both SDKs also drive the client-driven mode: a `ClientRunDriver` that opens or resumes a run, appends control events, and calls the model and tool steps directly against the server (see [Control plane](#control-plane) above). The model step is still performed by `salvor serve` itself, so pointing the server's own `SALVOR_MODEL_BASE_URL` at a local or offline endpoint (instead of the public Anthropic one) redirects every model step an SDK driver makes, with no change on the client side. `examples/browser-client-run` drives the same surface from a browser page.
 
 ## Workspace
 
 | Crate | Purpose |
 |---|---|
-| `salvor-core` | Event model, replay engine, budget enforcement, deterministic context |
+| `salvor-core` | Stable public surface over the event model, replay engine, budget enforcement, and deterministic context; re-exports `salvor-replay` |
+| `salvor-replay` | Pure, IO-free event vocabulary, replay cursor, and state fold: the durability engine's core, wasm32-portable, shared by the runtime, the CLI's `replay`, and the dashboard |
 | `salvor-store` | `EventStore` trait + SQLite (WAL) implementation |
+| `salvor-store-conformance` | Store-agnostic conformance kit that proves an `EventStore` backend satisfies the trait contract |
 | `salvor-llm` | Messages API client (Anthropic hosted and local endpoints) |
 | `salvor-tools` | `ToolHandler` trait, effect classification, MCP client |
+| `salvor-tools-macros` | The `#[derive(Tool)]` macro, re-exported by `salvor-tools` |
 | `salvor-wasm` | Sandboxed WebAssembly component tools (wasmtime, WASI p2, deny-all capabilities) |
-| `salvor-cli` | The `salvor` binary: `run`, `resume`, `list`, `history`, `replay` |
+| `salvor-runtime` | The IO edge: `RunCtx`, the `Agent` builder, budget enforcement, the built-in agent loop |
+| `salvor-graph` | Pure graph document model, versioned validation, and JSON Schema emission for the declarative graph-authoring format |
+| `salvor-server` | The control plane: HTTP + server-sent-events over the durable runtime, server-driven and client-driven |
+| `salvor-cli` | The `salvor` binary: `run`, `resume`, `resolve`, `list`, `history`, `replay`, `serve`, `graph` |
+| `salvor` | The umbrella crate that holds the published name; re-exports the family once v0.1 ships |
+
+`sdks/python` and `sdks/typescript` are the thin client SDKs described above; neither is a Rust crate, so neither is a workspace member. `dashboard/` is a client-side Leptos app compiled to wasm (`trunk build` / `trunk serve`) that talks to the control plane over `/v1` and folds event logs with the real `salvor-replay` code, so its run-inspector scrubber recomputes state in the browser rather than re-implementing the fold in JavaScript; it is excluded from the Cargo workspace because it targets `wasm32-unknown-unknown` and carries its own lockfile.
 
 ## Correctness
 
