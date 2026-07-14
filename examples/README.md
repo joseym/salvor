@@ -30,8 +30,7 @@ entry can instead reach a server hosted elsewhere with `url` (plus
 `todo-agent`, `approval-loop`, and `compliance` are ordinary Rust files
 (`main.rs`) wired into `crates/salvor-runtime/Cargo.toml` as out-of-package
 `[[example]]` targets, so `cargo build`/`cargo test --workspace` still
-compile-gate them without running anything. Each carries a same-name
-`main.teach.md` walking through what it demonstrates and why.
+compile-gate them without running anything.
 
 The thin Python and TypeScript client SDKs under [`../sdks/`](../sdks/) each also
 ship a runnable model-only example against a `salvor serve` control plane;

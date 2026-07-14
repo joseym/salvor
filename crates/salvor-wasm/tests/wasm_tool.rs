@@ -38,7 +38,7 @@ fn fixture_component() -> &'static Path {
         // crate's own directory): the guest is excluded from the workspace,
         // so cargo would otherwise nest a second target/ full of generated
         // files inside crates/, which tooling that sweeps the source trees
-        // (the teach-coverage hook) would then trip over.
+        // would then trip over.
         let target_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/wasm-guests");
         let status = std::process::Command::new(env!("CARGO"))
             .args(["build", "--target", "wasm32-wasip2", "--release", "--quiet"])
