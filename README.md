@@ -18,6 +18,45 @@ Salvor is pre-0.1 and not published anywhere, so build the binary from source (a
 cargo build            # produces target/debug/salvor
 ```
 
+### A first run
+
+An agent is a TOML file. Save this as `hello-agent.toml`:
+
+```toml
+model = "claude-opus-4-8"
+system_prompt = "You are a concise assistant. Answer in one or two sentences."
+```
+
+Run it, with a key exported (Salvor talks to the public Anthropic endpoint by default):
+
+```sh
+export ANTHROPIC_API_KEY=sk-ant-...
+
+./target/debug/salvor run --agent hello-agent.toml \
+    --input '"What does it mean for a program to be durable?"'
+```
+
+That prints the run's id, then its answer, once the model responds:
+
+```
+run 2cfc5c00-4e7f-4ad9-942a-8c8e942f6051
+"Durability means the run's state survives a crash: every event is written before the runtime acts on it, so a resume replays exactly what already happened and finishes the rest without repeating any side effect."
+```
+
+(The id is a fresh UUID and the wording is the model's own, so both vary run to run.) `salvor history <run-id>` shows what actually happened, as a durable event log rather than only the final answer:
+
+```
+   0  2026-07-14 02:44:30Z  RunStarted           agent sha256:abd8d6f… input "What does it mean for a program to be durable?"
+   1  2026-07-14 02:44:30Z  NowObserved          2026-07-14 02:44:30Z
+   2  2026-07-14 02:44:30Z  ModelCallRequested   request sha256:ff62b65…
+   3  2026-07-14 02:44:30Z  ModelCallCompleted   usage in 24 out 41
+   4  2026-07-14 02:44:30Z  RunCompleted         output "Durability means the run's state survives a crash: every event is written befor…
+```
+
+Every one of those five lines is a durably recorded event, written before the run moved past it. The rest of this Quickstart tests that property against a real crash.
+
+### The kill and resume walkthrough
+
 The headline workload lives in `demo/`: a research agent you can `kill -9` partway through and resume with an identical event history and zero repeated writes. From the repository root, with a key exported:
 
 ```sh
@@ -104,16 +143,3 @@ cog install-hook --all
 ```
 
 Commit messages follow Conventional Commits, enforced by `cog verify` in the commit-msg hook. Releases are cut with `cog bump`; see [docs/RELEASING.md](docs/RELEASING.md) for the distribution pipeline and how a release becomes prebuilt binaries.
-
-## License
-
-Licensed under either of
-
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
-
-at your option.
-
-Unless you explicitly state otherwise, any contribution intentionally submitted
-for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
-dual licensed as above, without any additional terms or conditions.
