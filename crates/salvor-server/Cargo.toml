@@ -40,6 +40,11 @@ time.workspace = true
 reqwest = { workspace = true, features = ["stream"] }
 wiremock.workspace = true
 tempfile.workspace = true
+# The corrupt-log honesty test tampers with a row's envelope JSON directly
+# through a second raw connection to the same file-backed SQLite store, to
+# prove `GET /v1/runs` degrades that one run's entry rather than the whole
+# list.
+rusqlite.workspace = true
 futures-util = "0.3"
 bytes = "1"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "time"] }

@@ -53,13 +53,25 @@ export interface RunState {
   raw: Record<string, unknown>;
 }
 
-/** One row of `GET /v1/runs`: a run id with its folded status and counts. */
+/**
+ * One row of `GET /v1/runs`: a run id with its folded status and counts.
+ *
+ * `usage`, `stepCount`, and `agentDefHash` are additive: present whenever
+ * the run's log folds (a real zero when a run genuinely has no model calls
+ * yet), and absent — not a fabricated zero — only when the server could not
+ * read that run's log at all (see `API.md`). `raw` always carries whatever
+ * the server actually sent, so a server-side field this SDK has not been
+ * taught yet is never lost.
+ */
 export interface RunSummary {
   run: string;
   status: RunStatus;
   eventCount: number;
   firstRecordedAt?: string;
   lastRecordedAt?: string;
+  usage?: Usage;
+  stepCount?: number;
+  agentDefHash?: string;
   raw: Record<string, unknown>;
 }
 
@@ -164,6 +176,10 @@ export function parseRunSummary(obj: Json): RunSummary {
     eventCount: Number(obj.event_count ?? 0),
     firstRecordedAt: obj.first_recorded_at as string | undefined,
     lastRecordedAt: obj.last_recorded_at as string | undefined,
+    usage: parseUsage(obj.usage),
+    stepCount:
+      obj.step_count === undefined ? undefined : Number(obj.step_count),
+    agentDefHash: obj.agent_def_hash as string | undefined,
     raw: obj,
   };
 }

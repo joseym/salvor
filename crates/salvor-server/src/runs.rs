@@ -122,21 +122,97 @@ pub async fn start(
     ))
 }
 
-/// `GET /v1/runs`: one entry per run with its folded status.
+/// `GET /v1/runs`: one entry per run with its folded status, plus per-run
+/// `usage` totals, `step_count`, and `agent_def_hash` — additive fields
+/// folded from the SAME log read and the SAME [`derive_state`] call this
+/// handler has always run for `status`. No second read of the log and no
+/// second fold pass: `usage` comes straight off the already-derived
+/// [`RunState`](salvor_core::RunState), and `step_count`/`agent_def_hash`
+/// are read off the same in-memory `log` slice already in hand.
+///
+/// `run`, `status`, `event_count`, `first_recorded_at`, and
+/// `last_recorded_at` keep their exact pre-existing shape and values; every
+/// consumer reading only those fields sees byte-identical JSON to before
+/// this change.
+///
+/// # The zero-vs-absent rule
+///
+/// A count is reported as a real number whenever it is genuinely known, and
+/// omitted (never `0`) whenever it is not, because `0` is a claim ("this run
+/// made no model calls") that would be a lie if the truth is merely
+/// "unknown":
+///
+/// - **The log folds.** `usage` and `step_count` are always present and are
+///   real counts — a run with no model calls truthfully folds to
+///   `step_count: 0` and `usage: {"input_tokens": 0, "output_tokens": 0}`.
+///   `agent_def_hash` is read off the run's `RunStarted` event, which is
+///   recorded first on every started run by construction, so it is present
+///   in practice; it stays `Option` (omitted, not defaulted, if ever
+///   missing) as a defensive honesty measure rather than a guarantee to
+///   invent a value for.
+/// - **The log cannot be read.** `store.read_log` can fail for one run's row
+///   alone (a corrupt or unreadable envelope: [`StoreError::Serialization`]
+///   or [`StoreError::Backend`]) without implicating any other run's row.
+///   [`EventStore::list_runs`]'s summary (`event_count`,
+///   `first_recorded_at`, `last_recorded_at`) is a cheap SQL aggregate that
+///   never parses the row's JSON payload, so it stays available even when
+///   the payload itself does not. So an unreadable log degrades only that
+///   one run's entry rather than failing the whole list: `status`,
+///   `usage`, `step_count`, and `agent_def_hash` are all omitted for it
+///   (every one of them needs the fold, which needs the log this run's row
+///   could not produce), while `run`, `event_count`, `first_recorded_at`,
+///   and `last_recorded_at` stay present, since they never depended on that
+///   read. This is strictly additive: before this change such a run took
+///   the whole request down (a `500`), so no existing consumer ever
+///   observed — or could have pinned — a shape for this case.
+///
+/// [`StoreError::Serialization`]: salvor_store::StoreError::Serialization
+/// [`StoreError::Backend`]: salvor_store::StoreError::Backend
+/// [`EventStore::list_runs`]: salvor_store::EventStore::list_runs
 pub async fn list(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
     let store = state.store();
     let summaries = store.list_runs().await.map_err(store_error)?;
     let mut runs = Vec::with_capacity(summaries.len());
     for summary in summaries {
-        let log = store.read_log(summary.run_id).await.map_err(store_error)?;
-        let state = derive_state(&log);
-        runs.push(json!({
+        let mut entry = json!({
             "run": summary.run_id.as_uuid().to_string(),
-            "status": json::status(&state.status),
             "event_count": summary.event_count,
             "first_recorded_at": rfc3339(summary.first_recorded_at),
             "last_recorded_at": rfc3339(summary.last_recorded_at),
-        }));
+        });
+        match store.read_log(summary.run_id).await {
+            Ok(log) => {
+                let state = derive_state(&log);
+                let step_count = log
+                    .iter()
+                    .filter(|envelope| matches!(envelope.event, Event::ModelCallRequested { .. }))
+                    .count();
+                let map = entry.as_object_mut().expect("entry is a JSON object");
+                map.insert("status".to_owned(), json::status(&state.status));
+                map.insert(
+                    "usage".to_owned(),
+                    json!({
+                        "input_tokens": state.usage.input_tokens,
+                        "output_tokens": state.usage.output_tokens,
+                    }),
+                );
+                map.insert("step_count".to_owned(), json!(step_count));
+                if let Some(hash) = recorded_agent_hash(&log) {
+                    map.insert("agent_def_hash".to_owned(), json!(hash));
+                }
+            }
+            Err(error) => {
+                // Scoped to this one run: the summary above already read fine,
+                // so the list still reports it, just without the fields that
+                // needed this read. See the zero-vs-absent rule above.
+                tracing::warn!(
+                    run = %summary.run_id.as_uuid(),
+                    %error,
+                    "list: run's log could not be read; status and folded fields omitted for it"
+                );
+            }
+        }
+        runs.push(entry);
     }
     Ok(Json(json!({ "runs": runs })))
 }

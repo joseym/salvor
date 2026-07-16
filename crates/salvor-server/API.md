@@ -148,11 +148,38 @@ one. Passing one lets a client choose the id (a UUID).
 ```json
 { "runs": [
   { "run": "6f...", "status": { "state": "completed", "output": ... },
-    "event_count": 10, "first_recorded_at": "2026-...", "last_recorded_at": "2026-..." }
+    "event_count": 10, "first_recorded_at": "2026-...", "last_recorded_at": "2026-...",
+    "usage": { "input_tokens": 250, "output_tokens": 50 },
+    "step_count": 2,
+    "agent_def_hash": "sha256:34e0..." }
 ] }
 ```
 
 Status is folded from each log, not stored, so it is always current.
+
+`usage`, `step_count`, and `agent_def_hash` are additive fields, folded from
+the same per-run log read and fold `status` has always come from — listing
+does not read a run's log twice. `usage` is the same shape as
+[`GET /v1/runs/{id}`](#get-v1runsid)'s `usage`. `step_count` is how many
+`ModelCallRequested` events the run's log holds. `agent_def_hash` is the hash
+recorded on the run's `RunStarted` event, the same value
+[`POST /v1/agents`](#post-v1agents) returned when the definition was
+registered.
+
+**Honest absence, not zero.** These three fields are present, and are real
+counts, whenever a run's log folds — a run with no model calls yet reports a
+true `step_count: 0` and `usage` of all zeros, not a missing field, because
+that zero is known. They are *absent* (omitted from the object entirely, per
+`skip_serializing_if`, never `null` and never `0`) only when a run's log
+cannot be read at all (a corrupt or unreadable stored envelope). That failure
+is scoped to the one run whose row it is: the store's per-run summary
+(`event_count`, `first_recorded_at`, `last_recorded_at`) is a cheap aggregate
+that never touches the row's JSON payload, so it — and even `status`, which
+also depends on the unreadable log — are the only fields such a run's entry
+carries. Before this fold ran, a single unreadable log failed the whole
+listing (`500`); now it degrades only that one entry, so this is additive:
+old consumers reading only the pre-existing fields see the exact same JSON
+for every run whose log reads cleanly.
 
 ### GET /v1/runs/{id}
 
