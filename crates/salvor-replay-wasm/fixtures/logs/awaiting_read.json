@@ -1,0 +1,39 @@
+[
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 0,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:00:00Z",
+    "event": {
+      "kind": "RunStarted",
+      "payload": {
+        "agent_def_hash": "sha256:agent-def",
+        "input": {
+          "nested": {
+            "a": 2,
+            "z": 1
+          },
+          "topic": "otters"
+        }
+      }
+    }
+  },
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 1,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:00:00Z",
+    "event": {
+      "kind": "ToolCallRequested",
+      "payload": {
+        "seq": 1,
+        "tool": "search",
+        "input": {
+          "q": "otters"
+        },
+        "effect": "read",
+        "idempotency_key": null
+      }
+    }
+  }
+]

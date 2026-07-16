@@ -54,3 +54,55 @@ jobs:
 
       - name: Build salvor-replay for wasm32 (purity proof)
         run: cargo build -p salvor-replay --target wasm32-unknown-unknown --no-default-features
+
+  # The Bridge's fold package: salvor-replay-wasm compiled to an npm
+  # package, plus the same-fold proof that the wasm fold is byte-identical to the
+  # native fold at every prefix of every fixture log. Additive to the purity
+  # build above — it exercises the same wasm32 code path through wasm-bindgen and
+  # a Node harness, which the purity build alone does not.
+  replay-wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: latest
+
+      # The native side of the same-fold proof: the committed expected states
+      # equal the live native fold at every prefix (and the committed logs equal
+      # the reference logs). No wasm toolchain needed.
+      - name: Same-fold proof (native anchor)
+        run: cargo test -p salvor-replay-wasm --locked
+
+      # The npm package the Bridge consumes.
+      - name: Build the wasm package (--target web)
+        run: wasm-pack build crates/salvor-replay-wasm --target web --out-dir pkg --out-name salvor_replay_wasm
+
+      # The Node build the harnesses drive.
+      - name: Build the wasm package (--target nodejs)
+        run: wasm-pack build crates/salvor-replay-wasm --target nodejs --out-dir pkg-node --out-name salvor_replay_wasm
+
+      # The wasm side of the same-fold proof: every fixture log folded at every
+      # prefix through the wasm module is byte-identical to the committed native
+      # fold. Plus the .d.ts surface pin and the scrub-latency measurement.
+      - name: Same-fold proof (wasm vs native) + surface pin + latency
+        run: |
+          node crates/salvor-replay-wasm/js/same-fold.mjs
+          node crates/salvor-replay-wasm/js/surface.mjs
+          node crates/salvor-replay-wasm/js/latency.mjs

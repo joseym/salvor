@@ -1,0 +1,38 @@
+[package]
+name = "salvor-replay-wasm"
+description = "A thin wasm-bindgen wrapper over the pure salvor-replay crate: folds a run's event log to state in the browser, with no server round trip, from the same code the runtime uses"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+# cdylib is the wasm artifact wasm-pack packages for npm; rlib keeps the crate
+# linkable as a normal Rust library so the native test harness (the same-fold
+# proof's native side) can call the fold core directly. Both come from one
+# source, which is the point: the bytes that fold natively are the bytes that
+# fold in the browser.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The real event model and state fold. default-features = false turns off the
+# host-only `rng` feature so the wasm32-unknown-unknown build draws no
+# randomness and stays pure, exactly as the dashboard crate consumes it. A
+# browser inspector reads run ids already recorded in the log; it never mints
+# one.
+salvor-replay = { path = "../salvor-replay", default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# The wasm boundary. wasm-bindgen compiles on native targets too (the generated
+# glue is inert off wasm32), so this crate is a normal workspace member that
+# `cargo build/test --workspace` builds natively without a wasm toolchain.
+wasm-bindgen = "0.2"
+
+[dev-dependencies]
+# The same-fold proof's native side builds the reference logs, which needs a
+# fixed timestamp and run id. These are dev-only: the shipped cdylib never
+# touches them, so the wasm build stays small and pure. (salvor-replay itself
+# comes from [dependencies] with rng off; the reference logs use
+# RunId::from_uuid and draw no randomness.)
+serde_json = { workspace = true }
+time = { workspace = true }
+uuid = { workspace = true }

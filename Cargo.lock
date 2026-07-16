@@ -2224,6 +2224,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "salvor-replay-wasm"
+version = "0.1.0"
+dependencies = [
+ "salvor-replay",
+ "serde",
+ "serde_json",
+ "time",
+ "uuid",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "salvor-runtime"
 version = "0.1.0"
 dependencies = [
@@ -2253,6 +2265,7 @@ dependencies = [
  "bytes",
  "futures-util",
  "reqwest 0.12.28",
+ "rusqlite",
  "salvor-core",
  "salvor-llm",
  "salvor-runtime",

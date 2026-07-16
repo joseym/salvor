@@ -1,0 +1,4 @@
+{"status":{"kind":"NotStarted"},"next_seq":0,"usage":{"input_tokens":0,"output_tokens":0}}
+{"status":{"kind":"Running"},"next_seq":1,"usage":{"input_tokens":0,"output_tokens":0}}
+{"status":{"kind":"AwaitingModel"},"next_seq":2,"usage":{"input_tokens":0,"output_tokens":0},"pending_call":{"kind":"Model","seq":1,"request_hash":"sha256:req"}}
+{"status":{"kind":"Failed","error":"provider timeout"},"next_seq":3,"usage":{"input_tokens":0,"output_tokens":0},"pending_call":{"kind":"Model","seq":1,"request_hash":"sha256:req"}}

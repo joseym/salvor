@@ -1,0 +1,113 @@
+[
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 0,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:00:00Z",
+    "event": {
+      "kind": "RunStarted",
+      "payload": {
+        "agent_def_hash": "sha256:agent-def",
+        "input": {
+          "nested": {
+            "a": 2,
+            "z": 1
+          },
+          "topic": "otters"
+        }
+      }
+    }
+  },
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 1,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:00:00Z",
+    "event": {
+      "kind": "NowObserved",
+      "payload": {
+        "now": "2025-07-15T08:00:00.123456789Z"
+      }
+    }
+  },
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 2,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:00:00Z",
+    "event": {
+      "kind": "RandomObserved",
+      "payload": {
+        "value": 18446744073709551615
+      }
+    }
+  },
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 3,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:00:00Z",
+    "event": {
+      "kind": "ModelCallRequested",
+      "payload": {
+        "seq": 3,
+        "request_hash": "sha256:req-a",
+        "request_body": {
+          "messages": [],
+          "model": "test"
+        }
+      }
+    }
+  },
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 4,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:00:00Z",
+    "event": {
+      "kind": "ModelCallCompleted",
+      "payload": {
+        "seq": 3,
+        "response": {
+          "text": "one"
+        },
+        "usage": {
+          "input_tokens": 4294967295,
+          "output_tokens": 40
+        }
+      }
+    }
+  },
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 5,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:00:00Z",
+    "event": {
+      "kind": "ModelCallRequested",
+      "payload": {
+        "seq": 5,
+        "request_hash": "sha256:req-b"
+      }
+    }
+  },
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 6,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:00:00Z",
+    "event": {
+      "kind": "ModelCallCompleted",
+      "payload": {
+        "seq": 5,
+        "response": {
+          "text": "two"
+        },
+        "usage": {
+          "input_tokens": 100,
+          "output_tokens": 2
+        }
+      }
+    }
+  }
+]
