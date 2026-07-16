@@ -1,0 +1,274 @@
+/* ============================================================
+   BRIDGE DESIGN TOKENS
+
+   Ported from the OD prototype (salvor-bridge.html, project b781b82b,
+   "LEDGER IDENTITY" block). This is the single source of truth for every
+   color, typeface, radius, elevation, spacing, and motion value the app
+   paints. No component stylesheet in this app should contain a literal
+   hex color, a literal `white`/`black` keyword, or a raw font stack —
+   everything routes through the tokens below.
+
+   ARCHITECTURE (do not break this):
+     - Six --anchor-* values, defined ONCE, in this file, in the block
+       below. Nothing else defines an --anchor-*. If a color needs to
+       change, change an anchor or add a new color-mix derived from one —
+       never hand-roll a new hex value elsewhere.
+     - Every other color is `color-mix(in oklab, <anchor-or-derived>, ...)`.
+       The two exceptions (--surface brightened past paper, --dk-bg
+       darkened past ink) are load-bearing and marked ANCHOR-EXCEPTION;
+       the build-time gate (scripts/check-tokens.mjs) allowlists exactly
+       those two lines and fails on any other literal white/black mix.
+     - The dark palette (--dk-*) is computed ONCE, here, from the same six
+       anchors. The two theme-remap blocks below (explicit attribute +
+       prefers-color-scheme media query) only REBIND --bg/--fg/etc to the
+       --dk-* values — they never introduce a new literal color, so the
+       two remap copies cannot drift from each other.
+     - This file previously had (in the prototype's own history, see its
+       comments) a dead first-pass anchor set and a second conflicting
+       --dk-* palette; the audit deleted both. Do not recreate a second
+       definition site for anything in the "THE ANCHORS" block.
+   ============================================================ */
+
+:root {
+  /* ─── Type scale ─── */
+  --text-xs: 12px;
+  --text-sm: 14px;
+  --text-base: 16px;
+  --text-lg: 20px;
+  --text-xl: 24px;
+  --text-2xl: 32px;
+  --text-3xl: 40px;
+  --text-4xl: 48px;
+
+  --leading-body: 1.35;
+  --leading-tight: 1.2;
+
+  /* ─── Spacing (4px base, matches Tailwind's default 0.25rem unit) ─── */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+
+  --section-y-desktop: 96px;
+  --section-y-tablet: 64px;
+  --section-y-phone: 48px;
+
+  /* ─── Motion ───
+     Consumed directly (`transition: background var(--motion-fast) var(--ease-standard)`),
+     never via `transition: all` — the build gate fails on that literal. */
+  --motion-fast: 150ms;
+  --motion-base: 200ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+
+  /* ─── Layout ─── */
+  --container-max: 1200px;
+  --container-gutter-desktop: 24px;
+  --container-gutter-tablet: 16px;
+  --container-gutter-phone: 12px;
+  --well: 1440px;
+  --well-form: 720px;
+  --nav-w: 232px;
+}
+
+/* ============================================================
+   THE ANCHORS — the only literal colors in this app.
+   ============================================================ */
+:root {
+  --anchor-paper:   #f7f4ee;   /* warm paper, not a screen white */
+  --anchor-ink:     #1b1a17;   /* warm ink, not a cold black */
+  --anchor-blue:    #24406b;   /* writing-ink blue, not framework blue */
+  --anchor-success: #1f5130;
+  --anchor-warn:    #b47607;   /* amber stays the human-attention colour */
+  --anchor-danger:  #9e2b24;   /* red stays the failure colour */
+
+  /* --- Light: paper and ink. --- */
+  --bg:            var(--anchor-paper);
+  /* ANCHOR-EXCEPTION: brightening past the paper anchor itself needs a
+     literal white reference point — there is no way to derive "lighter
+     than paper" from paper alone. Allowlisted by name in the gate script. */
+  --surface:       color-mix(in oklab, var(--anchor-paper), white 55%);
+  --surface-warm:  var(--surface);
+  --fg:            var(--anchor-ink);
+  --fg-2:          color-mix(in oklab, var(--anchor-ink), var(--anchor-paper) 20%);
+  --muted:         color-mix(in oklab, var(--anchor-ink), var(--anchor-paper) 30%);
+  --meta:          var(--muted);
+  --faint:         color-mix(in oklab, var(--muted), var(--bg) 12%);
+
+  /* hairlines you can actually see — in a ledger the rule IS the structure */
+  --border:        color-mix(in oklab, var(--anchor-ink), var(--anchor-paper) 58%);
+  --border-soft:   color-mix(in oklab, var(--anchor-ink), var(--anchor-paper) 86%);
+  /* 3.2:1 edge for affordances whose ONLY boundary is a border (inputs,
+     ghost buttons) — WCAG 1.4.11, stronger than the decorative --border. */
+  --edge-strong:   color-mix(in oklab, var(--border), var(--fg) 42%);
+  --wash:          color-mix(in oklab, var(--border-soft), var(--bg) 45%);
+  --rule:          var(--border-soft);
+  --rule-firm:     var(--border);
+
+  --accent:        var(--anchor-blue);
+  --accent-on:     var(--anchor-paper);
+  --accent-hover:  color-mix(in oklab, var(--anchor-blue), var(--anchor-ink) 28%);
+  --accent-active: color-mix(in oklab, var(--anchor-blue), var(--anchor-ink) 45%);
+
+  --success: var(--anchor-success);
+  --warn:    var(--anchor-warn);
+  --danger:  var(--anchor-danger);
+
+  /* the three parked states */
+  --amber:           var(--warn);
+  --amber-ink:       color-mix(in oklab, var(--warn), var(--fg) 45%);
+  --amber-wash:      color-mix(in oklab, var(--warn), var(--bg) 90%);
+  --amber-row:       var(--amber-wash);
+  --amber-row-hover: color-mix(in oklab, var(--warn), var(--bg) 82%);
+  --red:             var(--danger);
+  --red-wash:        color-mix(in oklab, var(--danger), var(--bg) 92%);
+
+  /* --- Posture: square corners, hairline rules, ink-mixed elevation. --- */
+  --radius-sm:   5px;
+  --radius-md:   8px;
+  --radius-lg:   10px;
+  --radius-pill: 9999px;   /* status dots and count/state pills stay round; nothing else is */
+  --elev-flat:   none;
+  --elev-ring:   0 0 0 1px var(--border);
+  --elev-raised:
+    0 0 0 1px var(--border-soft),
+    0 1px 2px  color-mix(in oklab, var(--anchor-ink), transparent 86%),
+    0 2px 4px  color-mix(in oklab, var(--anchor-ink), transparent 91%),
+    0 10px 24px -6px color-mix(in oklab, var(--anchor-ink), transparent 87%);
+  --focus-ring:
+    0 0 0 3px color-mix(in oklab, var(--accent), transparent 72%),
+    0 0 12px color-mix(in oklab, var(--accent), transparent 78%);
+
+  /* --- Type: serif display over a sans body. Mono means "off the wire". --- */
+  --font-display: 'Iowan Old Style', 'Charter', 'Hoefler Text', Georgia, serif;
+  --font-body: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Monaco, Consolas, monospace;
+  --tracking-display: -0.01em;
+
+  /* --- Dark: the same identity at night, computed once. ---
+     ANCHOR-EXCEPTION: darkening past the ink anchor itself needs a literal
+     black reference point, for the same reason --surface above needs white —
+     there is no way to derive "darker than ink" from ink alone. */
+  --dk-bg:          color-mix(in oklab, var(--anchor-ink), black 30%);
+  --dk-surface:     color-mix(in oklab, var(--anchor-ink), var(--anchor-paper) 6%);
+  --dk-wash:        color-mix(in oklab, var(--anchor-ink), var(--anchor-paper) 11%);
+  --dk-fg:          color-mix(in oklab, var(--anchor-paper), var(--anchor-ink) 6%);
+  --dk-fg-2:        color-mix(in oklab, var(--anchor-paper), var(--anchor-ink) 20%);
+  --dk-muted:       color-mix(in oklab, var(--anchor-paper), var(--anchor-ink) 38%);
+  --dk-faint:       color-mix(in oklab, var(--anchor-paper), var(--anchor-ink) 40%);
+  --dk-border:      color-mix(in oklab, var(--anchor-ink), var(--anchor-paper) 34%);
+  --dk-border-soft: color-mix(in oklab, var(--anchor-ink), var(--anchor-paper) 15%);
+  --dk-edge:        color-mix(in oklab, var(--anchor-ink), var(--anchor-paper) 48%);
+
+  --dk-accent:        color-mix(in oklab, var(--anchor-blue), var(--anchor-paper) 56%);
+  --dk-accent-hover:  color-mix(in oklab, var(--anchor-blue), var(--anchor-paper) 60%);
+  --dk-accent-active: color-mix(in oklab, var(--anchor-blue), var(--anchor-paper) 34%);
+
+  --dk-success: color-mix(in oklab, var(--anchor-success), var(--anchor-paper) 54%);
+  --dk-warn:    color-mix(in oklab, var(--anchor-warn), var(--anchor-paper) 26%);
+  --dk-danger:  color-mix(in oklab, var(--anchor-danger), var(--anchor-paper) 50%);
+  --dk-amber-ink:       color-mix(in oklab, var(--dk-warn), var(--anchor-paper) 30%);
+  --dk-amber-wash:      color-mix(in oklab, var(--dk-warn), var(--dk-bg) 86%);
+  --dk-amber-row:       color-mix(in oklab, var(--dk-warn), var(--dk-bg) 93%);
+  --dk-amber-row-hover: color-mix(in oklab, var(--dk-warn), var(--dk-bg) 88%);
+  --dk-red-wash:        color-mix(in oklab, var(--dk-danger), var(--dk-bg) 88%);
+
+  --dk-elev:
+    0 0 0 1px var(--dk-border-soft),
+    inset 0 1px 0 color-mix(in oklab, var(--anchor-paper), transparent 94%),
+    0 1px 2px color-mix(in oklab, var(--anchor-ink), transparent 45%),
+    0 8px 24px -6px color-mix(in oklab, var(--anchor-ink), transparent 40%);
+}
+
+/* ============================================================
+   THEME REMAP — two selectors, one set of --dk-* values.
+
+   `:root:not([data-theme="light"])` is unsafe unscoped (it would match
+   every page that has not explicitly opted into light, including a
+   light-OS visitor), so it only lives inside the prefers-color-scheme
+   media query. The explicit attribute selector sits outside it so a
+   user's toggled choice wins in both directions. Both blocks rebind the
+   same --dk-* values, so they cannot drift apart. An OS-dark visitor
+   paints dark on first frame, with no JS, and stays dark if the theme
+   script never runs.
+   ============================================================ */
+:root[data-theme='light'] {
+  color-scheme: light;
+}
+
+:root[data-theme='dark'] {
+  --bg: var(--dk-bg);
+  --surface: var(--dk-surface);
+  --surface-warm: var(--dk-surface);
+  --fg: var(--dk-fg);
+  --fg-2: var(--dk-fg-2);
+  --muted: var(--dk-muted);
+  --meta: var(--dk-muted);
+  --faint: var(--dk-faint);
+  --border: var(--dk-border);
+  --border-soft: var(--dk-border-soft);
+  --edge-strong: var(--dk-edge);
+  --wash: var(--dk-wash);
+  --accent: var(--dk-accent);
+  --accent-hover: var(--dk-accent-hover);
+  --accent-active: var(--dk-accent-active);
+  --accent-on: var(--dk-bg);
+  --success: var(--dk-success);
+  --warn: var(--dk-warn);
+  --danger: var(--dk-danger);
+  --amber-ink: var(--dk-amber-ink);
+  --amber-wash: var(--dk-amber-wash);
+  --amber-row: var(--dk-amber-row);
+  --amber-row-hover: var(--dk-amber-row-hover);
+  --red-wash: var(--dk-red-wash);
+  --elev-raised: var(--dk-elev);
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --bg: var(--dk-bg);
+    --surface: var(--dk-surface);
+    --surface-warm: var(--dk-surface);
+    --fg: var(--dk-fg);
+    --fg-2: var(--dk-fg-2);
+    --muted: var(--dk-muted);
+    --meta: var(--dk-muted);
+    --faint: var(--dk-faint);
+    --border: var(--dk-border);
+    --border-soft: var(--dk-border-soft);
+    --edge-strong: var(--dk-edge);
+    --wash: var(--dk-wash);
+    --accent: var(--dk-accent);
+    --accent-hover: var(--dk-accent-hover);
+    --accent-active: var(--dk-accent-active);
+    --accent-on: var(--dk-bg);
+    --success: var(--dk-success);
+    --warn: var(--dk-warn);
+    --danger: var(--dk-danger);
+    --amber-ink: var(--dk-amber-ink);
+    --amber-wash: var(--dk-amber-wash);
+    --amber-row: var(--dk-amber-row);
+    --amber-row-hover: var(--dk-amber-row-hover);
+    --red-wash: var(--dk-red-wash);
+    --elev-raised: var(--dk-elev);
+    color-scheme: dark;
+  }
+}
+
+/* ============================================================
+   REDUCED MOTION — global blanket. Every transition and animation in
+   the app collapses to effectively-instant; no per-component opt-out.
+   ============================================================ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

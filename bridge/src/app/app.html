@@ -1,0 +1,34 @@
+<div class="min-h-screen bg-bg text-fg-2">
+  <header class="flex items-center justify-between border-b border-edge-strong px-4 py-3">
+    <div class="flex items-center gap-3">
+      <span
+        class="flex h-8 w-8 items-center justify-center bg-fg font-display text-[17px] font-black text-bg"
+        style="border-radius: 2px"
+      >S</span>
+      <span class="font-display text-lg text-fg">Salvor Bridge</span>
+    </div>
+
+    <nav class="flex items-center gap-3">
+      @if (isDevMode) {
+        <a routerLink="/tokens" class="mono text-xs text-muted hover:text-fg">token parity</a>
+      }
+      <!-- Temporary theme toggle for S0 — the real nav/shell chrome (rail,
+           collapse, connection pill) lands in S4. Semantics match the
+           design spec's theme-toggle button exactly: aria-pressed reflects
+           dark, and the label names the theme a click switches TO. -->
+      <button
+        type="button"
+        (click)="theme.toggle()"
+        [attr.aria-pressed]="theme.theme() === 'dark'"
+        [attr.title]="theme.theme() === 'dark' ? 'Switch to the light theme' : 'Switch to the dark theme'"
+        class="border border-edge-strong bg-transparent px-3 py-1.5 text-xs text-fg-2 hover:bg-border-soft hover:text-fg"
+      >
+        {{ theme.theme() === 'dark' ? 'Light' : 'Dark' }}
+      </button>
+    </nav>
+  </header>
+
+  <main>
+    <router-outlet />
+  </main>
+</div>

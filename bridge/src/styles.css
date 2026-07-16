@@ -1,0 +1,115 @@
+@import 'tailwindcss';
+@import './styles/tokens.css';
+
+/* ============================================================
+   TAILWIND THEME WIRING
+
+   Tailwind's own reserved namespaces (--font-*, --text-*, --radius-*)
+   collide by name with this app's semantic tokens of the same name
+   (tokens.css defines --font-mono, --text-xs, --radius-sm, etc. for
+   direct use in plain CSS, exactly as the design spec does). Re-declaring
+   those same names inside @theme would self-reference and break, so only
+   COLOR is bridged into Tailwind's utility-generating namespace here,
+   under the distinct --color-* prefix — every value is a var() onto the
+   real token in tokens.css, never a duplicated hex. Typography, radius,
+   and motion stay plain CSS custom properties, consumed the same way the
+   design spec consumes them (`font-family: var(--font-mono)`, etc.) —
+   nothing here hand-rolls a second copy of any value.
+   ============================================================ */
+@theme {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-fg: var(--fg);
+  --color-fg-2: var(--fg-2);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-border: var(--border);
+  --color-border-soft: var(--border-soft);
+  --color-edge-strong: var(--edge-strong);
+  --color-wash: var(--wash);
+
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-active: var(--accent-active);
+  --color-accent-on: var(--accent-on);
+
+  --color-success: var(--success);
+  --color-warn: var(--warn);
+  --color-danger: var(--danger);
+
+  --color-amber: var(--amber);
+  --color-amber-ink: var(--amber-ink);
+  --color-amber-wash: var(--amber-wash);
+  --color-red: var(--red);
+  --color-red-wash: var(--red-wash);
+}
+
+/* --- reset + base, ported from the design spec --- */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  color-scheme: light;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg-2);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+  letter-spacing: 0.08px;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  margin: 0;
+  font-family: var(--font-display);
+  color: var(--fg);
+  line-height: var(--leading-tight);
+  letter-spacing: var(--tracking-display);
+  font-weight: 500;
+}
+
+a {
+  color: var(--accent);
+}
+a:hover {
+  color: var(--accent-hover);
+}
+
+button {
+  font: inherit;
+  letter-spacing: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--space-1);
+}
+
+/* wire data: mono, tabular, zero tracking */
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  letter-spacing: 0;
+}
+
+/* square corners: everything in this app is square by default. The only
+   round elements are status dots and count/state pills — see
+   --radius-pill in tokens.css — which opt in explicitly per component. */
