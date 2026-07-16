@@ -1,0 +1,79 @@
+<section class="mx-auto max-w-[1200px] px-6 py-10">
+  <h1 class="text-2xl">Token parity</h1>
+  <p class="mt-2 max-w-[720px] text-fg-2">
+    Dev-only verification instrument (not routed in production builds). Every
+    token defined in <code class="mono">styles/tokens.css</code>, resolved in
+    both themes without disturbing the theme you're currently viewing this
+    page in.
+  </p>
+
+  @for (group of groups(); track group.label) {
+    <h2 class="mt-10 text-lg">{{ group.label }}</h2>
+    <div class="mt-2 overflow-x-auto border border-border">
+      <table class="w-full border-collapse text-sm">
+        <thead>
+          <tr class="border-b border-edge-strong text-left">
+            <th class="p-2 font-normal text-muted">Token</th>
+            <th class="p-2 font-normal text-muted">Light</th>
+            <th class="p-2 font-normal text-muted">Dark</th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (token of group.tokens; track token.name) {
+            <tr class="border-b border-border">
+              <td class="mono p-2 text-fg-2">--{{ token.name }}</td>
+              <td class="p-2">
+                <div class="flex items-center gap-2">
+                  @if (token.kind === 'color') {
+                    <span class="h-5 w-5 flex-none border border-border-soft" [style.background-color]="token.light"></span>
+                  }
+                  <span class="mono text-xs text-fg-2">{{ token.light }}</span>
+                </div>
+              </td>
+              <td class="p-2">
+                <div class="flex items-center gap-2">
+                  @if (token.kind === 'color') {
+                    <span class="h-5 w-5 flex-none border border-border-soft" [style.background-color]="token.dark"></span>
+                  }
+                  <span class="mono text-xs text-fg-2">{{ token.dark }}</span>
+                </div>
+              </td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    </div>
+  }
+
+  <h2 class="mt-10 text-lg">AA contrast sweep</h2>
+  <p class="mt-2 max-w-[720px] text-fg-2">
+    Normal text needs 4.5:1 (WCAG 1.4.3); structural, non-text boundaries
+    need 3:1 (WCAG 1.4.11).
+  </p>
+  <div class="mt-2 overflow-x-auto border border-border">
+    <table class="w-full border-collapse text-sm">
+      <thead>
+        <tr class="border-b border-edge-strong text-left">
+          <th class="p-2 font-normal text-muted">Pair</th>
+          <th class="p-2 font-normal text-muted">Threshold</th>
+          <th class="p-2 font-normal text-muted">Light</th>
+          <th class="p-2 font-normal text-muted">Dark</th>
+        </tr>
+      </thead>
+      <tbody>
+        @for (row of contrasts(); track row.label) {
+          <tr class="border-b border-border">
+            <td class="p-2 text-fg-2">{{ row.label }}</td>
+            <td class="mono p-2 text-xs text-fg-2">{{ row.threshold }}:1</td>
+            <td class="mono p-2 text-xs" [class.text-danger]="!row.lightPass" [class.text-success]="row.lightPass">
+              {{ row.lightRatio.toFixed(2) }}:1 {{ row.lightPass ? 'PASS' : 'FAIL' }}
+            </td>
+            <td class="mono p-2 text-xs" [class.text-danger]="!row.darkPass" [class.text-success]="row.darkPass">
+              {{ row.darkRatio.toFixed(2) }}:1 {{ row.darkPass ? 'PASS' : 'FAIL' }}
+            </td>
+          </tr>
+        }
+      </tbody>
+    </table>
+  </div>
+</section>
