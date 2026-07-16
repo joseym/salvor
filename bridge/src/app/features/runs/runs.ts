@@ -1,0 +1,568 @@
+import { NgClass } from '@angular/common';
+import {
+  Component,
+  ElementRef,
+  type Signal,
+  ViewChild,
+  computed,
+  effect,
+  inject,
+  signal,
+} from '@angular/core';
+
+import { RunsService, createConnectionStateMachine } from '../../core/api';
+import { ViewService } from '../../core/view';
+import {
+  FIELDS,
+  MENU_KEYS,
+  VALUE_KEYS,
+  type Term,
+  matchesAll,
+  parseQuery,
+} from './filter-vocab';
+import {
+  type Group,
+  type RunRow,
+  age,
+  groupOf,
+  hourKey,
+  isWaiting,
+  labelOf,
+  toRunRow,
+} from './run-model';
+
+type SortKey = 'status' | 'id' | 'events' | 'age';
+
+interface AcItem {
+  readonly id: string;
+  readonly primary: string;
+  readonly secondary: string;
+  readonly term?: string;
+  readonly key?: string;
+}
+
+const WHY_COST =
+  'GET /v1/runs now carries usage, but not the model id of each call — and the price table is ' +
+  'keyed by model. Dollars need the per-call model id from each ModelCallCompleted, so they can ' +
+  'still only be folded from the log. Tokens are shown here; see Spend, which pays that cost ' +
+  'deliberately.';
+const WHY_UNREADABLE =
+  'GET /v1/runs omits this field for a run whose log it could not fold. An omission is not a ' +
+  'zero — the endpoint declines to answer rather than report a count it does not have.';
+
+/**
+ * The Runs ledger, complete: the 6-column table with the state rail / zebra / attention wash /
+ * outline-selection channels, attention-first sort, the token filter field (pills, `@` combobox,
+ * honest refusal pill), the fold-derived health strip, and the docked run-detail panel.
+ *
+ * It reads {@link RunsService} (wrapping `GET /v1/runs`). The list carries
+ * `usage`, `step_count` and `agent_def_hash`, so the detail panel renders those as REAL values;
+ * only `cost` remains an em-dash, with WHY_COST verbatim.
+ */
+@Component({
+  selector: 'bridge-runs',
+  imports: [NgClass],
+  templateUrl: './runs.html',
+})
+export class Runs {
+  private readonly runsService = inject(RunsService);
+  private readonly viewService = inject(ViewService);
+
+  /** The Runs list is a REST snapshot — the pill's honest state here is Snapshot, driven by the
+   * connection machine (no public setter; toSnapshot is called on each fetch). */
+  private readonly conn = createConnectionStateMachine();
+  readonly connState = this.conn.state;
+
+  @ViewChild('qInput') private qInputRef?: ElementRef<HTMLInputElement>;
+
+  // ── the query, as tokens (the truth) + the pending text being typed ──
+  private readonly qTok = signal<string[]>([]);
+  private readonly pendingText = signal<string>('');
+  private readonly terms = signal<Term[]>([]);
+  readonly qErr = signal<string | undefined>(undefined);
+  readonly qInvalid = computed(() => this.qErr() !== undefined);
+
+  // ── autocomplete / @ menu ──
+  readonly acMode = signal<'values' | 'keys'>('values');
+  readonly acItems = signal<AcItem[]>([]);
+  readonly acIdx = signal<number>(-1);
+  readonly acOpen = signal<boolean>(false);
+
+  // ── table state ──
+  private readonly sortKey = signal<SortKey>('status');
+  private readonly sortDir = signal<-1 | 1>(-1);
+  readonly runSel = signal<string | undefined>(undefined);
+  readonly panelOpen = signal<boolean>(true);
+  readonly dotKeyOpen = signal<boolean>(false);
+  private seeded = false;
+
+  readonly loading = this.runsService.loading;
+  readonly loadError = this.runsService.error;
+  readonly listLoaded = computed(() => !this.loading() && this.runsService.lastLoadedAt() !== undefined);
+
+  readonly rows: Signal<RunRow[]> = computed(() => this.runsService.runs().map(toRunRow));
+
+  readonly visible = computed<RunRow[]>(() => {
+    const t = this.terms();
+    const filtered = this.rows().filter((r) => matchesAll(r, t));
+    const key = this.sortKey();
+    const dir = this.sortDir();
+    return [...filtered].sort((a, b) => {
+      const av = this.sortVal(a, key);
+      const bv = this.sortVal(b, key);
+      const cmp = av < bv ? -1 : av > bv ? 1 : 0;
+      return cmp * dir || this.statusRank(b) - this.statusRank(a);
+    });
+  });
+
+  readonly counts = computed(() => {
+    const n = { waiting: 0, progress: 0, terminal: 0 } as Record<Group, number>;
+    for (const r of this.rows()) n[groupOf(r.status)]++;
+    return n;
+  });
+  readonly runningCount = computed(() => this.rows().filter((r) => r.status === 'running').length);
+  readonly failedCount = computed(() => this.rows().filter((r) => r.status === 'failed').length);
+  readonly totalCount = computed(() => this.rows().length);
+  readonly asOf = computed(() => {
+    const iso = this.runsService.lastLoadedAt();
+    return iso ? iso.replace('T', ' ').replace(/:\d\d\.\d+Z$/, 'Z') : '—';
+  });
+  readonly countLabel = computed(() => {
+    const v = this.visible().length;
+    const total = this.totalCount();
+    if (!this.listLoaded()) return 'Loading…';
+    return v === total ? `${total} runs` : `${v} of ${total} runs`;
+  });
+
+  readonly selectedRow = computed<RunRow | undefined>(() =>
+    this.rows().find((r) => r.id === this.runSel()),
+  );
+
+  readonly waitingActionable = computed(() => this.counts().waiting);
+
+  constructor() {
+    // read a filter carried in ?q= on entry
+    const initial = this.viewService.query();
+    if (initial) {
+      this.qTok.set(initial.trim().split(/\s+/).filter(Boolean));
+      this.applyQuery();
+    } else {
+      this.applyQuery();
+    }
+    void this.load();
+
+    // cold-load: seed the rail with the top waiting run, once
+    effect(() => {
+      if (this.seeded || !this.listLoaded()) return;
+      const firstWaiting = this.visible().find((r) => isWaiting(r.status));
+      this.seeded = true;
+      if (firstWaiting) {
+        this.runSel.set(firstWaiting.id);
+        this.panelOpen.set(true);
+      }
+    });
+
+    // keep the Snapshot pill's as-of honest with each fetch
+    effect(() => {
+      const iso = this.runsService.lastLoadedAt();
+      if (iso) this.conn.driver.toSnapshot(iso);
+    });
+  }
+
+  private async load(): Promise<void> {
+    try {
+      await this.runsService.refresh();
+    } catch {
+      /* error surfaced via runsService.error; renderListError-equivalent shows in template */
+    }
+  }
+
+  /** The committed tokens, for the template's pill rendering. */
+  qTokens(): string[] {
+    return this.qTok();
+  }
+
+  /** A plain-cell click opens the run; interactive controls stopPropagation so they never reach
+   * here, and a text selection the user is making is never hijacked into a navigation. */
+  onRowClick(e: MouseEvent, r: RunRow): void {
+    const t = e.target as HTMLElement;
+    if (t.closest('.c-caret, .copy, .iact, .status-btn')) return;
+    if (String(getSelection() ?? '')) return;
+    this.openRun(r.id);
+  }
+
+  // ── query plumbing ──
+  getQuery(): string {
+    return [...this.qTok(), this.pendingText().trim()].filter(Boolean).join(' ');
+  }
+
+  private applyQuery(): void {
+    try {
+      this.terms.set(parseQuery(this.getQuery()));
+      this.qErr.set(undefined);
+    } catch (ex) {
+      this.qErr.set(ex instanceof Error ? ex.message : String(ex));
+      // keep the last good result on screen
+    }
+    // reflect into ?q= (replaceUrl — a filter is not a history entry)
+    this.viewService.setQuery([...this.qTok()].join(' '));
+  }
+
+  isStructured(t: string): boolean {
+    return /^[a-z_]+[:<>]/i.test(t);
+  }
+  tokenBad(t: string): boolean {
+    try {
+      parseQuery(t);
+      return false;
+    } catch {
+      return true;
+    }
+  }
+  pillKey(t: string): string {
+    const m = t.match(/^([a-z_]+)([:<>])(.*)$/i);
+    return m ? m[1] + m[2] : t;
+  }
+  pillVal(t: string): string {
+    const m = t.match(/^([a-z_]+)([:<>])(.*)$/i);
+    return m ? m[3] : '';
+  }
+
+  onInput(el: HTMLInputElement): void {
+    this.pendingText.set(el.value);
+    this.applyQuery();
+    if (this.acMode() === 'keys') this.openKeys();
+    else this.autocomplete();
+  }
+
+  onKeydown(e: KeyboardEvent, el: HTMLInputElement): void {
+    if (e.key === '@' && el.value === '' && el.selectionStart === 0) {
+      e.preventDefault();
+      this.openKeys();
+      return;
+    }
+    if (e.key === 'Escape' && this.acOpen()) {
+      e.preventDefault();
+      e.stopPropagation();
+      this.acClose();
+      return;
+    }
+    if (e.key === 'Escape' && !this.acOpen()) {
+      // no menu open: clear the whole query
+      e.preventDefault();
+      this.clearQuery();
+      return;
+    }
+    if (this.acOpen() && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+      e.preventDefault();
+      this.acMove(e.key === 'ArrowDown' ? 1 : -1);
+      return;
+    }
+    if (e.key === ' ' || e.key === 'Tab') {
+      if (this.acOpen() && this.acIdx() >= 0) {
+        e.preventDefault();
+        this.acTake(el);
+        return;
+      }
+      if (e.key === ' ' && el.value.trim()) {
+        e.preventDefault();
+        this.commitPending(el);
+        this.applyQuery();
+      }
+      return;
+    }
+    if (e.key === 'Enter') {
+      if (this.acOpen() && this.acIdx() >= 0) {
+        e.preventDefault();
+        this.acTake(el);
+        return;
+      }
+      if (el.value.trim()) {
+        e.preventDefault();
+        this.commitPending(el);
+        this.applyQuery();
+      }
+      // otherwise: open the first run (keyboard contract)
+      const first = this.visible()[0];
+      if (first && !el.value.trim()) this.openRun(first.id);
+      return;
+    }
+    if (e.key === 'Backspace' && el.selectionStart === 0 && el.selectionEnd === 0 && this.qTok().length) {
+      e.preventDefault();
+      this.qTok.update((t) => t.slice(0, -1));
+      this.applyQuery();
+      return;
+    }
+  }
+
+  private commitPending(el: HTMLInputElement): boolean {
+    const t = el.value.trim();
+    if (!t) return false;
+    this.qTok.update((toks) => [...toks, t]);
+    el.value = '';
+    this.pendingText.set('');
+    return true;
+  }
+
+  private suggestions(): AcItem[] {
+    const t = this.pendingText();
+    const m = t.match(new RegExp(`^(${VALUE_KEYS.join('|')}):(.*)$`, 'i'));
+    if (!m) return [];
+    const key = m[1].toLowerCase();
+    const part = m[2].toLowerCase();
+    const read = FIELDS[key];
+    if (!read) return [];
+    const countByValue = new Map<string, number>();
+    for (const r of this.rows()) {
+      const v = String(read(r));
+      countByValue.set(v, (countByValue.get(v) ?? 0) + 1);
+    }
+    return [...countByValue.keys()]
+      .filter((v) => v.startsWith(part))
+      .sort()
+      .map((v, i) => ({
+        id: `qac-${i}`,
+        primary: v,
+        secondary: `${countByValue.get(v)} run${countByValue.get(v) === 1 ? '' : 's'}`,
+        term: `${key}:${v}`,
+      }));
+  }
+
+  autocomplete(): void {
+    const items = this.suggestions();
+    this.acIdx.set(-1);
+    if (!items.length) {
+      this.acClose();
+      return;
+    }
+    this.acMode.set('values');
+    this.acItems.set(items);
+    this.acOpen.set(true);
+  }
+
+  openKeys(): void {
+    this.acMode.set('keys');
+    const part = this.pendingText().toLowerCase().replace(/^@/, '');
+    const items: AcItem[] = MENU_KEYS.map((v) => ({ insert: v.key + v.op, desc: v.desc }))
+      .filter((it) => !part || it.insert.toLowerCase().startsWith(part))
+      .map((it, i) => ({ id: `qac-${i}`, primary: it.insert, secondary: it.desc, key: it.insert }));
+    this.acIdx.set(-1);
+    if (!items.length) {
+      this.acClose();
+      return;
+    }
+    this.acItems.set(items);
+    this.acOpen.set(true);
+  }
+
+  acMove(d: number): void {
+    const items = this.acItems();
+    if (!items.length) return;
+    const from = this.acIdx();
+    const idx = (from + d + items.length) % items.length;
+    this.acIdx.set(idx);
+  }
+
+  acTake(el: HTMLInputElement): boolean {
+    const item = this.acItems()[this.acIdx()];
+    if (!item) return false;
+    if (this.acMode() === 'keys' && item.key) {
+      this.chooseKey(item.key, el);
+      return true;
+    }
+    if (item.term) {
+      el.value = item.term;
+      this.pendingText.set(item.term);
+      this.commitPending(el);
+      this.acClose();
+      this.applyQuery();
+    }
+    return true;
+  }
+
+  chooseKey(insert: string, el: HTMLInputElement): void {
+    el.value = insert;
+    this.pendingText.set(insert);
+    this.acMode.set('values');
+    this.autocomplete();
+    el.focus();
+  }
+
+  onAcMousedown(e: MouseEvent, item: AcItem, el: HTMLInputElement): void {
+    e.preventDefault();
+    if (this.acMode() === 'keys' && item.key) {
+      this.chooseKey(item.key, el);
+      return;
+    }
+    if (item.term) {
+      el.value = item.term;
+      this.pendingText.set(item.term);
+      this.commitPending(el);
+      this.acClose();
+      this.applyQuery();
+      el.focus();
+    }
+  }
+
+  acClose(): void {
+    this.acOpen.set(false);
+    this.acMode.set('values');
+    this.acIdx.set(-1);
+  }
+
+  onBlur(): void {
+    setTimeout(() => this.acClose(), 120);
+  }
+
+  activeDescendant(): string | null {
+    const i = this.acIdx();
+    return this.acOpen() && i >= 0 ? `qac-${i}` : null;
+  }
+
+  clearQuery(): void {
+    this.qTok.set([]);
+    this.pendingText.set('');
+    if (this.qInputRef) this.qInputRef.nativeElement.value = '';
+    this.acClose();
+    this.applyQuery();
+  }
+
+  delToken(i: number): void {
+    this.qTok.update((t) => t.filter((_, idx) => idx !== i));
+    this.applyQuery();
+    this.qInputRef?.nativeElement.focus();
+  }
+
+  // ── group chips + status labels: one toggle behind every affordance ──
+  toggleTerm(term: string): void {
+    const family = term.slice(0, term.indexOf(':') + 1);
+    const parts = this.getQuery().trim().split(/\s+/).filter(Boolean);
+    const at = parts.indexOf(term);
+    if (at >= 0) parts.splice(at, 1);
+    else {
+      const other = parts.findIndex((p) => p.startsWith(family));
+      if (other >= 0) parts.splice(other, 1);
+      parts.push(term);
+    }
+    this.qTok.set(parts);
+    this.pendingText.set('');
+    if (this.qInputRef) this.qInputRef.nativeElement.value = '';
+    this.applyQuery();
+  }
+
+  chipPressed(term: string): boolean {
+    return this.getQuery().toLowerCase().split(/\s+/).includes(term);
+  }
+
+  // ── sorting ──
+  sortBy(key: SortKey): void {
+    if (this.sortKey() === key) this.sortDir.update((d) => (d === 1 ? -1 : 1));
+    else this.sortDir.set(key === 'id' ? 1 : -1);
+    this.sortKey.set(key);
+  }
+  ariaSort(key: SortKey): 'ascending' | 'descending' | 'none' {
+    if (this.sortKey() !== key) return 'none';
+    return this.sortDir() === 1 ? 'ascending' : 'descending';
+  }
+  private sortVal(r: RunRow, key: SortKey): number | string {
+    switch (key) {
+      case 'status':
+        return this.statusRank(r);
+      case 'id':
+        return r.id;
+      case 'events':
+        return r.eventCount;
+      case 'age':
+        return -(r.last ? Date.parse(r.last) : 0);
+    }
+  }
+  private statusRank(r: RunRow): number {
+    return isWaiting(r.status) ? 2 : r.status === 'failed' ? 1 : 0;
+  }
+
+  // ── row classes / cells ──
+  rowClasses(r: RunRow, i: number): Record<string, boolean> {
+    return {
+      z: i % 2 === 1,
+      [`g-${groupOf(r.status)}`]: true,
+      attention: isWaiting(r.status),
+      'is-failed': r.status === 'failed',
+      'is-done': r.status === 'completed',
+      'is-sel': this.runSel() === r.id,
+    };
+  }
+  statusClass(state: string): string {
+    return `status status-btn s-${state}`;
+  }
+  group(state: string): Group {
+    return groupOf(state);
+  }
+  label(state: string): string {
+    return labelOf(state);
+  }
+  short(id: string): string {
+    return id.slice(0, 8);
+  }
+   age(iso: string | undefined): string {
+    return age(iso);
+  }
+  /** DIVERGENCE (filed): GET /v1/runs carries no last-event kind, so the "Last event" cell shows
+   * the folded resting state label — real list data, not a per-row log fetch. */
+  lastEvent(r: RunRow): string {
+    return labelOf(r.status);
+  }
+
+  // ── detail panel ──
+  selectDetail(id: string): void {
+    this.runSel.update((cur) => (cur === id ? undefined : id));
+    this.panelOpen.set(true);
+  }
+  isSelected(id: string): boolean {
+    return this.runSel() === id;
+  }
+  closePanel(): void {
+    this.panelOpen.set(false);
+  }
+  openPanel(): void {
+    this.panelOpen.set(true);
+  }
+  panelSub(): string {
+    const r = this.selectedRow();
+    return r ? `${labelOf(r.status)} · ${r.eventCount} events` : 'Nothing selected';
+  }
+  panelTitle(): string {
+    const r = this.selectedRow();
+    return r ? r.id.slice(0, 8) : 'Run detail';
+  }
+  has(v: unknown): boolean {
+    return v !== undefined && v !== null;
+  }
+  int(n: number): string {
+    return n.toLocaleString('en-US');
+  }
+  hashShort(h: string): string {
+    return 'sha256:' + h.replace(/^sha256:/, '').slice(0, 8);
+  }
+  readonly whyCost = WHY_COST;
+  readonly whyUnreadable = WHY_UNREADABLE;
+
+  // ── navigation ──
+  openRun(id: string): void {
+    this.viewService.openRun(id);
+  }
+  goInbox(): void {
+    this.viewService.go('inbox');
+  }
+  toggleDotKey(): void {
+    this.dotKeyOpen.update((v) => !v);
+  }
+
+  async copy(value: string, ev: Event): Promise<void> {
+    ev.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(value);
+    } catch {
+      /* clipboard blocked — no fallback theater */
+    }
+  }
+}

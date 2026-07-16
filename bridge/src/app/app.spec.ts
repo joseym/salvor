@@ -2,12 +2,13 @@ import { TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
 import { App } from './app';
 import { routes } from './app.routes';
+import { provideSalvorApi } from './core/api';
 
 describe('App', () => {
   beforeEach(async () => {
     await TestBed.configureTestingModule({
       imports: [App],
-      providers: [provideRouter(routes)],
+      providers: [provideRouter(routes), provideSalvorApi({ baseUrl: '' })],
     }).compileComponents();
   });
 
@@ -17,11 +18,15 @@ describe('App', () => {
     expect(app).toBeTruthy();
   });
 
-  it('should render the shell brand and theme toggle', async () => {
+  it('should render the shell brand, five nav links and the theme toggle', async () => {
     const fixture = TestBed.createComponent(App);
+    fixture.detectChanges();
     await fixture.whenStable();
     const compiled = fixture.nativeElement as HTMLElement;
-    expect(compiled.textContent).toContain('Salvor Bridge');
-    expect(compiled.querySelector('button')).toBeTruthy();
+    expect(compiled.querySelector('#app-nav')).toBeTruthy();
+    expect(compiled.textContent).toContain('Salvor');
+    expect(compiled.textContent).toContain('bridge v0.3');
+    expect(compiled.querySelectorAll('.nav-link').length).toBe(5);
+    expect(compiled.querySelector('#theme-toggle')).toBeTruthy();
   });
 });

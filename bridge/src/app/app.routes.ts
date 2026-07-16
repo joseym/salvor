@@ -1,15 +1,29 @@
+import { Component, isDevMode } from '@angular/core';
 import { Routes } from '@angular/router';
-import { isDevMode } from '@angular/core';
+
+/**
+ * The router drives URL state only; the shell (App) renders all five view sections at once and
+ * toggles `.is-active` from {@link ViewService}. So every path resolves to this deliberately
+ * empty sink — there is no `<router-outlet>` content to swap. The `data.view` on each route is
+ * what ViewService reads to decide which section is active.
+ *
+ * PATH urls (a filed divergence from the prototype's hash routing; legacy
+ * hash deep links are redirected — see ViewService).
+ */
+@Component({ selector: 'bridge-route-sink', template: '' })
+export class RouteSink {}
 
 export const routes: Routes = [
-  {
-    path: '',
-    loadComponent: () => import('./features/home/home').then((m) => m.Home),
-  },
-  // Dev-only token-parity verification instrument.
-  // isDevMode() reflects the build configuration — Angular's production
-  // build defines it away, so this route does not exist in a `ng build`
-  // (production) bundle at all, not even lazily.
+  { path: '', pathMatch: 'full', redirectTo: 'runs' },
+  { path: 'runs', component: RouteSink, data: { view: 'runs' } },
+  { path: 'inspector', component: RouteSink, data: { view: 'inspector' } },
+  { path: 'inspector/:runId', component: RouteSink, data: { view: 'inspector' } },
+  { path: 'inbox', component: RouteSink, data: { view: 'inbox' } },
+  { path: 'workflows', component: RouteSink, data: { view: 'workflows' } },
+  { path: 'workflows/:hashPrefix', component: RouteSink, data: { view: 'workflows' } },
+  { path: 'spend', component: RouteSink, data: { view: 'spend' } },
+  // Dev-only token-parity verification instrument. Absent from a
+  // production `ng build` bundle — isDevMode() is defined away.
   ...(isDevMode()
     ? [
         {
@@ -18,4 +32,5 @@ export const routes: Routes = [
         },
       ]
     : []),
+  { path: '**', redirectTo: 'runs' },
 ];

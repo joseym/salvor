@@ -1,0 +1,293 @@
+<!-- RUN HEALTH — counted from the same list projection the table and chips read. NOT live: the
+     connection pill says Snapshot, and this carries an as-of, because Runs reads a page it already
+     fetched. Each figure is a real filter term. -->
+<div class="health" id="run-health" data-od-id="run-health">
+  <span class="health-k">Run health</span>
+  <button class="health-n" type="button" (click)="toggleTerm('status:running')">
+    <b>{{ runningCount() }}</b> running
+  </button>
+  <button class="health-n is-attn" type="button" (click)="toggleTerm('group:waiting')">
+    <b>{{ counts().waiting }}</b> waiting on you
+  </button>
+  <button class="health-n is-fail" type="button" (click)="toggleTerm('status:failed')">
+    <b>{{ failedCount() }}</b> failed
+  </button>
+  <span class="health-as"
+    >as of {{ asOf() }} · a census of <span class="mono">GET /v1/runs</span>: a snapshot, not a
+    stream</span
+  >
+</div>
+
+<div class="qbar" data-od-id="run-query">
+  <label class="sr" for="q">Filter runs</label>
+  <div class="qfield" id="qfield" [attr.aria-invalid]="qInvalid() ? 'true' : null">
+    <span class="qtokens" id="qtokens">
+      @for (t of qTokens(); track $index) {
+        @if (!isStructured(t)) {
+          <span class="qword" [attr.data-i]="$index" tabindex="0">{{ t }}</span>
+        } @else {
+          <span class="qpill" [class.is-bad]="tokenBad(t)" [attr.data-i]="$index">
+            <button
+              type="button"
+              class="qpill-v"
+              [attr.aria-invalid]="tokenBad(t)"
+              title="Edit this term"
+            >
+              <span class="qk">{{ pillKey(t) }}</span>{{ pillVal(t) }}
+            </button>
+            <button
+              type="button"
+              class="qpill-x"
+              [attr.aria-label]="'Remove filter ' + t"
+              (click)="delToken($index)"
+            >
+              ×
+            </button>
+          </span>
+        }
+      }
+    </span>
+    <input
+      #qInput
+      class="qinput"
+      id="q"
+      type="text"
+      autocomplete="off"
+      spellcheck="false"
+      role="combobox"
+      [attr.aria-expanded]="acOpen()"
+      aria-autocomplete="list"
+      aria-controls="qac"
+      [attr.aria-activedescendant]="activeDescendant()"
+      [placeholder]="qTokens().length ? '' : 'Filter runs…'"
+      aria-describedby="q-hint q-live"
+      (input)="onInput(qInput)"
+      (keydown)="onKeydown($event, qInput)"
+      (blur)="onBlur()"
+    />
+  </div>
+  <ul class="qac" id="qac" role="listbox" aria-label="Filter values" [class.is-keys]="acMode() === 'keys'" [hidden]="!acOpen()">
+    @for (item of acItems(); track item.id) {
+      <li
+        role="option"
+        [id]="item.id"
+        [attr.aria-selected]="acIdx() === $index"
+        [attr.data-term]="item.term ?? null"
+        [attr.data-key]="item.key ?? null"
+        (mousedown)="onAcMousedown($event, item, qInput)"
+      >
+        @if (acMode() === 'keys') {
+          <span class="mono qac-key">{{ item.primary }}</span><span class="qac-desc">{{ item.secondary }}</span>
+        } @else {
+          <span class="mono">{{ item.primary }}</span><span class="qac-n">{{ item.secondary }}</span>
+        }
+      </li>
+    }
+  </ul>
+  <p class="sr" id="q-live" aria-live="polite">{{ getQuery() ? 'Filter: ' + getQuery() : 'No filter' }}</p>
+</div>
+<p class="qhint" id="q-hint">
+  Type <code>&#64;</code> for filters, or a bare word to match a run id. Filters the page already
+  fetched; nothing round-trips.
+</p>
+@if (qErr()) {
+  <p class="qerr" id="qerr" role="alert">{{ qErr() }}</p>
+}
+
+<div class="filters" data-od-id="run-filters">
+  <span class="flabel">Group</span>
+  <div class="chips" role="group" aria-label="Filter by state group">
+    <button class="chip" type="button" data-term="group:waiting" [attr.aria-pressed]="chipPressed('group:waiting')" (click)="toggleTerm('group:waiting')">
+      Waiting on you<span class="chip-n" data-count="waiting" [class.is-zero]="counts().waiting === 0">{{ counts().waiting }}</span>
+    </button>
+    <button class="chip" type="button" data-term="group:progress" [attr.aria-pressed]="chipPressed('group:progress')" (click)="toggleTerm('group:progress')">
+      In progress<span class="chip-n" data-count="progress" [class.is-zero]="counts().progress === 0">{{ counts().progress }}</span>
+    </button>
+    <button class="chip" type="button" data-term="group:terminal" [attr.aria-pressed]="chipPressed('group:terminal')" (click)="toggleTerm('group:terminal')">
+      Terminal<span class="chip-n" data-count="terminal" [class.is-zero]="counts().terminal === 0">{{ counts().terminal }}</span>
+    </button>
+  </div>
+  <span class="count" id="runs-count">{{ countLabel() }}</span>
+</div>
+
+<div class="view-work" data-panel-dock [attr.data-panel]="panelOpen() ? 'open' : 'closed'">
+  <div>
+    <p class="qhint" id="runs-lede">
+      Runs waiting on you sort to the top — start there. Open any row to read its log: the list is a
+      snapshot from <code>GET /v1/runs</code>, and the log is where a run is actually read.
+    </p>
+    <div class="table-scroll" role="region" aria-label="Runs" tabindex="0">
+      <table class="ledger" id="runs-table">
+        <caption>Runs waiting on a human sort to the top.</caption>
+        <thead>
+          <tr>
+            <th scope="col"><span class="sr">Expand</span></th>
+            <th scope="col" data-sort="status" [attr.aria-sort]="ariaSort('status') === 'none' ? null : ariaSort('status')">
+              <button type="button" (click)="sortBy('status')">Status</button>
+            </th>
+            <th scope="col" data-sort="id" [attr.aria-sort]="ariaSort('id') === 'none' ? null : ariaSort('id')">
+              <button type="button" (click)="sortBy('id')">Run</button>
+            </th>
+            <th scope="col" class="num" data-sort="events" [attr.aria-sort]="ariaSort('events') === 'none' ? null : ariaSort('events')">
+              <button type="button" (click)="sortBy('events')">Events</button>
+            </th>
+            <th scope="col" class="num" data-sort="age" [attr.aria-sort]="ariaSort('age') === 'none' ? null : ariaSort('age')">
+              <button type="button" (click)="sortBy('age')">Last activity</button>
+            </th>
+            <th scope="col">Last event</th>
+          </tr>
+        </thead>
+        <tbody id="runs-body" aria-live="polite" [attr.aria-busy]="listLoaded() ? 'false' : 'true'">
+          @if (!listLoaded()) {
+            <tr class="skel-row"><td colspan="6"><span class="sr">Loading runs…</span></td></tr>
+            @for (n of [1, 2, 3, 4, 5]; track n) {
+              <tr class="skel-row"><td colspan="6"><span class="skel-bar"></span></td></tr>
+            }
+          } @else if (loadError()) {
+            <tr><td colspan="6" class="empty">{{ loadError() }} — <span class="mono">GET /v1/runs</span> did not answer.</td></tr>
+          } @else if (!totalCount()) {
+            <tr><td colspan="6" class="empty">
+              <div class="empty-state">
+                <h4>No runs recorded</h4>
+                <p>The log is empty. Start an agent and its run will appear here the moment its first event is recorded.</p>
+              </div>
+            </td></tr>
+          } @else if (!visible().length) {
+            <tr><td class="empty" colspan="6">
+              No run matches <span class="mono">{{ getQuery() }}</span>. The filter narrows the page this list
+              already fetched from <code>GET /v1/runs</code> — clear it to see all {{ totalCount() }}.
+            </td></tr>
+          } @else {
+            @for (r of visible(); track r.id; let i = $index) {
+              <tr [ngClass]="rowClasses(r, i)" [attr.data-id]="r.id" (click)="onRowClick($event, r)">
+                <td class="c-caret">
+                  <button
+                    class="iact panel-open"
+                    type="button"
+                    [attr.data-detail]="r.id"
+                    [attr.aria-pressed]="isSelected(r.id)"
+                    aria-controls="runs-panel"
+                    (click)="selectDetail(r.id); $event.stopPropagation()"
+                  >
+                    <span class="sr">Show {{ short(r.id) }} in the side detail panel (the row itself opens the run)</span>
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
+                      <rect x="2" y="3.5" width="12" height="9" rx="1.5" />
+                      <path d="M9.5 3.5v9" />
+                      <rect x="9.5" y="3.5" width="4.5" height="9" rx="0" fill="currentColor" stroke="none" opacity="0.16" />
+                    </svg>
+                  </button>
+                </td>
+                <td>
+                  <button
+                    class="{{ statusClass(r.status) }}"
+                    type="button"
+                    [attr.data-group]="group(r.status)"
+                    [attr.data-status]="r.status"
+                    [attr.aria-pressed]="chipPressed('status:' + r.status)"
+                    [attr.title]="'Filter the list to ' + label(r.status) + ' runs'"
+                    (click)="toggleTerm('status:' + r.status); $event.stopPropagation()"
+                  >{{ label(r.status) }}</button>
+                </td>
+                <td>
+                  <span class="runref">
+                    <span class="runid" [attr.title]="r.id">{{ short(r.id) }}</span>
+                    <button class="copy" type="button" [attr.data-copy]="r.id" (click)="copy(r.id, $event)">
+                      <span class="sr">Copy {{ r.id }}</span>
+                      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true">
+                        <rect x="5.5" y="5.5" width="8" height="8" rx="1.5" /><path d="M10.5 3.5v-1h-8v8h1" />
+                      </svg>
+                    </button>
+                  </span>
+                </td>
+                <td class="num c-events">{{ r.eventCount }}</td>
+                <td class="num c-age">{{ age(r.last) }}</td>
+                <td class="mono c-last">{{ lastEvent(r) }}</td>
+              </tr>
+            }
+          }
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <aside class="cpanel" data-drawer data-panel="runs" aria-label="Run detail" [hidden]="!panelOpen()">
+    <div class="cpanel-head">
+      <div>
+        <h3 class="cpanel-title">{{ panelTitle() }}</h3>
+        <p class="cpanel-sub" [hidden]="!panelSub()">{{ panelSub() }}</p>
+      </div>
+      <button class="cpanel-x" type="button" aria-label="Close the run detail panel" (click)="closePanel()">×</button>
+    </div>
+    <div class="cpanel-body" id="runs-panel">
+      @if (selectedRow(); as r) {
+        <dl class="dpanel">
+          <div class="f-id"><dt>run_id</dt><dd>{{ r.id }}</dd></div>
+          <div><dt>status.state</dt><dd>{{ label(r.status) }}</dd></div>
+          <div><dt>event_count</dt><dd>{{ r.eventCount }}</dd></div>
+          <div><dt>first_recorded_at</dt><dd>{{ r.first ?? '—' }}</dd></div>
+          <div><dt>last_recorded_at</dt><dd>{{ r.last ?? '—' }}</dd></div>
+          <div>
+            <dt>agent_def_hash</dt>
+            <dd>
+              @if (has(r.agentDefHash)) {
+                {{ hashShort(r.agentDefHash!) }}
+              } @else {
+                <span class="unavail" tabindex="0" [attr.title]="whyUnreadable" [attr.aria-label]="'Unavailable. ' + whyUnreadable">—</span>
+              }
+            </dd>
+          </div>
+          <div>
+            <dt>usage.input</dt>
+            <dd>
+              @if (has(r.usage)) { {{ int(r.usage!.inputTokens) }} } @else {
+                <span class="unavail" tabindex="0" [attr.title]="whyUnreadable" [attr.aria-label]="'Unavailable. ' + whyUnreadable">—</span>
+              }
+            </dd>
+          </div>
+          <div>
+            <dt>usage.output</dt>
+            <dd>
+              @if (has(r.usage)) { {{ int(r.usage!.outputTokens) }} } @else {
+                <span class="unavail" tabindex="0" [attr.title]="whyUnreadable" [attr.aria-label]="'Unavailable. ' + whyUnreadable">—</span>
+              }
+            </dd>
+          </div>
+          <div>
+            <dt>step_count</dt>
+            <dd>
+              @if (has(r.stepCount)) { {{ r.stepCount }} } @else {
+                <span class="unavail" tabindex="0" [attr.title]="whyUnreadable" [attr.aria-label]="'Unavailable. ' + whyUnreadable">—</span>
+              }
+            </dd>
+          </div>
+          <div>
+            <dt>cost</dt>
+            <dd><span class="unavail" tabindex="0" [attr.title]="whyCost" [attr.aria-label]="'Unavailable. ' + whyCost">—</span></dd>
+          </div>
+          <div class="wide">
+            <p class="no-log">
+              That is the whole list row — <code>GET /v1/runs</code> returns nothing else. It carries
+              <code>usage</code>, <code>step_count</code> and <code>agent_def_hash</code>, folded server-side in the
+              same pass as <code>status</code>, so they are values here. The one dash left is <code>cost</code>.
+            </p>
+            <button class="btn ghost" type="button" (click)="openRun(r.id)">Open in inspector</button>
+            <span class="endpoint" style="margin-left: 10px">GET /v1/runs/{{ short(r.id) }}…/events</span>
+          </div>
+        </dl>
+      } @else {
+        <p class="stub-note">
+          Use the panel control on a row to show its detail here. Clicking the row itself opens the run in the
+          Inspector.
+        </p>
+      }
+    </div>
+  </aside>
+  <button class="cpanel-tab" type="button" data-drawer data-panel="runs" [hidden]="panelOpen()" (click)="openPanel()">Run detail</button>
+</div>
+
+<p class="caption" id="runs-caption">
+  <b>Agent, usage, and steps stopped being an API demand — the list folds them now.</b>
+  <code>GET /v1/runs</code> returns <code>usage</code>, <code>step_count</code> and <code>agent_def_hash</code> in the
+  same server-side pass as <code>status</code>, so expand any row to read them. <code>cost</code> is the one that did
+  not come back — the row carries the tokens but not the model each call used, and the price table is keyed by model.
+</p>

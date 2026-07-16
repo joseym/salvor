@@ -1,34 +1,149 @@
-<div class="min-h-screen bg-bg text-fg-2">
-  <header class="flex items-center justify-between border-b border-edge-strong px-4 py-3">
-    <div class="flex items-center gap-3">
-      <span
-        class="flex h-8 w-8 items-center justify-center bg-fg font-display text-[17px] font-black text-bg"
-        style="border-radius: 2px"
-      >S</span>
-      <span class="font-display text-lg text-fg">Salvor Bridge</span>
+<!-- First focusable element. Keeps link semantics and an honest href, but the click is handled in
+     JS so it never rewrites the URL — it focuses the title directly. -->
+<a class="skip" href="#view-title" id="skip-link" (click)="onSkip($event)">Skip to content</a>
+<div class="app">
+  <!-- ========================= APPSHELL ========================= -->
+  <aside #appNav class="nav" id="app-nav" data-od-id="app-shell">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">S</span>
+      <span class="brand-word">
+        <h1>Salvor</h1>
+        <p>bridge v0.3</p>
+      </span>
     </div>
 
-    <nav class="flex items-center gap-3">
-      @if (isDevMode) {
-        <a routerLink="/tokens" class="mono text-xs text-muted hover:text-fg">token parity</a>
+    <nav class="nav-links" aria-label="Views">
+      @for (link of navLinks; track link.view) {
+        <button class="nav-link" type="button" [attr.data-view]="link.view" [attr.aria-current]="ariaCurrent(link.view)" (click)="go(link.view)">
+          <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true">
+            @switch (link.view) {
+              @case ('runs') { <path d="M2 4h12M2 8h12M2 12h12" /> }
+              @case ('inspector') { <circle cx="7" cy="7" r="4.5" /><path d="M10.5 10.5 14 14" /> }
+              @case ('inbox') { <path d="M3 2h10v12l-5-3-5 3z" /> }
+              @case ('workflows') { <rect x="1.5" y="2" width="5" height="4" rx="1" /><rect x="9.5" y="2" width="5" height="4" rx="1" /><rect x="5.5" y="10" width="5" height="4" rx="1" /><path d="M4 6v2h8V6M8 8v2" /> }
+              @case ('spend') { <path d="M2 13h12M4 10v3M7.5 6v7M11 8v5M14.5 3v10" /> }
+            }
+          </svg>
+          <span class="nav-text">{{ link.label }}</span>
+          @if (link.view === 'inbox') {
+            <span class="nav-badge" id="inbox-badge">{{ inboxCount() }}</span>
+          }
+        </button>
       }
-      <!-- Temporary theme toggle for S0 — the real nav/shell chrome (rail,
-           collapse, connection pill) lands in S4. Semantics match the
-           design spec's theme-toggle button exactly: aria-pressed reflects
-           dark, and the label names the theme a click switches TO. -->
-      <button
-        type="button"
-        (click)="theme.toggle()"
-        [attr.aria-pressed]="theme.theme() === 'dark'"
-        [attr.title]="theme.theme() === 'dark' ? 'Switch to the light theme' : 'Switch to the dark theme'"
-        class="border border-edge-strong bg-transparent px-3 py-1.5 text-xs text-fg-2 hover:bg-border-soft hover:text-fg"
-      >
-        {{ theme.theme() === 'dark' ? 'Light' : 'Dark' }}
-      </button>
     </nav>
-  </header>
 
-  <main>
-    <router-outlet />
+    <div class="nav-foot">
+      <div class="nav-controls">
+        <button class="nav-btn" type="button" id="theme-toggle" [attr.aria-pressed]="theme.theme() === 'dark'" [attr.title]="theme.theme() === 'dark' ? 'Switch to the light theme' : 'Switch to the dark theme'" (click)="toggleTheme()">
+          <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true">
+            <path d="M13.4 9.6A5.6 5.6 0 0 1 6.4 2.6a5.6 5.6 0 1 0 7 7z" />
+          </svg>
+          <span class="nav-text" id="theme-label">{{ theme.theme() === 'dark' ? 'Light' : 'Dark' }}</span>
+        </button>
+        <button class="nav-btn" type="button" id="nav-toggle" [attr.aria-expanded]="!navCollapsed()" aria-controls="app-nav" [attr.title]="navCollapsed() ? 'Expand the sidebar' : 'Collapse the sidebar to icons'" (click)="toggleNav()">
+          <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true">
+            <rect x="2" y="3" width="12" height="10" rx="1.5" /><path d="M6.5 3v10" />
+          </svg>
+          <span class="nav-text" id="nav-label">{{ navCollapsed() ? 'Expand' : 'Collapse' }}</span>
+        </button>
+      </div>
+
+      <div class="conn" id="conn" data-state="idle" role="status" aria-live="polite">
+        <span class="conn-dot"></span>
+        <span id="conn-label">{{ connLabel() }}</span>
+        <span class="conn-run" id="conn-run"></span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ========================= MAIN ========================= -->
+  <main class="main">
+    <header class="topbar" data-od-id="topbar">
+      <h2 id="view-title" tabindex="-1">{{ title() }}</h2>
+      <span class="sub" id="view-sub" role="status" aria-live="polite">{{ sub() }}</span>
+      <button class="info" type="button" id="dot-key" aria-label="What the status dots mean" aria-controls="dot-key-note" [attr.aria-expanded]="dotKeyOpen()" (click)="toggleDotKey()">i</button>
+
+      <!-- HONESTY, REWORDED FOR THIS BUILD. The prototype's chip said "Fixtures · no engine". This
+           build talks to a REAL control plane, so the fixtures half is no longer true — Runs and the
+           Inspector read the live server. What remains true is that there is NO graph engine (v0.4):
+           Workflows/fork have no runtime behind them. So the chip tells that truth instead. -->
+      <button class="wf-spec" type="button" id="spec-chip" aria-haspopup="dialog" title="This dashboard reads a real Salvor control plane. There is no graph engine yet (v0.4): Workflows and fork have no runtime behind them.">
+        <span class="spec-dot" aria-hidden="true"></span>Live control plane · no graph engine
+      </button>
+
+      <button class="palette-open" type="button" id="palette-open" aria-haspopup="dialog" title="Jump to a run, a graph or a view" (click)="openPalette()">
+        Jump to… <kbd class="kbd">⌘K</kbd>
+      </button>
+      <button class="palette-open keys-open" type="button" id="keys-open" aria-haspopup="dialog" title="Keyboard shortcuts" (click)="openKeys()">
+        <kbd class="kbd" aria-hidden="true">?</kbd><span class="sr">Keyboard shortcuts</span>
+      </button>
+    </header>
+
+    <!-- ---------------- VIEW: RUN LIST ---------------- -->
+    <section class="view" id="view-runs" data-od-id="run-list" aria-labelledby="view-title" [class.is-active]="isActive('runs')" [hidden]="!isActive('runs')">
+      @if (dotKeyOpen()) {
+        <p class="caption dot-key" id="dot-key-note">
+          <b>Reading the dots.</b> A run is in one of three groups, and the dot says which.
+        </p>
+      }
+      <bridge-runs />
+    </section>
+
+    <!-- ---------------- VIEW: INSPECTOR (S5 stub) ---------------- -->
+    <section class="view" id="view-inspector" data-od-id="run-inspector" [class.is-active]="isActive('inspector')" [hidden]="!isActive('inspector')">
+      <div id="inspector-empty">
+        <div class="empty-state">
+          <h4>Pick a run</h4>
+          <p>Choose a run from the list, or paste a run id, to read its log here.</p>
+        </div>
+        <p class="mechanism">The Inspector reads one run's event stream — <span class="mono">GET /v1/runs/&#123;id&#125;/events</span> — and folds it in the browser. It is coming next.</p>
+      </div>
+      <div id="inspector-body" hidden>
+        <dl class="stats" id="run-stats" data-od-id="run-header"></dl>
+      </div>
+    </section>
+
+    <!-- ---------------- VIEW: INBOX (S6 stub) ---------------- -->
+    <section class="view" id="view-inbox" data-od-id="approval-inbox" [class.is-active]="isActive('inbox')" [hidden]="!isActive('inbox')">
+      <p class="stub-note">The Inbox is coming — the waiting-run cards, suspension forms and reconciliation.</p>
+      <div id="inbox-cards"></div>
+    </section>
+
+    <!-- ---------------- VIEW: WORKFLOWS (S8 stub) ---------------- -->
+    <section class="view" id="view-workflows" data-od-id="workflows" [class.is-active]="isActive('workflows')" [hidden]="!isActive('workflows')">
+      <p class="stub-note">Workflows is coming — real graph documents, Builder mode and validation. There is no graph engine yet (v0.4).</p>
+      <div id="wf-nodes"></div>
+    </section>
+
+    <!-- ---------------- VIEW: SPEND (S7 stub) ---------------- -->
+    <section class="view" id="view-spend" data-od-id="spend" [class.is-active]="isActive('spend')" [hidden]="!isActive('spend')">
+      <p class="stub-note">Spend is coming — burn-down bands, by-agent/by-day ledgers, and the activity histogram.</p>
+    </section>
   </main>
+</div>
+
+<!-- ⌘K palette (stub: routes to views) -->
+<div class="palette" id="palette" popover="auto" role="dialog" aria-label="Jump to a run, graph or view">
+  <input #paletteInput type="text" placeholder="Jump to a run, a graph or a view…" aria-label="Jump to" />
+</div>
+
+<!-- ? keyboard reference -->
+<div class="keys" id="keys" popover="auto" aria-label="Keyboard shortcuts">
+  <div class="keys-group">
+    <h4>Anywhere</h4>
+    <dl>
+      <dt>⌘K</dt><dd>Jump to a run, a graph or a view.</dd>
+      <dt>/</dt><dd>Go to Runs and put the cursor in the filter.</dd>
+      <dt>?</dt><dd>This panel.</dd>
+    </dl>
+  </div>
+  <div class="keys-group">
+    <h4>The run filter</h4>
+    <dl>
+      <dt>&#64;</dt><dd>Offer the filter keys, at the start of an empty field.</dd>
+      <dt>↑ ↓</dt><dd>Walk the offered values.</dd>
+      <dt>Enter</dt><dd>Take the highlighted value; otherwise commit and open the first run.</dd>
+      <dt>Esc</dt><dd>Close the offers. Press again to clear the filter.</dd>
+    </dl>
+  </div>
 </div>
