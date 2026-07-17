@@ -38,6 +38,7 @@ async fn seed_dangling_write(path: &Path) -> RunId {
         Event::RunStarted {
             agent_def_hash: "sha256:agent".into(),
             input: json!("publish otters"),
+            labels: None,
         },
         Event::ToolCallRequested {
             seq: SequenceNumber::new(1),
