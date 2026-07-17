@@ -42,6 +42,7 @@ pub mod client_runs;
 pub mod dispatch;
 pub mod error;
 pub mod executor;
+pub mod graph;
 pub mod json;
 pub mod runs;
 pub mod sse;
@@ -82,6 +83,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/runs/{id}/events", get(sse::stream))
         .route("/v1/runs/{id}/resume", post(runs::resume))
         .route("/v1/runs/{id}/resolve", post(runs::resolve))
+        .route("/v1/runs/{id}/graph", get(graph::projection))
+        .route("/v1/graphs", post(graph::submit).get(graph::list))
+        .route("/v1/graphs/validate", post(graph::validate_only))
+        .route("/v1/graphs/{hash}", get(graph::get))
+        .route("/v1/graph-runs", post(graph::start_run))
         .route("/v1/client-runs", post(client_runs::open))
         .route("/v1/client-runs/{id}/log", get(client_runs::get_log))
         .route("/v1/client-runs/{id}/events", post(client_runs::append))

@@ -17,6 +17,14 @@ ui = ["dep:rust-embed"]
 salvor-core.workspace = true
 salvor-store.workspace = true
 salvor-runtime.workspace = true
+# The graph control plane: the document format and its strict validator
+# (`salvor-graph`), the engine that drives a validated document over a `RunCtx`
+# (`salvor-engine`), and the pure per-node fold the canvas reads
+# (`salvor-replay`, for `derive_graph_projection`). A graph run is an ordinary
+# run with a richer log, so these sit alongside the runtime, not in place of it.
+salvor-graph.workspace = true
+salvor-engine.workspace = true
+salvor-replay.workspace = true
 # The server-performed model step (client-driven runs) reuses the model
 # transport (`Client`, its raw-value send/stream methods) and the streaming
 # accumulator this crate holds, and forwards the caller's `MessageRequest` value

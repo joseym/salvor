@@ -36,15 +36,20 @@ Every error, whatever its status, has one shape:
 ```
 
 `code` is a stable machine token; `message` is a human sentence. A
-`details` object is present only when there is structured evidence, which today
-is the reconciliation refusal (below). The status codes and their codes:
+`details` object is present only when there is structured evidence: the
+reconciliation refusal (`details.intent`, below) and an invalid graph submission
+(`details.errors`, the full node/edge-precise list). The status codes and their
+codes:
 
 | Status | `code` | When |
 |---|---|---|
 | 400 | `bad_request` | Malformed body, bad run id, or a resume input the recorded schema rejects |
 | 401 | `unauthorized` | Missing or wrong bearer token |
 | 404 | `unknown_run` | No run under that id |
-| 404 | `unknown_agent` | No agent registered under that id |
+| 404 | `unknown_agent` | No agent registered under that id (also: a graph run references an unregistered agent) |
+| 400 | `invalid_graph` | A submitted graph document failed strict validation; `details.errors` carries the complete node/edge-precise list |
+| 404 | `unknown_graph` | No graph stored under that hash |
+| 409 | `not_a_graph_run` | The per-run graph projection was asked for an ordinary agent run |
 | 409 | `run_exists` | Starting a run at an id that already has history |
 | 409 | `wrong_state` | A verb applied to a run in the wrong state (resolving a run with no dangling write) |
 | 409 | `needs_reconciliation` | Resuming a run whose log ends at a write intent with no completion; `details.intent` carries the recorded write |
@@ -72,8 +77,14 @@ is the reconciliation refusal (below). The status codes and their codes:
 | GET | `/v1/runs/{id}` | Get one run's derived state |
 | GET | `/v1/runs/{id}/replay` | Dry-run replay: the derived state, executing nothing |
 | GET | `/v1/runs/{id}/events` | Stream a run's events (server-sent events) |
-| POST | `/v1/runs/{id}/resume` | Continue a run (resume a parked one, recover a crashed one) |
+| POST | `/v1/runs/{id}/resume` | Continue a run (resume a parked one, recover a crashed one); works on a graph run unchanged |
 | POST | `/v1/runs/{id}/resolve` | Record a dangling write's completion by hand |
+| GET | `/v1/runs/{id}/graph` | A graph run's per-node projection (for the canvas) |
+| POST | `/v1/graphs` | Submit and strictly validate a graph document |
+| GET | `/v1/graphs` | List stored graphs with a shape summary |
+| GET | `/v1/graphs/{hash}` | Read one stored graph document back |
+| POST | `/v1/graphs/validate` | Validate a document without storing it |
+| POST | `/v1/graph-runs` | Start a run of a stored graph |
 | POST | `/v1/client-runs` | Open or resume a client-driven run |
 | GET | `/v1/client-runs/{id}/log` | Read a client-driven run's recorded log |
 | POST | `/v1/client-runs/{id}/events` | Append control and context events (the guarded append) |
@@ -411,6 +422,145 @@ drives nothing.
 - `409 wrong_state` when the run does not need reconciliation (there is no
   dangling write to resolve).
 - `404 unknown_run` when the id has no history.
+
+## Graphs and graph runs
+
+A graph document is a control document: an acyclic set of nodes (`agent`,
+`tool`, `gate`, `branch`, `map`) authored once, submitted, hashed, and frozen
+for a run. A graph run is an ordinary run with a richer log: its head is
+`GraphRunStarted` instead of `RunStarted`, and its nodes narrate the walk, so
+[`GET /v1/runs/{id}`](#get-v1runsid), [`/replay`](#get-v1runsidreplay),
+[`/events`](#get-v1runsidevents), the enriched [`GET /v1/runs`](#get-v1runs)
+list, and [`POST /v1/runs/{id}/resume`](#post-v1runsidresume) all work on it
+through their existing code. A graph run has no single `agent_def_hash` (it
+coordinates many), so that field is simply absent from its run-list entry:
+honest absence, exactly as `labels` is absent when a run recorded none.
+
+### Resolution and the tool story
+
+Starting a graph run resolves what the document references against the server's
+live inventory, synchronously, before the run is spawned: every `agent` node's
+hash must be a **registered agent** (built through the same factory an agent run
+uses), and every `tool` node's tool must be present in the server's **tool
+registry**, the SAME registry a client-driven [tool step](#post-v1client-runsidtool-step)
+dispatches through. No separate tool-registration surface exists.
+`salvor serve` wires that registry EMPTY, so on a stock server every `tool` node
+is a precise `404 unknown_tool` until a host registers the tool it names.
+
+### POST /v1/graphs
+
+Submit a graph document (the body is the document JSON). The server validates it
+strictly and all at once (collect-all, no short-circuit), and stores it
+content-addressed by its reproducible hash.
+
+- Response `201`:
+
+```json
+{ "graph": "sha256:...", "created": true }
+```
+
+`created` is `false` when the identical document was already stored
+(re-submitting is idempotent: same document, same hash).
+
+- `400 invalid_graph` on any validation failure. `details.errors` is the
+  complete list; each entry has a `code`, a `message`, and the node or edge it
+  names, for example:
+
+```json
+{ "error": { "code": "invalid_graph", "message": "the graph document has 1 validation error(s)",
+  "details": { "errors": [
+    { "code": "dangling_edge", "message": "edge `approve` -> `ghost` references unknown node id `ghost`",
+      "edge": { "from": "approve", "to": "ghost" }, "missing": "ghost", "suggestion": null }
+  ] } } }
+```
+
+A document that does not even parse strictly (an unknown field, a missing one)
+is one `invalid_graph` error with code `malformed_document`.
+
+### GET /v1/graphs
+
+```json
+{ "graphs": [ { "graph": "sha256:...", "node_count": 3, "edge_count": 2,
+               "entry_nodes": ["research"], "terminal_nodes": ["publish"] } ] }
+```
+
+### GET /v1/graphs/{hash}
+
+```json
+{ "graph": "sha256:...", "document": { "schema_version": 1, "nodes": [ ... ], "edges": [ ... ] } }
+```
+
+`404 unknown_graph` when nothing is stored under the hash.
+
+### POST /v1/graphs/validate
+
+Validate a document without storing it: submit's dry run, the graph counterpart
+of `/replay`. It always answers the question rather than treating an invalid
+document as a bad request:
+
+- Response `200`, valid:
+
+```json
+{ "valid": true, "graph": "sha256:...", "summary": { "node_count": 3, "edge_count": 2,
+  "entry_nodes": ["research"], "terminal_nodes": ["publish"] } }
+```
+
+- Response `200`, invalid: `{ "valid": false, "errors": [ ... ] }`, the same
+  node/edge-precise list `POST /v1/graphs` refuses with. Nothing is ever stored.
+
+### POST /v1/graph-runs
+
+Start a run of a stored graph and return its id at once (the same fire-and-return
+shape [`POST /v1/runs`](#post-v1runs) uses).
+
+- Request:
+
+```json
+{ "graph_hash": "sha256:...", "input": { ... }, "labels": { "build": "42" } }
+```
+
+`input` defaults to `null`; `labels` is optional (same bounds as an agent run's).
+
+- Response `201`: `{ "run": "6f...", "status": "running" }`.
+- `404 unknown_graph` when the hash names no stored graph.
+- `400 bad_request` when `labels` violates the bounds.
+- `404 unknown_agent` (naming the node) when an `agent` node references an
+  unregistered agent; `404 unknown_tool` (naming the node) when a `tool` node
+  names a tool the registry does not hold. Both are resolved up front, so a run
+  is spawned only once everything it references resolves.
+
+A parked graph run (a `gate`, a budget crossing) resumes through the ordinary
+[`POST /v1/runs/{id}/resume`](#post-v1runsidresume): the server re-drives it over
+the engine, looking the graph document back up by the hash the log records.
+
+### GET /v1/runs/{id}/graph
+
+A graph run's per-node projection, for the canvas: which nodes the walk has
+reached, which case each `branch` fired, and any `map` fan-out. Absent-vs-null
+throughout: a node's `branch_case` and `map` appear only when recorded, and a
+node the walk has not reached is simply absent (distinct from a `skipped` one).
+
+```json
+{ "graph_hash": "sha256:...", "current_node": "approve", "nodes": [
+  { "node": "research", "state": "exited" },
+  { "node": "approve", "state": "entered" },
+  { "node": "reject", "state": "skipped", "reason": "no live inbound edge: an upstream branch routed to another case" }
+] }
+```
+
+`state` is `entered`, `exited`, or `skipped` (with a `reason`). `current_node` is
+present only while a node is entered and not yet exited.
+
+- `404 unknown_run` when the id has no history.
+- `409 not_a_graph_run` when the run is an ordinary agent run (no
+  `GraphRunStarted` head), mirroring the other `409` shapes.
+
+### Submitting a graph from the CLI
+
+The `salvor` CLI drives graphs LOCALLY (`salvor graph run <graph.json> --input
+<json> [--agent <file> ...]`), the same way `salvor run` drives an agent run; it
+has no remote-verb convention, so it does not submit graphs to a server. Submit
+and validate over HTTP with `curl` (or an SDK) against the endpoints above.
 
 ## Client-driven runs
 

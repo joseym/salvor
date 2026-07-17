@@ -87,6 +87,18 @@ impl ToolRegistry {
         self.tools.get(name).cloned()
     }
 
+    /// A borrowed view of the tool registered under `name`, if any. This is what
+    /// a graph run's `tool` node resolves through: the engine's
+    /// [`ToolResolver`](salvor_engine::ToolResolver) hands the engine a
+    /// `&dyn DynTool`, and this registry is the server's whole tool inventory —
+    /// the SAME seam a client-driven tool step dispatches through. `salvor serve`
+    /// ships it empty, so a graph `tool` node is a precise `unknown_tool` until a
+    /// host registers the tool it names.
+    #[must_use]
+    pub fn resolve(&self, name: &str) -> Option<&dyn DynTool> {
+        self.tools.get(name).map(AsRef::as_ref)
+    }
+
     /// Whether the registry holds no tools (the `salvor serve` default).
     #[must_use]
     pub fn is_empty(&self) -> bool {

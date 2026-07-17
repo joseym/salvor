@@ -353,6 +353,15 @@ pub async fn resume(
                     validate_extension_input(&input).map_err(ApiError::BadRequest)?;
                 }
             }
+            // A graph run is an ordinary run with a richer log: the classify,
+            // the input validation above, and the request/response contract are
+            // all shared. Only the re-drive differs — a graph run continues over
+            // the engine, resolving its document by the hash the log records,
+            // where an agent run rebuilds its agent and continues the built-in
+            // loop. This is the sole graph-specific branch the resume path needs.
+            if crate::graph::is_graph_run(&log) {
+                return crate::graph::drive_resume(state, run_id, &log, Some(input)).await;
+            }
             let built = rebuild_agent(&state, &log).await?;
             spawn_drive(state, run_id, built, DriveVerb::Resume(input));
             Ok(driving(run_id).into_response())
@@ -363,6 +372,12 @@ pub async fn resume(
                     run_id = %run_id.as_uuid(),
                     "this run crashed mid-step; the resume input is ignored when recovering"
                 );
+            }
+            // The graph branch, mirroring the Resume arm: a crashed graph run
+            // recovers over the engine (no resume input), an agent run over the
+            // built-in loop.
+            if crate::graph::is_graph_run(&log) {
+                return crate::graph::drive_resume(state, run_id, &log, None).await;
             }
             let built = rebuild_agent(&state, &log).await?;
             spawn_drive(state, run_id, built, DriveVerb::Recover);

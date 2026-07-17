@@ -76,6 +76,23 @@ pub enum ApiError {
     /// recorded, so the write-ahead intent is left dangling (the legal crash
     /// story) and the run stays drivable-or-reconcilable per the tool's effect.
     ToolExecution(String),
+    /// A submitted graph document failed strict validation. HTTP 400. Carries
+    /// the complete, node/edge-precise error list as evidence, because a graph
+    /// is a control document validated all at once (collect-all, no
+    /// short-circuit), so an author sees every mistake in one response.
+    InvalidGraph {
+        /// The human sentence.
+        message: String,
+        /// The full list of structured validation errors, each naming the node
+        /// or edge at fault.
+        errors: Value,
+    },
+    /// No graph is stored under the given hash. HTTP 404.
+    UnknownGraph(String),
+    /// A graph-only endpoint (the per-run graph projection) was asked for a run
+    /// whose log is not a graph run (an ordinary agent run has no
+    /// `GraphRunStarted` head). HTTP 409.
+    NotAGraphRun(String),
     /// A run needs human reconciliation and cannot be driven automatically.
     /// Carries the recorded write intent as evidence. HTTP 409.
     NeedsReconciliation {
@@ -100,6 +117,9 @@ impl ApiError {
             ApiError::UnknownAgent(_) => (StatusCode::NOT_FOUND, "unknown_agent"),
             ApiError::RunExists(_) => (StatusCode::CONFLICT, "run_exists"),
             ApiError::WrongState(_) => (StatusCode::CONFLICT, "wrong_state"),
+            ApiError::InvalidGraph { .. } => (StatusCode::BAD_REQUEST, "invalid_graph"),
+            ApiError::UnknownGraph(_) => (StatusCode::NOT_FOUND, "unknown_graph"),
+            ApiError::NotAGraphRun(_) => (StatusCode::CONFLICT, "not_a_graph_run"),
             ApiError::NeedsReconciliation { .. } => (StatusCode::CONFLICT, "needs_reconciliation"),
             ApiError::MissingDriveToken(_) => (StatusCode::UNAUTHORIZED, "missing_drive_token"),
             ApiError::InvalidDriveToken(_) => (StatusCode::FORBIDDEN, "invalid_drive_token"),
@@ -141,6 +161,9 @@ impl ApiError {
             | ApiError::UnknownTool(m)
             | ApiError::ToolRegistryUnavailable(m)
             | ApiError::ToolExecution(m)
+            | ApiError::UnknownGraph(m)
+            | ApiError::NotAGraphRun(m)
+            | ApiError::InvalidGraph { message: m, .. }
             | ApiError::NeedsReconciliation { message: m, .. } => m.clone(),
             ApiError::Unauthorized => "missing or invalid bearer token".to_owned(),
         }
@@ -152,8 +175,14 @@ impl IntoResponse for ApiError {
         let (status, code) = self.status_and_code();
         let message = self.message();
         let mut error = json!({ "code": code, "message": message });
-        if let ApiError::NeedsReconciliation { intent, .. } = self {
-            error["details"] = json!({ "intent": intent });
+        match self {
+            ApiError::NeedsReconciliation { intent, .. } => {
+                error["details"] = json!({ "intent": intent });
+            }
+            ApiError::InvalidGraph { errors, .. } => {
+                error["details"] = json!({ "errors": errors });
+            }
+            _ => {}
         }
         (status, Json(json!({ "error": error }))).into_response()
     }

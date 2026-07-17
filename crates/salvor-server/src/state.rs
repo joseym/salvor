@@ -27,13 +27,14 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use salvor_runtime::{Agent, ClockFn, RandomFn, Runtime};
+use salvor_graph::Graph;
+use salvor_runtime::{Agent, ClockFn, RandomFn, RunCtx, Runtime, RuntimeError};
 use salvor_store::EventStore;
 use salvor_tools::mcp::McpServer;
 use time::OffsetDateTime;
 use tokio::task::JoinHandle;
 
-use salvor_core::RunId;
+use salvor_core::{EventEnvelope, RunId};
 
 use crate::executor::ModelExecutor;
 use crate::tool_registry::ToolRegistry;
@@ -124,6 +125,14 @@ struct Inner {
     auth_token: Option<String>,
     poll_interval: Duration,
     agents: Mutex<HashMap<String, RegisteredAgent>>,
+    // The graph documents this process has accepted, keyed by their reproducible
+    // content hash (`salvor_engine::graph_hash`). In-memory, exactly like the
+    // agent registry above and for the same reason: a graph is pure data with a
+    // content hash, so re-submitting the identical document is idempotent and a
+    // restart re-accepts it under the same hash. Storing it here rather than in
+    // the event store keeps the store schema untouched (additive-migration
+    // discipline) and mirrors how a registered agent lives only in this map.
+    graphs: Mutex<HashMap<String, Graph>>,
     // Which runs a driver task is still working on, and the handles to those
     // tasks. The `active` set is membership only, inserted synchronously
     // before a task is spawned so a concurrent stream can never miss a run
@@ -171,6 +180,7 @@ impl AppState {
                 auth_token: None,
                 poll_interval: Duration::from_millis(50),
                 agents: Mutex::new(HashMap::new()),
+                graphs: Mutex::new(HashMap::new()),
                 active: Mutex::new(HashSet::new()),
                 handles: Mutex::new(HashMap::new()),
                 client_runs: Mutex::new(HashMap::new()),
@@ -337,6 +347,70 @@ impl AppState {
             .collect();
         hashes.sort();
         hashes
+    }
+
+    /// Records a validated graph document under `hash`, returning whether it was
+    /// newly stored (`true`) or already present (`false`). Re-storing the
+    /// identical document is idempotent: the second call keeps the first and
+    /// reports `false`, the graph counterpart of an agent register's `created`.
+    pub fn store_graph(&self, hash: String, graph: Graph) -> bool {
+        let mut graphs = self.inner.graphs.lock().expect("graphs registry lock");
+        if graphs.contains_key(&hash) {
+            return false;
+        }
+        graphs.insert(hash, graph);
+        true
+    }
+
+    /// The graph document stored under `hash`, if any. `None` is the
+    /// `unknown_graph` case.
+    #[must_use]
+    pub fn graph(&self, hash: &str) -> Option<Graph> {
+        self.inner
+            .graphs
+            .lock()
+            .expect("graphs registry lock")
+            .get(hash)
+            .cloned()
+    }
+
+    /// Every stored graph's hash, sorted for a stable listing.
+    #[must_use]
+    pub fn graph_hashes(&self) -> Vec<String> {
+        let mut hashes: Vec<String> = self
+            .inner
+            .graphs
+            .lock()
+            .expect("graphs registry lock")
+            .keys()
+            .cloned()
+            .collect();
+        hashes.sort();
+        hashes
+    }
+
+    /// Builds a per-run [`RunCtx`] over `log`, with this state's clock and random
+    /// source, so the graph engine can drive a run through the same durability
+    /// substrate the built-in loop uses. This is the graph counterpart of
+    /// [`runtime`](Self::runtime): the built-in loop reaches the store through a
+    /// [`Runtime`]; the graph engine reaches it through a `RunCtx` it drives
+    /// directly, and both share the exact clock/random hooks so a deterministic
+    /// test's logs still compare equal.
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeError::Replay`] when `log` is not a well-formed run history.
+    pub fn run_ctx(&self, run_id: RunId, log: Vec<EventEnvelope>) -> Result<RunCtx, RuntimeError> {
+        match &self.inner.hooks {
+            Some((clock, random)) => RunCtx::with_hooks(
+                self.inner.store.clone(),
+                run_id,
+                log,
+                clock.clone(),
+                random.clone(),
+            ),
+            None => RunCtx::new(self.inner.store.clone(), run_id, log),
+        }
     }
 
     /// Marks a run as being driven. Call this synchronously before spawning
