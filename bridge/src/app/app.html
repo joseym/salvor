@@ -48,10 +48,10 @@
         </button>
       </div>
 
-      <div class="conn" id="conn" data-state="idle" role="status" aria-live="polite">
+      <div class="conn" id="conn" [attr.data-state]="connState()" role="status" aria-live="polite">
         <span class="conn-dot"></span>
         <span id="conn-label">{{ connLabel() }}</span>
-        <span class="conn-run" id="conn-run"></span>
+        <span class="conn-run" id="conn-run">{{ connRun() }}</span>
       </div>
     </div>
   </aside>
@@ -89,24 +89,14 @@
       <bridge-runs />
     </section>
 
-    <!-- ---------------- VIEW: INSPECTOR (S5 stub) ---------------- -->
+    <!-- ---------------- VIEW: INSPECTOR ---------------- -->
     <section class="view" id="view-inspector" data-od-id="run-inspector" [class.is-active]="isActive('inspector')" [hidden]="!isActive('inspector')">
-      <div id="inspector-empty">
-        <div class="empty-state">
-          <h4>Pick a run</h4>
-          <p>Choose a run from the list, or paste a run id, to read its log here.</p>
-        </div>
-        <p class="mechanism">The Inspector reads one run's event stream — <span class="mono">GET /v1/runs/&#123;id&#125;/events</span> — and folds it in the browser. It is coming next.</p>
-      </div>
-      <div id="inspector-body" hidden>
-        <dl class="stats" id="run-stats" data-od-id="run-header"></dl>
-      </div>
+      <bridge-inspector />
     </section>
 
-    <!-- ---------------- VIEW: INBOX (S6 stub) ---------------- -->
+    <!-- ---------------- VIEW: INBOX ---------------- -->
     <section class="view" id="view-inbox" data-od-id="approval-inbox" [class.is-active]="isActive('inbox')" [hidden]="!isActive('inbox')">
-      <p class="stub-note">The Inbox is coming — the waiting-run cards, suspension forms and reconciliation.</p>
-      <div id="inbox-cards"></div>
+      <bridge-inbox />
     </section>
 
     <!-- ---------------- VIEW: WORKFLOWS (S8 stub) ---------------- -->

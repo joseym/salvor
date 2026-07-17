@@ -525,6 +525,11 @@ export class Runs {
   }
   openPanel(): void {
     this.panelOpen.set(true);
+    // Opening via the dock tab hands focus to the panel's dismiss control, matching the
+    // prototype's cpanel contract (suite spec 06 asserts the focus hand-off both ways).
+    queueMicrotask(() => {
+      document.querySelector<HTMLButtonElement>('.cpanel[data-panel="runs"] .cpanel-x')?.focus();
+    });
   }
   panelSub(): string {
     const r = this.selectedRow();

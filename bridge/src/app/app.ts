@@ -11,8 +11,11 @@ import {
 } from '@angular/core';
 
 import { RunsService } from './core/api';
+import { PillService } from './core/pill';
 import { ThemeService } from './core/theme';
 import { ViewService, type ViewName } from './core/view';
+import { Inbox } from './features/inbox/inbox';
+import { Inspector } from './features/inspector/inspector';
 import { groupOf } from './features/runs/run-model';
 import { Runs } from './features/runs/runs';
 
@@ -41,7 +44,7 @@ const SUBS: Readonly<Record<ViewName, string>> = {
  */
 @Component({
   selector: 'bridge-root',
-  imports: [Runs],
+  imports: [Runs, Inspector, Inbox],
   templateUrl: './app.html',
   host: { '(document:keydown)': 'onGlobalKeydown($event)' },
 })
@@ -49,6 +52,7 @@ export class App implements AfterViewInit {
   private readonly runsService = inject(RunsService);
   private readonly viewService = inject(ViewService);
   private readonly destroyRef = inject(DestroyRef);
+  private readonly pill = inject(PillService);
   protected readonly theme = inject(ThemeService);
 
   @ViewChild('appNav') private appNav?: ElementRef<HTMLElement>;
@@ -156,5 +160,26 @@ export class App implements AfterViewInit {
     }
   }
 
-  readonly connLabel: Signal<string> = computed(() => 'Snapshot');
+  // ── the connection pill, driven by whatever stream is actually open (PillService) ──
+  private readonly hms = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'UTC',
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+
+  readonly connState: Signal<string> = computed(() => this.pill.state().kind);
+
+  readonly connLabel: Signal<string> = computed(() => {
+    const s = this.pill.state();
+    if (s.kind === 'idle') return `Snapshot · as of ${this.hms.format(new Date(s.asOf))}Z`;
+    return s.label;
+  });
+
+  readonly connRun: Signal<string> = computed(() => {
+    const id = this.pill.runId();
+    const kind = this.pill.state().kind;
+    return id && (kind === 'connected' || kind === 'ended') ? 'run ' + id.slice(0, 8) : '';
+  });
 }
