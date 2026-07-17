@@ -76,6 +76,12 @@ pub async fn register(
         .await
         .map_err(ApiError::BadRequest)?;
     let agent_hash = built.agent.def_hash().to_owned();
+    // The name, if the definition declared one, is read off the built agent
+    // (`AgentConfig::validate` already bounded it during the build above, the
+    // same parse-and-validate path a file-based `salvor run` goes through —
+    // this is what makes the bound a server-enforced one, not merely a
+    // client-side courtesy).
+    let name = built.agent.name().map(str::to_owned);
     for server in built.servers {
         if let Err(error) = server.close().await {
             tracing::warn!(%error, "MCP session did not close cleanly after registration");
@@ -86,6 +92,7 @@ pub async fn register(
     state.register_agent(RegisteredAgent {
         definition,
         agent_hash: agent_hash.clone(),
+        name,
     });
 
     Ok((
@@ -94,20 +101,40 @@ pub async fn register(
     ))
 }
 
-/// `GET /v1/agents`: list the registered agent ids.
+/// `GET /v1/agents`: list the registered agent ids, each with its display
+/// name when the definition declared one (see the zero-vs-absent rule on
+/// [`get`]).
 pub async fn list(State(state): State<AppState>) -> impl IntoResponse {
     let agents: Vec<_> = state
         .agent_hashes()
         .into_iter()
-        .map(|hash| json!({ "agent": hash }))
+        .map(|hash| {
+            let name = state.agent(&hash).and_then(|registered| registered.name);
+            let mut entry = json!({ "agent": hash });
+            if let Some(name) = name {
+                entry
+                    .as_object_mut()
+                    .expect("entry is a JSON object")
+                    .insert("name".to_owned(), json!(name));
+            }
+            entry
+        })
         .collect();
     Json(json!({ "agents": agents }))
 }
 
 /// `GET /v1/agents/{hash}`: read one registered definition back.
 ///
-/// The response echoes the id, the format the definition was submitted in, and
-/// the definition body as text.
+/// The response echoes the id, the format the definition was submitted in,
+/// and the definition body as text.
+///
+/// # The zero-vs-absent rule, extended to `name`
+///
+/// `name` is present only when the registered definition actually declared
+/// one; there is no such thing as a genuinely empty name to fall back to, so
+/// an agent registered with none omits the field entirely rather than
+/// emitting `"name": null`. The same rule [`GET /v1/runs`](crate::runs::list)
+/// already applies to `agent_def_hash` and `labels`.
 pub async fn get(
     State(state): State<AppState>,
     Path(hash): Path<String>,
@@ -120,9 +147,16 @@ pub async fn get(
         DefFormat::Json => "json",
     };
     let body = String::from_utf8_lossy(&registered.definition.body).into_owned();
-    Ok(Json(json!({
+    let mut response = json!({
         "agent": registered.agent_hash,
         "format": format,
         "definition": body,
-    })))
+    });
+    if let Some(name) = registered.name {
+        response
+            .as_object_mut()
+            .expect("response is a JSON object")
+            .insert("name".to_owned(), json!(name));
+    }
+    Ok(Json(response))
 }

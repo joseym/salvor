@@ -90,6 +90,13 @@ pub struct RegisteredAgent {
     pub definition: AgentDefinition,
     /// The agent's content hash (`agent_def_hash`), the id clients reference.
     pub agent_hash: String,
+    /// The agent's display name, when the definition declared one
+    /// (`Agent::name`, read off the built agent at registration time).
+    /// `None` when the definition carried no name — genuinely absent, not a
+    /// default to fall back on: [`agents::get`](crate::agents::get) and
+    /// [`agents::list`](crate::agents::list) omit the field entirely for
+    /// such an agent rather than emit `"name": null`.
+    pub name: Option<String>,
 }
 
 /// The shared, cheaply cloned handle every route works through.

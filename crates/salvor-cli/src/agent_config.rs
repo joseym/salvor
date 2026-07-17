@@ -12,6 +12,14 @@
 //! # Required. The model id sent with every request.
 //! model = "claude-opus-4-8"
 //!
+//! # Optional. A short human label, shown by tooling that resolves
+//! # `agent_def_hash` back to something readable (the control plane's
+//! # `GET /v1/agents/{hash}` and its list). At most 64 characters, and not
+//! # empty or all whitespace when set. Purely descriptive: it plays no part
+//! # in `agent_def_hash`, so renaming an agent never mints a new identity or
+//! # orphans its recorded runs (see `salvor_runtime::Agent::name`).
+//! name = "support-triage"
+//!
 //! # Optional. Exactly one of these sets the system prompt; setting both is an
 //! # error. A path is resolved relative to the directory of this file.
 //! system_prompt = "You are a research agent."
@@ -165,6 +173,15 @@ use serde::Deserialize;
 /// overrides it either way. See the module docs.
 const RECORD_PROMPTS_ENV: &str = "SALVOR_RECORD_PROMPTS";
 
+/// The longest an agent `name` may be, in characters. A name is a short
+/// display label for the registry and dashboards, not a payload, so the
+/// bound is generous for a title but rejects anything payload-shaped.
+/// Checked in [`AgentConfig::validate`], which runs on every parse
+/// (`load`, `from_toml_str`, `from_json_str`) — including the control
+/// plane's `POST /v1/agents`, so a submitted name is bounded before it is
+/// trusted, the same as any other client-supplied config.
+pub const MAX_NAME_LEN: usize = 64;
+
 /// Resolves the effective prompt-recording flag from the per-agent setting and
 /// the global env default. Per-agent wins over env, env over off:
 /// `per_agent.or(env_default).unwrap_or(false)`. Kept pure (both inputs are
@@ -201,6 +218,13 @@ fn env_record_prompts_default() -> Option<bool> {
 pub struct AgentConfig {
     /// The model id sent with each request. Required.
     pub model: String,
+    /// A short human label, shown by tooling that resolves `agent_def_hash`
+    /// back to something readable. Optional; bounded to
+    /// [`MAX_NAME_LEN`] characters and, when set, not empty or all
+    /// whitespace (checked in [`validate`](Self::validate)). Excluded from
+    /// `agent_def_hash`: see `salvor_runtime::Agent::name`.
+    #[serde(default)]
+    pub name: Option<String>,
     /// An inline system prompt. Mutually exclusive with `system_prompt_path`.
     #[serde(default)]
     pub system_prompt: Option<String>,
@@ -636,14 +660,24 @@ impl AgentConfig {
     ///
     /// # Errors
     ///
-    /// Fails when both prompt fields are set, when any `[[mcp_servers]]`
-    /// entry breaks the `command`/`url` transport-exclusivity rules (see
-    /// [`McpServerConfig`]), or when any `[[wasm_tools]]` entry is missing
-    /// its required `effect` or breaks the schema-source rule (see
-    /// [`WasmToolConfig`]).
+    /// Fails when both prompt fields are set, when `name` is set but empty,
+    /// all whitespace, or over [`MAX_NAME_LEN`] characters, when any
+    /// `[[mcp_servers]]` entry breaks the `command`/`url`
+    /// transport-exclusivity rules (see [`McpServerConfig`]), or when any
+    /// `[[wasm_tools]]` entry is missing its required `effect` or breaks the
+    /// schema-source rule (see [`WasmToolConfig`]).
     pub fn validate(&self) -> Result<()> {
         if self.system_prompt.is_some() && self.system_prompt_path.is_some() {
             bail!("set only one of `system_prompt` or `system_prompt_path`, not both");
+        }
+        if let Some(name) = &self.name {
+            if name.trim().is_empty() {
+                bail!("`name`, if set, must not be empty or all whitespace");
+            }
+            let len = name.chars().count();
+            if len > MAX_NAME_LEN {
+                bail!("`name` is {len} characters, over the {MAX_NAME_LEN}-character cap");
+            }
         }
         for server in &self.mcp_servers {
             server.validate()?;
@@ -753,6 +787,9 @@ pub async fn build_agent(
     let agent_dir = agent_path.parent().unwrap_or_else(|| Path::new("."));
 
     let mut builder = Agent::builder().model(config.client_config(), &config.model);
+    if let Some(name) = &config.name {
+        builder = builder.name(name.clone());
+    }
     if let Some(prompt) = config.system_prompt(agent_dir)? {
         builder = builder.system_prompt(prompt);
     }
@@ -930,5 +967,53 @@ mod tests {
         let off =
             AgentConfig::from_toml_str("model = \"m\"\nrecord_prompts = false\n").expect("parses");
         assert_eq!(off.record_prompts, Some(false));
+    }
+
+    /// `name` parses from the agent TOML: absent leaves it `None`, and an
+    /// explicit value is read through unchanged.
+    #[test]
+    fn name_parses_from_toml() {
+        let absent = AgentConfig::from_toml_str("model = \"m\"\n").expect("parses");
+        assert_eq!(absent.name, None);
+
+        let named = AgentConfig::from_toml_str("model = \"m\"\nname = \"support-triage\"\n")
+            .expect("parses");
+        assert_eq!(named.name.as_deref(), Some("support-triage"));
+    }
+
+    /// An empty or all-whitespace `name` is rejected: it would render as
+    /// nothing, so it is not a meaningful label. `from_toml_str` runs
+    /// `validate` internally, so a blank name fails the whole call, not a
+    /// later separate step.
+    #[test]
+    fn blank_name_is_rejected() {
+        for blank in ["", "   ", "\t"] {
+            let error = AgentConfig::from_toml_str(&format!("model = \"m\"\nname = \"{blank}\"\n"))
+                .expect_err("blank name should be rejected");
+            assert!(format!("{error:#}").contains("empty or all whitespace"));
+        }
+    }
+
+    /// A name over the character cap is a loud, actionable parse error.
+    #[test]
+    fn oversized_name_is_rejected() {
+        let long_name = "a".repeat(MAX_NAME_LEN + 1);
+        let toml = format!("model = \"m\"\nname = \"{long_name}\"\n");
+        let error = AgentConfig::from_toml_str(&toml).expect_err("oversized name rejected");
+        let message = format!("{error:#}");
+        assert!(message.contains("65 characters"), "{message}");
+        assert!(
+            message.contains(&format!("{MAX_NAME_LEN}-character cap")),
+            "{message}"
+        );
+    }
+
+    /// A name exactly at the cap is valid.
+    #[test]
+    fn name_exactly_at_the_cap_is_valid() {
+        let name = "a".repeat(MAX_NAME_LEN);
+        let toml = format!("model = \"m\"\nname = \"{name}\"\n");
+        let config = AgentConfig::from_toml_str(&toml).expect("parses and validates");
+        assert_eq!(config.name.as_deref(), Some(name.as_str()));
     }
 }

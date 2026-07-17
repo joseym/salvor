@@ -65,6 +65,7 @@ pub struct Agent {
     def_hash: String,
     record_prompts: bool,
     labels: Option<BTreeMap<String, String>>,
+    name: Option<String>,
 }
 
 impl Agent {
@@ -142,6 +143,19 @@ impl Agent {
     pub fn labels(&self) -> Option<&BTreeMap<String, String>> {
         self.labels.as_ref()
     }
+
+    /// A short human label for this agent, when set with
+    /// [`AgentBuilder::name`] — a display name the control plane's agent
+    /// registry (`GET /v1/agents/{hash}`) can hand back to a caller that only
+    /// has the hash. Like [`labels`](Self::labels) and
+    /// [`record_prompts`](Self::record_prompts), this is descriptive
+    /// metadata, not part of the definition, so it is deliberately excluded
+    /// from [`def_hash`](Self::def_hash): renaming an agent must not mint a
+    /// new identity or orphan its recorded runs.
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
 }
 
 /// Builds an [`Agent`]:
@@ -174,6 +188,7 @@ pub struct AgentBuilder {
     max_response_tokens: Option<u32>,
     record_prompts: bool,
     labels: Option<BTreeMap<String, String>>,
+    name: Option<String>,
 }
 
 impl AgentBuilder {
@@ -275,6 +290,20 @@ impl AgentBuilder {
         self
     }
 
+    /// Sets a short human label for this agent (unset by default). Like
+    /// [`record_prompts`](Self::record_prompts) and [`labels`](Self::labels),
+    /// this is descriptive metadata rather than part of what the agent runs,
+    /// so it is excluded from [`Agent::def_hash`] (see that method's docs).
+    /// Sanity bounds on the name itself are not checked here; a config-file
+    /// caller enforces them where the config is parsed (see
+    /// `salvor_cli::agent_config::MAX_NAME_LEN`), so this setter is
+    /// infallible, mirroring [`labels`](Self::labels).
+    #[must_use]
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
     /// Builds the agent, computing its definition hash.
     ///
     /// # Errors
@@ -325,6 +354,7 @@ impl AgentBuilder {
             def_hash,
             record_prompts: self.record_prompts,
             labels: self.labels,
+            name: self.name,
         })
     }
 }
@@ -543,6 +573,24 @@ mod tests {
             labeled_a.labels(),
             Some(&BTreeMap::from([("build".to_owned(), "42".to_owned())]))
         );
+    }
+
+    /// `name` is descriptive metadata, not part of the definition: setting
+    /// it, changing it, or leaving it unset never changes `def_hash`,
+    /// mirroring how `record_prompts` and `labels` are excluded. This is the
+    /// def-hash half of the "a rename must not mint a new agent identity"
+    /// guarantee the CLI's TOML `name` field relies on (see
+    /// `salvor_cli::agent_config`'s own same-TOML-plus-or-minus-`name` test).
+    #[test]
+    fn name_never_affects_the_definition_hash() {
+        let unnamed = base_builder().build().unwrap();
+        let named_a = base_builder().name("triage-agent").build().unwrap();
+        let named_b = base_builder().name("a-different-name").build().unwrap();
+
+        assert_eq!(unnamed.def_hash(), named_a.def_hash());
+        assert_eq!(unnamed.def_hash(), named_b.def_hash());
+        assert_eq!(unnamed.name(), None);
+        assert_eq!(named_a.name(), Some("triage-agent"));
     }
 
     /// A cost budget without pricing is a build-time error, not a run-time

@@ -226,6 +226,33 @@ fn minimal_config_parses() {
     assert!(config.budgets.steps.is_none());
 }
 
+/// The same TOML plus or minus `name` builds to the SAME `agent_def_hash`: a
+/// rename must not mint a new agent identity. This is the CLI-level pin of
+/// the exclusion `salvor_runtime::Agent::name`'s docs describe (mirroring how
+/// `record_prompts` and `labels` are excluded); the builder-level half of the
+/// same guarantee lives in `salvor-runtime`'s
+/// `name_never_affects_the_definition_hash` test.
+#[tokio::test]
+async fn name_does_not_affect_agent_def_hash() {
+    let (unnamed, unnamed_file) = load_from_str("model = \"m\"\n");
+    let (named, named_file) = load_from_str("model = \"m\"\nname = \"support-triage\"\n");
+
+    let (unnamed_agent, unnamed_servers) = build_agent(&unnamed, unnamed_file.path())
+        .await
+        .expect("unnamed agent builds");
+    let (named_agent, named_servers) = build_agent(&named, named_file.path())
+        .await
+        .expect("named agent builds");
+
+    assert_eq!(unnamed_agent.def_hash(), named_agent.def_hash());
+    assert_eq!(unnamed_agent.name(), None);
+    assert_eq!(named_agent.name(), Some("support-triage"));
+
+    for server in unnamed_servers.into_iter().chain(named_servers) {
+        server.close().await.expect("server closes");
+    }
+}
+
 /// A cost budget with no pricing is a clear, actionable build error, and it
 /// names the fix.
 #[tokio::test]

@@ -91,10 +91,18 @@ definition drives every start, resume, and recover.
 
 Registration also validates: the server builds the agent (which spawns and
 immediately closes any MCP sessions) to confirm it is buildable and to compute
-the hash. A definition that will not build is a `400`.
+the hash. A definition that will not build is a `400`, which also covers an
+out-of-bounds `name` (see below): the server re-validates it at this same
+build step, the same as any other client-supplied config, rather than trusting
+whatever a submitter's own tooling already checked.
 
 - Request: the definition body. `Content-Type: application/toml` for the agent
-  TOML the CLI reads, or `application/json` for the same fields as JSON.
+  TOML the CLI reads, or `application/json` for the same fields as JSON. Both
+  accept an optional top-level `name`: a short display label (at most 64
+  characters, and not empty or all whitespace when set) shown by tooling that
+  resolves `agent_def_hash` back to something readable. `name` plays no part
+  in `agent_def_hash`, so renaming an agent (registering the same definition
+  again under a different `name`) never mints a new identity.
 - Response `201`:
 
 ```json
@@ -109,7 +117,7 @@ hash is stable, so runs that recorded a reference to it still resolve.
 ### GET /v1/agents
 
 ```json
-{ "agents": [ { "agent": "sha256:34e0..." } ] }
+{ "agents": [ { "agent": "sha256:34e0..." }, { "agent": "sha256:9f2c...", "name": "support-triage" } ] }
 ```
 
 ### GET /v1/agents/{hash}
@@ -117,6 +125,20 @@ hash is stable, so runs that recorded a reference to it still resolve.
 ```json
 { "agent": "sha256:34e0...", "format": "toml", "definition": "model = ..." }
 ```
+
+or, when the definition declared a `name`:
+
+```json
+{ "agent": "sha256:9f2c...", "format": "toml", "definition": "model = ...\nname = \"support-triage\"\n",
+  "name": "support-triage" }
+```
+
+`name` is present only when the registered definition actually declared one;
+there is no meaningful empty name to fall back to, so an agent registered with
+none omits the field entirely from both this response and the list above,
+rather than emitting `"name": null`. This is the same honest-absence rule
+[`GET /v1/runs`](#get-v1runs) already applies to `agent_def_hash` and
+`labels`.
 
 `404 unknown_agent` when the hash is not registered.
 
