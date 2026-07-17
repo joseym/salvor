@@ -16,8 +16,9 @@
 //! methods already encode, read off the log rather than off an orchestration
 //! request:
 //!
-//! - Contiguous 0-based sequence numbers, one run id, a `RunStarted` head, and
-//!   nothing after a terminal event: the [`ReplayCursor::new`] shape rules.
+//! - Contiguous 0-based sequence numbers, one run id, a run head (`RunStarted`
+//!   for an agent run or `GraphRunStarted` for a graph run), and nothing after
+//!   a terminal event: the [`ReplayCursor::new`] shape rules.
 //! - A model or tool intent is followed only by its correlated completion, or
 //!   is the log's last event (a dangling intent): the `MalformedLog` branches
 //!   in [`ReplayCursor::model_call`] and [`ReplayCursor::tool_call`]. This is
@@ -85,8 +86,9 @@ pub enum ValidationError {
         /// The kind the candidate carried instead.
         found: &'static str,
     },
-    /// `RunStarted` may appear only as the first event; the log already has one.
-    #[error("RunStarted may only be the first event; the log already has history")]
+    /// A run head (`RunStarted` or `GraphRunStarted`) may appear only as the
+    /// first event; the log already has one.
+    #[error("a run head may only be the first event; the log already has history")]
     DuplicateRunStarted,
     /// The log already ended with a terminal event; nothing may follow it.
     #[error("no event may follow the terminal {terminal}")]
@@ -166,11 +168,12 @@ pub fn validate_next(
     }
 
     let Some(last) = log.last() else {
-        // Empty log: the candidate opens the run. It must be a RunStarted, and
-        // its position (already checked to be `expected_seq` == 0) stands in
-        // for any run id, since there is no prior event to match against.
+        // Empty log: the candidate opens the run. It must be a run head —
+        // `RunStarted` for an agent run or `GraphRunStarted` for a graph run —
+        // and its position (already checked to be `expected_seq` == 0) stands
+        // in for any run id, since there is no prior event to match against.
         return match &candidate.event {
-            Event::RunStarted { .. } => Ok(()),
+            Event::RunStarted { .. } | Event::GraphRunStarted { .. } => Ok(()),
             other => Err(ValidationError::ExpectedRunStarted {
                 found: kind_name(other),
             }),
@@ -185,8 +188,12 @@ pub fn validate_next(
         });
     }
 
-    // RunStarted is a head-only event.
-    if matches!(candidate.event, Event::RunStarted { .. }) {
+    // A run head is a head-only event: neither `RunStarted` nor
+    // `GraphRunStarted` may appear once the log already has history.
+    if matches!(
+        candidate.event,
+        Event::RunStarted { .. } | Event::GraphRunStarted { .. }
+    ) {
         return Err(ValidationError::DuplicateRunStarted);
     }
 
@@ -338,6 +345,14 @@ fn kind_name(event: &Event) -> &'static str {
         Event::BudgetExceeded { .. } => "BudgetExceeded",
         Event::RunCompleted { .. } => "RunCompleted",
         Event::RunFailed { .. } => "RunFailed",
+        Event::GraphRunStarted { .. } => "GraphRunStarted",
+        Event::NodeEntered { .. } => "NodeEntered",
+        Event::NodeExited { .. } => "NodeExited",
+        Event::NodeSkipped { .. } => "NodeSkipped",
+        Event::BranchTaken { .. } => "BranchTaken",
+        Event::MapFannedOut { .. } => "MapFannedOut",
+        Event::MapIterationStarted { .. } => "MapIterationStarted",
+        Event::MapIterationJoined { .. } => "MapIterationJoined",
     }
 }
 
@@ -466,6 +481,75 @@ mod tests {
         v.push(env(1, tool_intent(1, Effect::Write))).unwrap();
         v.push(env(2, tool_done(1)))
             .expect("a completion after a write intent is well formed");
+    }
+
+    fn graph_started() -> Event {
+        Event::GraphRunStarted {
+            graph_hash: "sha256:graph".into(),
+            input: serde_json::json!({"topic": "otters"}),
+            labels: None,
+            forked_from: None,
+        }
+    }
+
+    /// A graph run's `GraphRunStarted` is a legal fresh-log head, exactly like
+    /// `RunStarted`, and its node markers validate as free-standing events
+    /// afterward (they are context/control events, not intents or completions).
+    #[test]
+    fn graph_run_head_and_markers_validate() {
+        let mut v = LogValidator::new(vec![]);
+        v.push(env(0, graph_started()))
+            .expect("a graph run head opens a fresh log");
+        v.push(env(
+            1,
+            Event::NodeEntered {
+                node: "research".into(),
+            },
+        ))
+        .expect("a node marker is a legal free-standing event");
+        v.push(env(
+            2,
+            Event::BranchTaken {
+                node: "gate".into(),
+                case: "approved".into(),
+            },
+        ))
+        .expect("a branch marker is a legal free-standing event");
+        v.push(env(
+            3,
+            Event::NodeExited {
+                node: "research".into(),
+            },
+        ))
+        .expect("a node marker is a legal free-standing event");
+    }
+
+    /// A second run head, of either kind, once the log has history is a
+    /// duplicate-head rejection.
+    #[test]
+    fn duplicate_graph_run_head_is_rejected() {
+        let log = vec![env(0, graph_started())];
+        let err = validate_next(&log, &env(1, graph_started())).unwrap_err();
+        assert_eq!(err, ValidationError::DuplicateRunStarted);
+    }
+
+    /// A graph marker cannot step past a dangling intent inside a node: the
+    /// completion must come first, exactly as for a context event.
+    #[test]
+    fn graph_marker_after_intent_is_rejected() {
+        let log = vec![
+            env(0, graph_started()),
+            env(1, Event::NodeEntered { node: "n".into() }),
+            env(2, model_intent(2)),
+        ];
+        let err = validate_next(&log, &env(3, Event::NodeExited { node: "n".into() })).unwrap_err();
+        assert_eq!(
+            err,
+            ValidationError::ExpectedCompletion {
+                intent_seq: SequenceNumber::new(2),
+                found: "NodeExited",
+            }
+        );
     }
 
     /// The first event of a fresh log must be RunStarted.

@@ -231,6 +231,36 @@ pub fn derive_state(log: &[EventEnvelope]) -> RunState {
                     error: error.clone(),
                 };
             }
+            // A graph run's head. It stands where an agent run's `RunStarted`
+            // does: the run is now under way, so the status becomes `Running`.
+            // No new `RunStatus` variant is minted for graph runs — the whole
+            // point of this fold's graph handling is that a graph run reads
+            // through the same agent-run status vocabulary. Between its
+            // recorded steps it is `Running`; a dangling model or tool call
+            // inside one of its agent or tool nodes still arrives as an
+            // ordinary `ModelCallRequested`/`ToolCallRequested`, so the arms
+            // above already carry it to `AwaitingModel`, `AwaitingTool`, or
+            // `NeedsReconciliation` with no graph-specific code. `usage`
+            // accumulates across every node's model calls; `pending_call`
+            // surfaces whichever node's call is dangling. The per-node picture
+            // (which node is current, which branch fired, map fan-out) is a
+            // separate projection, `crate::graph_state`, deliberately kept out
+            // of this run-level status.
+            Event::GraphRunStarted { .. } => {
+                state.status = RunStatus::Running;
+            }
+            // The graph node/branch/map markers narrate the walk for the
+            // per-node projection; at the run level they are structural notes
+            // that change no status, exactly like the context observations
+            // above. A graph run sits at `Running` across all of them (the
+            // real call boundaries are the model/tool intents they bracket).
+            Event::NodeEntered { .. }
+            | Event::NodeExited { .. }
+            | Event::NodeSkipped { .. }
+            | Event::BranchTaken { .. }
+            | Event::MapFannedOut { .. }
+            | Event::MapIterationStarted { .. }
+            | Event::MapIterationJoined { .. } => {}
         }
     }
     state
@@ -498,6 +528,89 @@ mod tests {
         ]));
         assert_eq!(state.status, RunStatus::Running);
         assert_eq!(state.next_seq, SequenceNumber::new(3));
+    }
+
+    fn graph_started() -> Event {
+        Event::GraphRunStarted {
+            graph_hash: "sha256:graph".into(),
+            input: serde_json::json!({"topic": "otters"}),
+            labels: None,
+            forked_from: None,
+        }
+    }
+
+    /// A graph run's head derives to running, exactly as an agent run's does:
+    /// no new status is minted for graph runs.
+    #[test]
+    fn graph_run_started_derives_running() {
+        let state = derive_state(&log(vec![graph_started()]));
+        assert_eq!(state.status, RunStatus::Running);
+        assert_eq!(state.next_seq, SequenceNumber::new(1));
+    }
+
+    /// The graph node/branch/map markers change no run status: a graph run
+    /// reads as running across them, and `next_seq` still advances.
+    #[test]
+    fn graph_markers_do_not_change_status() {
+        let state = derive_state(&log(vec![
+            graph_started(),
+            Event::NodeEntered {
+                node: "research".into(),
+            },
+            Event::BranchTaken {
+                node: "gate".into(),
+                case: "approved".into(),
+            },
+            Event::MapFannedOut {
+                node: "fanout".into(),
+                items: serde_json::json!([1, 2]),
+            },
+            Event::MapIterationStarted {
+                node: "fanout".into(),
+                index: 0,
+                child_run: "sha256:child".into(),
+            },
+            Event::MapIterationJoined {
+                node: "fanout".into(),
+                index: 0,
+            },
+            Event::NodeExited {
+                node: "research".into(),
+            },
+            Event::NodeSkipped {
+                node: "publish".into(),
+                reason: "unreached".into(),
+            },
+        ]));
+        assert_eq!(state.status, RunStatus::Running);
+        assert_eq!(state.next_seq, SequenceNumber::new(8));
+        assert_eq!(state.pending_call, None);
+    }
+
+    /// A dangling model call inside a graph run's agent node surfaces through
+    /// the same `AwaitingModel` status as an agent run: the graph markers add
+    /// no new call-boundary status, they only bracket the real intents.
+    #[test]
+    fn dangling_model_call_inside_a_node_derives_awaiting_model() {
+        let state = derive_state(&log(vec![
+            graph_started(),
+            Event::NodeEntered {
+                node: "research".into(),
+            },
+            Event::ModelCallRequested {
+                seq: SequenceNumber::new(2),
+                request_hash: "sha256:req".into(),
+                request_body: None,
+            },
+        ]));
+        assert_eq!(state.status, RunStatus::AwaitingModel);
+        assert_eq!(
+            state.pending_call,
+            Some(PendingCall::Model {
+                seq: SequenceNumber::new(2),
+                request_hash: "sha256:req".into(),
+            })
+        );
     }
 
     /// Usage accumulates across every completed model call, widened to u64.

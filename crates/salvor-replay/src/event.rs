@@ -53,6 +53,23 @@ use crate::id::{RunId, SequenceNumber};
 /// `#[serde(default, skip_serializing_if = "Option::is_none")]`, absent by
 /// default, so an unlabeled run's `RunStarted` serializes byte for byte as it
 /// did before the field existed, and the version stays 1 for the same reason.
+///
+/// # Why the graph events do not bump this
+///
+/// The graph-run events ([`Event::GraphRunStarted`] and the node/branch/map
+/// markers) are new variants, added the same read-compatible way the
+/// deterministic-context events were: a log written before them contains none
+/// of the new kinds, so every event in it parses to the identical value under
+/// the new build. [`Event::GraphRunStarted`]'s own `labels` and `forked_from`
+/// are additive-optional under the same
+/// `#[serde(default, skip_serializing_if = "Option::is_none")]` contract, so a
+/// graph run that is neither labeled nor forked omits both keys entirely.
+/// [`Event::GraphRunStarted`] is a separate variant rather than a field on
+/// [`Event::RunStarted`] because `RunStarted`'s `agent_def_hash` is required and
+/// names one agent, while a graph run has many agent hashes and none at its
+/// head; folding the two into one variant would have forced `agent_def_hash`
+/// optional and changed the existing `RunStarted` bytes, which this discipline
+/// forbids.
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// One record in a run's append-only log.
@@ -279,6 +296,145 @@ pub enum Event {
         /// A description of the failure.
         error: String,
     },
+    /// A graph run began. The head of a run that executes a graph document
+    /// rather than a single agent loop.
+    ///
+    /// A separate variant from [`Event::RunStarted`], not a field on it:
+    /// `RunStarted` requires exactly one `agent_def_hash`, but a graph run has
+    /// many agent hashes (one per agent node) and none at its head. It records
+    /// the hash of the frozen graph document and the run's input; the node,
+    /// branch, and map markers below then narrate the walk. Downstream of this
+    /// crate a `graph_hash` is `sha256:<64 lowercase hex>` over the canonical
+    /// graph document, but this crate treats it as an opaque string and never
+    /// depends on `salvor-graph` to interpret it.
+    GraphRunStarted {
+        /// Content hash of the frozen graph document this run executes. Opaque
+        /// here; the runtime forms and checks it against `salvor-graph`.
+        graph_hash: String,
+        /// The input the graph run started with.
+        input: serde_json::Value,
+        /// Optional operator-supplied correlation tags, carried for parity
+        /// with [`Event::RunStarted::labels`]: grouping (a build id, an
+        /// environment) matters for graph runs exactly as it does for agent
+        /// runs. Same additive-optional contract as that field — absent by
+        /// default via `#[serde(default, skip_serializing_if =
+        /// "Option::is_none")]`, so an unlabeled graph run omits the key
+        /// entirely. A tag, never part of identity: never fed into any hash.
+        /// Sanity bounds are enforced where a run is created, never here; a log
+        /// on disk is replayed as recorded.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        labels: Option<BTreeMap<String, String>>,
+        /// Set only when this run is a fork of an earlier run: the recorded
+        /// link back to its origin (see [`ForkOrigin`]). A fork is a new run
+        /// whose log opens with the origin's prefix rewritten under the new
+        /// id, and this field at seq 0 is the durable fact that it descends
+        /// from that origin. Absent by default under the same additive-optional
+        /// contract, so an ordinary (non-forked) graph run omits the key.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        forked_from: Option<ForkOrigin>,
+    },
+    /// Execution entered a graph node. Marks the node as the run's current
+    /// position; a later [`Event::NodeExited`] closes it.
+    NodeEntered {
+        /// The id of the node entered, unique within the graph document.
+        node: String,
+    },
+    /// Execution left a graph node, having produced its output.
+    NodeExited {
+        /// The id of the node exited.
+        node: String,
+    },
+    /// A graph node was skipped: reached on the walk but deliberately not run
+    /// (for example, a branch case that did not fire routes past its node). A
+    /// skipped node WAS reached — it is recorded precisely so a projection can
+    /// tell "skipped" apart from "never reached", which is the absence of any
+    /// event naming the node.
+    NodeSkipped {
+        /// The id of the node skipped.
+        node: String,
+        /// Why it was skipped, recorded for the audit trail.
+        reason: String,
+    },
+    /// A branch node routed: the named case fired. This is the sole recorded
+    /// authority for which way a branch went. The executed path is read from
+    /// these events, never inferred from which sibling nodes were skipped.
+    BranchTaken {
+        /// The id of the branch node that routed.
+        node: String,
+        /// The name of the case that fired, matching a branch-case name in the
+        /// graph document (realized by the like-named edge). Opaque here.
+        case: String,
+    },
+    /// A map node fanned out: the resolved list of items to map over was
+    /// determined and recorded. Recording the items here (rather than
+    /// re-resolving on replay) is what makes the fan-out deterministic — the
+    /// per-iteration child ids are derived from this recorded data.
+    MapFannedOut {
+        /// The id of the map node.
+        node: String,
+        /// The resolved list of items, one sub-run per element. Recorded
+        /// verbatim so replay reproduces the same fan-out.
+        items: serde_json::Value,
+    },
+    /// One iteration of a map fan-out started, as a child run. The child's id
+    /// is derived deterministically from recorded data (the parent run, the
+    /// node, and the index), so replay reconstructs the identical id without
+    /// drawing a fresh one.
+    MapIterationStarted {
+        /// The id of the map node this iteration belongs to.
+        node: String,
+        /// The zero-based position of this iteration in the fanned-out list.
+        index: u64,
+        /// The derived id of the child run executing this iteration.
+        child_run: String,
+    },
+    /// One iteration of a map fan-out joined back: its child run's result was
+    /// folded into the map node's output. Joins are recorded in index order,
+    /// never completion order, so the concurrency of the fan-out never
+    /// influences the parent log's byte sequence.
+    MapIterationJoined {
+        /// The id of the map node this iteration belongs to.
+        node: String,
+        /// The zero-based position of the iteration that joined.
+        index: u64,
+    },
+}
+
+/// The recorded link from a forked run back to the run it forked from.
+///
+/// A fork is a new run, never a mutation of the origin: its log opens with the
+/// origin's prefix (every event with `seq` below the fork boundary) rewritten
+/// under the fork's own run id, and [`ForkOrigin`] rides on the fork's
+/// [`Event::GraphRunStarted`] at seq 0 as the durable fact of that descent. The
+/// origin is immutable and never points forward at its forks; "forks of this
+/// run" is a derived server-side index over this field, not something the
+/// origin records.
+///
+/// Carries no floats, so it derives [`Eq`] (unlike [`Budget`]); every field is
+/// plain recorded data.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct ForkOrigin {
+    /// The run this fork descends from.
+    pub run_id: RunId,
+    /// The boundary the prefix was taken through: the fork's log carries the
+    /// origin's events with `seq` below the [`Event::NodeEntered`] that the
+    /// fork restarts from. A genuine log position, so it rides as a
+    /// [`SequenceNumber`].
+    pub through_seq: SequenceNumber,
+    /// The id of the node the fork restarts execution from.
+    pub from_node: String,
+    /// The origin's graph hash, which the fork must reuse unchanged. A fork may
+    /// not edit the graph: a different document could route the shared prefix
+    /// differently, turning a clean refusal into an arbitrary mid-replay
+    /// divergence. Opaque here, exactly like [`Event::GraphRunStarted::graph_hash`].
+    pub graph_hash: String,
+    /// The origin log positions of the [`Effect::Write`] intents the operator
+    /// acknowledged when forking past them. Raw `u64` positions, not
+    /// [`SequenceNumber`]s: this is an operator acknowledgement list recorded
+    /// as evidence, not a set of correlation keys this crate dereferences. An
+    /// empty vector means the fork boundary sat before any write intent, so
+    /// nothing needed acknowledging.
+    pub acknowledged_writes: Vec<u64>,
 }
 
 /// Token counts reported for a model call.
@@ -447,6 +603,51 @@ mod tests {
         assert_round_trips(Event::RunFailed {
             error: "provider timeout".into(),
         });
+        assert_round_trips(Event::GraphRunStarted {
+            graph_hash: "sha256:graph".into(),
+            input: serde_json::json!({"topic": "otters"}),
+            labels: None,
+            forked_from: None,
+        });
+        assert_round_trips(Event::GraphRunStarted {
+            graph_hash: "sha256:graph".into(),
+            input: serde_json::json!({"topic": "otters"}),
+            labels: Some(BTreeMap::from([("env".to_owned(), "prod".to_owned())])),
+            forked_from: Some(ForkOrigin {
+                run_id: run_id(),
+                through_seq: SequenceNumber::new(7),
+                from_node: "review".into(),
+                graph_hash: "sha256:graph".into(),
+                acknowledged_writes: vec![3, 5],
+            }),
+        });
+        assert_round_trips(Event::NodeEntered {
+            node: "research".into(),
+        });
+        assert_round_trips(Event::NodeExited {
+            node: "research".into(),
+        });
+        assert_round_trips(Event::NodeSkipped {
+            node: "publish".into(),
+            reason: "branch case did not fire".into(),
+        });
+        assert_round_trips(Event::BranchTaken {
+            node: "gate".into(),
+            case: "approved".into(),
+        });
+        assert_round_trips(Event::MapFannedOut {
+            node: "fanout".into(),
+            items: serde_json::json!([1, 2, 3]),
+        });
+        assert_round_trips(Event::MapIterationStarted {
+            node: "fanout".into(),
+            index: 0,
+            child_run: "sha256:child".into(),
+        });
+        assert_round_trips(Event::MapIterationJoined {
+            node: "fanout".into(),
+            index: 0,
+        });
     }
 
     /// Pins the exact serialized form of a representative envelope. A change to
@@ -569,6 +770,121 @@ mod tests {
             json,
             r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"RandomObserved","payload":{"value":18446744073709551615}}}"#
         );
+    }
+
+    /// Pins `GraphRunStarted` with neither labels nor a fork origin: both
+    /// optional keys are absent, so the payload is just `graph_hash` and
+    /// `input`. This is the additive-optional contract the [`SCHEMA_VERSION`]
+    /// docs promise for the new head variant, checked directly.
+    #[test]
+    fn graph_run_started_bare_serializes_to_pinned_json() {
+        let env = envelope(Event::GraphRunStarted {
+            graph_hash: "sha256:graph".into(),
+            input: serde_json::json!({"topic": "otters"}),
+            labels: None,
+            forked_from: None,
+        });
+        let json = serde_json::to_string(&env).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"GraphRunStarted","payload":{"graph_hash":"sha256:graph","input":{"topic":"otters"}}}}"#
+        );
+        assert!(
+            !json.contains("labels") && !json.contains("forked_from"),
+            "an unlabeled, unforked graph run must omit both keys: {json}"
+        );
+    }
+
+    /// Pins `GraphRunStarted` carrying both labels and a fork origin: the
+    /// labels ride sorted after `input`, and `forked_from` carries the full
+    /// [`ForkOrigin`] shape (run id, seq, node, graph hash, acknowledged
+    /// writes in order).
+    #[test]
+    fn graph_run_started_forked_serializes_to_pinned_json() {
+        let env = envelope(Event::GraphRunStarted {
+            graph_hash: "sha256:graph".into(),
+            input: serde_json::json!({"topic": "otters"}),
+            labels: Some(BTreeMap::from([
+                ("env".to_owned(), "prod".to_owned()),
+                ("build".to_owned(), "42".to_owned()),
+            ])),
+            forked_from: Some(ForkOrigin {
+                run_id: run_id(),
+                through_seq: SequenceNumber::new(7),
+                from_node: "review".into(),
+                graph_hash: "sha256:graph".into(),
+                acknowledged_writes: vec![3, 5],
+            }),
+        });
+        let json = serde_json::to_string(&env).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"GraphRunStarted","payload":{"graph_hash":"sha256:graph","input":{"topic":"otters"},"labels":{"build":"42","env":"prod"},"forked_from":{"run_id":"00000000-0000-4000-8000-000000000001","through_seq":7,"from_node":"review","graph_hash":"sha256:graph","acknowledged_writes":[3,5]}}}}"#
+        );
+    }
+
+    /// Pins the exact serialized form of each graph node/branch/map marker.
+    /// These variants were added additively (see [`SCHEMA_VERSION`]); the pins
+    /// lock their wire shape as the durability contract it is.
+    #[test]
+    fn graph_markers_serialize_to_pinned_json() {
+        let prefix = r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":"#;
+
+        let cases: Vec<(Event, &str)> = vec![
+            (
+                Event::NodeEntered {
+                    node: "research".into(),
+                },
+                r#"{"kind":"NodeEntered","payload":{"node":"research"}}"#,
+            ),
+            (
+                Event::NodeExited {
+                    node: "research".into(),
+                },
+                r#"{"kind":"NodeExited","payload":{"node":"research"}}"#,
+            ),
+            (
+                Event::NodeSkipped {
+                    node: "publish".into(),
+                    reason: "branch case did not fire".into(),
+                },
+                r#"{"kind":"NodeSkipped","payload":{"node":"publish","reason":"branch case did not fire"}}"#,
+            ),
+            (
+                Event::BranchTaken {
+                    node: "gate".into(),
+                    case: "approved".into(),
+                },
+                r#"{"kind":"BranchTaken","payload":{"node":"gate","case":"approved"}}"#,
+            ),
+            (
+                Event::MapFannedOut {
+                    node: "fanout".into(),
+                    items: serde_json::json!([1, 2, 3]),
+                },
+                r#"{"kind":"MapFannedOut","payload":{"node":"fanout","items":[1,2,3]}}"#,
+            ),
+            (
+                Event::MapIterationStarted {
+                    node: "fanout".into(),
+                    index: 0,
+                    child_run: "sha256:child".into(),
+                },
+                r#"{"kind":"MapIterationStarted","payload":{"node":"fanout","index":0,"child_run":"sha256:child"}}"#,
+            ),
+            (
+                Event::MapIterationJoined {
+                    node: "fanout".into(),
+                    index: 0,
+                },
+                r#"{"kind":"MapIterationJoined","payload":{"node":"fanout","index":0}}"#,
+            ),
+        ];
+
+        for (event, expected_event_json) in cases {
+            let json = serde_json::to_string(&envelope(event)).expect("serialize");
+            assert_eq!(json, format!("{prefix}{expected_event_json}}}"));
+        }
     }
 
     /// Effect serializes lowercase.

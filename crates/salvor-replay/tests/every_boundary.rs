@@ -243,7 +243,20 @@ fn expected_status(prefix: &[EventEnvelope]) -> RunStatus {
         return RunStatus::NotStarted;
     };
     match &last.event {
+        // The graph events share the agent run's status vocabulary: the head
+        // starts the run and the node/branch/map markers change no status, so a
+        // prefix ending at any of them reads as `Running`, exactly as the fold
+        // derives. This agent-run property script never emits them, but the
+        // match stays exhaustive so a new event kind cannot slip past it.
         Event::RunStarted { .. }
+        | Event::GraphRunStarted { .. }
+        | Event::NodeEntered { .. }
+        | Event::NodeExited { .. }
+        | Event::NodeSkipped { .. }
+        | Event::BranchTaken { .. }
+        | Event::MapFannedOut { .. }
+        | Event::MapIterationStarted { .. }
+        | Event::MapIterationJoined { .. }
         | Event::ModelCallCompleted { .. }
         | Event::ToolCallCompleted { .. }
         | Event::NowObserved { .. }

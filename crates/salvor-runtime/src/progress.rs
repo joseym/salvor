@@ -62,6 +62,14 @@ pub fn event_kind(event: &Event) -> &'static str {
         Event::BudgetExceeded { .. } => "BudgetExceeded",
         Event::RunCompleted { .. } => "RunCompleted",
         Event::RunFailed { .. } => "RunFailed",
+        Event::GraphRunStarted { .. } => "GraphRunStarted",
+        Event::NodeEntered { .. } => "NodeEntered",
+        Event::NodeExited { .. } => "NodeExited",
+        Event::NodeSkipped { .. } => "NodeSkipped",
+        Event::BranchTaken { .. } => "BranchTaken",
+        Event::MapFannedOut { .. } => "MapFannedOut",
+        Event::MapIterationStarted { .. } => "MapIterationStarted",
+        Event::MapIterationJoined { .. } => "MapIterationJoined",
     }
 }
 
@@ -130,6 +138,26 @@ pub fn event_detail(event: &Event) -> String {
         }
         Event::RunCompleted { output } => format!("output {}", truncate_json(output)),
         Event::RunFailed { error } => format!("error: {}", truncate_str(error)),
+        Event::GraphRunStarted {
+            graph_hash, input, ..
+        } => format!(
+            "graph {} input {}",
+            short_hash(graph_hash),
+            truncate_json(input)
+        ),
+        Event::NodeEntered { node } => format!("enter {node}"),
+        Event::NodeExited { node } => format!("exit {node}"),
+        Event::NodeSkipped { node, reason } => format!("skip {node}: {}", truncate_str(reason)),
+        Event::BranchTaken { node, case } => format!("branch {node} -> {case}"),
+        Event::MapFannedOut { node, items } => {
+            format!("map {node} fan-out {}", truncate_json(items))
+        }
+        Event::MapIterationStarted {
+            node,
+            index,
+            child_run,
+        } => format!("map {node}[{index}] child {}", short_hash(child_run)),
+        Event::MapIterationJoined { node, index } => format!("map {node}[{index}] joined"),
     }
 }
 

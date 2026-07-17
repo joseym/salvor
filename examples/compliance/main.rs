@@ -362,6 +362,11 @@ fn print_audit_trail(log: &[EventEnvelope]) {
                 format!("run completed (status={status})")
             }
             Event::RunFailed { error } => format!("run failed: {error}"),
+            // This walkthrough drives a single agent run, so the graph-run
+            // events never appear in its log. A wildcard keeps the demo
+            // compiling as the event vocabulary grows rather than narrating
+            // kinds it cannot emit.
+            other => format!("{other:?}"),
         };
         println!("  #{seq:<2} {at}  {detail}");
     }

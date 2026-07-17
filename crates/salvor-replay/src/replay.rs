@@ -254,7 +254,8 @@ impl ReplayCursor {
     /// Builds a cursor over a run's recorded log.
     ///
     /// An empty log is a fresh run: every request will be live. A non-empty
-    /// log must be well formed: it starts with [`Event::RunStarted`] at
+    /// log must be well formed: it starts with a run head ([`Event::RunStarted`]
+    /// for an agent run or [`Event::GraphRunStarted`] for a graph run) at
     /// position 0, all envelopes share one run id, positions are contiguous,
     /// and nothing follows a terminal event.
     ///
@@ -264,11 +265,17 @@ impl ReplayCursor {
     /// those shape rules.
     pub fn new(log: Vec<EventEnvelope>) -> Result<Self, ReplayError> {
         if let Some(first) = log.first() {
-            if !matches!(first.event, Event::RunStarted { .. }) {
+            // A log may open with an agent run's `RunStarted` or a graph run's
+            // `GraphRunStarted`; both are legal run heads. This is the sole
+            // wire-adjacent change the graph events require of the cursor.
+            if !matches!(
+                first.event,
+                Event::RunStarted { .. } | Event::GraphRunStarted { .. }
+            ) {
                 return Err(ReplayError::MalformedLog {
                     position: first.seq,
                     detail: format!(
-                        "a run log must start with RunStarted, found {}",
+                        "a run log must start with RunStarted or GraphRunStarted, found {}",
                         kind_name(&first.event)
                     ),
                 });
@@ -1056,6 +1063,14 @@ fn kind_name(event: &Event) -> &'static str {
         Event::BudgetExceeded { .. } => "BudgetExceeded",
         Event::RunCompleted { .. } => "RunCompleted",
         Event::RunFailed { .. } => "RunFailed",
+        Event::GraphRunStarted { .. } => "GraphRunStarted",
+        Event::NodeEntered { .. } => "NodeEntered",
+        Event::NodeExited { .. } => "NodeExited",
+        Event::NodeSkipped { .. } => "NodeSkipped",
+        Event::BranchTaken { .. } => "BranchTaken",
+        Event::MapFannedOut { .. } => "MapFannedOut",
+        Event::MapIterationStarted { .. } => "MapIterationStarted",
+        Event::MapIterationJoined { .. } => "MapIterationJoined",
     }
 }
 
@@ -1152,5 +1167,28 @@ mod tests {
                         .to_owned(),
             }
         );
+    }
+
+    /// A graph run's log opens with `GraphRunStarted`, and the cursor accepts
+    /// it as a legal run head — the sole wire-adjacent change graph runs make
+    /// to the cursor.
+    #[test]
+    fn graph_run_started_is_a_legal_first_event() {
+        let run_id =
+            RunId::from_uuid(Uuid::parse_str("00000000-0000-4000-8000-000000000006").unwrap());
+        let log = vec![EventEnvelope::new(
+            run_id,
+            SequenceNumber::new(0),
+            datetime!(2026-07-14 12:00:00 UTC),
+            Event::GraphRunStarted {
+                graph_hash: "sha256:graph".into(),
+                input: serde_json::json!({"topic": "otters"}),
+                labels: None,
+                forked_from: None,
+            },
+        )];
+        let cursor = ReplayCursor::new(log).expect("a graph run head is a legal first event");
+        assert_eq!(cursor.run_id(), Some(run_id));
+        assert!(cursor.is_replaying());
     }
 }

@@ -69,6 +69,14 @@ pub fn event_kinds(log: &[EventEnvelope]) -> Vec<&'static str> {
             Event::BudgetExceeded { .. } => "BudgetExceeded",
             Event::RunCompleted { .. } => "RunCompleted",
             Event::RunFailed { .. } => "RunFailed",
+            Event::GraphRunStarted { .. } => "GraphRunStarted",
+            Event::NodeEntered { .. } => "NodeEntered",
+            Event::NodeExited { .. } => "NodeExited",
+            Event::NodeSkipped { .. } => "NodeSkipped",
+            Event::BranchTaken { .. } => "BranchTaken",
+            Event::MapFannedOut { .. } => "MapFannedOut",
+            Event::MapIterationStarted { .. } => "MapIterationStarted",
+            Event::MapIterationJoined { .. } => "MapIterationJoined",
         })
         .collect()
 }
