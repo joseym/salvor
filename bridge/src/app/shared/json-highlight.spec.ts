@@ -1,4 +1,4 @@
-import { jsonHi } from './json-highlight';
+import { jsonHi } from './json-hi';
 
 describe('jsonHi', () => {
   it('wraps keys, strings, numbers, booleans, and null in their own span class', () => {

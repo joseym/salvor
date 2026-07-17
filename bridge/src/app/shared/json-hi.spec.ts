@@ -1,4 +1,6 @@
 import { esc, jsonHi, pretty } from './json-hi';
+// This file and json-highlight.spec.ts both exercise the single shared highlighter; the two sets
+// of assertions are kept as independent contracts over the one module.
 
 /** Render highlighted HTML into a detached element and report what actually landed in the DOM. */
 function render(html: string): { text: string; jSpans: number; foreign: string[] } {
