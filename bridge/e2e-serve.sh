@@ -5,7 +5,10 @@
 # It seeds a real Salvor control plane (mirroring scripts/demo-live.sh: an OFFLINE demo model,
 # a disposable SQLite store, two agents, two runs — one completed, one budget-exceeded so the
 # waiting group is non-empty), builds the Angular app, and serves the app + the API on ONE origin
-# through a static+proxy server (no CORS — the server ships none).
+# from `salvor serve` itself: the ui-enabled server embeds the dashboard and answers both the
+# static app and /v1/* on the same port, so there is no separate proxy and no CORS to configure.
+# The debug binary reads the freshly built dist/ from the filesystem, so the app is built before
+# the server is used.
 #
 # Inbox ADDITION, on top of the above, unchanged: one genuine `needs_reconciliation` run,
 # seeded via the repo's own offline reconciliation walkthrough (examples/reconciliation/) — run,
@@ -31,9 +34,12 @@ BRIDGE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$BRIDGE/.." && pwd)"
 cd "$ROOT"
 
+# APP_PORT is the one origin the app and the API share, now that salvor serve
+# hosts both. SERVE_ADDR is kept as an override alias so existing callers still
+# work; when unset it defaults to APP_PORT.
 APP_PORT="${APP_PORT:-4300}"
 MODEL_PORT="${MODEL_PORT:-8899}"
-SERVE_ADDR="${SERVE_ADDR:-127.0.0.1:8080}"
+SERVE_ADDR="${SERVE_ADDR:-127.0.0.1:${APP_PORT}}"
 API="http://${SERVE_ADDR}"
 STORE="/tmp/salvor-bridge-e2e-store.sqlite"
 FINDINGS="/tmp/salvor-bridge-e2e-findings.txt"
@@ -50,7 +56,6 @@ stop() {
   echo "[e2e-serve] stopping servers"
   pkill -f 'salvor-demo-model' 2>/dev/null || true
   pkill -f 'salvor .*serve' 2>/dev/null || true
-  pkill -f 'e2e-serve-proxy.mjs' 2>/dev/null || true
   pkill -f 'examples/reconciliation/model_server.py' 2>/dev/null || true
   pkill -f 'examples/reconciliation/server.py' 2>/dev/null || true
   pkill -f 'examples/reconciliation/agent.toml' 2>/dev/null || true
@@ -63,6 +68,12 @@ rm -f "$STORE" "$STORE"-wal "$STORE"-shm "$FINDINGS" "$RECON_REPORT"
 # 1. Build the CLI + fixture binaries (fixture is a default feature). Cheap if already built.
 echo "[e2e-serve] building salvor-cli"
 cargo build -p salvor-cli
+
+# 1b. Build the app. The ui-enabled debug server reads dist/ from the filesystem at request time,
+#     so the dashboard must be built before the server is used. Building it up front also fails
+#     fast on a token-gate or compile error, before any seeding work.
+echo "[e2e-serve] building the Bridge app"
+( cd "$BRIDGE" && npm run build )
 
 # 2. Offline demo model.
 echo "[e2e-serve] starting salvor-demo-model on 127.0.0.1:${MODEL_PORT}"
@@ -150,25 +161,16 @@ sleep 14
 echo "[e2e-serve] seeded runs:"
 curl -s "${API}/v1/runs" | python3 -m json.tool | head -60
 
-# 7. Build the app.
-echo "[e2e-serve] building the Bridge app"
-( cd "$BRIDGE" && npm run build )
-
-# 8. Serve app + API on one origin.
-DIST="$BRIDGE/dist/bridge/browser"
-echo "[e2e-serve] starting static+proxy server on 127.0.0.1:${APP_PORT}"
-node "$BRIDGE/e2e-serve-proxy.mjs" "$APP_PORT" "${SERVE_ADDR%:*}" "${SERVE_ADDR##*:}" "$DIST" \
-  >/tmp/salvor-bridge-e2e-proxy.log 2>&1 &
-until curl -s -o /dev/null "http://127.0.0.1:${APP_PORT}/" 2>/dev/null; do sleep 0.2; done
+# 7. Nothing more to start: salvor serve (step 3) is already answering both the app and the API
+#    on ${SERVE_ADDR}. The app was built in step 1b, so the server has a dashboard to serve.
 
 cat <<EOF
 
 [e2e-serve] UP.
-  App (same-origin app + API):  http://127.0.0.1:${APP_PORT}/
-  Control plane (direct):       ${API}
+  App + API (one origin, salvor serve):  ${API}/
 
 Run the suite from the e2e suite directory:
-  TARGET_URL=http://127.0.0.1:${APP_PORT}/ ./run.sh 01-boot.spec.js 05-routes-and-deeplinks.spec.js
+  TARGET_URL=${API}/ ./run.sh 01-boot.spec.js 05-routes-and-deeplinks.spec.js
 
 Tear down:
   bridge/e2e-serve.sh --stop
