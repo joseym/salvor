@@ -139,6 +139,7 @@ class Client:
         input: Any = None,
         *,
         run_id: Optional[str] = None,
+        labels: Optional[dict[str, str]] = None,
     ) -> str:
         """Start a fresh run of a registered agent; return its run id.
 
@@ -150,6 +151,12 @@ class Client:
             input: The run input, any JSON value. Defaults to ``None``.
             run_id: An optional client-chosen run id (a UUID). Omit to let the
                 server mint one.
+            labels: Optional correlation tags (a build id, an environment)
+                recorded once on the run's ``RunStarted`` event and readable
+                back from :meth:`list_runs`. See ``API.md`` for the bounds (at
+                most 16 labels, keys under 64 bytes, values under 256 bytes)
+                and the honest-absence rule. Omitted entirely, a run records
+                none, byte-identical to a caller that predates this parameter.
 
         Returns:
             The run id.
@@ -157,6 +164,8 @@ class Client:
         body: dict[str, Any] = {"agent": agent, "input": input}
         if run_id is not None:
             body["run_id"] = run_id
+        if labels is not None:
+            body["labels"] = labels
         resp = self._http.post("/v1/runs", json=body)
         return self._json(resp)["run"]
 

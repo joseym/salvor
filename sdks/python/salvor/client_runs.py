@@ -24,6 +24,13 @@ own methods: :meth:`~ClientRunDriver.model_step` and
                                  agent_def_hash=agent, input=task)])
         result = run.model_step(1, request)
         run.append([run.envelope(3, "RunCompleted", output=answer)])
+
+Unlike :meth:`salvor.Client.start_run`, this driver has no dedicated ``labels``
+parameter: the client builds ``RunStarted`` itself, so correlation tags simply
+ride in that call's keyword arguments, e.g.
+``run.envelope(0, "RunStarted", agent_def_hash=agent, input=task,
+labels={"build": "42"})``. The server enforces the same bounds on append (see
+``API.md``) as it does for a server-driven start.
 """
 
 from __future__ import annotations

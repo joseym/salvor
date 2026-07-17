@@ -143,12 +143,15 @@ class RunState:
 class RunSummary:
     """One row of ``GET /v1/runs``: a run id with its folded status and counts.
 
-    ``usage``, ``step_count``, and ``agent_def_hash`` are additive: present
-    whenever the run's log folds (a real ``0`` when a run genuinely has no
-    model calls yet), and ``None`` -- never a fabricated zero -- only when the
-    server could not read that run's log at all (see ``API.md``). ``raw``
-    always carries whatever the server actually sent, so a server-side field
-    this SDK has not been taught yet is never lost.
+    ``usage``, ``step_count``, ``agent_def_hash``, and ``labels`` are
+    additive: present whenever the run's log folds (a real ``0`` when a run
+    genuinely has no model calls yet), and ``None`` -- never a fabricated
+    zero -- only when the server could not read that run's log at all (see
+    ``API.md``). ``labels`` follows the same rule one step further: also
+    ``None`` when a run recorded no labels at all, or recorded an explicit
+    empty set -- the server never sends ``labels: {}``. ``raw`` always
+    carries whatever the server actually sent, so a server-side field this
+    SDK has not been taught yet is never lost.
     """
 
     run: str
@@ -159,6 +162,7 @@ class RunSummary:
     usage: Optional[Usage] = None
     step_count: Optional[int] = None
     agent_def_hash: Optional[str] = None
+    labels: Optional[dict[str, str]] = None
     raw: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -173,6 +177,7 @@ class RunSummary:
             usage=Usage.from_json(obj.get("usage")),
             step_count=int(step_count) if step_count is not None else None,
             agent_def_hash=obj.get("agent_def_hash"),
+            labels=obj.get("labels"),
             raw=obj,
         )
 
