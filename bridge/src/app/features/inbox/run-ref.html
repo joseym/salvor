@@ -1,5 +1,5 @@
 <span class="runref">
-  <span class="runid" [attr.title]="id()">{{ short() }}</span>
+  <span [class]="valueClass()" [attr.title]="id()">{{ short() }}</span>
   <button class="copy" type="button" [attr.data-copy]="id()" [attr.aria-label]="'Copy ' + id()" (click)="copy($event)">
     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true">
       <rect x="5.5" y="5.5" width="8" height="8" rx="1.5" /><path d="M10.5 3.5v-1h-8v8h1" />
