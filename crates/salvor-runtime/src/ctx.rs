@@ -379,6 +379,46 @@ impl RunCtx {
         }
     }
 
+    /// Records (or replays) that a graph node was skipped: reached on the walk
+    /// but deliberately not run (a branch routed past it). Unlike an executed
+    /// node there is no [`node_entered`](Self::node_entered)/[`node_exited`](Self::node_exited)
+    /// pair; the skip is the node's sole marker, which is what lets a projection
+    /// tell "skipped" apart from "never reached". `reason` must be a pure
+    /// function of the document and recorded values so it reproduces on replay.
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeError::Replay`] on divergence; [`RuntimeError::Store`] when
+    /// persistence fails.
+    pub async fn node_skipped(&mut self, node: &str, reason: &str) -> Result<(), RuntimeError> {
+        match self.cursor.node_skipped(node, reason)? {
+            Outcome::Replayed(()) => Ok(()),
+            Outcome::Live(emitted) => {
+                persist(self.store.as_ref(), self.run_id, &self.clock, &emitted).await
+            }
+        }
+    }
+
+    /// Records (or replays) that a branch node routed: the named `case` fired.
+    /// Recorded between the branch's [`node_entered`](Self::node_entered) and
+    /// [`node_exited`](Self::node_exited), it is the sole authority for which way
+    /// the branch went. The chosen `case` must be a deterministic function of
+    /// recorded values (a pure expression over the routed value, or a decision
+    /// recomputed from a replayed model reply) so replay reproduces the route.
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeError::Replay`] on divergence; [`RuntimeError::Store`] when
+    /// persistence fails.
+    pub async fn branch_taken(&mut self, node: &str, case: &str) -> Result<(), RuntimeError> {
+        match self.cursor.branch_taken(node, case)? {
+            Outcome::Replayed(()) => Ok(()),
+            Outcome::Live(emitted) => {
+                persist(self.store.as_ref(), self.run_id, &self.clock, &emitted).await
+            }
+        }
+    }
+
     /// The recorded clock: reads the injected clock once, live, and replays
     /// the identical instant forever after.
     ///

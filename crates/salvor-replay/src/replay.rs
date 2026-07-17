@@ -147,6 +147,20 @@ pub enum RequestedStep {
         /// The node id orchestration presented.
         node: String,
     },
+    /// [`ReplayCursor::node_skipped`] for this node.
+    NodeSkipped {
+        /// The node id orchestration presented.
+        node: String,
+        /// The skip reason orchestration presented.
+        reason: String,
+    },
+    /// [`ReplayCursor::branch_taken`] for this branch node.
+    BranchTaken {
+        /// The branch node id orchestration presented.
+        node: String,
+        /// The case name orchestration presented.
+        case: String,
+    },
     /// [`ReplayCursor::now`].
     Now,
     /// [`ReplayCursor::random`].
@@ -535,6 +549,97 @@ impl ReplayCursor {
         }
         let emitted = self.emit(Event::NodeExited {
             node: node.to_owned(),
+        });
+        Ok(Outcome::Live(emitted))
+    }
+
+    /// Records (or replays) that a graph node was skipped: reached on the walk
+    /// but deliberately not run (a branch routed past it). No
+    /// [`node_entered`](ReplayCursor::node_entered) precedes a skip; the skip is
+    /// the sole marker for the node.
+    ///
+    /// Replayed: matches the recorded [`Event::NodeSkipped`] for `node` (reason
+    /// included, so a skip that recorded one reason live cannot replay under
+    /// another). Live: returns the event to persist. The `reason` a caller
+    /// passes must be a pure function of the document and recorded values, like
+    /// every other emitted payload, so it reproduces on replay.
+    ///
+    /// # Errors
+    ///
+    /// [`ReplayError::Divergence`] on a node-id or reason mismatch, a different
+    /// recorded event, or a request after the run already ended.
+    pub fn node_skipped(
+        &mut self,
+        node: &str,
+        reason: &str,
+    ) -> Result<Outcome<(), Emitted>, ReplayError> {
+        let requested = RequestedStep::NodeSkipped {
+            node: node.to_owned(),
+            reason: reason.to_owned(),
+        };
+        self.guard_terminal(&requested)?;
+        if self.pos < self.log.len() {
+            if let Event::NodeSkipped {
+                node: recorded_node,
+                reason: recorded_reason,
+            } = &self.log[self.pos].event
+                && recorded_node == node
+                && recorded_reason == reason
+            {
+                self.pos += 1;
+                return Ok(Outcome::Replayed(()));
+            }
+            return Err(self.mismatch(requested));
+        }
+        let emitted = self.emit(Event::NodeSkipped {
+            node: node.to_owned(),
+            reason: reason.to_owned(),
+        });
+        Ok(Outcome::Live(emitted))
+    }
+
+    /// Records (or replays) that a branch node routed: the named `case` fired.
+    /// This is the sole recorded authority for which way a branch went; the
+    /// executed path is read from these events, never inferred from skips.
+    ///
+    /// Recorded between the branch's [`node_entered`](ReplayCursor::node_entered)
+    /// and [`node_exited`](ReplayCursor::node_exited). Replayed: matches the
+    /// recorded [`Event::BranchTaken`] for `node` and `case` (a branch that fired
+    /// one case live cannot replay having fired another). Live: returns the event
+    /// to persist. The chosen `case` must be a deterministic function of recorded
+    /// values (a pure expression over the routed value, or a decision recomputed
+    /// from a replayed model reply), so replay reproduces the same route.
+    ///
+    /// # Errors
+    ///
+    /// [`ReplayError::Divergence`] on a node-id or case mismatch, a different
+    /// recorded event, or a request after the run already ended.
+    pub fn branch_taken(
+        &mut self,
+        node: &str,
+        case: &str,
+    ) -> Result<Outcome<(), Emitted>, ReplayError> {
+        let requested = RequestedStep::BranchTaken {
+            node: node.to_owned(),
+            case: case.to_owned(),
+        };
+        self.guard_terminal(&requested)?;
+        if self.pos < self.log.len() {
+            if let Event::BranchTaken {
+                node: recorded_node,
+                case: recorded_case,
+            } = &self.log[self.pos].event
+                && recorded_node == node
+                && recorded_case == case
+            {
+                self.pos += 1;
+                return Ok(Outcome::Replayed(()));
+            }
+            return Err(self.mismatch(requested));
+        }
+        let emitted = self.emit(Event::BranchTaken {
+            node: node.to_owned(),
+            case: case.to_owned(),
         });
         Ok(Outcome::Live(emitted))
     }
@@ -1251,6 +1356,10 @@ impl fmt::Display for RequestedStep {
             Self::BeginGraph { graph_hash } => write!(f, "BeginGraph(graph_hash={graph_hash})"),
             Self::NodeEntered { node } => write!(f, "NodeEntered(node={node})"),
             Self::NodeExited { node } => write!(f, "NodeExited(node={node})"),
+            Self::NodeSkipped { node, reason } => {
+                write!(f, "NodeSkipped(node={node}, reason={reason})")
+            }
+            Self::BranchTaken { node, case } => write!(f, "BranchTaken(node={node}, case={case})"),
             Self::Now => write!(f, "Now"),
             Self::Random => write!(f, "Random"),
             Self::ModelCall { request_hash } => write!(f, "ModelCall(request_hash={request_hash})"),
@@ -1413,6 +1522,97 @@ mod tests {
             Outcome::Replayed(())
         ));
         assert!(!replay.is_replaying(), "history fully consumed");
+    }
+
+    /// `branch_taken` and `node_skipped` emit their events live at contiguous
+    /// positions and replay from history with no divergence.
+    #[test]
+    fn branch_and_skip_markers_emit_live_and_replay() {
+        let run_id =
+            RunId::from_uuid(Uuid::parse_str("00000000-0000-4000-8000-000000000009").unwrap());
+
+        let mut cursor = ReplayCursor::new(vec![]).expect("fresh run");
+        let mut emitted = Vec::new();
+        match cursor.begin_graph("sha256:g", None, None).expect("begin") {
+            Outcome::Live(p) => emitted.push(p.record(serde_json::json!({}))),
+            Outcome::Replayed(_) => panic!("fresh must be live"),
+        }
+        match cursor.branch_taken("route", "high").expect("branch") {
+            Outcome::Live(e) => emitted.push(e),
+            Outcome::Replayed(()) => panic!("fresh must be live"),
+        }
+        match cursor
+            .node_skipped("reject", "route fired high")
+            .expect("skip")
+        {
+            Outcome::Live(e) => emitted.push(e),
+            Outcome::Replayed(()) => panic!("fresh must be live"),
+        }
+        let positions: Vec<u64> = emitted.iter().map(|e| e.seq.get()).collect();
+        assert_eq!(positions, [0, 1, 2], "contiguous positions");
+
+        let log: Vec<EventEnvelope> = emitted
+            .iter()
+            .map(|e| {
+                EventEnvelope::new(
+                    run_id,
+                    e.seq,
+                    datetime!(2026-07-14 12:00:00 UTC),
+                    e.event.clone(),
+                )
+            })
+            .collect();
+        let mut replay = ReplayCursor::new(log).expect("well formed");
+        replay.begin_graph("sha256:g", None, None).expect("begin");
+        assert!(matches!(
+            replay.branch_taken("route", "high").expect("branch"),
+            Outcome::Replayed(())
+        ));
+        assert!(matches!(
+            replay
+                .node_skipped("reject", "route fired high")
+                .expect("skip"),
+            Outcome::Replayed(())
+        ));
+        assert!(!replay.is_replaying(), "history fully consumed");
+    }
+
+    /// A branch-case that does not match the recorded case at its position is a
+    /// divergence: the recorded route is authoritative.
+    #[test]
+    fn a_mismatched_branch_case_diverges() {
+        let run_id =
+            RunId::from_uuid(Uuid::parse_str("00000000-0000-4000-8000-00000000000a").unwrap());
+        let log = vec![
+            EventEnvelope::new(
+                run_id,
+                SequenceNumber::new(0),
+                datetime!(2026-07-14 12:00:00 UTC),
+                Event::GraphRunStarted {
+                    graph_hash: "sha256:g".into(),
+                    input: serde_json::json!({}),
+                    labels: None,
+                    forked_from: None,
+                },
+            ),
+            EventEnvelope::new(
+                run_id,
+                SequenceNumber::new(1),
+                datetime!(2026-07-14 12:00:00 UTC),
+                Event::BranchTaken {
+                    node: "route".into(),
+                    case: "high".into(),
+                },
+            ),
+        ];
+        let mut cursor = ReplayCursor::new(log).expect("well formed");
+        cursor.begin_graph("sha256:g", None, None).expect("begin");
+        let err = cursor
+            .branch_taken("route", "low")
+            .expect_err("a different case must diverge");
+        assert!(
+            matches!(err, ReplayError::Divergence { position, .. } if position == SequenceNumber::new(1))
+        );
     }
 
     /// A graph-marker request that does not match the recorded event at its
