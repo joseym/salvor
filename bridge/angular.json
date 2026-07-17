@@ -22,6 +22,11 @@
               {
                 "glob": "**/*",
                 "input": "public"
+              },
+              {
+                "glob": "salvor_replay_wasm_bg.wasm",
+                "input": "node_modules/salvor-replay-wasm",
+                "output": "/"
               }
             ],
             "styles": [
