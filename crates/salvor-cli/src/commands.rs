@@ -60,7 +60,12 @@ pub async fn run(store_path: &Path, args: RunArgs) -> Result<u8> {
     // The agent carries the resolved prompt-recording flag (per-agent config
     // over SALVOR_RECORD_PROMPTS over off); hand it to the runtime so the
     // RunCtx driving this run records the body only when opted in.
-    let runtime = Runtime::new(store.clone()).with_record_prompts(agent.record_prompts());
+    let mut runtime = Runtime::new(store.clone()).with_record_prompts(agent.record_prompts());
+    // Labels set on the agent definition (via the Rust builder; there is no
+    // TOML surface for them yet) ride along the same way record_prompts does.
+    if let Some(labels) = agent.labels() {
+        runtime = runtime.with_labels(labels.clone());
+    }
 
     let run_id = RunId::new();
     let uuid = run_id.as_uuid().to_string();
@@ -130,7 +135,10 @@ pub async fn resume(store_path: &Path, args: ResumeArgs) -> Result<u8> {
 
     let config = AgentConfig::load(&args.agent)?;
     let (agent, servers) = agent_config::build_agent(&config, &args.agent).await?;
-    let runtime = Runtime::new(store.clone()).with_record_prompts(agent.record_prompts());
+    let mut runtime = Runtime::new(store.clone()).with_record_prompts(agent.record_prompts());
+    if let Some(labels) = agent.labels() {
+        runtime = runtime.with_labels(labels.clone());
+    }
 
     let outcome = match disposition {
         Disposition::Resume(_) => {
