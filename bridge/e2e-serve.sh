@@ -102,19 +102,44 @@ TINY_AGENT=$(curl -s -X POST "${API}/v1/agents" -H 'Content-Type: application/to
 # 5. Start the runs — TWO completed + TWO budget-exceeded. The suite's row-channel tests need
 #    both a second WAITING row (besides the cold-seeded selection) and a zebra (odd-index)
 #    NON-waiting row, which needs two terminal rows below the two waiting ones.
+#
+#    Labels addition (additive only, same four runs, labels only): the two
+#    completed DEMO_AGENT runs share one build_id (bld_e2e_alpha) — a real 2-run, non-degenerate
+#    build group, both terminal so it also supplies the zebra (odd-index) non-waiting row item 10's
+#    suite already depends on. The first budget-exceeded run gets its OWN build_id (bld_e2e_beta,
+#    a singleton build); the second is left unlabeled, falling back to grouping by its own agent
+#    identity (never guessed into a build it wasn't tagged with) — plus the reconciliation run
+#    below, also genuinely unlabeled. Two distinct build_id values, a multi-run group, and honest
+#    unlabelled runs, all from the same four-run seed the row-channel tests already rely on.
 INPUT='{"topic":"durable execution for AI agents"}'
-echo "[e2e-serve] starting 2 completed + 2 budget-exceeded runs"
-for _ in 1 2; do
-  curl -s -X POST "${API}/v1/runs" -H 'Content-Type: application/json' \
-    -d "{\"agent\":\"${DEMO_AGENT}\",\"input\":${INPUT}}" >/dev/null
-  curl -s -X POST "${API}/v1/runs" -H 'Content-Type: application/json' \
-    -d "{\"agent\":\"${TINY_AGENT}\",\"input\":${INPUT}}" >/dev/null
-done
+echo "[e2e-serve] starting 2 completed + 2 budget-exceeded runs (the two completed runs share a build_id; one budget-exceeded run gets its own; one stays unlabelled)"
+curl -s -X POST "${API}/v1/runs" -H 'Content-Type: application/json' \
+  -d "{\"agent\":\"${DEMO_AGENT}\",\"input\":${INPUT},\"labels\":{\"build_id\":\"bld_e2e_alpha\"}}" >/dev/null
+curl -s -X POST "${API}/v1/runs" -H 'Content-Type: application/json' \
+  -d "{\"agent\":\"${TINY_AGENT}\",\"input\":${INPUT},\"labels\":{\"build_id\":\"bld_e2e_beta\"}}" >/dev/null
+curl -s -X POST "${API}/v1/runs" -H 'Content-Type: application/json' \
+  -d "{\"agent\":\"${DEMO_AGENT}\",\"input\":${INPUT},\"labels\":{\"build_id\":\"bld_e2e_alpha\"}}" >/dev/null
+curl -s -X POST "${API}/v1/runs" -H 'Content-Type: application/json' \
+  -d "{\"agent\":\"${TINY_AGENT}\",\"input\":${INPUT}}" >/dev/null
 
 # 5.5. Inbox addition: one needs_reconciliation run, via the CLI directly against $STORE (additive —
 #      the four runs above are untouched). Mirrors examples/reconciliation/run.sh's own stages 1-2
 #      (run, kill mid-write) without its later resolve/resume stages: this build's Inbox performs
 #      those itself, live, in the suite trial and in the browser.
+#
+#      Labels addition: also register this agent against the SAME serve process
+#      over HTTP (idempotent by content hash — `created` comes back false since the CLI run below
+#      already built it once into $STORE; this registers it into `salvor serve`'s own in-memory
+#      registry too, which is separate and process-local). Without this, the reconciliation run's
+#      agent_def_hash is registered nowhere the browser can ask about, so the Runs ledger's agent
+#      column (GET /v1/agents/{hash}) gets a genuine 404 for it on every load — and Chromium logs
+#      that 404 to the console regardless of how gracefully the app's own JS handles the rejection,
+#      which trips this suite's zero-console-errors gate on every test that touches Runs. The run
+#      itself is unaffected: it already finished driving via the CLI before this registers.
+echo "[e2e-serve] registering the reconciliation agent against the serve API too (so its hash resolves, no 404 noise)"
+curl -s -X POST "${API}/v1/agents" -H 'Content-Type: application/toml' \
+  --data-binary @examples/reconciliation/agent.toml >/dev/null
+
 echo "[e2e-serve] starting the reconciliation model+write server on 127.0.0.1:${RECON_MODEL_PORT}"
 RECON_MODEL_PORT="$RECON_MODEL_PORT" python3 examples/reconciliation/model_server.py \
   >/tmp/salvor-bridge-e2e-recon-model.log 2>&1 &
