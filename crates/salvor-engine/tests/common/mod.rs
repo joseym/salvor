@@ -176,6 +176,62 @@ impl DynTool for EchoTool {
     }
 }
 
+/// A tool that ignores its input and returns a fixed JSON value, counting each
+/// execution. Used to inject a structured routed value (for example a score
+/// object) that a branch condition can read, while still proving a replay does
+/// not re-execute it.
+pub struct ConstTool {
+    pub name: String,
+    pub effect: Effect,
+    pub value: Value,
+    pub calls: Arc<AtomicUsize>,
+}
+
+impl ConstTool {
+    /// A named tool of the given effect that always returns `value`, plus the
+    /// shared execution counter.
+    pub fn new(name: &str, effect: Effect, value: Value) -> (Self, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        (
+            Self {
+                name: name.to_owned(),
+                effect,
+                value,
+                calls: calls.clone(),
+            },
+            calls,
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl DynTool for ConstTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        "a constant-value test tool"
+    }
+
+    fn effect(&self) -> Effect {
+        self.effect
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({"type": "object"})
+    }
+
+    async fn call_json(
+        &self,
+        _ctx: &ToolCtx,
+        _input: Value,
+    ) -> Result<ToolOutcome<Value>, ToolError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolOutcome::Output(self.value.clone()))
+    }
+}
+
 /// A tool that always fails, for the tool-failure path.
 pub struct FailingTool {
     pub name: String,

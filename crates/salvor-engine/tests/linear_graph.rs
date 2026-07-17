@@ -15,7 +15,7 @@ use common::{
 };
 use salvor_core::Effect;
 use salvor_engine::{EngineError, GraphOutcome, graph_hash, run_graph};
-use salvor_graph::{AgentSpec, GateSpec, Graph, GraphBuilder};
+use salvor_graph::{AgentSpec, Graph, GraphBuilder, MapBody, MapSpec};
 use salvor_replay::{NodeState, derive_graph_projection};
 use salvor_runtime::RunCtx;
 use salvor_store::{EventStore, SqliteStore};
@@ -180,11 +180,13 @@ async fn linear_graph_runs_replays_and_projects() {
     );
 }
 
-/// Acceptance 3: a graph with a gate node hits the typed unsupported-node
-/// error, and no events are written past the refusal point.
+/// Acceptance 3: a graph with a still-unsupported map node hits the typed
+/// unsupported-node error, and no events are written past the refusal point.
+/// (Gate and branch nodes are executed; map is the remaining
+/// unsupported kind, so it now carries this "refuse before recording" coverage.)
 #[tokio::test]
-async fn a_gate_node_is_refused_before_it_records_anything() {
-    // research (agent) -> approve (gate). The agent runs; the gate is refused.
+async fn a_map_node_is_refused_before_it_records_anything() {
+    // research (agent) -> fanout (map). The agent runs; the map is refused.
     let research_server = ScriptedModel::mount(vec![(1, text_response("a draft", 3, 2))]).await;
     let research_agent = agent_builder(&research_server.uri()).build().unwrap();
     let mut agents: HashMap<String, salvor_runtime::Agent> = HashMap::new();
@@ -193,8 +195,13 @@ async fn a_gate_node_is_refused_before_it_records_anything() {
 
     let graph = GraphBuilder::new()
         .agent(AgentSpec::new("research", RESEARCH_HASH))
-        .gate(GateSpec::new("approve", json!({"type": "object"})))
-        .edge("research", "approve")
+        .map(MapSpec::new(
+            "fanout",
+            "items",
+            2,
+            MapBody::Node("research".into()),
+        ))
+        .edge("research", "fanout")
         .build();
 
     let run_id = fixed_run_id(2);
@@ -204,17 +211,17 @@ async fn a_gate_node_is_refused_before_it_records_anything() {
 
     let error = run_graph(&mut ctx, &graph, &json!({}), &agents, &tools)
         .await
-        .expect_err("a gate node must be refused");
+        .expect_err("a map node must be refused");
     match error {
         EngineError::UnsupportedNode { node, kind } => {
-            assert_eq!(node, "approve");
-            assert_eq!(kind, "gate");
+            assert_eq!(node, "fanout");
+            assert_eq!(kind, "map");
         }
         other => panic!("expected UnsupportedNode, got {other:?}"),
     }
 
     // The research node ran (its own events are present), but nothing for the
-    // gate and no terminal was written: the log ends exactly at the refusal.
+    // map and no terminal was written: the log ends exactly at the refusal.
     let log = store.read_log(run_id).await.expect("log reads");
     assert_eq!(
         event_kinds(&log),
@@ -226,26 +233,31 @@ async fn a_gate_node_is_refused_before_it_records_anything() {
             "ModelCallCompleted",
             "NodeExited", // research
         ],
-        "no NodeEntered for the gate, and no terminal"
+        "no NodeEntered for the map, and no terminal"
     );
-    // Doubly explicit: the gate node never appears in the log.
+    // Doubly explicit: the map node never appears in the log.
     assert!(
         !log.iter().any(|e| matches!(
             &e.event,
-            salvor_core::Event::NodeEntered { node } if node == "approve"
+            salvor_core::Event::NodeEntered { node } if node == "fanout"
         )),
-        "the gate must not have been entered"
+        "the map must not have been entered"
     );
 }
 
-/// A single gate node (no agent ahead of it) is refused immediately, with only
+/// A single map node (no agent ahead of it) is refused immediately, with only
 /// the graph head in the log.
 #[tokio::test]
-async fn a_lone_gate_refuses_with_only_the_head_recorded() {
+async fn a_lone_map_refuses_with_only_the_head_recorded() {
     let agents: HashMap<String, salvor_runtime::Agent> = HashMap::new();
     let tools: HashMap<String, Box<dyn DynTool>> = HashMap::new();
     let graph = GraphBuilder::new()
-        .gate(GateSpec::new("approve", json!({"type": "object"})))
+        .map(MapSpec::new(
+            "fanout",
+            "items",
+            1,
+            MapBody::Node("fanout".into()),
+        ))
         .build();
 
     let run_id = fixed_run_id(3);
@@ -255,7 +267,7 @@ async fn a_lone_gate_refuses_with_only_the_head_recorded() {
 
     let error = run_graph(&mut ctx, &graph, &json!({}), &agents, &tools)
         .await
-        .expect_err("a lone gate must be refused");
+        .expect_err("a lone map must be refused");
     assert!(matches!(error, EngineError::UnsupportedNode { .. }));
 
     let log = store.read_log(run_id).await.expect("log reads");
