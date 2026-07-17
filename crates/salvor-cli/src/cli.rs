@@ -52,6 +52,9 @@ pub enum Command {
     Replay(ReplayArgs),
     /// Run the control-plane HTTP + server-sent-events server over the store.
     Serve(ServeArgs),
+    /// Build the whole product from a salvor checkout: the web dashboard, then
+    /// the release binary that embeds it.
+    Build(BuildArgs),
     /// Author-time graph document tools: validate a document, or print its
     /// JSON Schema. These read no store and drive no run.
     Graph {
@@ -141,6 +144,16 @@ pub struct ReplayArgs {
     /// this version: live replay is not yet available.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+/// Arguments to `build`.
+#[derive(Debug, Args)]
+pub struct BuildArgs {
+    /// After building, install the release binary onto the PATH with
+    /// `cargo install --path crates/salvor-cli`, so the `salvor` you run from
+    /// anywhere carries the dashboard just built.
+    #[arg(long)]
+    pub install: bool,
 }
 
 /// Arguments to `serve`.

@@ -71,6 +71,8 @@ pub async fn dispatch(cli: Cli) -> Result<u8> {
         Command::History(args) => commands::history(store, args).await,
         Command::Replay(args) => commands::replay(store, args).await,
         Command::Serve(args) => commands::serve(store, args).await,
+        // `build` produces the product from a checkout; it reads no store.
+        Command::Build(args) => commands::build(args).await,
         // Graph document tooling reads no store and drives no run, so these
         // handlers are synchronous and ignore the store path.
         Command::Graph { command } => match command {

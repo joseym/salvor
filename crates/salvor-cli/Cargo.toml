@@ -40,8 +40,12 @@ default-features = false
 # Adding these deps costs the workspace nothing: salvor-tools already compiles
 # rmcp with the server features on, so feature unification means no new
 # crate.
-default = ["fixture"]
+default = ["fixture", "ui"]
 fixture = ["dep:rmcp", "dep:schemars"]
+# Forwards the embedded dashboard through to salvor-server. On by default so the
+# shipped `salvor serve` answers the web app and the API together;
+# `--no-default-features` builds a headless, API-only binary.
+ui = ["salvor-server/ui"]
 
 [[bin]]
 name = "salvor"
@@ -83,7 +87,11 @@ salvor-runtime.workspace = true
 # The control-plane server behind `salvor serve`. The CLI depends on it one
 # way: it supplies the agent-building function (so the TOML schema stays owned
 # here) and runs the server. The `serve` subcommand is the only consumer.
-salvor-server.workspace = true
+# Specified directly rather than inherited so default features can be turned
+# off: the CLI's own `ui` feature then governs whether the dashboard is
+# embedded, and `--no-default-features` yields a headless binary. (Cargo forbids
+# overriding `default-features` on a workspace-inherited dependency.)
+salvor-server = { path = "../salvor-server", default-features = false }
 # Sandboxed wasm tools ([[wasm_tools]] in the agent file). A direct, unguarded
 # dependency: the CLI is the batteries-included tier; library users who must
 # not compile a wasm runtime depend on the library crates, never on this one.

@@ -44,7 +44,8 @@ use uuid::Uuid;
 
 use crate::agent_config::{self, AgentConfig};
 use crate::cli::{
-    GraphValidateArgs, HistoryArgs, ReplayArgs, ResolveArgs, ResumeArgs, RunArgs, ServeArgs,
+    BuildArgs, GraphValidateArgs, HistoryArgs, ReplayArgs, ResolveArgs, ResumeArgs, RunArgs,
+    ServeArgs,
 };
 use crate::render;
 
@@ -312,6 +313,102 @@ pub async fn serve(store_path: &Path, args: ServeArgs) -> Result<u8> {
         .await
         .context("serving the control plane")?;
     Ok(0)
+}
+
+/// `salvor build`: build the whole product from a checkout.
+///
+/// It builds the web dashboard (the Bridge's production output) and then the
+/// release binary, in that order, so the release binary embeds the dashboard
+/// just produced. With `--install` it then installs that binary onto the PATH,
+/// so the `salvor` a shell resolves carries the fresh dashboard.
+///
+/// The dashboard and the binary are built through a login shell (`bash -lc`) so
+/// a node toolchain managed by nvm, and cargo under `~/.cargo/bin`, resolve the
+/// same way they do at an interactive prompt. Every subprocess inherits this
+/// process's streams, so the token gate and the compiler report scroll through
+/// live.
+pub async fn build(args: BuildArgs) -> Result<u8> {
+    let root = find_repo_root()?;
+    println!("salvor build: repo root at {}", root.display());
+
+    let bridge = root.join("bridge");
+    if !bridge.join("node_modules").is_dir() {
+        println!("installing dashboard dependencies (npm ci)");
+        run_shell(&bridge, "npm ci").await?;
+    }
+    println!("building the dashboard (npm run build)");
+    run_shell(&bridge, "npm run build").await?;
+
+    println!("building the release binary (cargo build --release -p salvor-cli)");
+    run_shell(&root, "cargo build --release -p salvor-cli").await?;
+
+    if args.install {
+        println!("installing salvor onto the PATH (cargo install --path crates/salvor-cli)");
+        run_shell(&root, "cargo install --path crates/salvor-cli").await?;
+        println!(
+            "salvor installed at {}",
+            install_dir().join("salvor").display()
+        );
+    } else {
+        println!("built {}", root.join("target/release/salvor").display());
+        println!("run `salvor build --install` to put it on your PATH");
+    }
+    Ok(0)
+}
+
+/// Walks up from the current directory for the workspace root: a directory with
+/// a `Cargo.toml` that declares the salvor workspace and a sibling `bridge/`
+/// tree. Names what it looked for when the search runs out.
+fn find_repo_root() -> Result<PathBuf> {
+    let start = std::env::current_dir().context("reading the current directory")?;
+    let mut dir = start.as_path();
+    loop {
+        let cargo = dir.join("Cargo.toml");
+        if cargo.is_file()
+            && dir.join("bridge").is_dir()
+            && std::fs::read_to_string(&cargo)
+                .map(|text| text.contains("[workspace]") && text.contains("crates/salvor-cli"))
+                .unwrap_or(false)
+        {
+            return Ok(dir.to_path_buf());
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent,
+            None => bail!(
+                "not inside a salvor checkout: walked up from {} and found no workspace \
+                 Cargo.toml declaring the salvor members alongside a bridge/ directory",
+                start.display()
+            ),
+        }
+    }
+}
+
+/// The directory `cargo install` writes binaries to: `$CARGO_HOME/bin`, else
+/// `$HOME/.cargo/bin`.
+fn install_dir() -> PathBuf {
+    if let Some(cargo_home) = std::env::var_os("CARGO_HOME") {
+        PathBuf::from(cargo_home).join("bin")
+    } else if let Some(home) = std::env::var_os("HOME") {
+        PathBuf::from(home).join(".cargo").join("bin")
+    } else {
+        PathBuf::from("~/.cargo/bin")
+    }
+}
+
+/// Runs one build step in `dir` through a login shell, inheriting this
+/// process's streams. Bails, naming the step, on a non-zero exit.
+async fn run_shell(dir: &Path, line: &str) -> Result<()> {
+    let status = tokio::process::Command::new("bash")
+        .arg("-lc")
+        .arg(line)
+        .current_dir(dir)
+        .status()
+        .await
+        .with_context(|| format!("spawning `{line}`"))?;
+    if !status.success() {
+        bail!("`{line}` failed ({status})");
+    }
+    Ok(())
 }
 
 /// `salvor graph validate <path>`: parse a graph document strictly and run
