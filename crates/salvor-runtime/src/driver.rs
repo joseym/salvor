@@ -55,26 +55,85 @@ use crate::wire::content_string;
 use salvor_core::Effect;
 use time::OffsetDateTime;
 
-/// How one drive of the loop ended: the run completed, or it parked and the
-/// process should stop driving it.
+/// How one drive of the loop ended: it produced a final output, or it parked
+/// and the process should stop driving it.
+///
+/// [`Completed`](LoopOutcome::Completed) carries the loop's final output but
+/// does **not** mean the run's terminal `RunCompleted` has been recorded:
+/// [`drive_loop`] deliberately leaves that to its caller. [`drive`] records it
+/// straight away, preserving the built-in loop's log byte for byte; the graph
+/// engine records it once, after its last node, so an agent loop can run as one
+/// node among many inside a single graph log without each node closing the run.
 #[derive(Debug, Clone)]
-pub(crate) enum LoopOutcome {
-    /// The run completed with this output.
+pub enum LoopOutcome {
+    /// The loop produced this final output. The caller records the terminal
+    /// `RunCompleted`.
     Completed(Value),
     /// The run is parked durably; resume it later with input.
     Parked(ParkReason),
 }
 
 /// Drives one run (fresh, recovering, or resuming; the `ctx` knows which)
-/// to completion or a park.
+/// to a final output or a park.
+///
+/// This is exactly [`begin`] followed by [`drive_loop`], with the terminal
+/// `RunCompleted` recorded here on completion. Splitting those two halves out
+/// is what lets the graph engine run [`drive_loop`] against a `RunCtx` whose
+/// log it already opened with `GraphRunStarted`: the agent node contributes its
+/// model and tool events without a second run head and without closing the run.
 pub(crate) async fn drive(
     ctx: &mut RunCtx,
     agent: &Agent,
     initial_input: &Value,
 ) -> Result<LoopOutcome, RuntimeError> {
-    let input = ctx.begin(agent.def_hash(), initial_input).await?;
+    let input = begin(ctx, agent, initial_input).await?;
+    let outcome = drive_loop(ctx, agent, &input).await?;
+    // The built-in path records the terminal itself, in the same position and
+    // with the same output the loop used to record inline. Moving the call here
+    // changes no bytes: `begin`, the loop's events, then `RunCompleted`, in that
+    // order, exactly as before the split.
+    if let LoopOutcome::Completed(output) = &outcome {
+        ctx.complete_run(output).await?;
+    }
+    Ok(outcome)
+}
 
-    let mut conversation: Vec<Message> = vec![Message::user(content_string(&input))];
+/// Records (or replays) the run's head and returns the input the loop drives
+/// on. The first half of [`drive`], split out so [`drive_loop`] can be driven
+/// against a run whose head was opened some other way.
+pub(crate) async fn begin(
+    ctx: &mut RunCtx,
+    agent: &Agent,
+    initial_input: &Value,
+) -> Result<Value, RuntimeError> {
+    ctx.begin(agent.def_hash(), initial_input).await
+}
+
+/// Runs the built-in agent loop over an already-begun run, returning the final
+/// output (a [`LoopOutcome::Completed`]) or a park — but **not** recording the
+/// terminal `RunCompleted`.
+///
+/// The second half of [`drive`], made public so an external driver can run an
+/// agent loop inside a run it opened itself. The graph engine uses exactly
+/// this: it opens the log with `GraphRunStarted`, records `NodeEntered`, calls
+/// `drive_loop` (whose model and tool events land in the same log), records
+/// `NodeExited`, and moves to the next node — recording the single terminal
+/// `RunCompleted` only after its last node. Leaving the terminal to the caller
+/// is the whole reason the completion moved out of the loop and into [`drive`].
+///
+/// `input` is the already-begun run's input (what [`begin`] returned).
+///
+/// # Errors
+///
+/// Whatever the `RunCtx` operations surface: [`RuntimeError::Replay`] on
+/// divergence, [`RuntimeError::Model`] on a live provider failure,
+/// [`RuntimeError::Store`] on a persistence failure.
+pub async fn drive_loop(
+    ctx: &mut RunCtx,
+    agent: &Agent,
+    input: &Value,
+) -> Result<LoopOutcome, RuntimeError> {
+    let mut conversation: Vec<Message> = vec![Message::user(content_string(input))];
     let llm_tools: Vec<Tool> = agent
         .tools()
         .descriptors()
@@ -152,10 +211,11 @@ pub(crate) async fn drive(
 
         conversation.push(Message::assistant_blocks(turn.response.content.clone()));
 
-        // No tool calls: the text is the final answer.
+        // No tool calls: the text is the final answer. The loop returns it
+        // without recording the terminal; the caller records `RunCompleted`
+        // (`drive` straight away, the graph engine once after its last node).
         if tool_uses.is_empty() {
             let output = Value::String(turn.response.text());
-            ctx.complete_run(&output).await?;
             return Ok(LoopOutcome::Completed(output));
         }
 

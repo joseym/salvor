@@ -89,6 +89,7 @@ pub use compact::{
 pub use ctx::{
     ClockFn, MAX_TOOL_ATTEMPTS, ModelTurn, RandomFn, Resumption, RunCtx, ToolCallResult,
 };
+pub use driver::{LoopOutcome, drive_loop};
 pub use error::RuntimeError;
 pub use hash::{canonical_json, hash_value, sha256_hex};
 pub use labels::{MAX_LABEL_KEY_LEN, MAX_LABEL_VALUE_LEN, MAX_LABELS, validate_labels};
