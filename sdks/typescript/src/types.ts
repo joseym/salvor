@@ -54,14 +54,22 @@ export interface RunState {
 }
 
 /**
+ * Free-form correlation tags on a run (a build id, an environment), set once
+ * at creation. Plain string-to-string, matching the server's `labels` object.
+ */
+export type Labels = Record<string, string>;
+
+/**
  * One row of `GET /v1/runs`: a run id with its folded status and counts.
  *
- * `usage`, `stepCount`, and `agentDefHash` are additive: present whenever
- * the run's log folds (a real zero when a run genuinely has no model calls
- * yet), and absent — not a fabricated zero — only when the server could not
- * read that run's log at all (see `API.md`). `raw` always carries whatever
- * the server actually sent, so a server-side field this SDK has not been
- * taught yet is never lost.
+ * `usage`, `stepCount`, `agentDefHash`, and `labels` are additive: present
+ * whenever the run's log folds (a real zero when a run genuinely has no model
+ * calls yet), and absent — not a fabricated zero — only when the server could
+ * not read that run's log at all (see `API.md`). `labels` follows the same
+ * rule one step further: also absent when a run recorded no labels at all, or
+ * recorded an explicit empty set — the server never sends `labels: {}`. `raw`
+ * always carries whatever the server actually sent, so a server-side field
+ * this SDK has not been taught yet is never lost.
  */
 export interface RunSummary {
   run: string;
@@ -72,6 +80,7 @@ export interface RunSummary {
   usage?: Usage;
   stepCount?: number;
   agentDefHash?: string;
+  labels?: Labels;
   raw: Record<string, unknown>;
 }
 
@@ -180,6 +189,7 @@ export function parseRunSummary(obj: Json): RunSummary {
     stepCount:
       obj.step_count === undefined ? undefined : Number(obj.step_count),
     agentDefHash: obj.agent_def_hash as string | undefined,
+    labels: obj.labels as Labels | undefined,
     raw: obj,
   };
 }

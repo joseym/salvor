@@ -45,6 +45,7 @@ export {
   type ResumeResult,
   type PendingCall,
   type Usage,
+  type Labels,
 } from "./types.js";
 export {
   GraphBuilder,

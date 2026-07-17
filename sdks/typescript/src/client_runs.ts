@@ -26,6 +26,12 @@
  * const { response, usage } = await run.modelStep(1, request);
  * await run.append([run.envelope(3, "RunCompleted", { output: answer })]);
  * ```
+ *
+ * Unlike {@link SalvorClient.startRun}, this driver has no dedicated `labels`
+ * option: the client builds `RunStarted` itself, so correlation tags simply
+ * ride in that payload, e.g. `run.envelope(0, "RunStarted", { agent_def_hash:
+ * agent, input: task, labels: { build: "42" } })`. The server enforces the
+ * same bounds on append (see `API.md`) as it does for a server-driven start.
  */
 
 import { SalvorStreamError, errorFrom } from "./errors.js";

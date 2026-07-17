@@ -16,6 +16,7 @@ import { SalvorApiError, SalvorStreamError, errorFrom } from "./errors.js";
 import { readSseFrames } from "./sse.js";
 import {
   type EndFrame,
+  type Labels,
   type ReplayState,
   type ResumeResult,
   type RunState,
@@ -116,14 +117,22 @@ export class SalvorClient {
    * Start a fresh run of a registered agent; return its run id. The call
    * resolves as soon as the run is accepted; the run then drives in the
    * background on the server. Open {@link streamEvents} to watch it.
+   *
+   * `options.labels` are optional correlation tags (a build id, an
+   * environment) recorded once on the run's `RunStarted` event and readable
+   * back from {@link listRuns}; see `API.md` for the bounds (at most 16
+   * labels, keys under 64 bytes, values under 256 bytes) and the honest-
+   * absence rule. Omitted entirely, a run records none, byte-identical to a
+   * client that predates this option.
    */
   async startRun(
     agent: string,
     input: unknown = null,
-    options: { runId?: string } = {},
+    options: { runId?: string; labels?: Labels } = {},
   ): Promise<string> {
     const body: Record<string, unknown> = { agent, input };
     if (options.runId !== undefined) body.run_id = options.runId;
+    if (options.labels !== undefined) body.labels = options.labels;
     const obj = await this.request("POST", "/v1/runs", {
       body: JSON.stringify(body),
       contentType: "application/json",
