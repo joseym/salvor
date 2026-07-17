@@ -27,13 +27,15 @@
 //! The full recorded log, replayed prefix and all, is always available through
 //! `salvor history`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use salvor_core::{Event, EventEnvelope, PendingCall, RunId, derive_state};
-use salvor_engine::{GraphOutcome, ToolResolver, graph_hash, run_graph};
+use salvor_core::{Event, EventEnvelope, PendingCall, RunId, RunStatus, derive_state};
+use salvor_engine::{
+    ForkError, GraphOutcome, ToolResolver, WriteHazard, graph_hash, plan_fork, run_graph,
+};
 use salvor_graph::{Graph, Node};
 use salvor_runtime::{
     Agent, ParkReason, RunCtx, RunOutcome, Runtime, RuntimeError, validate_labels,
@@ -52,8 +54,8 @@ use uuid::Uuid;
 use crate::agent_config::{self, AgentConfig};
 use crate::checkout;
 use crate::cli::{
-    BuildArgs, GraphRunArgs, GraphValidateArgs, HistoryArgs, ReplayArgs, ResolveArgs, ResumeArgs,
-    RunArgs, ServeArgs,
+    BuildArgs, ForkArgs, GraphRunArgs, GraphValidateArgs, HistoryArgs, ReplayArgs, ResolveArgs,
+    ResumeArgs, RunArgs, ServeArgs,
 };
 use crate::dev_server::DevServer;
 use crate::render;
@@ -183,6 +185,129 @@ pub async fn resume(store_path: &Path, args: ResumeArgs) -> Result<u8> {
 
     close_servers(servers).await;
     report_outcome(outcome?, &uuid, agent_path)
+}
+
+/// `salvor fork`: fork a graph run from a node boundary into a NEW run, refusing
+/// to re-execute a recorded write the operator has not acknowledged.
+///
+/// The local flavor of the server's `POST /v1/runs/{id}/fork`, mirroring how
+/// `graph run` and a graph `resume` re-supply their documents: the origin's log
+/// records only the graph's hash, so the document is re-supplied through
+/// `--graph` (hash-checked against the recorded one, since a fork reuses the
+/// origin's graph unchanged) and its `agent` nodes through `--agent`.
+///
+/// The fork planning is the shared, pure [`plan_fork`]; only the IO differs from
+/// the server. On a hazard the operator has not acknowledged it refuses (exit 1),
+/// listing exactly the writes that would re-fire; with `--acknowledge-writes`
+/// covering them it writes the child's prefix (the origin's events below the fork
+/// node, rewritten under a fresh id, seq-0 carrying the fork origin) and drives
+/// the child onward from the fork node exactly as a recovered graph run.
+pub async fn fork(store_path: &Path, args: ForkArgs) -> Result<u8> {
+    let origin_id = parse_run_id(&args.run_id)?;
+    let origin_uuid = origin_id.as_uuid().to_string();
+    let store = open_store(store_path)?;
+    let origin_log = store.read_log(origin_id).await?;
+    if origin_log.is_empty() {
+        bail!("no run {origin_uuid} in this store");
+    }
+
+    // An origin parked at a dangling write must be resolved first.
+    if matches!(
+        derive_state(&origin_log).status,
+        RunStatus::NeedsReconciliation
+    ) {
+        bail!(
+            "origin run {origin_uuid} is parked at a dangling write; resolve it \
+             (salvor resolve {origin_uuid} --output <json>) before forking, so the fork does not \
+             inherit an unsettled write"
+        );
+    }
+
+    // Plan the fork purely: boundary, prefix, and the write hazard set.
+    let plan = plan_fork(&origin_log, &args.from_node).map_err(|error| match error {
+        ForkError::NotAGraphRun => anyhow::anyhow!(
+            "run {origin_uuid} is an agent run, not a graph run; only a graph run has node \
+             boundaries to fork from"
+        ),
+        ForkError::NodeNeverEntered { node } => anyhow::anyhow!(
+            "run {origin_uuid} never entered node `{node}`; fork from a node boundary the run reached"
+        ),
+    })?;
+
+    // The re-supplied document must hash to the origin's recorded graph.
+    let graph = load_and_validate_graph(&args.graph)?;
+    let supplied_hash = graph_hash(&graph)?;
+    if supplied_hash != plan.graph_hash() {
+        bail!(
+            "the graph in {} hashes to {supplied_hash}, but run {origin_uuid} forked from {}; a fork \
+             reuses the SAME document the origin ran (submit a changed graph as a new run instead)",
+            args.graph.display(),
+            plan.graph_hash()
+        );
+    }
+
+    // Resolve the acknowledgement: `all` covers the full hazard set, else a
+    // comma-separated seq list. Then find what the acknowledgement misses.
+    let hazard_seqs = plan.hazard_seqs();
+    let acknowledged = parse_acknowledge_writes(args.acknowledge_writes.as_deref(), &hazard_seqs)?;
+    let missing: Vec<u64> = hazard_seqs
+        .iter()
+        .copied()
+        .filter(|seq| !acknowledged.contains(seq))
+        .collect();
+
+    // dry_run: print the preview, create nothing.
+    if args.dry_run {
+        print!("{}", render_fork_preview(&plan, &missing));
+        return Ok(0);
+    }
+
+    // Refuse-then-record: any unacknowledged hazard refuses, listing what is
+    // missing (exit 1, as a reconciliation refusal does).
+    if !missing.is_empty() {
+        let unacked: Vec<&WriteHazard> = plan
+            .hazards()
+            .iter()
+            .filter(|hazard| missing.contains(&hazard.seq))
+            .collect();
+        print!(
+            "{}",
+            render_fork_refusal(&origin_uuid, &args.from_node, &unacked)
+        );
+        return Ok(1);
+    }
+
+    // Everything the child references must resolve, before any envelope is written.
+    let (agents, servers) = build_graph_agents(&args.agents).await?;
+    if let Err(error) = check_graph_resolvable(&graph, &agents) {
+        close_servers(servers).await;
+        return Err(error);
+    }
+    let tools = AgentTools(&agents);
+
+    // Mint the child and write its prefix; it exists, standalone, at once.
+    let child_id = RunId::new();
+    let child_uuid = child_id.as_uuid().to_string();
+    let child_prefix = plan.build_child_prefix(child_id, hazard_seqs);
+    for envelope in &child_prefix {
+        if let Err(error) = store.append(envelope).await {
+            close_servers(servers).await;
+            return Err(error.into());
+        }
+    }
+    // Printed first, so a kill mid-drive still leaves the operator an id to resume.
+    println!(
+        "run {child_uuid} (forked from {origin_uuid} at node `{}`)",
+        args.from_node
+    );
+    tracing::info!(run_id = %child_uuid, origin = %origin_uuid, "forking graph run");
+
+    // Continue from the fork node exactly like a recovered graph run.
+    let child_log = store.read_log(child_id).await?;
+    let mut ctx = RunCtx::new(store, child_id, child_log)?;
+    let outcome = run_graph(&mut ctx, &graph, &Value::Null, &agents, &tools).await;
+    close_servers(servers).await;
+    report_graph_outcome(outcome?, &child_uuid, &args.graph, &args.agents)
 }
 
 /// `salvor resolve`: record the completion of a dangling write by hand.
@@ -792,6 +917,101 @@ fn parse_label_args(labels: &[String]) -> Result<Option<BTreeMap<String, String>
     }
     validate_labels(&map).map_err(anyhow::Error::msg)?;
     Ok(Some(map))
+}
+
+/// Resolves the `--acknowledge-writes` argument to the set of origin log
+/// positions the operator acknowledged: `all` expands to the full hazard set,
+/// an omitted argument is the empty set, and anything else is a comma-separated
+/// list of `u64` seqs. A non-numeric entry is a precise error.
+fn parse_acknowledge_writes(arg: Option<&str>, hazard_seqs: &[u64]) -> Result<HashSet<u64>> {
+    match arg.map(str::trim) {
+        None | Some("") => Ok(HashSet::new()),
+        Some("all") => Ok(hazard_seqs.iter().copied().collect()),
+        Some(list) => list
+            .split(',')
+            .map(|item| {
+                let item = item.trim();
+                item.parse::<u64>().with_context(|| {
+                    format!("`{item}` is not a valid log position; use `4,7` or `all`")
+                })
+            })
+            .collect(),
+    }
+}
+
+/// Renders the dry-run preview: what the fork would do, creating nothing.
+fn render_fork_preview(plan: &salvor_engine::ForkPlan, missing: &[u64]) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "fork of run {} from node `{}` (dry run):\n",
+        plan.origin_run().as_uuid(),
+        plan.from_node()
+    ));
+    out.push_str(&format!(
+        "  prefix: {} event(s), through seq {}\n",
+        plan.prefix_len(),
+        plan.through_seq().get()
+    ));
+    if plan.hazards().is_empty() {
+        out.push_str("  no writes in the re-walked segment; nothing to acknowledge.\n");
+    } else {
+        out.push_str(&format!(
+            "  {} write(s) the re-walked segment would re-execute:\n",
+            plan.hazards().len()
+        ));
+        for hazard in plan.hazards() {
+            out.push_str(&render_hazard_line(hazard));
+        }
+        if missing.is_empty() {
+            out.push_str("  all acknowledged; the fork would proceed.\n");
+        } else {
+            out.push_str(&format!(
+                "  would refuse: seq(s) {} still need acknowledgement.\n",
+                seq_list(missing)
+            ));
+        }
+    }
+    out
+}
+
+/// Renders the refusal report for an unacknowledged fork: the writes that would
+/// re-fire, and how to acknowledge them. Mirrors the reconciliation report's
+/// posture (show the intent, then how to proceed).
+fn render_fork_refusal(origin: &str, from_node: &str, unacked: &[&WriteHazard]) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "refused: forking run {origin} from node `{from_node}` would re-execute {} recorded \
+         write(s) the segment re-walks:\n",
+        unacked.len()
+    ));
+    for hazard in unacked {
+        out.push_str(&render_hazard_line(hazard));
+    }
+    let seqs: Vec<u64> = unacked.iter().map(|hazard| hazard.seq).collect();
+    out.push_str(&format!(
+        "acknowledge that they may re-fire, then fork:\n  salvor fork {origin} --from-node \
+         {from_node} --graph <graph.json> --agent <file>... --acknowledge-writes {}\n",
+        seq_list(&seqs)
+    ));
+    out
+}
+
+/// One write-hazard line: its seq, tool, and recorded input.
+fn render_hazard_line(hazard: &WriteHazard) -> String {
+    format!(
+        "    - seq {} `{}` input {}\n",
+        hazard.seq,
+        hazard.tool,
+        render::pretty_json(&hazard.input).trim_end()
+    )
+}
+
+/// A comma-separated seq list for a command hint.
+fn seq_list(seqs: &[u64]) -> String {
+    seqs.iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Prints the result of a graph drive: the final output on completion, or a

@@ -42,6 +42,9 @@ pub enum Command {
     Run(RunArgs),
     /// Continue an existing run: resume a parked one, or recover a crashed one.
     Resume(ResumeArgs),
+    /// Fork a graph run from a node boundary into a NEW run, refusing to
+    /// re-execute a recorded write the operator has not acknowledged.
+    Fork(ForkArgs),
     /// Record the completion of a dangling write by hand, after verifying it.
     Resolve(ResolveArgs),
     /// List every run in the store.
@@ -143,6 +146,38 @@ pub struct ResumeArgs {
     /// Ignored (with a warning) when recovering a crashed run.
     #[arg(long, value_name = "JSON|@FILE")]
     pub input: Option<String>,
+}
+
+/// Arguments to `fork`.
+#[derive(Debug, Args)]
+pub struct ForkArgs {
+    /// The origin run id (a UUID) to fork.
+    #[arg(value_name = "RUN_ID")]
+    pub run_id: String,
+    /// The node boundary to restart the fork from: the fork re-walks from this
+    /// node, carrying the origin's events below it as an identical prefix.
+    #[arg(long = "from-node", value_name = "NODE")]
+    pub from_node: String,
+    /// Path to the graph document (JSON) the origin ran. Re-supplied the same way
+    /// a graph resume re-supplies it (the log records only the hash); its hash
+    /// must match the recorded one, since a fork reuses the origin's graph
+    /// unchanged.
+    #[arg(long, value_name = "FILE")]
+    pub graph: PathBuf,
+    /// An agent definition (TOML) the graph's `agent` nodes reference.
+    /// Repeatable, exactly as `graph run` and a graph `resume` take them.
+    #[arg(long = "agent", value_name = "FILE")]
+    pub agents: Vec<PathBuf>,
+    /// Acknowledge the writes the re-walked segment would re-fire: a
+    /// comma-separated list of origin log positions (`4,7`), or `all` to
+    /// acknowledge the full hazard set. Recorded permanently into the child's
+    /// fork origin. Omit when the fork boundary sits before any write.
+    #[arg(long = "acknowledge-writes", value_name = "SEQ,SEQ|all")]
+    pub acknowledge_writes: Option<String>,
+    /// Print what the fork WOULD do (the hazard list and the would-be prefix
+    /// summary) without creating a run.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// Arguments to `resolve`.
