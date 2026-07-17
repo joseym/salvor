@@ -33,15 +33,15 @@ describe('filter-vocabulary bijection', () => {
     }
   });
 
-  it('direction 2 — the historically-refused fields stay refused by the parser', () => {
-    for (const key of ['agent', 'cost', 'steps', 'tokens']) {
+  it('direction 2 — the still-refused fields stay refused by the parser (agent/build joined the vocabulary in item 15, so they moved out of this list)', () => {
+    for (const key of ['cost', 'steps', 'tokens']) {
       expect(FILTER_VOCAB.some((v) => v.key === key)).toBe(false);
       expect(() => parseQuery(`${key}:1`)).toThrow();
     }
   });
 
   it('COLON_KEYS is exactly the deduped set of `:`-operator keys in the vocab', () => {
-    expect([...COLON_KEYS].sort()).toEqual(['group', 'hour', 'status', 'text']);
+    expect([...COLON_KEYS].sort()).toEqual(['agent', 'build', 'group', 'hour', 'status', 'text']);
   });
 
   it('hour: is an offered, enumerable key (it joined the vocabulary)', () => {
@@ -50,6 +50,21 @@ describe('filter-vocabulary bijection', () => {
     expect(hour?.offered).toBe(true);
     expect(hour?.enumerable).toBe(true);
     expect(MENU_KEYS.map((v) => v.key)).toContain('hour');
+  });
+
+  it('agent: and build: are offered, NON-enumerable keys (item 15) — they parse and appear in the @ menu, but do not autocomplete a value list', () => {
+    for (const key of ['agent', 'build']) {
+      const entry = FILTER_VOCAB.find((v) => v.key === key);
+      expect(entry, `${key} must be listed`).toBeDefined();
+      expect(entry?.offered).toBe(true);
+      expect(entry?.enumerable).toBe(false);
+      expect(MENU_KEYS.map((v) => v.key)).toContain(key);
+    }
+  });
+
+  it('agent: no longer throws the stale "GET /v1/runs carries no agent" refusal (item 15 fixed it)', () => {
+    expect(() => parseQuery('agent:triage')).not.toThrow();
+    expect(parseQuery('agent:triage')).toEqual([{ f: 'agent', op: ':', v: 'triage' }]);
   });
 
   it('a bare word parses to a text term (matches the run id)', () => {
@@ -104,7 +119,47 @@ describe('matchesAll over the field readers', () => {
     expect(rows.filter((r) => matchesAll(r, parseQuery('bbbb'))).map((r) => r.id)).toEqual(['bbbb2222']);
   });
 
+  it('agent: matches a caller-supplied readable label as-is', () => {
+    const agentRows: RunRow[] = [
+      { id: 'x1', status: 'completed', eventCount: 1, agentDefHash: 'aarg_jd_parser_v1' },
+      { id: 'x2', status: 'completed', eventCount: 1, agentDefHash: 'aarg_cover_writer_v1' },
+    ];
+    expect(agentRows.filter((r) => matchesAll(r, parseQuery('agent:jd_parser'))).map((r) => r.id)).toEqual([
+      'x1',
+    ]);
+  });
+
+  it('agent: matches a raw hash prefix even when no name has resolved', () => {
+    const r: RunRow = { id: 'x3', status: 'completed', eventCount: 1, agentDefHash: 'sha256:e8a1d362abc' };
+    expect(matchesAll(r, parseQuery('agent:e8a1d362'))).toBe(true);
+    expect(matchesAll(r, parseQuery('agent:e8a1d362'), new Map())).toBe(true);
+  });
+
+  it('agent: matches a resolved registry name when the caller passes the name map', () => {
+    const r: RunRow = { id: 'x4', status: 'completed', eventCount: 1, agentDefHash: 'sha256:e8a1d362abc' };
+    const names = new Map([['sha256:e8a1d362abc', 'support-triage']]);
+    expect(matchesAll(r, parseQuery('agent:triage'), names)).toBe(true);
+    expect(matchesAll(r, parseQuery('agent:triage'))).toBe(false); // no names map: falls back to the hash text
+  });
+
+  it('build: matches the labels.build_id a run was tagged with, and never matches an untagged run on a real build id', () => {
+    const buildRows: RunRow[] = [
+      { id: 'y1', status: 'completed', eventCount: 1, labels: { build_id: 'bld_7f3a2c' } },
+      { id: 'y2', status: 'completed', eventCount: 1 },
+    ];
+    expect(buildRows.filter((r) => matchesAll(r, parseQuery('build:bld_7f3a2c'))).map((r) => r.id)).toEqual([
+      'y1',
+    ]);
+    expect(FIELDS['build'](buildRows[1], new Map())).toBe(''); // no labels at all: honestly empty, never a guess
+  });
+
+  it('FIELDS.agent reads through agentIdentity, honoring the same name map', () => {
+    const r: RunRow = { id: 'x5', status: 'completed', eventCount: 1, agentDefHash: 'sha256:abc' };
+    expect(String(FIELDS['agent'](r, new Map()))).toContain('sha256:abc');
+    expect(String(FIELDS['agent'](r, new Map([['sha256:abc', 'daily-digest']])))).toContain('daily-digest');
+  });
+
   it('FIELDS.group reads through groupOf', () => {
-    expect(FIELDS['group'](rows[1])).toBe('waiting');
+    expect(FIELDS['group'](rows[1], new Map())).toBe('waiting');
   });
 });

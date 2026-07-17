@@ -58,8 +58,9 @@ export interface RunUsage {
 /**
  * One row of the ledger — a projection of `GET /v1/runs`, flat and view-ready. Every value here
  * is something the list endpoint actually carries; nothing is folded client-side. `usage`,
- * `stepCount` and `agentDefHash` are present when the server could fold the run's log and
- * genuinely absent (undefined, never a fabricated zero) when it could not.
+ * `stepCount`, `agentDefHash` and `labels` are present when the server could fold the run's log
+ * and genuinely absent (undefined, never a fabricated zero or an invented `{}`) when it could not
+ * — `labels` follows the rule one step further: also absent when the run recorded none at all.
  */
 export interface RunRow {
   readonly id: string;
@@ -70,6 +71,7 @@ export interface RunRow {
   readonly usage?: RunUsage;
   readonly stepCount?: number;
   readonly agentDefHash?: string;
+  readonly labels?: Readonly<Record<string, string>>;
 }
 
 export function toRunRow(s: RunSummary): RunRow {
@@ -82,8 +84,56 @@ export function toRunRow(s: RunSummary): RunRow {
     usage: s.usage ? { inputTokens: s.usage.inputTokens, outputTokens: s.usage.outputTokens } : undefined,
     stepCount: s.stepCount,
     agentDefHash: s.agentDefHash,
+    labels: s.labels,
   };
 }
+
+/**
+ * A hash-shaped `agent_def_hash` (a salvor-native run, content-addressed by its definition) vs a
+ * caller-supplied readable label (a client-driven run — e.g. AARG's `aarg_jd_parser_v1` — is its
+ * own label; it was never a hash to begin with). Mirrors the prototype's `isHash` exactly.
+ */
+export function isHash(value: string): boolean {
+  return /^sha256:/.test(value);
+}
+
+/** Which of the three honest renderings {@link agentIdentity} chose. */
+export type AgentIdentityKind = 'none' | 'label' | 'hash' | 'name';
+
+/**
+ * The agent column's one source of truth. The run's log records only
+ * `agent_def_hash` — the NAME here, when present, is a separate, honestly-sourced lookup (a
+ * registry resolution via {@link AgentRegistryService}), never read off the log. Three renderings,
+ * in the same priority the design's `agentIdentity()` used:
+ *
+ *   1. no `agent_def_hash` at all → `"none"` (an em dash; genuinely nothing recorded)
+ *   2. not hash-shaped → `"label"` (a caller-supplied readable name, shown as-is)
+ *   3. hash-shaped, and `names` resolved it → `"name"` (registry-resolved; the hash still rides
+ *      along on `.hash` for a title)
+ *   4. hash-shaped, unresolved (unregistered, or not yet looked up) → `"hash"` (the hash itself,
+ *      truncated + copyable at render time — an absent name is not an error, see
+ *      {@link AgentRegistryService})
+ *
+ * `names` defaults to empty so this stays a pure function callers can use before any lookup has
+ * resolved (or in a context, like the filter vocabulary, with no registry in scope).
+ */
+export interface AgentIdentity {
+  readonly text: string;
+  readonly kind: AgentIdentityKind;
+  readonly hash?: string;
+}
+export function agentIdentity(
+  r: RunRow,
+  names: ReadonlyMap<string, string> = EMPTY_NAMES,
+): AgentIdentity {
+  const h = r.agentDefHash;
+  if (!h) return { text: '—', kind: 'none' };
+  if (!isHash(h)) return { text: h, kind: 'label', hash: h };
+  const name = names.get(h);
+  if (name) return { text: name, kind: 'name', hash: h };
+  return { text: h, kind: 'hash', hash: h };
+}
+const EMPTY_NAMES: ReadonlyMap<string, string> = new Map();
 
 /** `2026-07-12T08:41:12Z` → `2026-07-12T08:00Z` (the UTC hour a run was LAST active). */
 export function hourKey(iso: string | undefined): string {
