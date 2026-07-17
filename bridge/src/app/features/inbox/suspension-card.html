@@ -1,0 +1,195 @@
+<form
+  class="acard"
+  [class.committed]="receipt()"
+  [attr.id]="'card-' + ns()"
+  [attr.data-resume]="row().run"
+  (submit)="$event.preventDefault(); submit()"
+>
+  @if (receipt(); as r) {
+    <div class="acard-head">
+      <h4>Appended to the log</h4>
+      <bridge-run-ref [id]="row().run" />
+    </div>
+    <dl class="evidence">
+      <div><dt>seq</dt><dd>{{ r.seq ?? '—' }}</dd></div>
+      <div><dt>event.kind</dt><dd>{{ r.kind }}</dd></div>
+      <div><dt>recorded_at</dt><dd>{{ r.recordedAt ?? '—' }}</dd></div>
+      <div><dt>payload</dt><dd [innerHTML]="jsonHiCompact(r.payload)"></dd></div>
+      <div><dt>status now</dt><dd>{{ r.statusState }}</dd></div>
+    </dl>
+    <p class="reason">
+      <b>Nothing was edited.</b> The run's status was not set — it was re-derived from
+      <span class="mono">GET /v1/runs/{{ ns() }}…</span> after this append. That is why it can never
+      disagree with the runtime: it is the runtime's own fold.
+      @if (r.unconfirmed) {
+        The appended event's own sequence could not be confirmed in time — the status above is
+        still a fresh, independent read.
+      }
+    </p>
+    <div class="actions">
+      <button class="btn ghost" type="button" (click)="openTimeline()">View timeline</button>
+      <span class="endpoint">{{ r.endpoint }}</span>
+    </div>
+  } @else {
+    <div class="acard-head">
+      <h4>{{ title() }}</h4>
+      <bridge-run-ref [id]="row().run" />
+      <button
+        class="btn ghost ev-btn"
+        type="button"
+        [attr.data-evidence]="row().run"
+        [attr.aria-pressed]="evidencePressed()"
+        (click)="evidence.emit()"
+      >
+        Evidence
+      </button>
+    </div>
+    <p class="reason">{{ reason() }}</p>
+
+    @if (showProvenance()) {
+      <p class="provenance">
+        Prefilled values were <b>proposed by this run</b>, carried on its recorded
+        <span class="mono">input_schema</span>. Confirming them is the approval — change anything
+        that is wrong.
+      </p>
+    }
+
+    @if (usesRawJson()) {
+      <div class="f-field">
+        <label [attr.for]="ns() + '-raw'"
+          >Resume input (JSON) <span class="req">required</span></label
+        >
+        <p class="desc">
+          This run's recorded <span class="mono">input_schema</span> could not be turned into a
+          form — see the reason above. Paste the resume input as JSON instead.
+        </p>
+        <textarea
+          [id]="ns() + '-raw'"
+          [value]="rawJson()"
+          (input)="rawJson.set($any($event.target).value)"
+        ></textarea>
+      </div>
+    } @else {
+      @for (f of fields(); track f.key) {
+        <div class="f-field">
+          @switch (f.kind) {
+            @case ('boolean') {
+              <fieldset>
+                <legend
+                  >{{ f.label }}@if (f.required) {
+                    <span class="req">required</span>
+                  }@if (f.proposed) {
+                    <span class="proposed">proposed by the run</span>
+                  }</legend
+                >
+                @if (f.description) {
+                  <p class="desc">{{ f.description }}</p>
+                }
+                <div class="choice">
+                  <label
+                    ><input
+                      type="radio"
+                      [name]="f.id"
+                      value="true"
+                      [checked]="valueOf(f) === 'true'"
+                      [required]="f.required"
+                      (change)="setValue(f.key, 'true')"
+                    />
+                    true</label
+                  >
+                  <label
+                    ><input
+                      type="radio"
+                      [name]="f.id"
+                      value="false"
+                      [checked]="valueOf(f) === 'false'"
+                      (change)="setValue(f.key, 'false')"
+                    />
+                    false</label
+                  >
+                </div>
+              </fieldset>
+            }
+            @default {
+              <label [attr.for]="f.id"
+                >{{ f.label }}@if (f.required) {
+                  <span class="req">required</span>
+                }@if (f.proposed) {
+                  <span class="proposed">proposed by the run</span>
+                }</label
+              >
+              @if (f.description) {
+                <p class="desc">{{ f.description }}</p>
+              }
+              @switch (f.kind) {
+                @case ('enum') {
+                  <select
+                    [id]="f.id"
+                    [required]="f.required"
+                    [value]="valueOf(f)"
+                    (change)="setValue(f.key, $any($event.target).value)"
+                  >
+                    <option value="">— select —</option>
+                    @for (opt of f.enumOptions; track opt) {
+                      <option [value]="opt">{{ opt }}</option>
+                    }
+                  </select>
+                }
+                @case ('number') {
+                  <input
+                    type="number"
+                    [id]="f.id"
+                    step="0.01"
+                    [attr.min]="f.min ?? null"
+                    [attr.max]="f.max ?? null"
+                    [required]="f.required"
+                    [value]="valueOf(f)"
+                    [attr.aria-describedby]="f.id + '-b'"
+                    (input)="setValue(f.key, $any($event.target).value)"
+                  />
+                }
+                @case ('textarea') {
+                  <textarea
+                    [id]="f.id"
+                    [attr.maxlength]="f.maxLength ?? null"
+                    [required]="f.required"
+                    [value]="valueOf(f)"
+                    [attr.aria-describedby]="f.id + '-b'"
+                    (input)="setValue(f.key, $any($event.target).value)"
+                  ></textarea>
+                }
+                @default {
+                  <input
+                    type="text"
+                    [id]="f.id"
+                    [attr.maxlength]="f.maxLength ?? null"
+                    [required]="f.required"
+                    [value]="valueOf(f)"
+                    [attr.aria-describedby]="f.id + '-b'"
+                    (input)="setValue(f.key, $any($event.target).value)"
+                  />
+                }
+              }
+              @if (bounds(f); as b) {
+                <p class="bounds" [id]="f.id + '-b'">{{ b }}</p>
+              }
+            }
+          }
+        </div>
+      }
+    }
+
+    @if (submitError()) {
+      <p class="f-err" role="alert">{{ submitError() }}</p>
+    }
+
+    <div class="actions">
+      <button class="btn" type="submit" [disabled]="submitting()">Resume run</button>
+      <button class="btn ghost" type="button" (click)="openTimeline()">View timeline</button>
+      <details class="api">
+        <summary>show API</summary>
+        <span class="endpoint">{{ endpoint() }}</span>
+      </details>
+    </div>
+  }
+</form>

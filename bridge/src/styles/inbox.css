@@ -1,0 +1,219 @@
+/* ============================================================
+   BRIDGE INBOX  —  ported from the OD prototype (salvor-bridge.html,
+   project b781b82b, the #view-inbox regions).
+
+   Scope discipline: `app.css` already carries `.btn`/`.btn.ghost` (plain,
+   unfilled — no feature has yet spent the filled-accent treatment the
+   design intends for a view's ONE primary action), `.mechanism`/`.caption`/
+   `.empty-state` (the Inspector's empty state already uses the first two;
+   redefining them here would silently change that S5 screen, which this
+   slice must not touch). So this file reuses those AS SHIPPED rather than
+   overriding them, and gives the Inbox's OWN primary actions (Resume run /
+   Raise limit and resume / Record outcome) the filled-accent treatment
+   scoped to `.acard .actions .btn`, never the bare `.btn` — nothing outside
+   `#inbox-cards` is touched by this file. Same discipline as `app.css`:
+   every value routes through the tokens in tokens.css.
+   ============================================================ */
+
+/* ── the queue: heading, lede in the hero position, cards, foot apparatus ── */
+.queue > h3.section { font-size: var(--text-lg); margin-bottom: var(--space-1); }
+.lede {
+  max-width: 68ch; margin: var(--space-2) 0 var(--space-4);
+  font-size: var(--text-sm); line-height: 1.55;
+  color: var(--fg-2); text-wrap: pretty; letter-spacing: 0.16px;
+}
+.lede code { font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
+
+/* ── one action card ──────────────────────────────────────────────────── */
+.acard {
+  padding: var(--space-5) var(--space-6);
+  max-width: 800px;
+  margin-bottom: var(--space-4);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--warn);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.acard.committed { border-color: var(--edge-strong); border-left-color: var(--success); background: var(--surface); }
+.acard.committed .evidence dd { color: var(--fg); }
+.acard-head { display: flex; align-items: baseline; gap: var(--space-3); flex-wrap: wrap; margin-bottom: var(--space-1); }
+.acard-head h4 { font-size: var(--text-lg); }
+.acard .reason { margin: 0 0 var(--space-4); font-size: 13px; color: var(--fg-2); text-wrap: pretty; letter-spacing: 0.08px; }
+.acard .question { margin: 0 0 var(--space-4); font-family: var(--font-display); font-size: var(--text-xl); color: var(--fg); }
+
+/* ── the recorded evidence block ──────────────────────────────────────── */
+.evidence {
+  margin: 0 0 var(--space-4); padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--border-soft);
+}
+.evidence div { display: flex; gap: var(--space-3); padding: var(--space-2) 0; border-bottom: 1px solid var(--border); }
+.evidence div:last-child { border-bottom: 0; }
+.evidence dt { flex: none; width: 132px; font-size: var(--text-xs); color: var(--muted); letter-spacing: 0.16px; }
+.evidence dd { margin: 0; font-family: var(--font-mono); font-size: var(--text-xs); color: var(--fg-2); word-break: break-all; letter-spacing: 0; }
+.evidence dd.null { color: var(--amber-ink); font-weight: 500; }
+
+/* ── generated form fields (the schema-driven suspension form + the budget/reconcile fields) ── */
+.f-field { margin-bottom: var(--space-4); }
+.f-field label, .f-field legend { display: block; font-size: 13px; font-weight: 500; color: var(--fg); margin-bottom: var(--space-1); padding: 0; letter-spacing: 0.08px; }
+.f-field fieldset { border: 0; padding: 0; margin: 0; }
+.f-field .req { color: var(--amber-ink); font-weight: 400; }
+.f-field .desc { margin: 0 0 var(--space-2); font-size: var(--text-xs); color: var(--muted); letter-spacing: 0.16px; }
+.f-field input[type='text'],
+.f-field input[type='number'],
+.f-field select,
+.f-field textarea {
+  width: 100%; max-width: 440px; padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--edge-strong); border-radius: var(--radius-sm);
+  background: var(--surface); color: var(--fg); font: inherit; font-size: 13px;
+}
+.f-field textarea { min-height: 72px; resize: vertical; font-family: var(--font-mono); font-size: var(--text-xs); letter-spacing: 0; }
+.f-field .choice { display: flex; gap: var(--space-4); }
+.f-field .choice label { display: flex; align-items: center; gap: var(--space-2); font-weight: 400; margin: 0; }
+.f-field .choice input { accent-color: var(--accent); }
+.f-field .bounds { margin: var(--space-1) 0 0; font-family: var(--font-mono); font-size: 11px; color: var(--faint); font-weight: 400; letter-spacing: 0; }
+.f-err { margin: var(--space-1) 0 0; font-size: var(--text-xs); color: var(--danger); letter-spacing: 0.16px; }
+
+/* a schema default is the RUN's proposal, not a neutral prefill */
+.proposed {
+  margin-left: var(--space-2); color: var(--faint); font-size: 11px; letter-spacing: 0.16px;
+}
+.provenance {
+  display: flex; align-items: center; gap: var(--space-2);
+  margin: 0 0 var(--space-4); padding: var(--space-2) var(--space-3);
+  border-left: 2px solid var(--border); background: var(--wash);
+  font-size: 12px; color: var(--fg-2); letter-spacing: 0.16px;
+}
+.provenance::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--muted); flex: none; }
+
+/* ── reconciliation card: the two-choice fieldset ─────────────────────── */
+.choice-stack { display: flex; flex-direction: column; gap: var(--space-2); }
+.choice-stack label {
+  display: flex; align-items: center; gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--edge-strong); border-radius: var(--radius-sm);
+  background: var(--surface); font-weight: 400; margin: 0; font-size: 13px; cursor: pointer;
+  transition: border-color var(--motion-fast) var(--ease-standard);
+}
+.choice-stack label:hover { border-color: var(--fg); }
+.choice-stack label:has(:checked) { border-color: var(--accent); background: color-mix(in oklab, var(--accent), var(--bg) 90%); }
+.choice-stack input { accent-color: var(--accent); }
+
+/* read-only notice: the "did not reach the provider" lock block.
+   THE [hidden]-TRAP LESSON (item 14 / spec 14): this class sets its own `display`, which — same as
+   the prototype's own fixed defect — would beat the UA's `[hidden]{display:none}` were it not for
+   the override rule right below. Branch visibility here is driven ONLY by `[hidden]`, bound from
+   the reconcile card's `outcome` signal; this pair of rules is what makes that binding actually
+   take effect rather than silently rendering both branches at once. */
+.readonly {
+  display: flex; align-items: flex-start; gap: var(--space-3);
+  padding: var(--space-3) var(--space-4); margin-top: var(--space-4);
+  border: 1px dashed var(--edge-strong); border-radius: var(--radius-sm);
+  background: var(--border-soft); color: var(--fg-2);
+  font-size: 13px; letter-spacing: 0.08px; text-wrap: pretty;
+}
+.readonly[hidden] { display: none; }
+.readonly svg { flex: none; width: 15px; height: 15px; margin-top: 2px; color: var(--muted); }
+
+.confirm { display: flex; align-items: flex-start; gap: var(--space-2); margin-top: var(--space-4); font-size: 13px; color: var(--fg-2); letter-spacing: 0.08px; }
+.confirm input { accent-color: var(--accent); margin-top: 2px; }
+
+/* a resolve writes durable, immutable history — not a casual primary */
+.btn.serious { background: var(--surface); color: var(--fg); border-color: var(--fg); box-shadow: none; }
+.btn.serious:hover:not(:disabled) { background: var(--border-soft); }
+
+/* ── the effect badge (reconciliation card's evidence row) ────────────── */
+.badge {
+  display: inline-block; padding: 1px var(--space-2);
+  border-radius: var(--radius-pill);
+  font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0;
+  border: 1px solid var(--edge-strong); color: var(--muted); vertical-align: 1px;
+}
+.badge.e-write { border-color: color-mix(in oklab, var(--warn), var(--fg) 12%); color: var(--amber-ink); background: var(--amber-wash); }
+
+/* ── "show API": demoted behind a native <details>, closed by default ──
+   The committed receipt's endpoint is the documented exception and never gets this treatment — it
+   stays a plain `.endpoint` span outside any `<details>`, in the templates. */
+.api { font-family: var(--font-mono); font-size: 10px; }
+.api summary { cursor: pointer; list-style: none; color: var(--faint); letter-spacing: 0.04em; padding: 2px 0; }
+.api summary::-webkit-details-marker { display: none; }
+.api summary::before { content: '› '; }
+.api[open] summary::before { content: '⌄ '; }
+.api summary:hover { color: var(--fg-2); }
+.api summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+.api .endpoint { display: block; margin-top: 3px; }
+.endpoint { font-family: var(--font-mono); font-size: 11px; color: var(--faint); letter-spacing: 0; }
+
+.actions { display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; margin-top: var(--space-5); }
+
+/* THE FILLED ACCENT, scoped to this feature's own primary actions only — see the file banner for
+   why the bare `.btn` (already shipped, unfilled, in app.css) is reused rather than overridden. */
+.acard .actions .btn:not(.ghost):not(.serious) {
+  background: var(--accent); color: var(--accent-on); border-color: transparent;
+  box-shadow: var(--elev-raised);
+  transition: background var(--motion-fast) var(--ease-standard);
+}
+.acard .actions .btn:not(.ghost):not(.serious):hover { background: var(--accent-hover); }
+.acard .actions .btn:not(.ghost):not(.serious):active { background: var(--accent-active); }
+.acard .actions .btn:disabled,
+.acard .actions .btn:disabled:hover {
+  background: var(--surface); color: var(--faint); border-color: var(--border);
+  border-style: dashed; box-shadow: none; cursor: not-allowed;
+}
+
+/* ── the all-clear state ───────────────────────────────────────────────
+   NOT `.empty-state` (already shipped for the Inspector/Runs no-match states, a different shape) —
+   `.state` is the big-icon centered variant the prototype uses for Inbox/Spend/Workflows states. */
+.state {
+  display: grid; place-items: center; gap: var(--space-3);
+  padding: var(--space-12) var(--space-6);
+  border: 1px dashed var(--border); border-radius: var(--radius-md);
+  text-align: center; max-width: var(--well-form);
+}
+.state h4 { font-size: var(--text-xl); }
+.state p { margin: 0; max-width: 46ch; font-size: 13px; color: var(--muted); letter-spacing: 0.16px; }
+.state .mark { color: var(--border); }
+.state .mark svg { width: 56px; height: 56px; }
+.state.all-clear { border-color: color-mix(in oklab, var(--success), var(--bg) 70%); }
+.state.all-clear .mark { color: color-mix(in oklab, var(--success), var(--bg) 55%); }
+
+/* ── the Evidence panel (#inbox-panel): reads, never acts ──────────────
+   Field styles scoped under #inbox-panel so a future Workflows surface can define its own
+   panel-field language without colliding. The pre reuses the payload posture the design gives
+   wire data everywhere: mono, boxed, hairline. */
+#inbox-panel .ev-field { margin-bottom: var(--space-4); }
+#inbox-panel .ev-field .k {
+  display: block; font-family: var(--font-mono); font-size: 10px;
+  letter-spacing: 0.28px; text-transform: uppercase; color: var(--faint);
+  margin-bottom: var(--space-1);
+}
+#inbox-panel .ev-field .v { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--fg-2); letter-spacing: 0; word-break: break-word; }
+#inbox-panel .ev-field pre {
+  margin: 0; padding: var(--space-3) var(--space-4); overflow: auto; max-height: 264px;
+  background: var(--border-soft); border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono); font-size: 11.5px; line-height: 1.55;
+  color: var(--fg-2); letter-spacing: 0;
+}
+#inbox-panel .ev-why { margin: var(--space-2) 0 0; font-size: var(--text-xs); color: var(--muted); line-height: 1.5; text-wrap: pretty; letter-spacing: 0.16px; }
+#inbox-panel .ev-why b { color: var(--fg); font-weight: 500; }
+#inbox-panel .ev-empty { font-size: var(--text-xs); color: var(--muted); line-height: 1.6; text-wrap: pretty; }
+#inbox-panel .ev-empty b { color: var(--fg); font-weight: 500; }
+
+/* the per-card Evidence button sits at the head's right edge, like the prototype's ev-btn */
+.acard-head .ev-btn { margin-left: auto; }
+
+/* ── the one JSON highlighter this feature uses (json-highlight.ts) ─────
+   Same tiers/colors as the design's ledger-invariant AA pass: keys strong-ink bold, strings take
+   the accent (the dominant token in a schema/evidence payload), numbers strong ink, booleans
+   strong-ink italic, null recedes quiet and italic. No product-semantic color (amber/red/green) is
+   borrowed for a neutral value. */
+.j-key { color: var(--fg); font-weight: 600; }
+.j-str { color: var(--accent); }
+.j-num { color: var(--fg); }
+.j-bool { color: var(--fg); font-style: italic; }
+.j-null { color: var(--muted); font-style: italic; }
+
+@media (max-width: 860px) {
+  .acard { max-width: none; padding: var(--space-4); }
+}

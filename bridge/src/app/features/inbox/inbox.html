@@ -1,0 +1,157 @@
+<div class="queue">
+  <h3 class="section">Waiting on you</h3>
+
+  <div class="view-work" data-panel-dock [attr.data-panel]="panelOpen() ? 'open' : 'closed'">
+    <div>
+      <!-- THE LEDE, in the hero position: unboxed, INSIDE the left column with the cards it
+           describes (the flush-sidebar rule) — under the heading, above the first card; never a
+           boxed note fused with the apparatus that belongs at the foot. -->
+      <p class="lede">
+        Every run at <code>suspended</code>, <code>budget_exceeded</code>, or
+        <code>needs_reconciliation</code>, with the one action that unblocks it.
+      </p>
+
+      <p class="sr" role="status" aria-live="polite">{{ liveMessage() }}</p>
+
+      <div id="inbox-cards" aria-busy="false">
+        @if (!listLoaded()) {
+          <p class="stub-note">Loading the waiting-run list…</p>
+        } @else if (!parked().length) {
+          <div class="state all-clear">
+            <span class="mark" aria-hidden="true">
+              <svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path d="M4 44h56" />
+                <path d="M10 44c4-3 8-3 11 0s7 3 11 0 8-3 11 0 7 3 11 0" />
+                <path d="M32 40V12" />
+                <path d="M32 16l14 10-14 4z" />
+                <circle cx="32" cy="9" r="2.5" />
+              </svg>
+            </span>
+            <h4>All clear</h4>
+            <p>
+              No run is suspended, over budget, or awaiting reconciliation. This is the state a
+              healthy control plane sits in — runs that need a person arrive here with the one
+              action that unblocks them.
+            </p>
+          </div>
+        } @else {
+          @for (c of parked(); track c.row.run) {
+            @switch (c.kind) {
+              @case ('suspension') {
+                <bridge-suspension-card
+                  [row]="c.row"
+                  [evidencePressed]="evidenceSel() === c.row.run"
+                  (announce)="onAnnounce($event)"
+                  (committed)="onCommitted()"
+                  (evidence)="onEvidence(c.row.run)"
+                />
+              }
+              @case ('budget') {
+                <bridge-budget-card
+                  [row]="c.row"
+                  [evidencePressed]="evidenceSel() === c.row.run"
+                  (announce)="onAnnounce($event)"
+                  (committed)="onCommitted()"
+                  (evidence)="onEvidence(c.row.run)"
+                />
+              }
+              @case ('reconcile') {
+                <bridge-reconcile-card
+                  [row]="c.row"
+                  [evidencePressed]="evidenceSel() === c.row.run"
+                  (announce)="onAnnounce($event)"
+                  (committed)="onCommitted()"
+                  (evidence)="onEvidence(c.row.run)"
+                />
+              }
+            }
+          }
+        }
+      </div>
+    </div>
+
+    <!-- THE EVIDENCE PANEL: reads, never acts. Selecting a card's Evidence renders a fresh
+         GET /v1/runs/{id} here; the action stays in the card, so reading can never disturb a
+         form someone has started filling in. Cold-load COLLAPSED (tab only). -->
+    <aside class="cpanel" data-drawer data-panel="inbox" aria-label="Recorded evidence" [hidden]="!panelOpen()">
+      <div class="cpanel-head">
+        <div>
+          <h3 class="cpanel-title">{{ panelTitle() }}</h3>
+          <p class="cpanel-sub" [hidden]="!panelSub()">{{ panelSub() }}</p>
+        </div>
+        <button class="cpanel-x" type="button" aria-label="Close the evidence panel" (click)="closePanel()">×</button>
+      </div>
+      <div class="cpanel-body" id="inbox-panel">
+        @if (!evidenceSel()) {
+          <p class="ev-empty">
+            Select a card's <b>Evidence</b> to read what the run recorded. The action stays in the
+            card — reading here can never disturb a form you have started filling in.
+          </p>
+        } @else if (evidenceError()) {
+          <p class="ev-empty" role="alert">{{ evidenceError() }}</p>
+        } @else if (evidenceState(); as st) {
+          <div class="ev-field">
+            <span class="k">status</span>
+            <div class="v">{{ evidenceStatusLabel(st) }}</div>
+          </div>
+          @switch (st.status.state) {
+            @case ('needs_reconciliation') {
+              <div class="ev-field">
+                <span class="k">the recorded intent</span>
+                <div class="v"><pre [innerHTML]="evidencePendingHtml(st)"></pre></div>
+                <p class="ev-why">
+                  A write was recorded as intended, with no completion. The fold parks the run
+                  rather than guess whether the side effect landed.
+                </p>
+              </div>
+            }
+            @case ('suspended') {
+              <div class="ev-field">
+                <span class="k">reason</span>
+                <div class="v">{{ evidenceReason(st) }}</div>
+              </div>
+              <div class="ev-field">
+                <span class="k">Suspended.input_schema</span>
+                <div class="v"><pre [innerHTML]="evidenceSchemaHtml(st)"></pre></div>
+                <p class="ev-why">
+                  The Inbox form is generated from this schema — nothing is hand-written per agent.
+                </p>
+              </div>
+            }
+            @case ('budget_exceeded') {
+              <div class="ev-field">
+                <span class="k">BudgetExceeded</span>
+                <div class="v"><pre [innerHTML]="evidenceBudgetHtml(st)"></pre></div>
+                <p class="ev-why">
+                  The ceiling that was actually in force, read from this run's own event.
+                </p>
+              </div>
+            }
+          }
+          <div class="ev-field">
+            <span class="k">endpoint</span>
+            <div class="v">{{ evidenceEndpoint(st) }}</div>
+          </div>
+          <p class="ev-why">
+            <b>This panel reads; it does not act.</b> The one action that unblocks this run stays in
+            its card, so changing what you are reading can never destroy a form you have
+            half-filled.
+          </p>
+        } @else {
+          <p class="ev-empty">Reading <span class="mono">GET /v1/runs/{{ panelTitle() }}…</span></p>
+        }
+      </div>
+    </aside>
+    <button class="cpanel-tab" type="button" data-drawer data-panel="inbox" [hidden]="panelOpen()" (click)="openPanel()">Evidence</button>
+  </div>
+
+  <!-- THE FOOT APPARATUS — two blocks, not one, because these are two different kinds of statement
+       (per the hero-position rule: fusing kinds is what puts a doorstop where the lede belongs). -->
+  <p class="caption">
+    Client-driven runs are absent because <code>GET /v1/runs</code> does not enumerate them.
+  </p>
+  <p class="mechanism">
+    Suspension forms are generated from the run's own recorded
+    <code>Suspended.input_schema</code> — nothing here is hand-written per agent.
+  </p>
+</div>

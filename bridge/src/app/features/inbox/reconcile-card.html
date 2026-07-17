@@ -1,0 +1,151 @@
+<form
+  class="acard"
+  [class.committed]="receipt()"
+  [attr.id]="'card-' + ns()"
+  [attr.data-resolve]="row().run"
+  (submit)="$event.preventDefault(); submit()"
+>
+  @if (receipt(); as r) {
+    <div class="acard-head">
+      <h4>Appended to the log</h4>
+      <bridge-run-ref [id]="row().run" />
+    </div>
+    <dl class="evidence">
+      <div><dt>seq</dt><dd>{{ r.seq ?? '—' }}</dd></div>
+      <div><dt>event.kind</dt><dd>{{ r.kind }}</dd></div>
+      <div><dt>recorded_at</dt><dd>{{ r.recordedAt ?? '—' }}</dd></div>
+      <div><dt>payload</dt><dd [innerHTML]="jsonHiCompact(r.payload)"></dd></div>
+      <div><dt>status now</dt><dd>{{ r.statusState }}</dd></div>
+    </dl>
+    <p class="reason">
+      <b>Nothing was edited.</b> The run's status was not set — it was re-derived from
+      <span class="mono">GET /v1/runs/{{ ns() }}…</span> after this append.
+    </p>
+    <div class="actions">
+      <button class="btn ghost" type="button" (click)="openTimeline()">View timeline</button>
+      <span class="endpoint">{{ r.endpoint }}</span>
+    </div>
+  } @else if (intent(); as i) {
+    <div class="acard-head">
+      <h4>Reconcile a recorded write intent</h4>
+      <bridge-run-ref [id]="row().run" />
+      <button
+        class="btn ghost ev-btn"
+        type="button"
+        [attr.data-evidence]="row().run"
+        [attr.aria-pressed]="evidencePressed()"
+        (click)="evidence.emit()"
+      >
+        Evidence
+      </button>
+    </div>
+    <p class="question">Did <span class="mono">{{ i.tool }}</span> reach the provider?</p>
+    <dl class="evidence">
+      <div><dt>tool</dt><dd>{{ i.tool }}</dd></div>
+      <div><dt>effect</dt><dd><span [class]="'badge e-' + i.effect">{{ i.effect }}</span></dd></div>
+      <div>
+        <dt>idempotency_key</dt>
+        <dd [class.null]="!i.idempotencyKey">
+          {{ i.idempotencyKey ?? 'null — the call cannot be safely retried' }}
+        </dd>
+      </div>
+      <div><dt>input</dt><dd [innerHTML]="jsonHiCompact(i.input)"></dd></div>
+      <div><dt>recorded_at</dt><dd>{{ i.recordedAt }}</dd></div>
+      <div><dt>completion</dt><dd class="null">none recorded</dd></div>
+    </dl>
+
+    <p class="reason">
+      <b>Resolve appends one <span class="mono">ToolCallCompleted</span> carrying the output you
+      give it.</b>
+      On resume the loop replays that completion; it never re-executes the write. There is no way
+      to record that nothing happened — the log has no shape for an absence.
+    </p>
+
+    <fieldset class="f-field">
+      <legend>What happened? <span class="req">required</span></legend>
+      <div class="choice-stack">
+        <label
+          ><input
+            type="radio"
+            [name]="ns() + '-outcome'"
+            value="reached"
+            required
+            [checked]="outcome() === 'reached'"
+            (change)="chooseOutcome('reached')"
+          />
+          It reached the provider — I have its output</label
+        >
+        <label
+          ><input
+            type="radio"
+            [name]="ns() + '-outcome'"
+            value="not_reached"
+            [checked]="outcome() === 'not_reached'"
+            (change)="chooseOutcome('not_reached')"
+          />
+          It did not reach the provider</label
+        >
+      </div>
+    </fieldset>
+
+    <div class="f-field" data-when="reached" [hidden]="outcome() !== 'reached'">
+      <label [attr.for]="ns() + '-output'">Observed output <span class="req">required</span></label>
+      <p class="desc">
+        Exactly what the provider returned, as JSON. It becomes the completion the agent sees on
+        resume, so a typo here is recorded forever.
+      </p>
+      <textarea
+        [id]="ns() + '-output'"
+        placeholder='{"charge_id": "ch_…", "status": "succeeded"}'
+        [value]="outputText()"
+        (input)="outputText.set($any($event.target).value)"
+      ></textarea>
+      @if (submitError()) {
+        <p class="f-err" role="alert">{{ submitError() }}</p>
+      }
+    </div>
+
+    <div class="readonly" data-when="not_reached" [hidden]="outcome() !== 'not_reached'">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true">
+        <rect x="3" y="7" width="10" height="7" rx="1.5" /><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" />
+      </svg>
+      <span
+        ><b>Then perform it yourself, and come back with what it returned.</b> Resolve cannot record
+        an absence and will not retry the write for you — so the run stays parked until a real
+        completion exists to record. Run <span class="mono">{{ i.tool }}</span> manually with the
+        input above, then choose the first option and paste its output.</span
+      >
+    </div>
+
+    <label class="confirm">
+      <input
+        type="checkbox"
+        [checked]="confirmed()"
+        (change)="setConfirmed($any($event.target).checked)"
+      />
+      I understand this appends immutable history to the run's log.
+    </label>
+
+    <div class="actions">
+      <button class="btn serious" type="submit" [disabled]="!canSubmit()">Record outcome</button>
+      <button class="btn ghost" type="button" (click)="openTimeline()">View timeline</button>
+      <details class="api">
+        <summary>show API</summary>
+        <span class="endpoint">{{ endpoint() }}</span>
+      </details>
+    </div>
+  } @else if (loadError()) {
+    <div class="acard-head">
+      <h4>Reconcile a recorded write intent</h4>
+      <bridge-run-ref [id]="row().run" />
+    </div>
+    <p class="reason" role="alert">{{ loadError() }}</p>
+    <button class="btn ghost" type="button" (click)="openTimeline()">View timeline</button>
+  } @else {
+    <div class="acard-head">
+      <h4>Reconcile a recorded write intent</h4>
+      <bridge-run-ref [id]="row().run" />
+    </div>
+    <p class="reason">Reading the recorded intent…</p>
+  }
+</form>

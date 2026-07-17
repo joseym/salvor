@@ -1,0 +1,98 @@
+<form
+  class="acard"
+  [class.committed]="receipt()"
+  [attr.id]="'card-' + ns()"
+  [attr.data-raise]="row().run"
+  (submit)="$event.preventDefault(); submit()"
+>
+  @if (receipt(); as r) {
+    <div class="acard-head">
+      <h4>Appended to the log</h4>
+      <bridge-run-ref [id]="row().run" />
+    </div>
+    <dl class="evidence">
+      <div><dt>seq</dt><dd>{{ r.seq ?? '—' }}</dd></div>
+      <div><dt>event.kind</dt><dd>{{ r.kind }}</dd></div>
+      <div><dt>recorded_at</dt><dd>{{ r.recordedAt ?? '—' }}</dd></div>
+      <div><dt>payload</dt><dd [innerHTML]="jsonHiCompact(r.payload)"></dd></div>
+      <div><dt>status now</dt><dd>{{ r.statusState }}</dd></div>
+    </dl>
+    <p class="reason">
+      <b>Nothing was edited.</b> The run's status was not set — it was re-derived from
+      <span class="mono">GET /v1/runs/{{ ns() }}…</span> after this append.
+    </p>
+    <div class="actions">
+      <button class="btn ghost" type="button" (click)="openTimeline()">View timeline</button>
+      <span class="endpoint">{{ r.endpoint }}</span>
+    </div>
+  } @else if (budget(); as b) {
+    <div class="acard-head">
+      <h4>Budget ceiling crossed</h4>
+      <bridge-run-ref [id]="row().run" />
+      <button
+        class="btn ghost ev-btn"
+        type="button"
+        [attr.data-evidence]="row().run"
+        [attr.aria-pressed]="evidencePressed()"
+        (click)="evidence.emit()"
+      >
+        Evidence
+      </button>
+    </div>
+    <p class="reason">
+      The run stopped when its declared <span class="mono">{{ kindLabel() }}</span> ceiling was
+      crossed.
+    </p>
+    <dl class="evidence">
+      <div><dt>limit</dt><dd>{{ kindLabel() }}</dd></div>
+      <div><dt>declared</dt><dd>{{ formatted(b.limit) }}</dd></div>
+      <div><dt>observed</dt><dd class="null">{{ formatted(b.observed) }}</dd></div>
+      @if (row().usage; as usage) {
+        <div>
+          <dt>tokens so far</dt>
+          <dd>{{ usage.inputTokens.toLocaleString('en-US') }} in / {{ usage.outputTokens.toLocaleString('en-US') }} out</dd>
+        </div>
+      }
+    </dl>
+    <p class="provenance">
+      This run proposed nothing — a <span class="mono">BudgetExceeded</span> event carries only the
+      limit and the observed spend. <b>{{ formatted(propose()) }} is this dashboard's suggestion</b>,
+      twice the declared ceiling. It is a starting point, not a recommendation.
+    </p>
+    <div class="f-field">
+      <label [attr.for]="ns() + '-limit'">New ceiling ({{ kindLabel() }}) <span class="req">required</span></label>
+      <p class="desc">
+        Must be at least {{ formatted(floor()) }} — the run has already spent
+        {{ formatted(b.observed) }}, and a ceiling below that would park it again on its next call.
+        Raising the limit and resuming re-drives the run from its recorded log — no completed call
+        is re-paid.
+      </p>
+      <input
+        type="number"
+        [id]="ns() + '-limit'"
+        step="0.01"
+        [attr.min]="floor()"
+        [value]="newLimit()"
+        required
+        (input)="setLimit($any($event.target).value)"
+      />
+      @if (submitError()) {
+        <p class="f-err" role="alert">{{ submitError() }}</p>
+      }
+    </div>
+    <div class="actions">
+      <button class="btn" type="submit" [disabled]="submitting()">Raise limit and resume</button>
+      <button class="btn ghost" type="button" (click)="openTimeline()">View timeline</button>
+      <details class="api">
+        <summary>show API</summary>
+        <span class="endpoint">{{ endpoint() }}</span>
+      </details>
+    </div>
+  } @else {
+    <p class="reason">
+      This run's <span class="mono">budget_exceeded</span> status did not carry a readable budget
+      object — the card cannot compute a safe floor. See the run in the Inspector.
+    </p>
+    <button class="btn ghost" type="button" (click)="openTimeline()">View timeline</button>
+  }
+</form>
