@@ -1,6 +1,6 @@
 import type { SalvorEvent } from '@salvor/client';
 
-import { esc, pretty } from './json-hi';
+import { esc, pretty } from '../../shared/json-hi';
 import { callCost, int, usd } from './pricing';
 import { costOfPrefix } from './state-model';
 

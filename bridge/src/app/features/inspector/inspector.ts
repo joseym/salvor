@@ -18,7 +18,7 @@ import { ViewService } from '../../core/view';
 import { groupOf, labelOf } from '../runs/run-model';
 import { SERVER_CAPABILITIES, forkOffered } from './capability';
 import { KINDS, clock, renderStripHtml, renderTimelineHtml } from './event-model';
-import { esc } from './json-hi';
+import { esc } from '../../shared/json-hi';
 import { type CostTotal, int, usd } from './pricing';
 import {
   agentOf,

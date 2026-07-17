@@ -3,7 +3,7 @@ import type { RunSummary } from '@salvor/client';
 
 import { RunDetailService, SALVOR_CLIENT, errorMessage } from '../../core/api';
 import { ViewService } from '../../core/view';
-import { jsonHi } from './json-highlight';
+import { jsonHi } from '../../shared/json-hi';
 import { type ReceiptVM, buildReceipt, shortId } from './inbox-model';
 import { RunRef } from './run-ref';
 import {

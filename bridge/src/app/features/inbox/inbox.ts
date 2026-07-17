@@ -6,7 +6,7 @@ import { focusWhenRendered } from '../../core/focus';
 import { labelOf } from '../runs/run-model';
 import { BudgetCard } from './budget-card';
 import { shortId } from './inbox-model';
-import { jsonHi } from './json-highlight';
+import { jsonHi } from '../../shared/json-hi';
 import { ReconcileCard } from './reconcile-card';
 import { SuspensionCard } from './suspension-card';
 

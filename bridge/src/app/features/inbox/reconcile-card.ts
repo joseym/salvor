@@ -20,7 +20,7 @@ import {
   reconcileIntentFrom,
   shortId,
 } from './inbox-model';
-import { jsonHi } from './json-highlight';
+import { jsonHi } from '../../shared/json-hi';
 import { RunRef } from './run-ref';
 
 /** The reconcile card's own branch state. A class that sets its own `display` beats the UA's

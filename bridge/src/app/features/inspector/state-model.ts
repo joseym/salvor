@@ -1,7 +1,7 @@
 import type { SalvorEvent } from '@salvor/client';
 
 import { GROUP, LABEL, groupOf, labelOf } from '../runs/run-model';
-import { esc } from './json-hi';
+import { esc } from '../../shared/json-hi';
 import { type CompletedCall, type CostTotal, costOf, int } from './pricing';
 import type { RunStateJson, RunStatusJson } from './wasm-fold';
 

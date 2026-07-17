@@ -201,7 +201,7 @@
 /* the per-card Evidence button sits at the head's right edge */
 .acard-head .ev-btn { margin-left: auto; }
 
-/* ── the one JSON highlighter this feature uses (json-highlight.ts) ─────
+/* ── the shared JSON highlighter's token classes (shared/json-hi.ts) ─────
    Same tiers/colors as the design's ledger-invariant AA pass: keys strong-ink bold, strings take
    the accent (the dominant token in a schema/evidence payload), numbers strong ink, booleans
    strong-ink italic, null recedes quiet and italic. No product-semantic color (amber/red/green) is

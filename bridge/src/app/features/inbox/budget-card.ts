@@ -15,7 +15,7 @@ import {
   parseBudgetInfo,
   shortId,
 } from './inbox-model';
-import { jsonHi } from './json-highlight';
+import { jsonHi } from '../../shared/json-hi';
 import { RunRef } from './run-ref';
 
 /**
