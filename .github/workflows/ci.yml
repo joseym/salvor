@@ -106,3 +106,69 @@ jobs:
           node crates/salvor-replay-wasm/js/same-fold.mjs
           node crates/salvor-replay-wasm/js/surface.mjs
           node crates/salvor-replay-wasm/js/latency.mjs
+
+  # The embedded-dashboard build. It is its own job, not a step bolted onto the
+  # `test` job, on purpose: the test job stays a fast, pure-Rust feedback loop.
+  # It compiles the default `ui` feature without a dashboard present — build.rs
+  # creates the empty asset folder so the embed macro resolves, and a debug
+  # build reads that folder at request time rather than baking it in, so no
+  # frontend toolchain is needed to run the Rust tests. Baking the real assets
+  # into a release binary is a distinct concern, and this job owns it end to
+  # end: build the wasm fold package and the TypeScript client the app depends
+  # on, build the Angular app, then build the release binary and confirm it
+  # embeds a non-trivial dashboard. That last step is the whole point of the
+  # `ui` feature, so it gets a dedicated proof rather than riding along on unit
+  # tests that never exercise it.
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: latest
+
+      # The fold package the Bridge imports (bridge/package.json depends on it
+      # by path). Same invocation the replay-wasm job's --target web build uses.
+      - name: Build the wasm fold package (--target web)
+        run: wasm-pack build crates/salvor-replay-wasm --target web --out-dir pkg --out-name salvor_replay_wasm
+
+      # The TypeScript client the Bridge imports by path (@salvor/client).
+      - name: Build the TypeScript client
+        run: |
+          npm ci --prefix sdks/typescript
+          npm run build --prefix sdks/typescript
+
+      # The Angular production app: the token gate then `ng build`, into
+      # bridge/dist/bridge/browser, which the release binary embeds.
+      - name: Build the Bridge app
+        run: |
+          npm ci --prefix bridge
+          npm run build --prefix bridge
+
+      # The proof: a release binary built after the app exists bakes the
+      # dashboard in. A non-trivial embed (the index and the wasm fold present)
+      # confirms the `ui` feature shipped assets rather than the honest note.
+      - name: Build the release binary (embeds the dashboard)
+        run: cargo build --release -p salvor-cli
+
+      - name: Confirm the dashboard was embedded
+        run: |
+          test -s bridge/dist/bridge/browser/index.html
+          test -s bridge/dist/bridge/browser/salvor_replay_wasm_bg.wasm
+          strings target/release/salvor | grep -q 'data-beasties-container'
