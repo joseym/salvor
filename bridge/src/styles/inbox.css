@@ -78,10 +78,11 @@
   margin-left: var(--space-2); color: var(--faint); font-size: 11px; letter-spacing: 0.16px;
 }
 .provenance {
-  display: flex; align-items: center; gap: var(--space-2);
+  display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-1) var(--space-2);
   margin: 0 0 var(--space-4); padding: var(--space-2) var(--space-3);
   border-left: 2px solid var(--border); background: var(--wash);
   font-size: 12px; color: var(--fg-2); letter-spacing: 0.16px;
+  min-width: 0; /* wrap the run id + endpoint path onto new lines rather than push the card wide */
 }
 .provenance::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--muted); flex: none; }
 
@@ -140,7 +141,7 @@
 .api summary:hover { color: var(--fg-2); }
 .api summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
 .api .endpoint { display: block; margin-top: 3px; }
-.endpoint { font-family: var(--font-mono); font-size: 11px; color: var(--faint); letter-spacing: 0; }
+.endpoint { font-family: var(--font-mono); font-size: 11px; color: var(--faint); letter-spacing: 0; min-width: 0; overflow-wrap: anywhere; }
 
 .actions { display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; margin-top: var(--space-5); }
 

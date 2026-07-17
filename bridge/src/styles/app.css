@@ -416,6 +416,15 @@
   .nav-btn { min-height: 32px; padding: var(--space-1) var(--space-2); }
   #nav-toggle { display: none; }
 
+  /* The topbar wraps instead of running off the strip: the title/dot key stay on the first line,
+     the subtitle takes its own line, and the honesty chip + jump controls flow below. Nothing
+     forces the page to scroll sideways. */
+  .topbar { flex-wrap: wrap; gap: var(--space-2) var(--space-3); padding: var(--space-4) var(--space-4) var(--space-3); }
+  .topbar .sub { flex-basis: 100%; order: 3; }
+  .topbar .wf-spec { order: 4; }
+  .topbar .palette-open { order: 5; }
+  .topbar h2 { font-size: var(--text-xl); }
+
   /* the selection drawer starts BELOW the strip (measured --nav-h), never over it */
   .cpanel[data-drawer] { position: fixed; inset: var(--nav-h, 0px) 0 0 auto; z-index: 60; width: min(420px, 92vw); max-height: none; overflow-y: auto; overscroll-behavior: contain; margin: 0; padding: var(--space-5); background: var(--surface); border: 0; border-left: 1px solid var(--rule-firm); box-shadow: var(--elev-raised); }
   .cpanel-tab[data-drawer] { position: fixed; right: 0; top: 50%; translate: 0 -50%; z-index: 59; writing-mode: vertical-rl; width: auto; margin: 0; padding: var(--space-3) 5px; border-radius: var(--radius-sm) 0 0 var(--radius-sm); box-shadow: var(--elev-raised); }
