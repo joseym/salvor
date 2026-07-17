@@ -17,7 +17,7 @@ import { RunsService } from '../../core/api';
 import { ViewService } from '../../core/view';
 import { groupOf, labelOf } from '../runs/run-model';
 import { SERVER_CAPABILITIES, forkOffered } from './capability';
-import { KINDS, clock, renderStripHtml, renderTimelineHtml } from './event-model';
+import { KINDS, clock, renderStripHtml, renderTimelineHtml, zoneOf } from './event-model';
 import { esc } from '../../shared/json-hi';
 import { type CostTotal, int, usd } from './pricing';
 import {
@@ -403,12 +403,29 @@ export class Inspector implements AfterViewInit {
 
     this.renderForkHere(n);
 
-    // dim/cut on timeline rows
+    // The three scrub zones on timeline rows — folded (no class), boundary (the event under the
+    // playhead, seq n-1), beyond (dimmed, seq >= n). `zoneOf` is the single source of truth so
+    // this toggle and its unit tests cannot drift apart.
+    let boundaryRow: HTMLElement | undefined;
     this.timelineEl?.nativeElement.querySelectorAll<HTMLElement>('.levent').forEach((row) => {
       const seq = Number(row.dataset['seq']);
-      row.classList.toggle('dim', seq >= n);
-      row.classList.toggle('cut', seq === n && n > 0);
+      const zone = zoneOf(seq, n);
+      row.classList.toggle('boundary', zone === 'boundary');
+      row.classList.toggle('dim', zone === 'beyond');
+      if (zone === 'boundary') boundaryRow = row;
     });
+    // FOLLOW — keep the boundary row in view WHILE SCRUBBING, and only then. `.dragging` on the
+    // scrub element is the single "actively scrubbing" predicate: the range's pointer + keyboard
+    // handlers (onRangeGrab/onRangeRelease) and the tick strip (wireStrip) both set it; a
+    // re-render triggered by a live append or a filter change never does, so browsing the log by
+    // hand is never hijacked. This is the same respect-the-reading-position principle as the live
+    // ticker's hold-on-scrub-back: THAT decides whether the PLAYHEAD advances when a new event
+    // arrives; THIS decides whether the VIEWPORT moves during a drag. They cannot fight — the
+    // ticker is not a drag and so never sets `.dragging`. A boundary row hidden by the kind/node
+    // filter is not chased.
+    if (n > 0 && boundaryRow && !boundaryRow.hidden && this.scrubEl()?.classList.contains('dragging')) {
+      this.followBoundary(boundaryRow);
+    }
     // future on ticks
     this.stripEl?.nativeElement.querySelectorAll<HTMLElement>('.etick').forEach((t) => {
       t.classList.toggle('future', Number(t.dataset['scrub']) >= n);
@@ -497,6 +514,32 @@ export class Inspector implements AfterViewInit {
     return this.stripEl?.nativeElement.closest('.scrub') as HTMLElement | undefined;
   }
 
+  /**
+   * Scroll the DOCUMENT so the boundary row sits in a comfortable upper band — never
+   * `scrollIntoView`, which can drag an unrelated ancestor's scroll position along with it. It
+   * only nudges when the row has drifted OUT of the band, so a steady drag does not thrash the
+   * page. `topGuard` clears the sticky column-head (`.lhead`) rather than a hardcoded pixel
+   * figure, since it is measured, not assumed. `bandBottom` tracks the scrubber panel's own top
+   * IF it is ever docked at the viewport bottom (this build always renders it as the sticky
+   * 340px side column, so that branch is inert today but keeps the contract if a narrow layout
+   * ever docks it) — otherwise the floor is the viewport bottom. Smooth unless reduced motion.
+   */
+  private followBoundary(row: HTMLElement): void {
+    const r = row.getBoundingClientRect();
+    const lhead = document.querySelector('.lhead');
+    const topGuard = lhead ? lhead.getBoundingClientRect().bottom + 12 : 130;
+    let bandBottom = window.innerHeight;
+    const panel = document.querySelector('.cpanel[data-panel="inspector"]');
+    if (panel) {
+      const p = panel.getBoundingClientRect();
+      if (p.top > window.innerHeight * 0.4 && p.bottom >= window.innerHeight - 2) bandBottom = p.top;
+    }
+    if (r.top >= topGuard && r.bottom <= bandBottom - 8) return; // already comfortably in view
+    const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const target = r.top + window.scrollY - (topGuard + 40);
+    window.scrollTo({ top: Math.max(0, target), behavior: reduced ? 'auto' : 'smooth' });
+  }
+
   foldAll(): void {
     this.setPrefix(this.events().length);
   }
@@ -536,7 +579,7 @@ export class Inspector implements AfterViewInit {
     strip.addEventListener('pointermove', (e) => {
       if (dragging) this.scrubFromX(e.clientX);
     });
-    strip.addEventListener('pointerup', (e) => {
+    const release = (e: PointerEvent): void => {
       dragging = false;
       this.scrubEl()?.classList.remove('dragging');
       try {
@@ -544,7 +587,9 @@ export class Inspector implements AfterViewInit {
       } catch {
         /* capture may already be gone */
       }
-    });
+    };
+    strip.addEventListener('pointerup', release);
+    strip.addEventListener('pointercancel', release);
     // every tick is also a real button: a click (mouse or keyboard Enter) folds through its seq
     strip.addEventListener('click', (e) => {
       const t = (e.target as HTMLElement).closest<HTMLElement>('[data-scrub]');

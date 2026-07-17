@@ -80,6 +80,21 @@ export function forkOf(events: readonly SalvorEvent[]): SalvorEvent | null {
   return events.find((e) => e.kind === 'ForkedFrom') ?? null;
 }
 
+/**
+ * The scrub zone a timeline row falls into, given the fold prefix length `n` (the scrubber's
+ * `prefix`, i.e. `derive_state(&log[0..n])`): `folded` (already inside the derived state),
+ * `boundary` (seq n−1 — the event under the playhead, the LAST folded one), or `beyond` (seq ≥
+ * n — in the log but not yet folded). Pure, so `renderScrubber`'s DOM class toggle and its unit
+ * tests share one source of truth for the boundary math. This replaces the old bug of accenting
+ * seq === n (the first EXCLUDED event) instead of the one actually under the playhead.
+ */
+export type ScrubZone = 'folded' | 'boundary' | 'beyond';
+export function zoneOf(seq: number, n: number): ScrubZone {
+  if (seq >= n) return 'beyond';
+  if (n > 0 && seq === n - 1) return 'boundary';
+  return 'folded';
+}
+
 /** One log row's full `.levent` HTML, over a decoded {@link SalvorEvent}. */
 export function rowOf(e: SalvorEvent, events: readonly SalvorEvent[], arrivedSeq: number | null): string {
   const p = e.payload;

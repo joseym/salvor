@@ -254,12 +254,44 @@
 .levent[hidden] {
   display: none;
 }
-.levent.cut {
-  border-top: 1px solid var(--accent);
+
+/* THE FOLD BOUNDARY — the event under the playhead, the LAST one inside
+   the derived prefix (seq n-1). The old treatment put a lone 1px top-accent border on the FIRST
+   row beyond the fold: a near-invisible hairline that accented the wrong event (the first
+   EXCLUDED one, not the one in focus). It now marks the right row with the app's own selection
+   vocabulary — blue = state, never status: an accent left rail (the same inset-3px channel the
+   status rails use), an accent wash, an accent-bold seq, a fold line on the lower edge, and a
+   knob that echoes the scrub playhead. The wash is a colour TINT, not an opacity drop, so text
+   underneath keeps its contrast ratio. `content-visibility: visible` takes the boundary row out
+   of the timeline's off-screen layout/paint skip (`.levent` below) so its geometry — read by the
+   follow-scroll below — and its paint are never subject to the virtualization estimate. */
+.levent.boundary {
+  content-visibility: visible;
+  border-bottom: 1px solid var(--accent);
 }
-.levent.cut .seq {
+.levent.boundary .lrow {
+  background: color-mix(in oklab, var(--accent), var(--bg) 88%);
+  box-shadow: inset 3px 0 0 0 var(--accent);
+}
+.levent.boundary .lrow:hover {
+  background: color-mix(in oklab, var(--accent), var(--bg) 80%);
+}
+.levent.boundary .seq {
   color: var(--accent);
   font-weight: 700;
+}
+.levent.boundary::after {
+  content: '';
+  position: absolute;
+  left: 40px;
+  bottom: -4px;
+  z-index: 2;
+  width: 7px;
+  height: 7px;
+  transform: translateX(-50%);
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--bg); /* a knob straddling the fold line, echoing the playhead */
 }
 .lrow {
   display: grid;
@@ -438,7 +470,17 @@
   max-width: 72ch;
 }
 
-/* past the scrubber prefix — recoloured, not opacity-dimmed */
+/* THE BEYOND ZONE — past the scrubber prefix: in the log, not yet
+   folded. Text is recoloured, never opacity-dimmed (an opacity drop takes it under 4.5:1). The
+   row also carries a faint RECESSED wash — a 4% fg tint UNDER the text, not on it — so folded /
+   boundary / beyond read as three distinct bands from across the room, which a pure text-colour
+   change alone could not do. */
+.levent.dim .lrow {
+  background: color-mix(in oklab, var(--fg), transparent 96%);
+}
+.levent.dim .lrow:hover {
+  background: color-mix(in oklab, var(--fg), transparent 91%);
+}
 .levent.dim .kchip,
 .levent.dim .ldetail,
 .levent.dim .ldetail b {

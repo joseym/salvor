@@ -71,7 +71,7 @@
         <div #stripEl class="estrip" id="estrip" role="group" aria-label="Fold through an event"></div>
         <div #playheadEl class="playhead" id="playhead" hidden></div>
         <label class="sr" for="prefix">Prefix length — the number of events folded</label>
-        <input #prefixEl type="range" class="scrub-range" id="prefix" min="0" [max]="eventCount()" [value]="prefixN()" step="1" (input)="onRangeInput($event)" (pointerdown)="onRangeGrab()" (keydown)="onRangeGrab()" (pointerup)="onRangeRelease()" (keyup)="onRangeRelease()" (blur)="onRangeRelease()" />
+        <input #prefixEl type="range" class="scrub-range" id="prefix" min="0" [max]="eventCount()" [value]="prefixN()" step="1" (input)="onRangeInput($event)" (pointerdown)="onRangeGrab()" (keydown)="onRangeGrab()" (pointerup)="onRangeRelease()" (pointercancel)="onRangeRelease()" (keyup)="onRangeRelease()" (blur)="onRangeRelease()" />
         <div class="scrub-ends">
           <span>seq 0</span>
           <span class="now-group">
