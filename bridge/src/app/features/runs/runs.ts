@@ -267,6 +267,10 @@ export class Runs {
     if (this.acOpen() && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
       e.preventDefault();
       this.acMove(e.key === 'ArrowDown' ? 1 : -1);
+      // Reflect the active option onto the input now, not on the next change-detection pass, so a
+      // screen reader hears the move immediately as the arrow key is pressed.
+      const active = this.activeDescendant();
+      if (active) el.setAttribute('aria-activedescendant', active);
       return;
     }
     if (e.key === ' ' || e.key === 'Tab') {

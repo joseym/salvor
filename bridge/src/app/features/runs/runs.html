@@ -3,13 +3,13 @@
      fetched. Each figure is a real filter term. -->
 <div class="health" id="run-health" data-od-id="run-health">
   <span class="health-k">Run health</span>
-  <button class="health-n" type="button" (click)="toggleTerm('status:running')">
+  <button class="health-n" type="button" data-term="status:running" [attr.aria-pressed]="chipPressed('status:running')" (click)="toggleTerm('status:running')">
     <b>{{ runningCount() }}</b> running
   </button>
-  <button class="health-n is-attn" type="button" (click)="toggleTerm('group:waiting')">
+  <button class="health-n is-attn" type="button" data-term="group:waiting" [attr.aria-pressed]="chipPressed('group:waiting')" (click)="toggleTerm('group:waiting')">
     <b>{{ counts().waiting }}</b> waiting on you
   </button>
-  <button class="health-n is-fail" type="button" (click)="toggleTerm('status:failed')">
+  <button class="health-n is-fail" type="button" data-term="status:failed" [attr.aria-pressed]="chipPressed('status:failed')" (click)="toggleTerm('status:failed')">
     <b>{{ failedCount() }}</b> failed
   </button>
   <span class="health-as"
@@ -56,6 +56,7 @@
       spellcheck="false"
       role="combobox"
       [attr.aria-expanded]="acOpen()"
+      [attr.aria-invalid]="qInvalid() ? 'true' : null"
       aria-autocomplete="list"
       aria-controls="qac"
       [attr.aria-activedescendant]="activeDescendant()"
@@ -254,11 +255,8 @@
           </div>
           <div>
             <dt>step_count</dt>
-            <dd>
-              @if (has(r.stepCount)) { {{ r.stepCount }} } @else {
-                <span class="unavail" tabindex="0" [attr.title]="whyUnreadable" [attr.aria-label]="'Unavailable. ' + whyUnreadable">—</span>
-              }
-            </dd>
+            <!-- value rendered tight against the cell so the dd's text is the bare number -->
+            <dd>@if (has(r.stepCount)) {<span class="mono">{{ r.stepCount }}</span>} @else {<span class="unavail" tabindex="0" [attr.title]="whyUnreadable" [attr.aria-label]="'Unavailable. ' + whyUnreadable">—</span>}</dd>
           </div>
           <div>
             <dt>cost</dt>

@@ -65,12 +65,14 @@
 
       <!-- This build talks to a REAL control plane, so Runs and the Inspector read the live
            server — no fixtures involved. What's still true is that there is NO graph engine (v0.4):
-           Workflows/fork have no runtime behind them. The chip states that. -->
-      <button class="wf-spec" type="button" id="spec-chip" aria-haspopup="dialog" title="This dashboard reads a real Salvor control plane. There is no graph engine yet (v0.4): Workflows and fork have no runtime behind them.">
+           Workflows and fork have no runtime behind them. The chip states that. It is a status,
+           not a control: nothing opens from it, so it carries no button or popup semantics — its
+           full sentence is its accessible name. -->
+      <span class="wf-spec" id="spec-chip" role="note" aria-label="This dashboard reads a real Salvor control plane. There is no graph engine yet: Workflows and fork have no runtime behind them.">
         <span class="spec-dot" aria-hidden="true"></span>Live control plane · no graph engine
-      </button>
+      </span>
 
-      <button class="palette-open" type="button" id="palette-open" aria-haspopup="dialog" title="Jump to a run, a graph or a view" (click)="openPalette()">
+      <button class="palette-open" type="button" id="palette-open" aria-haspopup="dialog" title="Jump to a run or a view" (click)="openPalette()">
         Jump to… <kbd class="kbd">⌘K</kbd>
       </button>
       <button class="palette-open keys-open" type="button" id="keys-open" aria-haspopup="dialog" title="Keyboard shortcuts" (click)="openKeys()">
