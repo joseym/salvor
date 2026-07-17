@@ -67,7 +67,7 @@ use thiserror::Error;
 use time::OffsetDateTime;
 
 use crate::effect::Effect;
-use crate::event::{Budget, Event, EventEnvelope, TokenUsage};
+use crate::event::{Budget, Event, EventEnvelope, ForkOrigin, TokenUsage};
 use crate::id::{RunId, SequenceNumber};
 
 /// How the cursor answered a request: from recorded history, or with a
@@ -131,6 +131,21 @@ pub enum RequestedStep {
     Begin {
         /// The hash orchestration presented.
         agent_def_hash: String,
+    },
+    /// [`ReplayCursor::begin_graph`] with this graph document hash.
+    BeginGraph {
+        /// The graph hash orchestration presented.
+        graph_hash: String,
+    },
+    /// [`ReplayCursor::node_entered`] for this node.
+    NodeEntered {
+        /// The node id orchestration presented.
+        node: String,
+    },
+    /// [`ReplayCursor::node_exited`] for this node.
+    NodeExited {
+        /// The node id orchestration presented.
+        node: String,
     },
     /// [`ReplayCursor::now`].
     Now,
@@ -408,6 +423,120 @@ impl ReplayCursor {
             labels,
             cursor: self,
         }))
+    }
+
+    /// Requests the start of a graph run.
+    ///
+    /// The graph-run counterpart of [`begin`](ReplayCursor::begin): the log
+    /// opens with [`Event::GraphRunStarted`] rather than [`Event::RunStarted`],
+    /// because a graph run coordinates many agent hashes and has none at its
+    /// head. Replayed: verifies `graph_hash` against the recorded head (a
+    /// changed graph document must not silently resume an old run) and returns
+    /// the recorded input. Live: returns a [`GraphBeginPermit`] the caller
+    /// redeems with the run's input.
+    ///
+    /// `labels` and `forked_from` land on a genuinely fresh
+    /// [`Event::GraphRunStarted`]; they play no part in replay, exactly as
+    /// [`begin`](ReplayCursor::begin)'s `labels` do. Bounds on `labels` are not
+    /// checked here; a caller enforces them before calling.
+    ///
+    /// # Errors
+    ///
+    /// [`ReplayError::Divergence`] on a hash mismatch, a different recorded
+    /// event, or a request after the run already ended.
+    pub fn begin_graph(
+        &mut self,
+        graph_hash: &str,
+        labels: Option<BTreeMap<String, String>>,
+        forked_from: Option<ForkOrigin>,
+    ) -> Result<Outcome<Value, GraphBeginPermit<'_>>, ReplayError> {
+        let requested = RequestedStep::BeginGraph {
+            graph_hash: graph_hash.to_owned(),
+        };
+        self.guard_terminal(&requested)?;
+        if self.pos < self.log.len() {
+            // Only the graph hash is compared; the recorded event (labels and
+            // fork origin included) wins, exactly as the recorded input does.
+            if let Event::GraphRunStarted {
+                graph_hash: recorded_hash,
+                input,
+                ..
+            } = &self.log[self.pos].event
+                && recorded_hash == graph_hash
+            {
+                let input = input.clone();
+                self.pos += 1;
+                return Ok(Outcome::Replayed(input));
+            }
+            return Err(self.mismatch(requested));
+        }
+        Ok(Outcome::Live(GraphBeginPermit {
+            graph_hash: graph_hash.to_owned(),
+            labels,
+            forked_from,
+            cursor: self,
+        }))
+    }
+
+    /// Requests entry into a graph node.
+    ///
+    /// Replayed: matches the recorded [`Event::NodeEntered`] for `node`. Live:
+    /// returns the event to persist. A graph node's own events (an agent loop's
+    /// model calls, a tool call) are recorded between this and the matching
+    /// [`node_exited`](ReplayCursor::node_exited).
+    ///
+    /// # Errors
+    ///
+    /// [`ReplayError::Divergence`] on a node-id mismatch, a different recorded
+    /// event, or a request after the run already ended.
+    pub fn node_entered(&mut self, node: &str) -> Result<Outcome<(), Emitted>, ReplayError> {
+        let requested = RequestedStep::NodeEntered {
+            node: node.to_owned(),
+        };
+        self.guard_terminal(&requested)?;
+        if self.pos < self.log.len() {
+            if let Event::NodeEntered { node: recorded } = &self.log[self.pos].event
+                && recorded == node
+            {
+                self.pos += 1;
+                return Ok(Outcome::Replayed(()));
+            }
+            return Err(self.mismatch(requested));
+        }
+        let emitted = self.emit(Event::NodeEntered {
+            node: node.to_owned(),
+        });
+        Ok(Outcome::Live(emitted))
+    }
+
+    /// Requests exit from a graph node, having produced its output.
+    ///
+    /// Replayed: matches the recorded [`Event::NodeExited`] for `node`. Live:
+    /// returns the event to persist. The counterpart of
+    /// [`node_entered`](ReplayCursor::node_entered).
+    ///
+    /// # Errors
+    ///
+    /// [`ReplayError::Divergence`] on a node-id mismatch, a different recorded
+    /// event, or a request after the run already ended.
+    pub fn node_exited(&mut self, node: &str) -> Result<Outcome<(), Emitted>, ReplayError> {
+        let requested = RequestedStep::NodeExited {
+            node: node.to_owned(),
+        };
+        self.guard_terminal(&requested)?;
+        if self.pos < self.log.len() {
+            if let Event::NodeExited { node: recorded } = &self.log[self.pos].event
+                && recorded == node
+            {
+                self.pos += 1;
+                return Ok(Outcome::Replayed(()));
+            }
+            return Err(self.mismatch(requested));
+        }
+        let emitted = self.emit(Event::NodeExited {
+            node: node.to_owned(),
+        });
+        Ok(Outcome::Live(emitted))
     }
 
     /// Requests the current time.
@@ -900,6 +1029,36 @@ impl BeginPermit<'_> {
     }
 }
 
+/// Live permission to start a fresh graph run.
+///
+/// Handed out by [`ReplayCursor::begin_graph`] when the log is empty. Redeem it
+/// with the run's input to obtain the [`Event::GraphRunStarted`] to persist.
+/// The `labels` and `forked_from` passed to
+/// [`begin_graph`](ReplayCursor::begin_graph) ride along and land on the
+/// recorded event unchanged.
+#[derive(Debug)]
+pub struct GraphBeginPermit<'c> {
+    graph_hash: String,
+    labels: Option<BTreeMap<String, String>>,
+    forked_from: Option<ForkOrigin>,
+    cursor: &'c mut ReplayCursor,
+}
+
+impl GraphBeginPermit<'_> {
+    /// Records the graph-run start with this input, returning the event to
+    /// persist. Orchestration proceeds with the same input it passed here.
+    #[must_use]
+    pub fn record(self, input: Value) -> Emitted {
+        let event = Event::GraphRunStarted {
+            graph_hash: self.graph_hash,
+            input,
+            labels: self.labels,
+            forked_from: self.forked_from,
+        };
+        self.cursor.emit(event)
+    }
+}
+
 /// Live permission to observe the clock.
 ///
 /// Handed out by [`ReplayCursor::now`] once history is exhausted. The caller
@@ -1089,6 +1248,9 @@ impl fmt::Display for RequestedStep {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Begin { agent_def_hash } => write!(f, "Begin(agent_def_hash={agent_def_hash})"),
+            Self::BeginGraph { graph_hash } => write!(f, "BeginGraph(graph_hash={graph_hash})"),
+            Self::NodeEntered { node } => write!(f, "NodeEntered(node={node})"),
+            Self::NodeExited { node } => write!(f, "NodeExited(node={node})"),
             Self::Now => write!(f, "Now"),
             Self::Random => write!(f, "Random"),
             Self::ModelCall { request_hash } => write!(f, "ModelCall(request_hash={request_hash})"),
@@ -1190,5 +1352,105 @@ mod tests {
         let cursor = ReplayCursor::new(log).expect("a graph run head is a legal first event");
         assert_eq!(cursor.run_id(), Some(run_id));
         assert!(cursor.is_replaying());
+    }
+
+    /// Driving `begin_graph`, `node_entered`, `node_exited` live emits the graph
+    /// markers at contiguous positions, and replaying over the emitted log
+    /// answers each from history with no divergence.
+    #[test]
+    fn graph_markers_emit_live_and_replay_from_history() {
+        let run_id =
+            RunId::from_uuid(Uuid::parse_str("00000000-0000-4000-8000-000000000007").unwrap());
+
+        // Live: a fresh cursor emits the head and one node's enter/exit.
+        let mut cursor = ReplayCursor::new(vec![]).expect("empty log is a fresh run");
+        let mut emitted = Vec::new();
+        match cursor
+            .begin_graph("sha256:graph", None, None)
+            .expect("begin")
+        {
+            Outcome::Live(permit) => emitted.push(permit.record(serde_json::json!({"t": 1}))),
+            Outcome::Replayed(_) => panic!("fresh run must be live"),
+        }
+        match cursor.node_entered("research").expect("enter") {
+            Outcome::Live(e) => emitted.push(e),
+            Outcome::Replayed(()) => panic!("fresh run must be live"),
+        }
+        match cursor.node_exited("research").expect("exit") {
+            Outcome::Live(e) => emitted.push(e),
+            Outcome::Replayed(()) => panic!("fresh run must be live"),
+        }
+        let positions: Vec<u64> = emitted.iter().map(|e| e.seq.get()).collect();
+        assert_eq!(positions, [0, 1, 2], "markers occupy contiguous positions");
+
+        // Replay: build a log from the emitted events and drive the same calls.
+        let log: Vec<EventEnvelope> = emitted
+            .iter()
+            .map(|e| {
+                EventEnvelope::new(
+                    run_id,
+                    e.seq,
+                    datetime!(2026-07-14 12:00:00 UTC),
+                    e.event.clone(),
+                )
+            })
+            .collect();
+        let mut replay = ReplayCursor::new(log).expect("emitted log is well formed");
+        let input = match replay
+            .begin_graph("sha256:graph", None, None)
+            .expect("begin")
+        {
+            Outcome::Replayed(input) => input,
+            Outcome::Live(_) => panic!("recorded head must replay"),
+        };
+        assert_eq!(input, serde_json::json!({"t": 1}), "recorded input replays");
+        assert!(matches!(
+            replay.node_entered("research").expect("enter"),
+            Outcome::Replayed(())
+        ));
+        assert!(matches!(
+            replay.node_exited("research").expect("exit"),
+            Outcome::Replayed(())
+        ));
+        assert!(!replay.is_replaying(), "history fully consumed");
+    }
+
+    /// A graph-marker request that does not match the recorded event at its
+    /// position is a divergence naming both sides.
+    #[test]
+    fn a_mismatched_node_id_diverges() {
+        let run_id =
+            RunId::from_uuid(Uuid::parse_str("00000000-0000-4000-8000-000000000008").unwrap());
+        let log = vec![
+            EventEnvelope::new(
+                run_id,
+                SequenceNumber::new(0),
+                datetime!(2026-07-14 12:00:00 UTC),
+                Event::GraphRunStarted {
+                    graph_hash: "sha256:graph".into(),
+                    input: serde_json::json!({}),
+                    labels: None,
+                    forked_from: None,
+                },
+            ),
+            EventEnvelope::new(
+                run_id,
+                SequenceNumber::new(1),
+                datetime!(2026-07-14 12:00:00 UTC),
+                Event::NodeEntered {
+                    node: "research".into(),
+                },
+            ),
+        ];
+        let mut cursor = ReplayCursor::new(log).expect("well formed");
+        cursor
+            .begin_graph("sha256:graph", None, None)
+            .expect("begin");
+        let err = cursor
+            .node_entered("publish")
+            .expect_err("a different node id must diverge");
+        assert!(
+            matches!(err, ReplayError::Divergence { position, .. } if position == SequenceNumber::new(1))
+        );
     }
 }

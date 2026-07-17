@@ -85,8 +85,8 @@ pub use graph_state::{
 };
 pub use id::{RunId, SequenceNumber};
 pub use replay::{
-    BeginPermit, Emitted, LoggedStep, ModelCallPermit, ModelReply, NowPermit, Outcome, Parked,
-    RandomPermit, ReplayCursor, ReplayError, RequestedStep, ToolCallPermit,
+    BeginPermit, Emitted, GraphBeginPermit, LoggedStep, ModelCallPermit, ModelReply, NowPermit,
+    Outcome, Parked, RandomPermit, ReplayCursor, ReplayError, RequestedStep, ToolCallPermit,
 };
 pub use state::{PendingCall, RunState, RunStatus, TokenTotals, derive_state};
 pub use validate::{LogValidator, ValidationError, validate_next};

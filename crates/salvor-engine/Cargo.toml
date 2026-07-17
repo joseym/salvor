@@ -1,0 +1,25 @@
+[package]
+name = "salvor-engine"
+description = "The Salvor graph engine: drives a validated graph document through its nodes over the public RunCtx durability substrate"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+salvor-core.workspace = true
+salvor-graph.workspace = true
+salvor-runtime.workspace = true
+salvor-tools.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+salvor-replay.workspace = true
+salvor-store.workspace = true
+salvor-llm.workspace = true
+wiremock.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+time.workspace = true
+uuid.workspace = true
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }

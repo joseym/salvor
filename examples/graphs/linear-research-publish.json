@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "nodes": [
+    {
+      "kind": "agent",
+      "payload": {
+        "id": "research",
+        "agent_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "output_schema": { "type": "object", "properties": { "draft": { "type": "string" } }, "required": ["draft"] }
+      }
+    },
+    {
+      "kind": "agent",
+      "payload": {
+        "id": "review",
+        "agent_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        "input_schema": { "type": "object", "properties": { "draft": { "type": "string" } }, "required": ["draft"] }
+      }
+    },
+    {
+      "kind": "tool",
+      "payload": {
+        "id": "publish",
+        "tool": "http_post",
+        "input": { "body": "review.draft", "url": "config.publish_url" }
+      }
+    }
+  ],
+  "edges": [
+    { "from": "research", "to": "review" },
+    { "from": "review", "to": "publish" }
+  ]
+}

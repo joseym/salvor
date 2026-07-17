@@ -2426,6 +2426,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "salvor-engine"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "salvor-core",
+ "salvor-graph",
+ "salvor-llm",
+ "salvor-replay",
+ "salvor-runtime",
+ "salvor-store",
+ "salvor-tools",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "time",
+ "tokio",
+ "uuid",
+ "wiremock",
+]
+
+[[package]]
 name = "salvor-graph"
 version = "0.1.0"
 dependencies = [

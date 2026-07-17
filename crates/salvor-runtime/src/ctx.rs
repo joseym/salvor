@@ -303,6 +303,82 @@ impl RunCtx {
         }
     }
 
+    /// Starts (or replays the start of) a graph run: the graph-document
+    /// counterpart of [`begin`](Self::begin).
+    ///
+    /// Live: records [`salvor_core::Event::GraphRunStarted`] with `input`, the
+    /// labels set through [`with_labels`](Self::with_labels) (if any), and no
+    /// fork origin, then returns `input`. Replayed: verifies `graph_hash`
+    /// against the recorded head (a changed graph document must not silently
+    /// resume an old run) and returns the *recorded* input, which always wins.
+    ///
+    /// A graph run's log opens with this event rather than `RunStarted` because
+    /// a graph coordinates many agent hashes and has none at its head. The graph
+    /// engine calls this once, then frames each node with
+    /// [`node_entered`](Self::node_entered) / [`node_exited`](Self::node_exited)
+    /// and records the single terminal itself after the last node.
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeError::Replay`] on a graph-hash mismatch or any other
+    /// divergence; [`RuntimeError::InvalidLabels`] when the labels set through
+    /// [`with_labels`](Self::with_labels) violate the sanity bounds (only
+    /// checked on the live path, exactly as [`begin`](Self::begin) does);
+    /// [`RuntimeError::Store`] when persistence fails.
+    pub async fn begin_graph(
+        &mut self,
+        graph_hash: &str,
+        input: &Value,
+    ) -> Result<Value, RuntimeError> {
+        match self
+            .cursor
+            .begin_graph(graph_hash, self.labels.clone(), None)?
+        {
+            Outcome::Replayed(recorded) => Ok(recorded),
+            Outcome::Live(permit) => {
+                if let Some(labels) = &self.labels {
+                    validate_labels(labels).map_err(RuntimeError::InvalidLabels)?;
+                }
+                let emitted = permit.record(input.clone());
+                persist(self.store.as_ref(), self.run_id, &self.clock, &emitted).await?;
+                Ok(input.clone())
+            }
+        }
+    }
+
+    /// Records (or replays) entry into a graph node. A graph node's own events
+    /// (an agent loop's model calls, a tool call) are recorded between this and
+    /// the matching [`node_exited`](Self::node_exited).
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeError::Replay`] on divergence; [`RuntimeError::Store`] when
+    /// persistence fails.
+    pub async fn node_entered(&mut self, node: &str) -> Result<(), RuntimeError> {
+        match self.cursor.node_entered(node)? {
+            Outcome::Replayed(()) => Ok(()),
+            Outcome::Live(emitted) => {
+                persist(self.store.as_ref(), self.run_id, &self.clock, &emitted).await
+            }
+        }
+    }
+
+    /// Records (or replays) exit from a graph node, having produced its output.
+    /// The counterpart of [`node_entered`](Self::node_entered).
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeError::Replay`] on divergence; [`RuntimeError::Store`] when
+    /// persistence fails.
+    pub async fn node_exited(&mut self, node: &str) -> Result<(), RuntimeError> {
+        match self.cursor.node_exited(node)? {
+            Outcome::Replayed(()) => Ok(()),
+            Outcome::Live(emitted) => {
+                persist(self.store.as_ref(), self.run_id, &self.clock, &emitted).await
+            }
+        }
+    }
+
     /// The recorded clock: reads the injected clock once, live, and replays
     /// the identical instant forever after.
     ///
