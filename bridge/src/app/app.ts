@@ -16,17 +16,24 @@ import { ThemeService } from './core/theme';
 import { ViewService, type ViewName } from './core/view';
 import { Inbox } from './features/inbox/inbox';
 import { Inspector } from './features/inspector/inspector';
-import { groupOf } from './features/runs/run-model';
+import { groupOf, labelOf } from './features/runs/run-model';
 import { Runs } from './features/runs/runs';
 import { Spend } from './features/spend/spend';
 
 type NavLink = { readonly view: ViewName; readonly label: string };
 
+/** One row in the ⌘K palette: a named view to switch to, or a live run to open by id. */
+type PaletteItem =
+  | { readonly kind: 'view'; readonly id: string; readonly label: string; readonly hint: string; readonly view: ViewName }
+  | { readonly kind: 'run'; readonly id: string; readonly label: string; readonly hint: string; readonly runId: string };
+
+// Workflows is not a navigable view: the graph canvas ships with the v0.4 engine. It is absent
+// from the nav, but /workflows still resolves (see routes) so a deep link lands on an honest note
+// rather than a dead end.
 const NAV_LINKS: readonly NavLink[] = [
   { view: 'runs', label: 'Runs' },
   { view: 'inspector', label: 'Inspector' },
   { view: 'inbox', label: 'Inbox' },
-  { view: 'workflows', label: 'Workflows' },
   { view: 'spend', label: 'Spend' },
 ];
 
@@ -34,14 +41,15 @@ const SUBS: Readonly<Record<ViewName, string>> = {
   runs: 'A snapshot of GET /v1/runs — waiting-first.',
   inspector: 'One run, read from its log.',
   inbox: 'Runs waiting on a human decision.',
-  workflows: 'Graph documents — author and validate.',
+  workflows: 'Ships with the graph engine.',
   spend: 'Folded usage, by agent and by day.',
 };
 
 /**
- * The app shell: desktop sidebar nav (brand, five view links with the Inbox count badge, theme
+ * The app shell: desktop sidebar nav (brand, the four view links with the Inbox count badge, theme
  * toggle, rail collapse), the ≤860px compact strip (measured `--nav-h`), the per-view topbar, and
- * the five `<section id="view-*">` panels that toggle `.is-active` from {@link ViewService}.
+ * the `<section id="view-*">` panels that toggle `.is-active` from {@link ViewService}. Workflows
+ * is not among the nav links, but its section stays mounted so a `/workflows` deep link resolves.
  */
 @Component({
   selector: 'bridge-root',

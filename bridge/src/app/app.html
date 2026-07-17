@@ -98,10 +98,19 @@
       <bridge-inbox />
     </section>
 
-    <!-- ---------------- VIEW: WORKFLOWS (stub) ---------------- -->
+    <!-- ---------------- VIEW: WORKFLOWS ----------------
+         Not a nav destination: the graph canvas ships with the v0.4 engine. The section stays
+         mounted only so a pasted /workflows deep link lands on this honest note instead of a dead
+         end. No canvas, no nodes — there is nothing to run yet. -->
     <section class="view" id="view-workflows" data-od-id="workflows" [class.is-active]="isActive('workflows')" [hidden]="!isActive('workflows')">
-      <p class="stub-note">Workflows is coming — real graph documents, Builder mode and validation. There is no graph engine yet (v0.4).</p>
-      <div id="wf-nodes"></div>
+      <div class="empty-state">
+        <h4>Workflows arrives with the graph engine</h4>
+        <p>
+          This is where agent graphs will be authored, validated and watched as they run. The server
+          holds graph documents today, but has no engine to run them — that lands in v0.4. Until
+          then there is nothing here to show, so the view is kept out of the way.
+        </p>
+      </div>
     </section>
 
     <!-- ---------------- VIEW: SPEND (stub) ---------------- -->
