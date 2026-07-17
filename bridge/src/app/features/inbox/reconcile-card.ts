@@ -23,9 +23,10 @@ import {
 import { jsonHi } from './json-highlight';
 import { RunRef } from './run-ref';
 
-/** The reconcile card's own branch state — the [hidden]-trap lesson (item 14 / spec 14): visibility
- * is driven from THIS state machine, and only this, never inferred from which controls happen to be
- * checked at read time. Undefined is "no choice made yet" — both branches unrendered. */
+/** The reconcile card's own branch state. A class that sets its own `display` beats the UA's
+ * `[hidden]` rule, so visibility is driven from THIS state machine, and only this, never inferred
+ * from which controls happen to be checked at read time. Undefined is "no choice made yet" — both
+ * branches unrendered. */
 export type ReconcileOutcome = 'reached' | 'not_reached' | undefined;
 
 /**
@@ -110,7 +111,7 @@ export class ReconcileCard implements OnInit {
    * `signal.set()` inside a template event handler schedules Angular's own change-detection
    * notify, which can still land a frame after the click when nothing else forces a flush, and a
    * test reading `getComputedStyle` immediately after a real click (no auto-retry, by design — the
-   * whole point of item 14 is reading COMPUTED state, not polling for it) can sample the gap.
+   * whole point is reading COMPUTED state, not polling for it) can sample the gap.
    * `ChangeDetectorRef.detectChanges()` forces the flush synchronously, scoped to this component's
    * own view (unlike `ApplicationRef.tick()`, which walks every attached view app-wide and is both
    * unnecessary here and unsafe in a test harness that keeps multiple fixtures alive at once) — so

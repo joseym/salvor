@@ -9,9 +9,9 @@ const TERMINAL_EVENT_KINDS: ReadonlySet<string> = new Set(['RunCompleted', 'RunF
 const DEFAULT_POLL_INTERVAL_MS = 2000;
 
 /**
- * The open-by-id fallback path for a client-driven run (the prototype's documented empty
- * state: a lookup that misses `GET /v1/runs` falls back to trying the run as
- * client-driven). A client-driven run has no server-side driver task, so it has no SSE
+ * The open-by-id fallback path for a client-driven run: a lookup that misses `GET /v1/runs`
+ * falls back to trying the run as client-driven. A client-driven run has no server-side driver
+ * task, so it has no SSE
  * surface — `GET /v1/runs/{id}/events` is server-driven-run only. The only way to read it
  * is `ClientRunDriver.log(fromSeq)`, a plain GET with no push, so this channel polls it.
  * That is honestly `Polling`, never `Live` — the fourth connection-pill state exists

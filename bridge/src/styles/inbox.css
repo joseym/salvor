@@ -1,13 +1,12 @@
 /* ============================================================
-   BRIDGE INBOX  —  ported from the OD prototype (salvor-bridge.html,
-   project b781b82b, the #view-inbox regions).
+   BRIDGE INBOX
 
    Scope discipline: `app.css` already carries `.btn`/`.btn.ghost` (plain,
    unfilled — no feature has yet spent the filled-accent treatment the
    design intends for a view's ONE primary action), `.mechanism`/`.caption`/
    `.empty-state` (the Inspector's empty state already uses the first two;
-   redefining them here would silently change that S5 screen, which this
-   slice must not touch). So this file reuses those AS SHIPPED rather than
+   redefining them here would silently change that screen, which this
+   file must not touch). So this file reuses those AS SHIPPED rather than
    overriding them, and gives the Inbox's OWN primary actions (Resume run /
    Raise limit and resume / Record outcome) the filled-accent treatment
    scoped to `.acard .actions .btn`, never the bare `.btn` — nothing outside
@@ -100,11 +99,10 @@
 .choice-stack input { accent-color: var(--accent); }
 
 /* read-only notice: the "did not reach the provider" lock block.
-   THE [hidden]-TRAP LESSON (item 14 / spec 14): this class sets its own `display`, which — same as
-   the prototype's own fixed defect — would beat the UA's `[hidden]{display:none}` were it not for
-   the override rule right below. Branch visibility here is driven ONLY by `[hidden]`, bound from
-   the reconcile card's `outcome` signal; this pair of rules is what makes that binding actually
-   take effect rather than silently rendering both branches at once. */
+   This class sets its own `display`, which beats the UA's `[hidden]{display:none}` were it not
+   for the override rule right below. Branch visibility here is driven ONLY by `[hidden]`, bound
+   from the reconcile card's `outcome` signal; this pair of rules is what makes that binding
+   actually take effect rather than silently rendering both branches at once. */
 .readonly {
   display: flex; align-items: flex-start; gap: var(--space-3);
   padding: var(--space-3) var(--space-4); margin-top: var(--space-4);
@@ -163,7 +161,7 @@
 
 /* ── the all-clear state ───────────────────────────────────────────────
    NOT `.empty-state` (already shipped for the Inspector/Runs no-match states, a different shape) —
-   `.state` is the big-icon centered variant the prototype uses for Inbox/Spend/Workflows states. */
+   `.state` is the big-icon centered variant used for Inbox/Spend/Workflows states. */
 .state {
   display: grid; place-items: center; gap: var(--space-3);
   padding: var(--space-12) var(--space-6);
@@ -178,7 +176,7 @@
 .state.all-clear .mark { color: color-mix(in oklab, var(--success), var(--bg) 55%); }
 
 /* ── the Evidence panel (#inbox-panel): reads, never acts ──────────────
-   Field styles scoped under #inbox-panel so a future Workflows surface can define its own
+   Field styles scoped under #inbox-panel so a future Workflows view can define its own
    panel-field language without colliding. The pre reuses the payload posture the design gives
    wire data everywhere: mono, boxed, hairline. */
 #inbox-panel .ev-field { margin-bottom: var(--space-4); }
@@ -200,7 +198,7 @@
 #inbox-panel .ev-empty { font-size: var(--text-xs); color: var(--muted); line-height: 1.6; text-wrap: pretty; }
 #inbox-panel .ev-empty b { color: var(--fg); font-weight: 500; }
 
-/* the per-card Evidence button sits at the head's right edge, like the prototype's ev-btn */
+/* the per-card Evidence button sits at the head's right edge */
 .acard-head .ev-btn { margin-left: auto; }
 
 /* ── the one JSON highlighter this feature uses (json-highlight.ts) ─────

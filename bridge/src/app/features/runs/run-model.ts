@@ -5,13 +5,10 @@ import type { RunSummary } from '@salvor/client';
  * adapter from the SDK's {@link RunSummary} to the flat {@link RunRow} the table, filter,
  * health strip and detail panel all read.
  *
- * DIVERGENCE FROM THE PROTOTYPE (filed for the drift ledger): the OD prototype's fixtures use
- * HYPHENATED status slugs (`awaiting-model`, `budget-exceeded`, `needs-reconciliation`,
- * `not-started`). The live control plane serialises status `state` in SNAKE_CASE
- * (`awaiting_model`, `budget_exceeded`, `needs_reconciliation`, `not_started`; see
- * `crates/salvor-server/src/json.rs`). This build consumes the REAL API, so the maps below are
- * keyed on the server's snake_case strings. `completed`/`failed`/`running`/`suspended` are
- * identical in both, so only the multi-word states move.
+ * The live control plane serialises status `state` in SNAKE_CASE (`awaiting_model`,
+ * `budget_exceeded`, `needs_reconciliation`, `not_started`; see `crates/salvor-server/src/json.rs`),
+ * not hyphenated slugs, so the maps below are keyed on the server's snake_case strings.
+ * `completed`/`failed`/`running`/`suspended` are single words, so only the multi-word states move.
  */
 export type Group = 'progress' | 'waiting' | 'terminal';
 

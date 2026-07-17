@@ -1,12 +1,11 @@
 /* ============================================================
    BRIDGE DESIGN TOKENS
 
-   Ported from the OD prototype (salvor-bridge.html, project b781b82b,
-   "LEDGER IDENTITY" block). This is the single source of truth for every
-   color, typeface, radius, elevation, spacing, and motion value the app
-   paints. No component stylesheet in this app should contain a literal
-   hex color, a literal `white`/`black` keyword, or a raw font stack —
-   everything routes through the tokens below.
+   The single source of truth for every color, typeface, radius, elevation,
+   spacing, and motion value the app paints. No component stylesheet in
+   this app should contain a literal hex color, a literal `white`/`black`
+   keyword, or a raw font stack — everything routes through the tokens
+   below.
 
    ARCHITECTURE (do not break this):
      - Six --anchor-* values, defined ONCE, in this file, in the block
@@ -23,10 +22,9 @@
        prefers-color-scheme media query) only REBIND --bg/--fg/etc to the
        --dk-* values — they never introduce a new literal color, so the
        two remap copies cannot drift from each other.
-     - This file previously had (in the prototype's own history, see its
-       comments) a dead first-pass anchor set and a second conflicting
-       --dk-* palette; the audit deleted both. Do not recreate a second
-       definition site for anything in the "THE ANCHORS" block.
+     - This file used to have a dead first-pass anchor set and a second
+       conflicting --dk-* palette; both were removed. Do not recreate a
+       second definition site for anything in the "THE ANCHORS" block.
    ============================================================ */
 
 :root {

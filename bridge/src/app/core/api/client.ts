@@ -11,8 +11,8 @@ export interface SalvorApiConfig {
 
 /**
  * The API layer's one configuration point. A real deployment provides this via
- * {@link provideSalvorApi} in `app.config.ts` (wired up in the app shell, once
- * there is a shell to read a runtime base URL from). Absent that, {@link SALVOR_CLIENT}'s
+ * {@link provideSalvorApi} in `app.config.ts`, once there is a shell to read a runtime base
+ * URL from. Absent that, {@link SALVOR_CLIENT}'s
  * factory falls back to the SDK README's own local-dev default
  * (`http://127.0.0.1:8080`, the address `demo-live.sh` and the SDK's example both use) —
  * a placeholder for this service layer, not a production default.

@@ -1,10 +1,9 @@
 /**
  * Suspension forms are GENERATED from a run's own recorded `Suspended.input_schema` — never
- * hand-written per agent — a load-bearing rule. This module is the generator: a
- * pure, unit-tested mapping from a JSON Schema object to the field descriptors the suspension-card
- * template renders, plus the inverse — reading the submitted control values back into the typed
- * input object `resume` expects. Ported from the OD prototype's `schemaForm()` (and the submit
- * handler's per-property extraction), adapted from string-templated HTML to Angular-renderable data.
+ * hand-written per agent, since a hand-written form drifts from whatever schema an agent actually
+ * declares. This module is the generator: a pure, unit-tested mapping from a JSON Schema object to
+ * the field descriptors the suspension-card template renders, plus the inverse — reading the
+ * submitted control values back into the typed input object `resume` expects.
  */
 
 /** The shape of one JSON Schema property this generator understands. Anything else (a `$ref`, an
@@ -72,7 +71,7 @@ function fieldBounds(f: JsonSchemaProperty): string | undefined {
 }
 
 /** Every field the schema's `properties` declares, in the schema's own key order — the same order
- * `Object.entries` walks, matching the prototype's rendering order exactly. */
+ * `Object.entries` walks, so field order in the rendered form always matches the schema's own. */
 export function schemaFields(schema: JsonSchemaObject, ns: string): SchemaField[] {
   const required = schema.required ?? [];
   return Object.entries(schema.properties).map(([key, f]) => ({

@@ -16,17 +16,15 @@ const TITLES: Readonly<Record<ViewName, string>> = {
 /**
  * The one authority on "which view is active", derived from the Angular Router's URL.
  *
- * DIVERGENCE FROM THE PROTOTYPE (standing risk #2, filed for the drift ledger): the prototype
- * routes on the HASH (`#inspector/<run-id>`). This build routes on PATH urls
- * (`/inspector/:runId`, `/inbox`, `/workflows/:hashPrefix`, `/spend`, `/runs` default).
- * Old-style hash links are still honoured: {@link redirectLegacyHash} converts a
- * pasted `#inspector/<id>` (etc.) into the path equivalent, so a deep link that predates the
- * cutover still lands on the right view.
+ * Canonical URLs are PATHs (`/inspector/:runId`, `/inbox`, `/workflows/:hashPrefix`, `/spend`,
+ * `/runs` default), not hashes. Old-style hash links are still honoured: {@link redirectLegacyHash}
+ * converts a pasted `#inspector/<id>` (etc.) into the path equivalent, so a deep link from before
+ * the switch to path routing still lands on the right view.
  *
- * The five `<section id="view-*">` elements all live in the shell at once and toggle `.is-active`
- * — the prototype's architecture, not a router-outlet swap — because the behavioural contract
- * (the Playwright suite) asserts every view section is addressable by id with an `is-active`
- * class and an `aria-current="page"` nav link, exactly as the prototype renders them.
+ * The five `<section id="view-*">` elements all live in the shell at once and toggle `.is-active`,
+ * rather than a router-outlet swap, so every view section stays addressable by id with an
+ * `is-active` class and an `aria-current="page"` nav link at all times, not only while its route
+ * is the active one.
  */
 @Injectable({ providedIn: 'root' })
 export class ViewService {

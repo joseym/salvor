@@ -10,11 +10,10 @@ import type { RunState, SalvorClient, SalvorEvent } from '@salvor/client';
 // ── budgets ──────────────────────────────────────────────────────────────────────────────────
 
 /** The four budget dimensions the server can declare (`crates/salvor-replay::event::BudgetKind`,
- * serialized snake_case). DIVERGENCE, filed: the OD prototype's BudgetCard assumes every budget is
- * `cost_usd` (its floor/propose math and "$…" copy are USD-only). The real seeded fixture
+ * serialized snake_case). A budget is not always `cost_usd` — the real seeded fixture
  * (`bridge/e2e-serve.sh`'s tiny-budget agent) declares a `steps` budget, and `tokens`/`wall_time`
  * are equally real dimensions — so this build's BudgetCard is honest about whichever dimension the
- * run actually crossed, not USD-only. */
+ * run actually crossed, never USD-only floor/propose math or "$…" copy. */
 export type BudgetKind = 'steps' | 'tokens' | 'cost_usd' | 'wall_time';
 
 export interface BudgetInfo {
@@ -63,15 +62,16 @@ const USD_4 = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 4,
 });
 
-/** `$0.0273` under a dollar, `$1.23` at or above — matches the prototype's `usd()`. */
+/** `$0.0273` under a dollar, `$1.23` at or above — four decimal places below a dollar so a
+ * fractions-of-a-cent per-call cost is never rounded away to `$0.00`. */
 export function usd(n: number): string {
   return (Math.abs(n) < 1 ? USD_4 : USD_2).format(n);
 }
 
 /** The precision a "round up, never down" ceiling uses per dimension: cents for a dollar figure,
  * whole units for a count (steps/tokens are integral in nature — see `Budget`'s own doc comment),
- * tenths of a second for wall time. The `-1e-9` epsilon matches the prototype's `ceilCents`: a value
- * already exactly on a boundary must not round UP past itself. */
+ * tenths of a second for wall time. The `-1e-9` epsilon guards against floating-point error pushing
+ * a value that is already exactly on a boundary up past itself. */
 function ceilForKind(kind: BudgetKind, n: number): number {
   if (kind === 'cost_usd') return Math.ceil(n * 100 - 1e-9) / 100;
   if (kind === 'wall_time') return Math.ceil(n * 10 - 1e-9) / 10;
@@ -109,7 +109,7 @@ export function budgetKindLabel(kind: BudgetKind): string {
 /**
  * The dangling write intent, as evidence for the reconcile card.
  *
- * DIVERGENCE, forced and filed: the obvious source for this is `RunState.pending` from a plain
+ * The obvious source for this is `RunState.pending` from a plain
  * `GET /v1/runs/{id}` — except that object omits `recorded_at` (`crates/salvor-server/src/json.rs`'s
  * `pending()` never includes it). The other place it DOES appear is a `409 needs_reconciliation`
  * refusal's `details.intent` (`API.md`) — deliberately provoking one (attempting `resume` with no
@@ -117,9 +117,8 @@ export function budgetKindLabel(kind: BudgetKind): string {
  * it is exactly what `salvor resume` itself does at the CLI to show this evidence. It was reverted:
  * a browser logs ANY non-2xx `fetch` response to the console as `Failed to load resource: the server
  * responded with status 409`, unconditionally, regardless of whether application code catches the
- * resulting rejection — and the suite's fixture fails a test on ANY console error
- * (the e2e suite's zero-console-errors gate), observed failing exactly this
- * way against a live `needs_reconciliation` run. So `recorded_at` is read the other honest way
+ * resulting rejection — and the test suite fails on ANY console error, observed failing exactly
+ * this way against a live `needs_reconciliation` run. So `recorded_at` is read the other honest way
  * instead: `RunState.pending.seq` names the exact log position of the intent, and the event stream
  * opened `?from_seq=<that seq>` replays that envelope first — its own `recorded_at` is the answer,
  * off a plain 200 read, never an error response. See {@link fetchAppendedEvent}, reused for this.
@@ -180,7 +179,7 @@ export interface ReceiptVM {
  *
  * A resume/resolve response (`ResumeResult`/`RunState`) carries no seq/kind/recorded_at/payload of
  * its own (see `API.md`'s response shapes) — this is the one honest way to get them from the real
- * control plane, where the OD prototype's fixture had them for free off its own in-browser fold.
+ * control plane.
  */
 export async function fetchAppendedEvent(
   client: SalvorClient,

@@ -1,10 +1,10 @@
 /**
- * THE ONE JSON HIGHLIGHTER, ported from the OD Bridge prototype (`jsonHi`, salvor-bridge.html).
+ * THE ONE JSON HIGHLIGHTER for the Inspector.
  *
  * Every pretty-printed JSON site in the Inspector routes through this, so highlighting is
  * everywhere or nowhere. It is a string→string function: it takes a value, stringifies it at a
  * given indent, and wraps each JSON token in a `<span class="j-*">`. Two invariants, both pinned
- * by the unit tests beside this file and by e2e spec 10:
+ * by the unit tests beside this file:
  *
  *   1. It NEVER weakens escaping. Every token's text is run through {@link esc} before it is
  *      wrapped, so a string value containing markup renders inert. The only text left unwrapped is
@@ -46,7 +46,7 @@ export function jsonHi(value: unknown, indent: number): string {
   );
 }
 
-/** The prototype's `pretty` shorthand: highlight at indent 2, the timeline payload indent. */
+/** Shorthand: highlight at indent 2, the timeline payload's indent. */
 export function pretty(value: unknown): string {
   return jsonHi(value, 2);
 }

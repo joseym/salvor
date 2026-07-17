@@ -5,11 +5,11 @@ import { callCost, int, usd } from './pricing';
 import { costOfPrefix } from './state-model';
 
 /**
- * The timeline renderer, ported from the OD Bridge prototype (`rowOf`/`groupsOf`/`renderTimeline`/
- * `renderStrip`). Pure functions that take the run's decoded log and return HTML strings — the
- * Inspector component injects them and wires event delegation, exactly as the prototype does. Kept
- * as string-building rather than Angular template so the DOM is byte-faithful to the spec contract
- * (the `.levent` grid, the kchip dots, the effect badges, the highlighted `<pre>` panes).
+ * The timeline renderer (`rowOf`/`groupsOf`/`renderTimeline`/`renderStrip`). Pure functions that
+ * take the run's decoded log and return HTML strings — the Inspector component injects them and
+ * wires event delegation. Kept as string-building rather than Angular template so the DOM stays
+ * byte-faithful (the `.levent` grid, the kchip dots, the effect badges, the highlighted `<pre>`
+ * panes) instead of drifting through template diffing.
  */
 
 /** kind → { dot: kchip dot class, cat: filter category }. Node-scoped kinds included so a graph
@@ -66,7 +66,7 @@ function pane(label: string, v: unknown): string {
 const CARET = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5"/></svg>`;
 const FOLD = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M2.5 3v10"/><path d="M5 8h9M11 4.5 14.5 8 11 11.5"/></svg>`;
 
-/** The running cost label the prototype's `costLabel` produced. */
+/** The running cost label: the folded dollar total, or "tokens only" when it's incomplete. */
 function costLabel(c: { complete: boolean; usd: number | null }): string {
   return c.complete ? usd(c.usd ?? 0) : 'tokens only';
 }
@@ -80,7 +80,7 @@ export function forkOf(events: readonly SalvorEvent[]): SalvorEvent | null {
   return events.find((e) => e.kind === 'ForkedFrom') ?? null;
 }
 
-/** One log row's full `.levent` HTML — the prototype's `rowOf`, over a decoded {@link SalvorEvent}. */
+/** One log row's full `.levent` HTML, over a decoded {@link SalvorEvent}. */
 export function rowOf(e: SalvorEvent, events: readonly SalvorEvent[], arrivedSeq: number | null): string {
   const p = e.payload;
   const kind = e.kind;
@@ -231,8 +231,8 @@ interface Turn {
   tot: string;
 }
 
-/** Group the log by model turn, with each turn's recorded-usage subtotal — the prototype's
- *  `groupsOf`. A new turn opens at each `ModelCallRequested`; a terminal/budget event opens "End". */
+/** Group the log by model turn, with each turn's recorded-usage subtotal. A new turn opens at
+ *  each `ModelCallRequested`; a terminal/budget event opens "End". */
 export function groupsOf(events: readonly SalvorEvent[]): Turn[] {
   const gs: Turn[] = [];
   let cur: Turn = { title: 'Start', of: '', events: [], tot: '' };

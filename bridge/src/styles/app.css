@@ -1,13 +1,13 @@
 /* ============================================================
-   BRIDGE APP CHROME + RUNS  —  ported from the OD prototype
-   (salvor-bridge.html, project b781b82b).
+   BRIDGE APP CHROME + RUNS
 
-   GLOBAL on purpose. The behavioural contract (the Playwright suite) reads
-   the CSSOM by exact selectorText (`.qfield:focus-within`, `.qinput:focus`,
-   the a11y remediation group) and computed styles across the whole document.
+   GLOBAL on purpose. The Playwright suite reads the CSSOM by exact
+   selectorText (`.qfield:focus-within`, `.qinput:focus`, the a11y
+   remediation group) and computed styles across the whole document.
    Angular component-scoped styles rewrite selectors with [_ngcontent-*]
    attributes, which would break those exact-match reads — so the app's
-   structural CSS lives here, in the global cascade, exactly as the spec is.
+   structural CSS lives here, in the global cascade, not scoped to a
+   component.
 
    Every value routes through the tokens in tokens.css. No literal hex, no
    raw font stack, no `transition: all` (the build gate forbids them).

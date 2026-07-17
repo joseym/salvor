@@ -63,10 +63,9 @@
       <span class="sub" id="view-sub" role="status" aria-live="polite">{{ sub() }}</span>
       <button class="info" type="button" id="dot-key" aria-label="What the status dots mean" aria-controls="dot-key-note" [attr.aria-expanded]="dotKeyOpen()" (click)="toggleDotKey()">i</button>
 
-      <!-- HONESTY, REWORDED FOR THIS BUILD. The prototype's chip said "Fixtures · no engine". This
-           build talks to a REAL control plane, so the fixtures half is no longer true — Runs and the
-           Inspector read the live server. What remains true is that there is NO graph engine (v0.4):
-           Workflows/fork have no runtime behind them. So the chip tells that truth instead. -->
+      <!-- This build talks to a REAL control plane, so Runs and the Inspector read the live
+           server — no fixtures involved. What's still true is that there is NO graph engine (v0.4):
+           Workflows/fork have no runtime behind them. The chip states that. -->
       <button class="wf-spec" type="button" id="spec-chip" aria-haspopup="dialog" title="This dashboard reads a real Salvor control plane. There is no graph engine yet (v0.4): Workflows and fork have no runtime behind them.">
         <span class="spec-dot" aria-hidden="true"></span>Live control plane · no graph engine
       </button>
@@ -99,13 +98,13 @@
       <bridge-inbox />
     </section>
 
-    <!-- ---------------- VIEW: WORKFLOWS (S8 stub) ---------------- -->
+    <!-- ---------------- VIEW: WORKFLOWS (stub) ---------------- -->
     <section class="view" id="view-workflows" data-od-id="workflows" [class.is-active]="isActive('workflows')" [hidden]="!isActive('workflows')">
       <p class="stub-note">Workflows is coming — real graph documents, Builder mode and validation. There is no graph engine yet (v0.4).</p>
       <div id="wf-nodes"></div>
     </section>
 
-    <!-- ---------------- VIEW: SPEND (S7 stub) ---------------- -->
+    <!-- ---------------- VIEW: SPEND (stub) ---------------- -->
     <section class="view" id="view-spend" data-od-id="spend" [class.is-active]="isActive('spend')" [hidden]="!isActive('spend')">
       <p class="stub-note">Spend is coming — burn-down bands, by-agent/by-day ledgers, and the activity histogram.</p>
     </section>

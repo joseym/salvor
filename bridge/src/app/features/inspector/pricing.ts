@@ -1,5 +1,5 @@
 /**
- * The price table and per-call pricing, ported from the OD Bridge prototype fold semantics.
+ * The price table and per-call pricing.
  *
  * In the Inspector we HAVE the run's log — every `ModelCallCompleted` carries its model id and
  * token usage — so cost is REAL here (unlike the Runs list, where the model ids are not returned
@@ -8,7 +8,7 @@
  * degrades to tokens-only. That honesty is the point of the {@link CostTotal.complete} flag.
  */
 
-/** USD per 1M tokens, keyed by model id, exactly as the prototype's PRICES table. */
+/** USD per 1M tokens, keyed by model id. */
 export const PRICES: Readonly<Record<string, { readonly in: number; readonly out: number }>> = {
   'claude-sonnet-4-5': { in: 3.0, out: 15.0 },
   'claude-haiku-4-5': { in: 1.0, out: 5.0 },
@@ -19,9 +19,9 @@ export function priceOf(model: string): { in: number; out: number } | null {
 }
 
 /**
- * Money, formatted by the platform rather than by string concatenation. Two-tier precision, as
- * the prototype: a per-call cost is fractions of a cent, so under a dollar it needs four places or
- * it reads as $0.00; at a dollar or more, cents are what anyone reconciles against. Magnitude, not
+ * Money, formatted by the platform rather than by string concatenation. Two-tier precision: a
+ * per-call cost is fractions of a cent, so under a dollar it needs four places or it reads as
+ * $0.00; at a dollar or more, cents are what anyone reconciles against. Magnitude, not
  * sign, picks the tier. Two cached formatters — constructing an `Intl.NumberFormat` per cell is
  * the expensive part, and these render in tables.
  */
@@ -54,7 +54,7 @@ export function callCost(model: string, inputTokens: number, outputTokens: numbe
   return (inputTokens * price.in + outputTokens * price.out) / 1e6;
 }
 
-/** A folded cost total, honest about unpriced models — the prototype's `cost` object shape. */
+/** A folded cost total, honest about unpriced models. */
 export interface CostTotal {
   /** True only when EVERY completed call in the prefix was priced. */
   readonly complete: boolean;

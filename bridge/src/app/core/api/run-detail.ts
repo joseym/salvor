@@ -7,13 +7,10 @@ import { errorMessage } from './errors';
 /**
  * One run's derived-state surface: `GET /v1/runs/{id}`, plus the two write verbs that
  * change it, `resume` and `resolve`. A single instance tracks the currently-loaded run
- * (the app shows one Inspector detail panel at a time, per the prototype); loading a
- * different id replaces it.
+ * (the app shows one Inspector detail panel at a time); loading a different id replaces it.
  *
  * `resume` and `resolve` both re-derive `run` from the server's response so every reader
- * of {@link run} sees the consequence of the write without a manual re-fetch — consequence
- * re-rendering after resume/resolve starts
- * here; the Inbox UI reads it.
+ * of {@link run} sees the consequence of the write without a manual re-fetch.
  */
 @Injectable({ providedIn: 'root' })
 export class RunDetailService {

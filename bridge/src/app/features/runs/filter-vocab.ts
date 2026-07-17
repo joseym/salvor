@@ -3,8 +3,7 @@ import { type RunRow, groupOf, hourKey } from './run-model';
 /**
  * THE FILTER VOCABULARY — the single source of truth for what the Runs filter can answer.
  *
- * Ported verbatim in spirit from the OD prototype's FILTER_VOCAB (salvor-bridge.html). Every
- * entry is a key `GET /v1/runs` can actually answer, the operator it takes, whether its values
+ * Every entry is a key `GET /v1/runs` can actually answer, the operator it takes, whether its values
  * are ENUMERABLE from the page in memory, and whether the `@` menu OFFERS it. `text` is accepted
  * by the parser but not offered — it is the long-hand of a bare word.
  *
@@ -61,8 +60,8 @@ export interface Term {
 /**
  * Parse a query string into structured terms. Refuses, loudly and honestly, the fields the list
  * response does not carry (`agent`, `cost`, `steps`, `tokens`) and any other unparseable
- * `key<op>value` shape — the exact refusal the prototype raises, so an invalid pill still
- * renders and still explains itself rather than silently matching nothing.
+ * `key<op>value` shape, so an invalid pill still renders and still explains itself rather than
+ * silently matching nothing.
  */
 export function parseQuery(s: string): Term[] {
   return s

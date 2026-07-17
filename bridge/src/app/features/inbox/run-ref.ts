@@ -3,8 +3,8 @@ import { Component, computed, input } from '@angular/core';
 import { shortId } from './inbox-model';
 
 /**
- * `runRef` ported as a tiny component: a truncated, copyable run id. Reuses `.runref`/`.runid`/
- * `.copy` — already global, ported from the prototype for the Runs ledger (`app.css`) — so this
+ * A tiny component for a truncated, copyable run id. Reuses `.runref`/`.runid`/
+ * `.copy` — already global, shared with the Runs ledger (`app.css`) — so this
  * needs no styles of its own.
  */
 @Component({

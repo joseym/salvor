@@ -6,7 +6,7 @@ import { type CompletedCall, type CostTotal, costOf, int } from './pricing';
 import type { RunStateJson, RunStatusJson } from './wasm-fold';
 
 /**
- * The bridge between the wasm fold's `RunStateJson` and the prototype's presentation vocabulary.
+ * The bridge between the wasm fold's `RunStateJson` and this app's presentation vocabulary.
  *
  * The wasm returns a PascalCase, `kind`-tagged status; this build's status classes, groups and
  * labels are the server's snake_case slugs (see `run-model.ts`, keyed on the live control plane's
@@ -39,7 +39,7 @@ export function statusStateOf(status: RunStatusJson): string {
   }
 }
 
-/** The plain, non-interactive status pill — a statement of fact, as the prototype's `statusEl`. */
+/** The plain, non-interactive status pill — a statement of fact, not a control. */
 export function statusHtml(state: string): string {
   return `<span class="status s-${state}" data-group="${groupOf(state)}">${esc(labelOf(state))}</span>`;
 }
@@ -81,7 +81,7 @@ export function stepsOf(events: readonly SalvorEvent[], n: number): number {
 /**
  * The derived-panel `pending` line. The wasm's `pending_call` names the dangling intent; for a
  * model call we look its model id up from the log at that seq (the wasm carries only the request
- * hash), so the line reads the way the prototype's did.
+ * hash), so the line names the model rather than just "model".
  */
 export function pendingLabel(state: RunStateJson, events: readonly SalvorEvent[]): string {
   const pc = state.pending_call;

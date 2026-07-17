@@ -44,19 +44,19 @@ function info(why: string): string {
 }
 
 /**
- * The Inspector: one run read from its log. Timeline over the REAL event stream (S2's
- * {@link RunEventsService}), VIRTUALIZED with `content-visibility` so painting is bounded while
+ * The Inspector: one run read from its log. Timeline over the REAL event stream
+ * ({@link RunEventsService}), VIRTUALIZED with `content-visibility` so painting is bounded while
  * every recorded event stays in the DOM and scrub-and-keyboard reachable; the scrubber folds
- * prefixes through the REAL wasm fold (S1, {@link FoldService}); JSON highlighting via the ported
- * `jsonHi`. Hold-on-scrub-back during live SSE appends, the live ticker driven by the channel's
+ * prefixes through the REAL wasm fold ({@link FoldService}); JSON highlighting via `jsonHi`.
+ * Hold-on-scrub-back during live SSE appends, the live ticker driven by the channel's
  * connection state, the run-stats hero, the note apparatus, the empty state, and the
  * capability-gated fork offer (off in this build — the server has no fork runtime).
  *
  * The complex, byte-exact DOM (the `.levent` grid, kchip dots, effect badges, highlighted panes,
  * the derived panel) is built as HTML strings and written into stable container refs with
- * delegated event handling — the prototype's architecture, chosen so the DOM matches the suite's
- * contract exactly. Signals drive WHEN each container re-renders; the containers themselves are
- * fixed, so click/pointer wiring is attached once.
+ * delegated event handling, so the DOM stays byte-exact and selector-addressable rather than
+ * drifting through Angular's own template diffing. Signals drive WHEN each container re-renders;
+ * the containers themselves are fixed, so click/pointer wiring is attached once.
  */
 @Component({
   selector: 'bridge-inspector',

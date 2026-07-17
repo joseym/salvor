@@ -7,8 +7,8 @@ import { Routes } from '@angular/router';
  * empty sink — there is no `<router-outlet>` content to swap. The `data.view` on each route is
  * what ViewService reads to decide which section is active.
  *
- * PATH urls (a filed divergence from the prototype's hash routing; legacy
- * hash deep links are redirected — see ViewService).
+ * Routes use PATH urls, not hash routing. Legacy hash deep links are redirected — see
+ * ViewService.
  */
 @Component({ selector: 'bridge-route-sink', template: '' })
 export class RouteSink {}

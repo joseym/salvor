@@ -1,7 +1,6 @@
 /* ============================================================
-   INSPECTOR. Ported from the Bridge prototype's inspector regions.
-   Shared primitives (.chip, .btn, .info, .copy, .runref, .agent-label, .cpanel*, .status,
-   .empty-state, .mechanism, .caption, .stats base margin) live in app.css and are NOT
+   INSPECTOR. Shared primitives (.chip, .btn, .info, .copy, .runref, .agent-label, .cpanel*,
+   .status, .empty-state, .mechanism, .caption, .stats base margin) live in app.css and are NOT
    redefined here. This file adds only the Inspector's own surfaces.
    ============================================================ */
 

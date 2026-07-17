@@ -14,24 +14,20 @@ import { SuspensionCard } from './suspension-card';
  * action that unblocks it. Reads the same {@link RunsService} projection the Runs ledger and the
  * shell's badge read, so the count can never disagree across views.
  *
- * DIVERGENCE FROM THE PROTOTYPE (filed for the drift ledger, same shape as `run-model.ts`'s own):
- * the prototype's lede names the fixture's HYPHENATED status slugs (`suspended`, `budget-exceeded`,
- * `needs-reconciliation`). This build reads the real control plane, whose wire statuses are
- * snake_case (`budget_exceeded`, `needs_reconciliation`) — the lede below states the real ones.
+ * The real control plane's wire statuses are snake_case (`budget_exceeded`, `needs_reconciliation`,
+ * same shape as `run-model.ts`'s own) — the lede above states the real ones, not hyphenated slugs.
  *
  * Each card kind (suspension / budget / reconcile) is its own small component so its local form
  * state — a per-run signal, not a `Map` keyed by run id in this parent — lives naturally in its own
  * component instance, one per `@for` iteration.
  *
- * CARD PERMANENCE, a real bug caught in the live suite trial: `parked` does NOT simply re-filter
- * `runsService.runs()` live, and the card kind it renders is not re-derived from the row's live
- * status either. The prototype's own `commit()` is explicit that "a committed card is deliberately
- * REPLACED IN PLACE by its receipt, not re-rendered away" — `renderInbox()` there runs only at boot
- * or after a fork, never as a reaction to the very commit it is about to render the receipt for. A
- * naive live re-filter breaks that: the moment a commit succeeds, `onCommitted()` must refresh
- * `RunsService` (the carried consequence-re-rendering criterion — the Runs ledger, health strip, and
- * the shell's badge all need the fresh status), and that refresh's response no longer carries this
- * run as `waiting` — so a plain `.filter(isWaiting)` recomputes the very instant the commit lands.
+ * CARD PERMANENCE: `parked` does NOT simply re-filter `runsService.runs()` live, and the card kind
+ * it renders is not re-derived from the row's live status either. A committed card must be
+ * deliberately REPLACED IN PLACE by its receipt, never re-rendered away — a naive live re-filter
+ * breaks that: the moment a commit succeeds, `onCommitted()` must refresh `RunsService` (the Runs
+ * ledger, health strip, and the shell's badge all need the fresh status), and that refresh's
+ * response no longer carries this run as `waiting` — so a plain `.filter(isWaiting)` recomputes the
+ * very instant the commit lands.
  * Worse, even keeping the ROW around is not enough on its own: a `@switch` keyed on the row's live
  * `status.state` stops matching any card kind the moment that status changes (to `running`, then
  * `completed`, as the freshly-resumed run keeps driving), so the card component itself still gets
@@ -75,8 +71,8 @@ export class Inbox {
   /** STICKY on purpose — `lastLoadedAt` alone, never `!loading()`. A post-commit refresh flips
    * `loading` true for a moment, and gating the cards region on it swaps the whole `@if` branch to
    * the loading note, DESTROYING every card component mid-flight — including the receipt a person
-   * just watched get written (caught live by spec 12's committed-receipt test: the announce fired,
-   * then the card re-mounted blank). Once the first load has landed, the region never un-renders. */
+   * just watched get written: the announce fired, then the card re-mounted blank.
+   * Once the first load has landed, the region never un-renders. */
   readonly listLoaded = computed(() => this.runsService.lastLoadedAt() !== undefined);
 
   /** Every run id ever seen waiting, with the card kind it was waiting AS — grown, never shrunk
@@ -124,18 +120,17 @@ export class Inbox {
     this.liveMessage.set(message);
   }
 
-  /** Consequence re-rendering: a commit re-fetches the list, so the
-   * Runs ledger, the health strip, and the shell's Inbox badge all reflect the append — nothing here
-   * mutates a count by hand. */
+  /** A commit re-fetches the list, so the Runs ledger, the health strip, and the shell's Inbox
+   * badge all reflect the append — nothing here mutates a count by hand. */
   onCommitted(): void {
     void this.load();
   }
 
-  // ── the Evidence panel (the prototype's inbox cpanel: READ, never act) ────────────────────
+  // ── the Evidence panel: READ, never act ─────────────────────────────────────────────────────
   private readonly client = inject(SALVOR_CLIENT);
 
-  /** Cold-load COLLAPSED, per the prototype's `PANELS = { …, inbox: false }` (spec 12 p2-15
-   * asserts the tab is visible and the panel hidden on a cold `#inbox` load). */
+  /** Cold-load COLLAPSED: the cards are the decision surface and the evidence panel duplicates
+   * the selected card, so it earns its width only on request. */
   readonly panelOpen = signal(false);
   readonly evidenceSel = signal<string | undefined>(undefined);
   readonly evidenceState = signal<RunState | undefined>(undefined);
