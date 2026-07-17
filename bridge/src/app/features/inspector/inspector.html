@@ -1,0 +1,99 @@
+<!-- No-run-selected state. An empty state is an invitation, not an apparatus dump: the invitation
+     carries NO wire references (the endpoints belong in the colophon), and the colophon sits AFTER
+     it, outside the box. The id stays on the WRAPPER so both halves hide together. -->
+<div id="inspector-empty" [hidden]="hasRun()">
+  <div class="empty-state">
+    <h4>Pick a run</h4>
+    <p>Choose one above, open a row from Runs or a card from the Inbox — or paste an id.</p>
+  </div>
+  <p class="mechanism">
+    An id resolves against <code>GET /v1/runs/&#123;id&#125;/events</code> first and falls back to
+    <code>GET /v1/client-runs/&#123;id&#125;/log</code>; whichever answers is labelled in the header. Client-driven
+    runs are not enumerated by <code>GET /v1/runs</code>, so opening by id is the only way to reach one.
+  </p>
+</div>
+
+<!-- The populated body. `.inspector` sets display:grid, which beats the UA's [hidden]{display:none};
+     inspector.css says `.inspector[hidden]{display:none}` so hiding it genuinely removes it. -->
+<div class="inspector" id="inspector-body" data-panel-dock data-panel="open" [hidden]="!hasRun()">
+  <div>
+    <dl #statsEl class="stats" id="run-stats" data-od-id="run-header" [attr.data-group]="headGroup()"></dl>
+    <div #lineageEl id="run-lineage"></div>
+    <div #bandEl id="run-band"></div>
+
+    <div class="lbar" data-od-id="log-toolbar">
+      <div class="chips" role="group" aria-label="Filter by event kind" style="display:flex;gap:6px;flex-wrap:wrap">
+        @for (k of KIND_CHIPS; track k.key) {
+          <button class="chip" type="button" [attr.data-kind]="k.key" [attr.aria-pressed]="kindFilter() === k.key" (click)="setKindFilter(k.key)">{{ k.label }}</button>
+        }
+      </div>
+      <span class="spacer"></span>
+      @if (nodeFilter()) {
+        <button class="chip node-chip" type="button" id="node-filter" (click)="clearNodeFilter()">node: {{ nodeFilter() }} ×</button>
+      }
+      <span class="count" id="log-count">{{ logCountLabel() }}</span>
+      <button class="chip" id="expand-all" type="button" [attr.aria-pressed]="allOpen()" (click)="toggleExpandAll()">{{ allOpen() ? 'Collapse payloads' : 'Expand payloads' }}</button>
+    </div>
+
+    <div class="lhead lgrid" aria-hidden="true">
+      <span></span>
+      <span class="r">Seq</span>
+      <span>Event</span>
+      <span class="h-detail">Detail</span>
+      <span class="h-time">Time</span>
+      <span></span>
+    </div>
+
+    <div #timelineEl id="timeline"></div>
+
+    <!-- Four facts, so a .notes and not a .caption — labelled once for the whole apparatus. -->
+    <div class="notes">
+      <p><b>Every row is a pinned envelope.</b> <code>seq</code>, <code>recorded_at</code>,
+        <code>event.kind</code>, <code>event.payload</code> — an <code>EventEnvelope</code>, exactly as recorded.</p>
+      <p><b>Rows group by model turn.</b> Each group's subtotal is that turn's recorded usage.</p>
+      <p><b>Grey rows are past the scrubber prefix.</b> They exist in the log but not in the derived state.</p>
+      <p><b>Filtering never changes the fold.</b> It hides rows; the fold always runs over the whole prefix.</p>
+    </div>
+  </div>
+
+  <!-- The scrubber, as a CONTEXT PANEL. Same ids, same behaviour, same hold-on-scrub-back. -->
+  <aside class="cpanel" data-panel="inspector" data-od-id="scrubber" aria-label="Scrubber" [hidden]="!panelOpen()">
+    <div class="cpanel-head">
+      <div>
+        <h3 class="cpanel-title">Scrubber</h3>
+        <p class="cpanel-sub">Drag, or click a tick, to re-derive the run state from a prefix of the log.</p>
+      </div>
+      <button #panelClose class="cpanel-x" type="button" aria-label="Close the scrubber panel" (click)="closePanel()">×</button>
+    </div>
+    <div class="cpanel-body">
+      <div #liveBarEl class="live-bar" id="live-bar"></div>
+      <div #scrubEl class="scrub" id="scrub">
+        <div #stripEl class="estrip" id="estrip" role="group" aria-label="Fold through an event"></div>
+        <div #playheadEl class="playhead" id="playhead" hidden></div>
+        <label class="sr" for="prefix">Prefix length — the number of events folded</label>
+        <input #prefixEl type="range" class="scrub-range" id="prefix" min="0" [max]="eventCount()" [value]="prefixN()" step="1" (input)="onRangeInput($event)" (pointerdown)="onRangeGrab()" (keydown)="onRangeGrab()" (pointerup)="onRangeRelease()" (keyup)="onRangeRelease()" (blur)="onRangeRelease()" />
+        <div class="scrub-ends">
+          <span>seq 0</span>
+          <span class="now-group">
+            <span class="now" id="prefix-readout">{{ readoutLabel() }}</span>
+            <button class="fold-all" type="button" id="fold-all" [disabled]="foldAllDisabled()" [attr.title]="foldAllTitle()" (click)="foldAll()">Fold all</button>
+          </span>
+          <span id="scrub-end">seq {{ lastSeq() }}</span>
+        </div>
+      </div>
+
+      <dl #derivedEl class="derived" id="derived" role="status" aria-live="polite"></dl>
+
+      <!-- Fork, offered where the decision is made — capability-gated OFF (the server has no fork
+           runtime yet). Rendered from the fold so it names the node under the playhead. -->
+      <div #forkHereEl id="fork-here"></div>
+
+      <p class="mechanism">
+        <b>derive_state(&amp;log[0..n])</b><br />
+        The same pure fold the runtime runs, compiled to wasm32. No server round-trip per drag; the log is
+        immutable once past. A client-driven run's log folds identically — same envelopes, same fold.
+      </p>
+    </div>
+  </aside>
+  <button #panelTab class="cpanel-tab" type="button" data-panel="inspector" [hidden]="panelOpen()" (click)="openPanel()">Scrubber</button>
+</div>

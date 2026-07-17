@@ -1,0 +1,900 @@
+/* ============================================================
+   INSPECTOR. Ported from the Bridge prototype's inspector regions.
+   Shared primitives (.chip, .btn, .info, .copy, .runref, .agent-label, .cpanel*, .status,
+   .empty-state, .mechanism, .caption, .stats base margin) live in app.css and are NOT
+   redefined here. This file adds only the Inspector's own surfaces.
+   ============================================================ */
+
+/* Screen-reader-only text. This utility was never defined in the token/app layers, so every
+   `<span class="sr">` across the app (the Inspector emits many — per-row payload/fold labels, the
+   strip's tick labels, copy-button names) rendered as VISIBLE inline text, and in the Runs table a
+   copy button's "Copy <uuid>" label even sat over a cell and intercepted its clicks. This is the
+   standard visually-hidden clip: present for assistive tech, zero-size and non-interactive for
+   sighted users. Global on purpose — the class is used everywhere. */
+.sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* the two-column body: content + the 340px scrubber panel. `display:grid` beats the UA's
+   [hidden]{display:none}, so the empty-state swap needs this one explicit line (defect 2). */
+.inspector {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: var(--space-6);
+  align-items: start;
+}
+.inspector[hidden] {
+  display: none;
+}
+
+/* ── RUN SUMMARY STRIP: STATUS as the hero, the four measurements in a 2×2 ── */
+.stats {
+  display: grid;
+  grid-template-columns: minmax(264px, 1.05fr) repeat(2, minmax(150px, 1fr));
+  margin-bottom: var(--space-4);
+  overflow: hidden;
+}
+.stat {
+  padding: var(--space-4) var(--space-5);
+  min-width: 0;
+  border-color: var(--border);
+}
+.stat.hero {
+  grid-row: span 2;
+  border-right: 1px solid var(--border-soft);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+.stat.hero dd {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+.stat.hero dd .status {
+  font-size: 16px;
+  font-weight: 500;
+  padding: 7px var(--space-4) 7px var(--space-3);
+  margin-bottom: var(--space-1);
+}
+#run-stats[data-group='waiting'] .hero {
+  background: color-mix(in oklab, var(--warn), var(--bg) 93%);
+  box-shadow: inset 3px 0 0 0 var(--warn);
+}
+#run-stats[data-group='terminal'] .hero {
+  box-shadow: inset 3px 0 0 0 var(--border);
+}
+#run-stats[data-group='progress'] .hero {
+  box-shadow: inset 3px 0 0 0 var(--border);
+}
+.stat:not(.hero) {
+  border-right: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--border-soft);
+}
+.stat:nth-child(3),
+.stat:nth-child(5) {
+  border-right: 0;
+}
+.stat:nth-child(4),
+.stat:nth-child(5) {
+  border-bottom: 0;
+}
+@media (max-width: 900px) {
+  .stats {
+    grid-template-columns: 1fr;
+  }
+  .stat.hero {
+    grid-row: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .stat:not(.hero) {
+    border-right: 0;
+  }
+  .stat:nth-child(4) {
+    border-bottom: 1px solid var(--border-soft);
+  }
+}
+.stat dt {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin-bottom: var(--space-2);
+}
+.stat dd {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+  color: var(--fg);
+  line-height: var(--leading-tight);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: var(--tracking-display);
+}
+.stat dd.figure {
+  font-size: 22px;
+}
+.stat dd .status {
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+}
+.stat .sub {
+  display: block;
+  margin-top: var(--space-1);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  color: var(--muted);
+  letter-spacing: 0.16px;
+}
+
+/* ── the attention / failure band ── */
+.band {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  margin-bottom: var(--space-4);
+  border: 1px solid color-mix(in oklab, var(--warn), var(--fg) 12%);
+  border-radius: var(--radius-md);
+  background: var(--amber-wash);
+  color: var(--amber-ink);
+  font-size: 13px;
+  letter-spacing: 0.08px;
+  text-wrap: pretty;
+}
+.band svg {
+  flex: none;
+  width: 16px;
+  height: 16px;
+}
+.band .mono {
+  color: var(--amber-ink);
+}
+.band.is-fail {
+  border-color: color-mix(in oklab, var(--danger), var(--fg) 12%);
+  background: var(--red-wash);
+  color: color-mix(in oklab, var(--danger), var(--fg) 45%);
+}
+.band.is-fail .mono {
+  color: color-mix(in oklab, var(--danger), var(--fg) 45%);
+}
+
+/* ── log toolbar + head ── */
+.lbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+  flex-wrap: wrap;
+}
+.lbar .spacer {
+  margin-left: auto;
+}
+.lbar .count {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+.lgrid {
+  grid-template-columns: 3px 34px 176px minmax(0, 1fr) 76px 62px;
+}
+.lhead {
+  display: grid;
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--edge-strong);
+  position: sticky;
+  top: 73px;
+  z-index: 2;
+  background: var(--bg);
+}
+.lhead span {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.lhead span.r {
+  text-align: right;
+  padding-right: var(--space-3);
+}
+
+/* ── turns ── */
+.turn {
+  position: relative;
+}
+.turn[hidden] {
+  display: none;
+}
+.turn-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding: var(--space-5) 0 var(--space-2) 3px;
+  border-bottom: 1px solid var(--border);
+}
+.turn-head h4 {
+  font-size: var(--text-base);
+  font-weight: 500;
+}
+.turn-head .of {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--faint);
+  letter-spacing: 0;
+}
+.turn-head .tot {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+
+/* ── log rows. VIRTUALIZED with content-visibility: off-screen rows are not painted or laid out,
+   but every .levent stays in the DOM — scrub-and-keyboard reachable, and folded identically. The
+   invariant holds: virtualization changes what is PAINTED, never the addressable set. ── */
+.levent {
+  border-bottom: 1px solid var(--border);
+  position: relative;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 44px;
+}
+.levent[hidden] {
+  display: none;
+}
+.levent.cut {
+  border-top: 1px solid var(--accent);
+}
+.levent.cut .seq {
+  color: var(--accent);
+  font-weight: 700;
+}
+.lrow {
+  display: grid;
+  align-items: center;
+  min-height: 42px;
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-standard);
+}
+.lrow:hover {
+  background: var(--border-soft);
+}
+.lrow .bar {
+  align-self: stretch;
+  background: transparent;
+}
+.levent.attn .bar {
+  background: var(--warn);
+}
+.levent.fail .bar {
+  background: var(--danger);
+}
+.lrow .seq {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--faint);
+  text-align: right;
+  padding-right: var(--space-3);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+.kchip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-sm);
+  background: color-mix(in oklab, var(--fg), var(--bg) 95%);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--fg);
+  letter-spacing: 0;
+}
+.kchip::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-pill);
+  background: var(--muted);
+  flex: none;
+}
+.kchip.k-tool::before,
+.kchip.k-life::before {
+  background: var(--fg);
+}
+.kchip.k-observe::before {
+  width: 5px;
+  height: 5px;
+  background: var(--faint);
+}
+.kchip.k-amber::before {
+  background: var(--warn);
+  width: 9px;
+  height: 9px;
+}
+.kchip.k-red::before {
+  background: var(--danger);
+  width: 9px;
+  height: 9px;
+}
+.kchip.k-write::before {
+  background: var(--surface);
+  box-shadow: inset 0 0 0 2px var(--warn);
+  width: 9px;
+  height: 9px;
+}
+.kchip.k-blue::before {
+  background: var(--accent);
+}
+.kchip.k-green::before {
+  background: var(--success);
+}
+.ldetail {
+  min-width: 0;
+  font-size: 13px;
+  color: var(--muted);
+  padding-right: var(--space-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  letter-spacing: 0.08px;
+}
+.ldetail b {
+  color: var(--fg-2);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.ldetail b.fig {
+  color: var(--fg);
+  font-weight: 600;
+}
+.ldetail .badge {
+  font-weight: 600;
+}
+.ltime {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+.lacts {
+  display: flex;
+  gap: 2px;
+  justify-content: flex-end;
+}
+.iact {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: none;
+  cursor: pointer;
+  color: var(--muted);
+}
+.iact:hover {
+  border-color: var(--edge-strong);
+  color: var(--fg);
+}
+.iact svg {
+  width: 13px;
+  height: 13px;
+}
+.iact[aria-expanded='true'] {
+  color: var(--fg);
+}
+.iact[aria-expanded='true'] svg {
+  transform: rotate(90deg);
+}
+.lbody {
+  display: none;
+  padding: var(--space-1) 0 var(--space-4) 51px;
+}
+.levent.open .lbody {
+  display: block;
+}
+.lbody .pane + .pane {
+  margin-top: var(--space-3);
+}
+.pane-label {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin-bottom: var(--space-2);
+}
+.lbody pre {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  overflow: auto;
+  max-height: 264px;
+  background: var(--border-soft);
+  border: 1px solid var(--edge-strong);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--fg-2);
+  letter-spacing: 0;
+}
+.lbody .ev-note,
+.lbody .ev-honest {
+  max-width: 72ch;
+}
+
+/* past the scrubber prefix — recoloured, not opacity-dimmed */
+.levent.dim .kchip,
+.levent.dim .ldetail,
+.levent.dim .ldetail b {
+  color: var(--faint);
+  font-weight: 400;
+}
+.levent.dim .kchip::before {
+  opacity: 0.4;
+}
+.levent.dim .lbody pre {
+  color: var(--faint);
+}
+.levent.dim .lbody pre :is(.j-key, .j-str, .j-num, .j-bool, .j-null) {
+  color: inherit;
+  font-weight: inherit;
+}
+
+/* effect badges */
+.badge {
+  display: inline-block;
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-pill);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0;
+  border: 1px solid var(--edge-strong);
+  color: var(--muted);
+  vertical-align: 1px;
+}
+.badge.e-idempotent {
+  border-style: dashed;
+}
+.badge.e-write {
+  border-color: color-mix(in oklab, var(--warn), var(--fg) 12%);
+  color: var(--amber-ink);
+  background: var(--amber-wash);
+}
+
+.ev-note {
+  margin: var(--space-2) 0 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid color-mix(in oklab, var(--warn), var(--fg) 12%);
+  border-radius: var(--radius-sm);
+  background: var(--amber-wash);
+  color: var(--amber-ink);
+  font-size: 13px;
+  text-wrap: pretty;
+  letter-spacing: 0.08px;
+}
+.ev-honest {
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-xs);
+  color: var(--faint);
+  font-style: italic;
+  letter-spacing: 0.16px;
+}
+
+.mode-badge {
+  display: inline-block;
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--edge-strong);
+  background: var(--border-soft);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-2);
+}
+.tokens-only {
+  color: var(--amber-ink);
+  font-weight: 500;
+}
+
+/* ── the notes apparatus ── */
+.notes {
+  max-width: 64ch;
+  margin-top: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border-left: 2px solid var(--border);
+  background: var(--wash);
+  letter-spacing: 0.16px;
+}
+.notes::before {
+  content: 'Notes';
+  display: block;
+  margin-bottom: var(--space-2);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.notes > p {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--fg-2);
+  text-wrap: pretty;
+}
+.notes > p + p {
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--rule);
+}
+.notes > p > b:first-child {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+/* ── the scrubber ── */
+.scrub {
+  position: relative;
+  padding-bottom: var(--space-2);
+}
+.estrip {
+  --estrip-h: 44px;
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: var(--estrip-h);
+  margin: 0 0 var(--space-2);
+  cursor: ew-resize;
+  touch-action: none;
+}
+.etick {
+  flex: 1;
+  min-width: 3px;
+  border: 0;
+  padding: 0;
+  cursor: ew-resize;
+  border-radius: 1px;
+  background: var(--fg-2);
+  height: 56%;
+  transition: none;
+}
+.etick.t-model {
+  background: var(--muted);
+  height: 68%;
+}
+.etick.t-tool,
+.etick.t-life {
+  background: var(--fg);
+  height: 80%;
+}
+.etick.t-observe {
+  background: var(--border);
+  height: 34%;
+}
+.etick.t-amber,
+.etick.t-write {
+  background: var(--warn);
+  height: 100%;
+}
+.etick.t-red {
+  background: var(--danger);
+  height: 100%;
+}
+.etick.t-blue {
+  background: var(--accent);
+  height: 68%;
+}
+.etick.t-green {
+  background: var(--success);
+  height: 80%;
+}
+.etick.future {
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--border);
+  opacity: 1;
+}
+.etick:hover {
+  outline: 1px solid var(--fg);
+  outline-offset: 1px;
+}
+/* on a coarse pointer each tick's hit area becomes its full COLUMN of the strip — one axis is
+   what a fingertip needs, and the tick→seq mapping stays 1:1. Painted nothing. */
+@media (pointer: coarse) {
+  .etick {
+    position: relative;
+  }
+  .etick::after {
+    content: '';
+    position: absolute;
+    left: -1px;
+    right: -1px;
+    bottom: 0;
+    height: var(--estrip-h);
+  }
+}
+.playhead {
+  position: absolute;
+  top: 0;
+  bottom: 22px;
+  width: 1px;
+  background: var(--accent);
+  pointer-events: none;
+}
+.playhead[hidden] {
+  display: none;
+}
+.playhead::after {
+  content: '';
+  position: absolute;
+  top: -3px;
+  left: 50%;
+  width: 9px;
+  height: 9px;
+  margin-left: -4.5px;
+  background: var(--accent);
+  border-radius: 2px;
+  transform: rotate(45deg);
+}
+.scrub-range {
+  width: 100%;
+  height: 4px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+.scrub-ends {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-top: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+.scrub-ends .now {
+  color: var(--fg);
+  font-weight: 500;
+}
+.now-group {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.fold-all {
+  appearance: none;
+  -webkit-appearance: none;
+  min-height: 24px;
+  padding: 2px var(--space-2);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  cursor: pointer;
+}
+.fold-all:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.fold-all:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.fold-all:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* ── the derived-state field list ── */
+.derived {
+  margin-top: var(--space-4);
+  border-top: 1px solid var(--border-soft);
+}
+.drow {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  align-items: baseline;
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--border-soft);
+  border-color: var(--border);
+}
+.drow dt {
+  font-size: var(--text-xs);
+  color: var(--muted);
+  letter-spacing: 0.16px;
+}
+.drow dd {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  word-break: break-all;
+  letter-spacing: 0;
+}
+
+/* ── the live ticker bar ── */
+.live-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 22px;
+  margin-bottom: var(--space-2);
+}
+.live-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.live-tag.held {
+  color: var(--amber-ink);
+  text-transform: none;
+  letter-spacing: 0.16px;
+  font-size: 12px;
+}
+.live-tag.done {
+  color: var(--success);
+}
+.live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--success);
+  flex: none;
+  box-shadow: 0 0 6px color-mix(in oklab, var(--success), transparent 45%);
+}
+.live-bar .link-btn {
+  margin-left: auto;
+}
+
+/* a plain text button — used by the band and the live bar */
+.link-btn {
+  appearance: none;
+  -webkit-appearance: none;
+  padding: 0;
+  background: none;
+  border: 0;
+  color: var(--accent);
+  font: inherit;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+}
+.link-btn:hover {
+  color: var(--accent-hover);
+}
+.link-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* the marginal gloss under the fork offer */
+.gloss {
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-xs);
+  color: var(--muted);
+  line-height: 1.5;
+  text-wrap: pretty;
+}
+
+/* ── THE ONE JSON HIGHLIGHTER's token palette. Theme-driven via tokens, AA on the pane ground in
+   both themes; no product-semantic colour (amber/red/green) borrowed for a neutral value. ── */
+.j-key {
+  color: var(--fg);
+  font-weight: 600;
+}
+.j-str {
+  color: var(--accent);
+}
+.j-num {
+  color: var(--fg);
+}
+.j-bool {
+  color: var(--fg);
+  font-style: italic;
+}
+.j-null {
+  color: var(--muted);
+  font-style: italic;
+}
+
+/* ── PANEL MOTION (design-queue item 6). The panel and its restore tab fade + rise in and out —
+   opacity + a 4px lift on --motion-base, display transitioned with allow-discrete so each can
+   animate up from display:none, with @starting-style supplying the entry from-state. The global
+   reduced-motion blanket makes all of this instant. Opacity and translate only — never width. ── */
+.cpanel,
+.cpanel-tab {
+  transition:
+    opacity var(--motion-base) var(--ease-standard),
+    translate var(--motion-base) var(--ease-standard),
+    display var(--motion-base) allow-discrete;
+}
+.cpanel:not([hidden]),
+.cpanel-tab:not([hidden]) {
+  opacity: 1;
+  translate: 0 0;
+}
+.cpanel[hidden],
+.cpanel-tab[hidden] {
+  opacity: 0;
+  translate: 0 var(--space-1);
+}
+@starting-style {
+  .cpanel:not([hidden]),
+  .cpanel-tab:not([hidden]) {
+    opacity: 0;
+    translate: 0 var(--space-1);
+  }
+}
+
+/* ── the append motion grammar. The row and tick that just landed arrive and wash once; the live
+   bar enters on a mode change. All neutralised by the reduced-motion blanket. ── */
+@keyframes ins-arrive {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes ins-wash {
+  from {
+    background: color-mix(in oklab, var(--accent), var(--bg) 86%);
+  }
+  to {
+    background: transparent;
+  }
+}
+.levent.arrive {
+  animation: ins-arrive var(--motion-base) var(--ease-standard) both;
+}
+.levent.arrive .lrow {
+  animation: ins-wash 900ms var(--ease-standard) both;
+}
+.etick.arrive {
+  animation: ins-arrive var(--motion-fast) var(--ease-standard) both;
+}
+.live-tag.enter {
+  animation: ins-arrive var(--motion-base) var(--ease-standard) both;
+}
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes ins-pulse {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.45;
+    }
+  }
+  .live-dot {
+    animation: ins-pulse 1.6s ease-in-out infinite;
+  }
+}
