@@ -84,6 +84,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/runs/{id}/resume", post(runs::resume))
         .route("/v1/runs/{id}/resolve", post(runs::resolve))
         .route("/v1/runs/{id}/graph", get(graph::projection))
+        .route("/v1/runs/{id}/fork", post(graph::fork))
+        .route("/v1/runs/{id}/forks", get(graph::forks))
+        .route("/v1/capabilities", get(capabilities))
         .route("/v1/graphs", post(graph::submit).get(graph::list))
         .route("/v1/graphs/validate", post(graph::validate_only))
         .route("/v1/graphs/{hash}", get(graph::get))
@@ -109,6 +112,18 @@ pub fn build_router(state: AppState) -> Router {
     let api = api.fallback(ui::static_handler);
 
     api.with_state(state)
+}
+
+/// `GET /v1/capabilities`: what this build of the control plane can do, for a
+/// dashboard to probe before offering a capability-gated action (the Bridge
+/// gates its fork UI on this). Additive and honest: a capability is advertised
+/// only when the feature genuinely exists on this server, so a probe is never a
+/// promise the server cannot keep. This build advertises `fork: true`, the fork
+/// endpoint ([`graph::fork`]).
+async fn capabilities() -> axum::response::Response {
+    axum::response::IntoResponse::into_response(axum::Json(
+        serde_json::json!({ "capabilities": { "fork": true } }),
+    ))
 }
 
 /// Serves the control plane on `listener` until the process ends.

@@ -49,7 +49,10 @@ codes:
 | 404 | `unknown_agent` | No agent registered under that id (also: a graph run references an unregistered agent) |
 | 400 | `invalid_graph` | A submitted graph document failed strict validation; `details.errors` carries the complete node/edge-precise list |
 | 404 | `unknown_graph` | No graph stored under that hash |
-| 409 | `not_a_graph_run` | The per-run graph projection was asked for an ordinary agent run |
+| 409 | `not_a_graph_run` | The per-run graph projection (or a fork) was asked for an ordinary agent run |
+| 409 | `invalid_fork_node` | A fork named a node the origin never entered |
+| 409 | `origin_needs_reconciliation` | A fork of an origin parked at a dangling write; `details.intent` carries the origin's recorded write |
+| 409 | `write_replay_hazard` | A fork would re-execute recorded writes the operator has not acknowledged; `details.writes` lists exactly the ones still needing acknowledgement |
 | 409 | `run_exists` | Starting a run at an id that already has history |
 | 409 | `wrong_state` | A verb applied to a run in the wrong state (resolving a run with no dangling write) |
 | 409 | `needs_reconciliation` | Resuming a run whose log ends at a write intent with no completion; `details.intent` carries the recorded write |
@@ -80,6 +83,9 @@ codes:
 | POST | `/v1/runs/{id}/resume` | Continue a run (resume a parked one, recover a crashed one); works on a graph run unchanged |
 | POST | `/v1/runs/{id}/resolve` | Record a dangling write's completion by hand |
 | GET | `/v1/runs/{id}/graph` | A graph run's per-node projection (for the canvas) |
+| POST | `/v1/runs/{id}/fork` | Fork a graph run from a node boundary into a new run (refuse-then-record) |
+| GET | `/v1/runs/{id}/forks` | The forks of a run, as a derived index |
+| GET | `/v1/capabilities` | What this build of the control plane can do (a dashboard probes it) |
 | POST | `/v1/graphs` | Submit and strictly validate a graph document |
 | GET | `/v1/graphs` | List stored graphs with a shape summary |
 | GET | `/v1/graphs/{hash}` | Read one stored graph document back |
@@ -549,11 +555,100 @@ node the walk has not reached is simply absent (distinct from a `skipped` one).
 ```
 
 `state` is `entered`, `exited`, or `skipped` (with a `reason`). `current_node` is
-present only while a node is entered and not yet exited.
+present only while a node is entered and not yet exited. A forked run's
+projection also carries a `forked_from` object (the `ForkOrigin` record:
+`run_id`, `through_seq`, `from_node`, `graph_hash`, `acknowledged_writes`).
 
 - `404 unknown_run` when the id has no history.
 - `409 not_a_graph_run` when the run is an ordinary agent run (no
   `GraphRunStarted` head), mirroring the other `409` shapes.
+
+### POST /v1/runs/{id}/fork
+
+Fork a graph run from a node boundary into a NEW run, and (the differentiator)
+refuse to re-execute a recorded write the operator has not acknowledged.
+
+A fork is a new run whose log opens with the origin's prefix (every event below
+the fork node's `NodeEntered`) rewritten under the fork's own id, its seq-0
+`GraphRunStarted` carrying `forked_from`. The origin is never touched. The child
+then continues from the fork node exactly as a recovered graph run does. A fork
+reuses the origin's graph unchanged (it may not edit it): to change the graph,
+submit a new document and start a fresh run.
+
+- Request:
+
+```json
+{ "from_node": "publish", "acknowledge_writes": [4], "dry_run": false }
+```
+
+`from_node` is the node boundary to restart from. `acknowledge_writes` (default
+`[]`) are the origin log positions of the `Effect::Write` intents in the
+re-walked segment the operator accepts may re-fire; they must cover the full
+hazard set. `dry_run` (default `false`) previews without creating a run.
+
+- Response `201`: `{ "run": "<child>", "status": "running", "forked_from": {
+  "run_id": "<origin>", "through_seq": 3, "from_node": "publish", "graph_hash":
+  "sha256:...", "acknowledged_writes": [4] } }`. The `acknowledge_writes` seqs
+  are recorded permanently into the child's `forked_from.acknowledged_writes`.
+- `409 write_replay_hazard` when the re-walked segment holds unacknowledged
+  writes (the refuse-then-record refusal):
+
+```json
+{ "error": {
+  "code": "write_replay_hazard",
+  "message": "forking run ... would re-execute 1 recorded write(s) ...",
+  "details": { "writes": [
+    { "seq": 4, "tool": "publish", "input": { ... },
+      "idempotency_key": null, "recorded_at": "2026-..." }
+  ] }
+} }
+```
+
+  `details.writes` lists exactly the writes still needing acknowledgement (all of
+  them on a first, bare fork; a partial acknowledgement narrows it to what is
+  missing). Acknowledging every listed `seq` lets the fork proceed. Idempotent
+  tools are NOT listed: a graph tool's idempotency key is derived from its
+  position in the graph (graph hash, node id, call index), so a fork presents the
+  same key its origin recorded and the provider collapses the duplicate, so
+  `Write` is the only class needing acknowledgement.
+- `409 origin_needs_reconciliation` (with the origin's `details.intent`) when the
+  origin is parked at a dangling write; resolve the origin first.
+- `409 invalid_fork_node` when the origin never entered `from_node`.
+- `409 not_a_graph_run` when the run is an ordinary agent run.
+- `404 unknown_graph` when the origin's graph is no longer stored (graphs are
+  in-memory and do not survive a restart); resubmit the identical document, then
+  fork.
+- `dry_run: true` returns `200` with `{ "dry_run": true, "origin": "<id>",
+  "from_node": "publish", "through_seq": 3, "graph_hash": "sha256:...",
+  "prefix_event_count": 4, "writes": [ ... ], "unacknowledged_writes": [4],
+  "would_proceed": false }` and creates nothing. The structural refusals above
+  still apply under `dry_run` (a fork that could never proceed is reported, not
+  faked).
+
+### GET /v1/runs/{id}/forks
+
+The forks of a run, as a DERIVED index. The origin is immutable and never points
+forward at its children; this answer is a server-side scan of every run's
+`forked_from`, labeled `"derived": true` to say so. It is not a fact the origin
+recorded.
+
+```json
+{ "run": "<id>", "derived": true, "forks": [
+  { "run": "<child>", "from_node": "publish", "through_seq": 3, "acknowledged_writes": [4] }
+] }
+```
+
+- `404 unknown_run` when the id has no history.
+
+### GET /v1/capabilities
+
+What this build of the control plane can do, for a dashboard to probe before
+offering a capability-gated action. Additive and honest: a capability is
+advertised only when the feature genuinely exists on this server.
+
+```json
+{ "capabilities": { "fork": true } }
+```
 
 ### Submitting a graph from the CLI
 
@@ -561,6 +656,14 @@ The `salvor` CLI drives graphs LOCALLY (`salvor graph run <graph.json> --input
 <json> [--agent <file> ...]`), the same way `salvor run` drives an agent run; it
 has no remote-verb convention, so it does not submit graphs to a server. Submit
 and validate over HTTP with `curl` (or an SDK) against the endpoints above.
+
+`salvor fork <run> --from-node <id> --graph <graph.json> [--agent <file> ...]
+[--acknowledge-writes <seq,seq|all>] [--dry-run]` is the local flavor of the fork
+endpoint: it re-supplies the origin's document (hash-checked against the recorded
+one, since a fork reuses the graph unchanged), plans the fork, and drives the
+child onward from the fork node, refusing any write the re-walked segment would
+re-fire until `--acknowledge-writes` covers it. Same refuse-then-record contract
+as the endpoint, exit 1 on an unacknowledged hazard.
 
 ## Client-driven runs
 

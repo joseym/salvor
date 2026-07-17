@@ -10,8 +10,11 @@
 //!
 //! `code` is a stable machine token (an SDK matches on it); `message` is a
 //! human sentence; `details` is present only when there is structured evidence
-//! to carry, and the reconciliation refusal is the case that uses it (the
-//! recorded write intent travels there, mirroring the CLI's report).
+//! to carry. The reconciliation refusal is the original case (the recorded write
+//! intent travels in `details.intent`, mirroring the CLI's report); the fork
+//! endpoint's `write_replay_hazard` carries the same kind of evidence in
+//! `details.writes` (the exact writes a fork would re-fire), which is the
+//! refuse-then-record differentiator on the wire.
 //!
 //! Each variant fixes its own HTTP status, so the status and the body's `code`
 //! never drift: a 404 always carries `unknown_run` or `unknown_agent`, a 409
@@ -93,6 +96,35 @@ pub enum ApiError {
     /// whose log is not a graph run (an ordinary agent run has no
     /// `GraphRunStarted` head). HTTP 409.
     NotAGraphRun(String),
+    /// A fork was requested from a node the origin never entered (it is not in
+    /// the graph, or the walk routed past it). A fork point must be a node
+    /// boundary the run reached. HTTP 409.
+    InvalidForkNode(String),
+    /// A fork was requested of an origin parked at a dangling write (status
+    /// `NeedsReconciliation`): the origin must be resolved first, since forking
+    /// past an unsettled write would carry that ambiguity into the child. HTTP
+    /// 409. Carries the origin's recorded write intent as evidence, mirroring
+    /// [`NeedsReconciliation`](Self::NeedsReconciliation).
+    OriginNeedsReconciliation {
+        /// The human sentence.
+        message: String,
+        /// The origin's recorded dangling write intent (the same shape a resume
+        /// reconciliation refusal carries).
+        intent: Value,
+    },
+    /// A fork would re-walk a segment containing recorded `Effect::Write` intents
+    /// the operator has not acknowledged. HTTP 409. Carries the exact writes that
+    /// would re-fire as evidence, mirroring
+    /// [`NeedsReconciliation`](Self::NeedsReconciliation)'s use of `details`: the
+    /// refuse-then-record differentiator in one response the operator can read
+    /// and then acknowledge.
+    WriteReplayHazard {
+        /// The human sentence.
+        message: String,
+        /// The unacknowledged writes the fork's re-walked segment would
+        /// re-execute, each `{ seq, tool, input, idempotency_key, recorded_at }`.
+        writes: Value,
+    },
     /// A run needs human reconciliation and cannot be driven automatically.
     /// Carries the recorded write intent as evidence. HTTP 409.
     NeedsReconciliation {
@@ -120,6 +152,11 @@ impl ApiError {
             ApiError::InvalidGraph { .. } => (StatusCode::BAD_REQUEST, "invalid_graph"),
             ApiError::UnknownGraph(_) => (StatusCode::NOT_FOUND, "unknown_graph"),
             ApiError::NotAGraphRun(_) => (StatusCode::CONFLICT, "not_a_graph_run"),
+            ApiError::InvalidForkNode(_) => (StatusCode::CONFLICT, "invalid_fork_node"),
+            ApiError::OriginNeedsReconciliation { .. } => {
+                (StatusCode::CONFLICT, "origin_needs_reconciliation")
+            }
+            ApiError::WriteReplayHazard { .. } => (StatusCode::CONFLICT, "write_replay_hazard"),
             ApiError::NeedsReconciliation { .. } => (StatusCode::CONFLICT, "needs_reconciliation"),
             ApiError::MissingDriveToken(_) => (StatusCode::UNAUTHORIZED, "missing_drive_token"),
             ApiError::InvalidDriveToken(_) => (StatusCode::FORBIDDEN, "invalid_drive_token"),
@@ -163,7 +200,10 @@ impl ApiError {
             | ApiError::ToolExecution(m)
             | ApiError::UnknownGraph(m)
             | ApiError::NotAGraphRun(m)
+            | ApiError::InvalidForkNode(m)
             | ApiError::InvalidGraph { message: m, .. }
+            | ApiError::OriginNeedsReconciliation { message: m, .. }
+            | ApiError::WriteReplayHazard { message: m, .. }
             | ApiError::NeedsReconciliation { message: m, .. } => m.clone(),
             ApiError::Unauthorized => "missing or invalid bearer token".to_owned(),
         }
@@ -176,8 +216,12 @@ impl IntoResponse for ApiError {
         let message = self.message();
         let mut error = json!({ "code": code, "message": message });
         match self {
-            ApiError::NeedsReconciliation { intent, .. } => {
+            ApiError::NeedsReconciliation { intent, .. }
+            | ApiError::OriginNeedsReconciliation { intent, .. } => {
                 error["details"] = json!({ "intent": intent });
+            }
+            ApiError::WriteReplayHazard { writes, .. } => {
+                error["details"] = json!({ "writes": writes });
             }
             ApiError::InvalidGraph { errors, .. } => {
                 error["details"] = json!({ "errors": errors });

@@ -46,16 +46,20 @@ use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use salvor_core::{Event, EventEnvelope, RunId};
-use salvor_engine::{GraphOutcome, graph_hash, run_graph};
+use salvor_core::{Event, EventEnvelope, PendingCall, RunId, RunStatus, derive_state};
+use salvor_engine::{
+    ForkError, ForkPlan, GraphOutcome, WriteHazard, graph_hash, plan_fork, run_graph,
+};
 use salvor_graph::{Graph, GraphError, GraphSummary, Node};
 use salvor_replay::{GraphProjection, NodeState, derive_graph_projection};
 use salvor_runtime::{Agent, RunCtx, validate_labels};
 use salvor_tools::mcp::McpServer;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
 use crate::error::ApiError;
@@ -84,6 +88,25 @@ struct StartRunRequest {
     /// against the same bounds an agent run's labels are.
     #[serde(default)]
     labels: Option<BTreeMap<String, String>>,
+}
+
+/// The body of `POST /v1/runs/{id}/fork`.
+#[derive(Debug, Default, Deserialize)]
+struct ForkRequest {
+    /// The node boundary to restart the fork from: the fork's log carries the
+    /// origin's events below this node's `NodeEntered`, then re-walks from it.
+    from_node: String,
+    /// The origin log positions of the `Effect::Write` intents in the re-walked
+    /// segment the operator acknowledges. Must cover the full hazard set for the
+    /// fork to proceed; the covered seqs are recorded permanently into the
+    /// child's `ForkOrigin.acknowledged_writes`. Empty (the default) when the
+    /// fork boundary sits before any write.
+    #[serde(default)]
+    acknowledge_writes: Vec<u64>,
+    /// When true, return what the fork WOULD do (the hazard list and the
+    /// would-be prefix summary) and create no run.
+    #[serde(default)]
+    dry_run: bool,
 }
 
 /// Which verb a graph driver task runs. Mirrors the built-in loop's start /
@@ -273,6 +296,245 @@ pub async fn projection(
         )));
     }
     Ok(Json(projection_json(&derive_graph_projection(&log))))
+}
+
+/// `POST /v1/runs/{id}/fork`: fork a graph run from a node boundary into a NEW
+/// run, refusing (or recording an acknowledgement for) the writes the re-walked
+/// segment would re-fire.
+///
+/// The origin is never touched: this reads its log, plans the fork purely
+/// ([`salvor_engine::plan_fork`]), and — on success — writes the child's prefix
+/// under a fresh id and drives it onward from the fork node, exactly as a
+/// recovered graph run continues. The refusals, each typed and precise:
+///
+/// - `404 unknown_run` — no such origin.
+/// - `409 not_a_graph_run` — the origin is an ordinary agent run.
+/// - `409 invalid_fork_node` — the origin never entered the named node.
+/// - `404 unknown_graph` — the origin's graph is no longer in the registry
+///   (graphs do not survive a restart); resubmit the identical document, then
+///   fork.
+/// - `409 origin_needs_reconciliation` — the origin is parked at a dangling
+///   write; resolve it first.
+/// - `409 write_replay_hazard` — the re-walked segment holds `Effect::Write`
+///   intents not covered by `acknowledge_writes`; `details.writes` lists exactly
+///   the ones still needing acknowledgement.
+///
+/// `dry_run: true` returns the preview (the hazard list and the would-be prefix
+/// summary) and creates nothing; the structural refusals above still apply, so a
+/// dry run reports a fork that could never proceed rather than pretending it
+/// could.
+pub async fn fork(
+    State(state): State<AppState>,
+    Path(run_id_text): Path<String>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let origin_id = parse_run_id(&run_id_text)?;
+    let request: ForkRequest = parse_body(&body)?;
+
+    let origin_log = state
+        .store()
+        .read_log(origin_id)
+        .await
+        .map_err(store_error)?;
+    if origin_log.is_empty() {
+        return Err(ApiError::UnknownRun(format!(
+            "no run {} in this store",
+            origin_id.as_uuid()
+        )));
+    }
+
+    // An origin parked at a dangling write must be resolved first: forking past
+    // an unsettled write would carry that ambiguity into the child.
+    let derived = derive_state(&origin_log);
+    if matches!(derived.status, RunStatus::NeedsReconciliation) {
+        return Err(ApiError::OriginNeedsReconciliation {
+            message: format!(
+                "origin run {id} is parked at a dangling write; resolve it (POST /v1/runs/{id}/resolve) \
+                 before forking, so the fork does not inherit an unsettled write",
+                id = origin_id.as_uuid()
+            ),
+            intent: origin_reconcile_intent(&origin_log, derived.pending_call.as_ref()),
+        });
+    }
+
+    // Plan the fork purely: find the boundary, the prefix, and the hazard set.
+    let plan = plan_fork(&origin_log, &request.from_node).map_err(|error| match error {
+        ForkError::NotAGraphRun => ApiError::NotAGraphRun(format!(
+            "run {} is an agent run, not a graph run; only a graph run has node boundaries to fork from",
+            origin_id.as_uuid()
+        )),
+        ForkError::NodeNeverEntered { node } => ApiError::InvalidForkNode(format!(
+            "run {} never entered node `{node}`; fork from a node boundary the run reached",
+            origin_id.as_uuid()
+        )),
+    })?;
+
+    // A fork reuses the origin's graph unchanged, so the document must still be
+    // in the registry. It is in-memory, so a restart drops it: refuse honestly
+    // and tell the operator to resubmit the identical document.
+    let graph = state.graph(plan.graph_hash()).ok_or_else(|| {
+        ApiError::UnknownGraph(format!(
+            "the graph {} this run executes is not stored on this server (graphs do not survive a \
+             restart); resubmit the identical document to POST /v1/graphs, then fork",
+            plan.graph_hash()
+        ))
+    })?;
+
+    // Which hazard writes are still unacknowledged?
+    let hazard_seqs = plan.hazard_seqs();
+    let acknowledged: HashSet<u64> = request.acknowledge_writes.iter().copied().collect();
+    let missing: Vec<u64> = hazard_seqs
+        .iter()
+        .copied()
+        .filter(|seq| !acknowledged.contains(seq))
+        .collect();
+
+    // dry_run: preview, create nothing.
+    if request.dry_run {
+        return Ok(Json(fork_preview_json(&plan, &missing)).into_response());
+    }
+
+    // Refuse-then-record: any unacknowledged hazard refuses, listing exactly the
+    // writes still needing acknowledgement (all of them on a first, bare fork; a
+    // partial acknowledgement narrows the list to what is missing).
+    if !missing.is_empty() {
+        let unacked: Vec<&WriteHazard> = plan
+            .hazards()
+            .iter()
+            .filter(|hazard| missing.contains(&hazard.seq))
+            .collect();
+        return Err(ApiError::WriteReplayHazard {
+            message: format!(
+                "forking run {} from node `{}` would re-execute {} recorded write(s) the segment \
+                 re-walks; acknowledge them (acknowledge_writes: [{}]) to record that you accept \
+                 they may re-fire, then fork",
+                origin_id.as_uuid(),
+                request.from_node,
+                unacked.len(),
+                missing
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+            writes: write_hazards_json(unacked.into_iter()),
+        });
+    }
+
+    // Everything the child references must resolve, exactly as a fresh graph run
+    // does, before any envelope is written.
+    let registry = require_tools(&state, &graph)?;
+    let (agents, servers) = build_agents(&state, &graph).await?;
+
+    // Mint the child and write its prefix: the origin's events below the fork
+    // node, rewritten under the child id, seq-0 carrying the fork origin with the
+    // acknowledged writes. The child exists, standalone, the instant we return.
+    let child_id = RunId::new();
+    let existing = state
+        .store()
+        .read_log(child_id)
+        .await
+        .map_err(store_error)?;
+    if !existing.is_empty() {
+        close_servers(servers).await;
+        return Err(ApiError::RunExists(format!(
+            "run {} already has recorded history",
+            child_id.as_uuid()
+        )));
+    }
+    let child_prefix = plan.build_child_prefix(child_id, hazard_seqs.clone());
+    for envelope in &child_prefix {
+        if let Err(error) = state.store().append(envelope).await {
+            close_servers(servers).await;
+            return Err(store_error(error));
+        }
+    }
+
+    // Continue executing from the fork node, exactly like a recovered graph run:
+    // the engine replays the prefix and drives the fork node onward live.
+    spawn_graph_drive(
+        state,
+        child_id,
+        graph,
+        agents,
+        servers,
+        registry,
+        GraphVerb::Recover,
+    );
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "run": child_id.as_uuid().to_string(),
+            "status": "running",
+            // The recorded fork origin, the same shape the graph projection's
+            // `forked_from` carries (the `ForkOrigin` fields), so the two agree.
+            "forked_from": {
+                "run_id": origin_id.as_uuid().to_string(),
+                "through_seq": plan.through_seq().get(),
+                "from_node": request.from_node,
+                "graph_hash": plan.graph_hash(),
+                "acknowledged_writes": hazard_seqs,
+            },
+        })),
+    )
+        .into_response())
+}
+
+/// `GET /v1/runs/{id}/forks`: the forks of a run, as a DERIVED index.
+///
+/// The origin is immutable and never points forward at its children; this
+/// answer is a server-side scan of every run's `forked_from`, not a fact the
+/// origin recorded. The response is labeled `"derived": true` to say so. `404
+/// unknown_run` when the id has no history.
+pub async fn forks(
+    State(state): State<AppState>,
+    Path(run_id_text): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let origin_id = parse_run_id(&run_id_text)?;
+    let origin_log = state
+        .store()
+        .read_log(origin_id)
+        .await
+        .map_err(store_error)?;
+    if origin_log.is_empty() {
+        return Err(ApiError::UnknownRun(format!(
+            "no run {} in this store",
+            origin_id.as_uuid()
+        )));
+    }
+
+    // Scan every run for a GraphRunStarted head whose fork origin names this run.
+    // An unreadable individual log is skipped, never allowed to fail the whole
+    // listing (the same posture GET /v1/runs takes).
+    let summaries = state.store().list_runs().await.map_err(store_error)?;
+    let mut forks = Vec::new();
+    for summary in summaries {
+        if summary.run_id == origin_id {
+            continue;
+        }
+        let Ok(log) = state.store().read_log(summary.run_id).await else {
+            continue;
+        };
+        if let Some(Event::GraphRunStarted {
+            forked_from: Some(origin),
+            ..
+        }) = log.first().map(|envelope| &envelope.event)
+            && origin.run_id == origin_id
+        {
+            forks.push(json!({
+                "run": summary.run_id.as_uuid().to_string(),
+                "from_node": origin.from_node,
+                "through_seq": origin.through_seq.get(),
+                "acknowledged_writes": origin.acknowledged_writes,
+            }));
+        }
+    }
+
+    Ok(Json(json!({
+        "run": origin_id.as_uuid().to_string(),
+        "derived": true,
+        "forks": forks,
+    })))
 }
 
 /// Drives a parked or crashed GRAPH run further, for
@@ -631,6 +893,61 @@ fn projection_json(projection: &GraphProjection) -> Value {
     }
     object.insert("nodes".to_owned(), Value::Array(nodes));
     Value::Object(object)
+}
+
+/// Renders a set of [`WriteHazard`]s as the `details.writes` / preview array:
+/// each `{ seq, tool, input, idempotency_key, recorded_at }`, mirroring the
+/// reconciliation refusal's intent shape.
+fn write_hazards_json<'a>(hazards: impl Iterator<Item = &'a WriteHazard>) -> Value {
+    Value::Array(
+        hazards
+            .map(|hazard| {
+                json!({
+                    "seq": hazard.seq,
+                    "tool": hazard.tool,
+                    "input": hazard.input,
+                    "idempotency_key": hazard.idempotency_key,
+                    "recorded_at": rfc3339(hazard.recorded_at),
+                })
+            })
+            .collect(),
+    )
+}
+
+/// The dry-run preview: what the fork WOULD do, creating nothing. Carries the
+/// full hazard list, the would-be prefix summary, and whether the fork would
+/// proceed under the acknowledgement supplied.
+fn fork_preview_json(plan: &ForkPlan, missing: &[u64]) -> Value {
+    json!({
+        "dry_run": true,
+        "origin": plan.origin_run().as_uuid().to_string(),
+        "from_node": plan.from_node(),
+        "through_seq": plan.through_seq().get(),
+        "graph_hash": plan.graph_hash(),
+        "prefix_event_count": plan.prefix_len(),
+        "writes": write_hazards_json(plan.hazards().iter()),
+        "unacknowledged_writes": missing,
+        "would_proceed": missing.is_empty(),
+    })
+}
+
+/// The origin's dangling-write intent, for the `origin_needs_reconciliation`
+/// refusal: the pending call plus when it was recorded, the same evidence a
+/// resume reconciliation refusal carries.
+fn origin_reconcile_intent(log: &[EventEnvelope], pending: Option<&PendingCall>) -> Value {
+    let mut intent = crate::json::pending(pending);
+    if let Some(PendingCall::Tool { seq, .. }) = pending
+        && let Some(envelope) = log.iter().find(|envelope| envelope.seq == *seq)
+    {
+        intent["recorded_at"] = json!(rfc3339(envelope.recorded_at));
+    }
+    intent
+}
+
+/// Formats a timestamp as RFC 3339, the wire form the reconciliation intent and
+/// the store summaries use.
+fn rfc3339(timestamp: OffsetDateTime) -> String {
+    timestamp.format(&Rfc3339).unwrap_or_default()
 }
 
 /// The 202 body for a run now driving in the background (identical to the
