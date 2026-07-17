@@ -324,6 +324,7 @@ impl GateSpec {
 pub struct BranchSpec {
     id: String,
     on: Option<String>,
+    agent_hash: Option<String>,
     cases: Vec<BranchCase>,
 }
 
@@ -334,6 +335,7 @@ impl BranchSpec {
         Self {
             id: id.into(),
             on: None,
+            agent_hash: None,
             cases: Vec::new(),
         }
     }
@@ -342,6 +344,16 @@ impl BranchSpec {
     #[must_use]
     pub fn on(mut self, on: impl Into<String>) -> Self {
         self.on = Some(on.into());
+        self
+    }
+
+    /// Sets the `sha256:<64 hex>` hash of the agent that decides a
+    /// [`BranchCondition::ModelDecision`] case. Required by [`crate::validate`]
+    /// on any branch that carries a model-decision case; the hash form is
+    /// checked there, not here.
+    #[must_use]
+    pub fn agent_hash(mut self, agent_hash: impl Into<String>) -> Self {
+        self.agent_hash = Some(agent_hash.into());
         self
     }
 
@@ -361,6 +373,7 @@ impl BranchSpec {
         Node::Branch(BranchNode {
             id: self.id,
             on: self.on,
+            agent_hash: self.agent_hash,
             cases: self.cases,
         })
     }

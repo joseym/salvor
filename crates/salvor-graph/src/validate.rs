@@ -121,6 +121,19 @@ pub enum GraphError {
         /// The parse error's message.
         error: String,
     },
+
+    /// A `branch` node carries a `model_decision` case but declares no
+    /// `agent_hash`, so the engine would have no agent to make the decision.
+    /// Caught at submit, node- and case-precise.
+    #[error(
+        "branch node `{node}`: case `{case}` is a model decision but the branch declares no `agent_hash`"
+    )]
+    ModelDecisionWithoutAgent {
+        /// The branch node's id.
+        node: String,
+        /// The name of the model-decision case with no agent.
+        case: String,
+    },
 }
 
 /// Formats an optional nearest-name suggestion as a trailing clause, or empty.
@@ -274,28 +287,53 @@ fn check_node_fields(graph: &Graph, errors: &mut Vec<GraphError>) {
     }
 }
 
-/// Every `branch` case whose condition is an expression must parse in the
-/// [`crate::expr`] condition language.
+/// Every `branch` case is checked for the rule its condition kind implies.
 ///
-/// This is where the opaque expression string earns its meaning: the language
-/// is parsed AT SUBMIT, so a malformed condition is a node-precise error the
-/// author sees now, never a run-time failure inside a durable, replayed run.
-/// Each bad expression is one collected error naming the node and the case;
-/// `model_decision` conditions carry no expression and are skipped.
+/// This is where the opaque case conditions earn their meaning, AT SUBMIT, so a
+/// malformed branch is a node-precise error the author sees now, never a
+/// run-time failure inside a durable, replayed run:
+///
+/// - an `expression` condition must parse in the [`crate::expr`] condition
+///   language;
+/// - a `model_decision` condition requires the branch to declare an
+///   `agent_hash`, because the engine drives that agent to make the decision;
+/// - a declared `agent_hash` must be a well-formed `sha256:<64 hex>` string,
+///   exactly like an agent node's hash.
+///
+/// Each fault is one collected error naming the node (and, for a case fault, the
+/// case).
 fn check_branch_expressions(graph: &Graph, errors: &mut Vec<GraphError>) {
     for node in &graph.nodes {
         let Node::Branch(branch) = node else {
             continue;
         };
+        if let Some(hash) = &branch.agent_hash
+            && !is_well_formed_agent_hash(hash)
+        {
+            errors.push(GraphError::MalformedAgentHash {
+                id: branch.id.clone(),
+                hash: hash.clone(),
+            });
+        }
         for case in &branch.cases {
-            if let BranchCondition::Expression(source) = &case.when
-                && let Err(error) = expr::parse(source)
-            {
-                errors.push(GraphError::InvalidBranchExpression {
-                    node: branch.id.clone(),
-                    case: case.name.clone(),
-                    error: error.to_string(),
-                });
+            match &case.when {
+                BranchCondition::Expression(source) => {
+                    if let Err(error) = expr::parse(source) {
+                        errors.push(GraphError::InvalidBranchExpression {
+                            node: branch.id.clone(),
+                            case: case.name.clone(),
+                            error: error.to_string(),
+                        });
+                    }
+                }
+                BranchCondition::ModelDecision => {
+                    if branch.agent_hash.is_none() {
+                        errors.push(GraphError::ModelDecisionWithoutAgent {
+                            node: branch.id.clone(),
+                            case: case.name.clone(),
+                        });
+                    }
+                }
             }
         }
     }
@@ -756,6 +794,7 @@ mod tests {
         let branch = Node::Branch(BranchNode {
             id: "route".into(),
             on: Some("score".into()),
+            agent_hash: Some(hash()),
             cases: vec![
                 BranchCase {
                     name: "high".into(),
@@ -778,6 +817,7 @@ mod tests {
         let branch = Node::Branch(BranchNode {
             id: "route".into(),
             on: None,
+            agent_hash: Some(hash()),
             cases: vec![
                 BranchCase {
                     name: "broken".into(),
@@ -798,6 +838,55 @@ mod tests {
                     if node == "route" && case == "broken"
             ),
             "one node/case-precise expression error: {errors:?}"
+        );
+    }
+
+    /// A `model_decision` case on a branch that declares no `agent_hash` is a
+    /// node/case-precise error: the engine would have no agent to make the
+    /// decision.
+    #[test]
+    fn model_decision_without_agent_is_reported() {
+        let branch = Node::Branch(BranchNode {
+            id: "route".into(),
+            on: None,
+            agent_hash: None,
+            cases: vec![BranchCase {
+                name: "ask".into(),
+                when: BranchCondition::ModelDecision,
+            }],
+        });
+        let g = graph(vec![branch], vec![]);
+        let errors = validate(&g).expect_err("invalid");
+        assert!(
+            errors.contains(&GraphError::ModelDecisionWithoutAgent {
+                node: "route".into(),
+                case: "ask".into(),
+            }),
+            "names the node and case: {errors:?}"
+        );
+    }
+
+    /// A branch that declares an `agent_hash` must spell it `sha256:<64 hex>`,
+    /// exactly like an agent node's hash.
+    #[test]
+    fn malformed_branch_agent_hash_is_reported() {
+        let branch = Node::Branch(BranchNode {
+            id: "route".into(),
+            on: None,
+            agent_hash: Some("sha256:not-hex".into()),
+            cases: vec![BranchCase {
+                name: "ask".into(),
+                when: BranchCondition::ModelDecision,
+            }],
+        });
+        let g = graph(vec![branch], vec![]);
+        let errors = validate(&g).expect_err("invalid");
+        assert!(
+            errors.contains(&GraphError::MalformedAgentHash {
+                id: "route".into(),
+                hash: "sha256:not-hex".into(),
+            }),
+            "names the branch node and its malformed hash: {errors:?}"
         );
     }
 }

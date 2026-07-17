@@ -237,9 +237,21 @@ pub struct BranchNode {
     /// Recorded as DATA; not resolved in this crate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on: Option<String>,
-    /// The cases, each a named condition. The condition is DATA: nothing here
-    /// evaluates it (there is no expression evaluator). At run time the engine
-    /// picks the firing case and records the choice as an event.
+    /// Content hash of the agent that decides a [`BranchCondition::ModelDecision`]
+    /// case, in `sha256:<64 lowercase hex>` form. Present only on a branch that
+    /// carries a model-decision case: the engine drives this agent with the
+    /// routed value and maps its reply to a case name. Additive: absent on the
+    /// wire when unset, so a purely expression-driven branch (and every document
+    /// written before this field existed) serializes byte for byte as before.
+    /// [`crate::validate`] reports a model-decision case with no agent here as a
+    /// node-precise error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_hash: Option<String>,
+    /// The cases, each a named condition. An expression condition is evaluated
+    /// against the routed value; a model-decision condition is resolved by the
+    /// node's [`agent_hash`](Self::agent_hash) agent. The first matching case in
+    /// author order wins, and the engine records the choice as a
+    /// [`crate::document`]-external `BranchTaken` event.
     pub cases: Vec<BranchCase>,
 }
 
