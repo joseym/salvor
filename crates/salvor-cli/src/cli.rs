@@ -73,6 +73,11 @@ pub enum GraphCommand {
     Validate(GraphValidateArgs),
     /// Print the graph document JSON Schema to stdout.
     Schema,
+    /// Drive a graph document locally over the store, exactly as `salvor run`
+    /// drives an agent run: each `agent` node resolves to a provided `--agent`
+    /// file (keyed by its computed definition hash), and each `tool` node
+    /// resolves from the tools those agents carry.
+    Run(GraphRunArgs),
 }
 
 /// Arguments to `graph validate`.
@@ -81,6 +86,27 @@ pub struct GraphValidateArgs {
     /// Path to the graph document (JSON).
     #[arg(value_name = "FILE")]
     pub path: PathBuf,
+}
+
+/// Arguments to `graph run`.
+#[derive(Debug, Args)]
+pub struct GraphRunArgs {
+    /// Path to the graph document (JSON).
+    #[arg(value_name = "FILE")]
+    pub graph: PathBuf,
+    /// The run input: a JSON value, or `@path` to read JSON from a file.
+    #[arg(long, value_name = "JSON|@FILE")]
+    pub input: String,
+    /// An agent definition (TOML) an `agent` node may reference. Repeatable:
+    /// each file is built and keyed by its computed definition hash, and a
+    /// graph `agent_hash` that matches none of them fails with a precise
+    /// message listing the hashes that were provided.
+    #[arg(long = "agent", value_name = "FILE")]
+    pub agents: Vec<PathBuf>,
+    /// A correlation tag `key=value`, recorded once on the run's
+    /// `GraphRunStarted`. Repeatable.
+    #[arg(long = "label", value_name = "KEY=VALUE")]
+    pub labels: Vec<String>,
 }
 
 /// Arguments to `run`.
@@ -100,9 +126,19 @@ pub struct ResumeArgs {
     /// The run id (a UUID) to continue.
     #[arg(value_name = "RUN_ID")]
     pub run_id: String,
-    /// Path to the agent definition (TOML), needed to rebuild the agent.
+    /// Path to an agent definition (TOML), needed to rebuild the agent.
+    /// Repeatable: an agent run needs exactly one; a graph run needs the files
+    /// its `agent` nodes reference (zero or more).
+    #[arg(long = "agent", value_name = "FILE")]
+    pub agents: Vec<PathBuf>,
+    /// Path to the graph document (JSON), needed to re-drive a GRAPH run. The
+    /// run's log records only the graph's hash, not the document, exactly as it
+    /// records an agent by hash and not its definition; so a graph run's resume
+    /// re-supplies the document here, the same way an agent run re-supplies its
+    /// definition through `--agent`. Its hash must match the one the run
+    /// recorded. Omit for an ordinary agent run.
     #[arg(long, value_name = "FILE")]
-    pub agent: PathBuf,
+    pub graph: Option<PathBuf>,
     /// The resume input, required for a parked run: a JSON value, or `@path`.
     /// Ignored (with a warning) when recovering a crashed run.
     #[arg(long, value_name = "JSON|@FILE")]

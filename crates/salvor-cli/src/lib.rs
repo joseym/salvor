@@ -83,11 +83,13 @@ pub async fn dispatch(cli: Cli) -> Result<u8> {
         Command::Serve(args) => commands::serve(store, args).await,
         // `build` produces the product from a checkout; it reads no store.
         Command::Build(args) => commands::build(args).await,
-        // Graph document tooling reads no store and drives no run, so these
-        // handlers are synchronous and ignore the store path.
         Command::Graph { command } => match command {
+            // `validate` and `schema` read no store and drive no run, so they
+            // are synchronous and ignore the store path; `run` drives a graph
+            // over the store, exactly as `salvor run` drives an agent run.
             crate::cli::GraphCommand::Validate(args) => commands::graph_validate(args),
             crate::cli::GraphCommand::Schema => commands::graph_schema(),
+            crate::cli::GraphCommand::Run(args) => commands::graph_run(store, args).await,
         },
     }
 }

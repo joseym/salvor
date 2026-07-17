@@ -80,6 +80,10 @@ salvor-core.workspace = true
 # The graph document format + validator behind `salvor graph`. A pure, IO-free
 # leaf: the CLI depends on it, never the other way, so there is no cycle.
 salvor-graph.workspace = true
+# The graph engine behind `salvor graph run` (and a graph run's `salvor
+# resume`): it drives a validated document over a `RunCtx`, exactly as the CLI
+# drives an agent run over the runtime.
+salvor-engine.workspace = true
 salvor-store.workspace = true
 salvor-llm.workspace = true
 salvor-tools.workspace = true

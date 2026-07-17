@@ -2397,6 +2397,7 @@ dependencies = [
  "predicates",
  "rmcp",
  "salvor-core",
+ "salvor-engine",
  "salvor-graph",
  "salvor-llm",
  "salvor-runtime",

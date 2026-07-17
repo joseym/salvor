@@ -27,17 +27,24 @@
 //! The full recorded log, replayed prefix and all, is always available through
 //! `salvor history`.
 
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use salvor_core::{PendingCall, RunId, derive_state};
-use salvor_runtime::{RunOutcome, Runtime, RuntimeError};
+use salvor_core::{Event, EventEnvelope, PendingCall, RunId, derive_state};
+use salvor_engine::{GraphOutcome, ToolResolver, graph_hash, run_graph};
+use salvor_graph::{Graph, Node};
+use salvor_runtime::{
+    Agent, ParkReason, RunCtx, RunOutcome, Runtime, RuntimeError, validate_labels,
+};
 use salvor_server::dispatch::{Disposition, classify};
 use salvor_server::{
     AgentDefinition, AgentFactory, AppState, BuiltAgent, DefFormat, LlmModelExecutor, ToolRegistry,
 };
 use salvor_store::{EventStore, SqliteStore};
+use salvor_tools::DynTool;
+use salvor_tools::mcp::McpServer;
 use serde_json::Value;
 use tokio::net::TcpListener;
 use uuid::Uuid;
@@ -45,8 +52,8 @@ use uuid::Uuid;
 use crate::agent_config::{self, AgentConfig};
 use crate::checkout;
 use crate::cli::{
-    BuildArgs, GraphValidateArgs, HistoryArgs, ReplayArgs, ResolveArgs, ResumeArgs, RunArgs,
-    ServeArgs,
+    BuildArgs, GraphRunArgs, GraphValidateArgs, HistoryArgs, ReplayArgs, ResolveArgs, ResumeArgs,
+    RunArgs, ServeArgs,
 };
 use crate::dev_server::DevServer;
 use crate::render;
@@ -135,8 +142,18 @@ pub async fn resume(store_path: &Path, args: ResumeArgs) -> Result<u8> {
         Disposition::Resume(_) | Disposition::Recover => {}
     }
 
-    let config = AgentConfig::load(&args.agent)?;
-    let (agent, servers) = agent_config::build_agent(&config, &args.agent).await?;
+    // A graph run re-drives over the engine, not the built-in loop. The classify
+    // above, the parked-vs-crashed decision, and the input handling are shared;
+    // only the re-drive differs, because the log records the graph's hash, not
+    // the document. See `resume_graph`.
+    if is_graph_run(&log) {
+        return resume_graph(store, run_id, &uuid, &log, &args, disposition).await;
+    }
+
+    // An agent run rebuilds its one agent. Exactly one `--agent` is expected.
+    let agent_path = single_agent(&args.agents)?;
+    let config = AgentConfig::load(agent_path)?;
+    let (agent, servers) = agent_config::build_agent(&config, agent_path).await?;
     let mut runtime = Runtime::new(store.clone()).with_record_prompts(agent.record_prompts());
     if let Some(labels) = agent.labels() {
         runtime = runtime.with_labels(labels.clone());
@@ -165,7 +182,7 @@ pub async fn resume(store_path: &Path, args: ResumeArgs) -> Result<u8> {
     };
 
     close_servers(servers).await;
-    report_outcome(outcome?, &uuid, &args.agent)
+    report_outcome(outcome?, &uuid, agent_path)
 }
 
 /// `salvor resolve`: record the completion of a dangling write by hand.
@@ -524,6 +541,292 @@ pub fn graph_schema() -> Result<u8> {
     let schema = salvor_graph::graph_schema();
     println!("{}", serde_json::to_string_pretty(&schema)?);
     Ok(0)
+}
+
+/// `salvor graph run`: drive a graph document locally over the store, the graph
+/// counterpart of [`run`].
+///
+/// It mirrors `salvor run`: strict-parse and validate the document (refusing an
+/// invalid one before any run head is written), build every `--agent` file and
+/// key it by its computed definition hash, and drive the engine over a fresh
+/// `RunCtx`. The run id is printed first so a `kill -9` mid-run still leaves an
+/// id to resume. On a park (a gate, a budget crossing) it prints how to continue
+/// with `salvor resume ... --graph`.
+///
+/// # Resolution, and how it matches the server
+///
+/// An `agent` node resolves to a provided `--agent` file by that file's
+/// definition hash; a hash matching none of them is a precise error listing what
+/// was provided. A `tool` node resolves from the tools the provided agents
+/// carry — the local counterpart of the server's tool registry, keeping one
+/// honest story: a tool no provided agent carries is refused, named, before the
+/// walk reaches it (as [`run_graph`] does through the resolver).
+pub async fn graph_run(store_path: &Path, args: GraphRunArgs) -> Result<u8> {
+    let graph = load_and_validate_graph(&args.graph)?;
+    let input = parse_input(&args.input)?;
+    let labels = parse_label_args(&args.labels)?;
+    let store = open_store(store_path)?;
+    let (agents, servers) = build_graph_agents(&args.agents).await?;
+    // Resolve everything the document references up front, before any run head is
+    // written, so an unresolvable agent or tool is a precise refusal rather than
+    // a run stranded at the offending node. This mirrors the server, which
+    // resolves synchronously at graph-run submit.
+    if let Err(error) = check_graph_resolvable(&graph, &agents) {
+        close_servers(servers).await;
+        return Err(error);
+    }
+    let tools = AgentTools(&agents);
+
+    let run_id = RunId::new();
+    let uuid = run_id.as_uuid().to_string();
+    // Printed first, so a kill mid-run still leaves the operator an id to resume.
+    println!("run {uuid}");
+    tracing::info!(run_id = %uuid, "starting graph run");
+
+    let mut ctx = RunCtx::new(store.clone(), run_id, vec![])?;
+    if let Some(labels) = labels {
+        ctx = ctx.with_labels(labels);
+    }
+    let outcome = run_graph(&mut ctx, &graph, &input, &agents, &tools).await;
+    close_servers(servers).await;
+    report_graph_outcome(outcome?, &uuid, &args.graph, &args.agents)
+}
+
+/// Re-drives a parked or crashed GRAPH run, for [`resume`]'s graph branch.
+///
+/// The log records only the graph's hash, so the document is re-supplied through
+/// `--graph`; its hash must match the recorded one (a different document could
+/// route the same log differently, which would be a silent divergence rather
+/// than an honest refusal). The agent nodes' definitions are re-supplied through
+/// `--agent`, exactly as an agent run re-supplies its one definition. A parked
+/// run consumes `--input` at its suspension; a crashed run recovers with none.
+async fn resume_graph(
+    store: Arc<dyn EventStore>,
+    run_id: RunId,
+    uuid: &str,
+    log: &[EventEnvelope],
+    args: &ResumeArgs,
+    disposition: Disposition,
+) -> Result<u8> {
+    let graph_path = args.graph.as_deref().context(
+        "this is a graph run; pass --graph <graph.json> (its hash must match the recorded run) to \
+         re-drive it, alongside the --agent files its agent nodes reference",
+    )?;
+    let graph = load_and_validate_graph(graph_path)?;
+    let hash = graph_hash(&graph)?;
+    let recorded =
+        recorded_graph_hash(log).context("this graph run's log has no GraphRunStarted event")?;
+    if hash != recorded {
+        bail!(
+            "the graph in {} hashes to {hash}, but run {uuid} recorded {recorded}; resume needs the \
+             SAME document the run started with (submit the changed graph as a new run instead)",
+            graph_path.display()
+        );
+    }
+    let (agents, servers) = build_graph_agents(&args.agents).await?;
+    if let Err(error) = check_graph_resolvable(&graph, &agents) {
+        close_servers(servers).await;
+        return Err(error);
+    }
+    let tools = AgentTools(&agents);
+
+    let mut ctx = RunCtx::new(store, run_id, log.to_vec())?;
+    match disposition {
+        Disposition::Resume(_) => {
+            let raw = args.input.as_deref().context(
+                "this run is parked awaiting input; pass --input <json|@file> to resume it",
+            )?;
+            ctx.set_resume_input(parse_input(raw)?);
+            tracing::info!(run_id = %uuid, "resuming parked graph run");
+        }
+        _ => {
+            if args.input.is_some() {
+                tracing::warn!(
+                    run_id = %uuid,
+                    "this graph run crashed mid-step; --input is ignored when recovering"
+                );
+            }
+            tracing::info!(run_id = %uuid, "recovering crashed graph run");
+        }
+    }
+    // The recorded input wins on replay, so a bare null is fine here.
+    let outcome = run_graph(&mut ctx, &graph, &Value::Null, &agents, &tools).await;
+    close_servers(servers).await;
+    report_graph_outcome(outcome?, uuid, graph_path, &args.agents)
+}
+
+/// A [`ToolResolver`] over the provided agents' own tools: a graph `tool` node
+/// resolves to the first provided agent that carries a tool of that name. This
+/// is the local counterpart of the server's tool registry — the CLI has no
+/// standalone tool inventory, so the tools come from the real agent definitions
+/// the operator supplied.
+struct AgentTools<'a>(&'a HashMap<String, Agent>);
+
+impl ToolResolver for AgentTools<'_> {
+    fn resolve_tool(&self, name: &str) -> Option<&dyn DynTool> {
+        self.0.values().find_map(|agent| agent.tools().get(name))
+    }
+}
+
+/// Reads and strictly validates a graph document, refusing an invalid one with a
+/// precise, node/edge-level error message (the same checks `graph validate`
+/// runs).
+fn load_and_validate_graph(path: &Path) -> Result<Graph> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading graph document {}", path.display()))?;
+    let graph: Graph = serde_json::from_str(&text)
+        .with_context(|| format!("{} is not a valid graph document", path.display()))?;
+    match salvor_graph::validate(&graph) {
+        Ok(_) => Ok(graph),
+        Err(errors) => {
+            let mut message = format!("{}: {} validation error(s):", path.display(), errors.len());
+            for error in &errors {
+                message.push_str(&format!("\n  - {error}"));
+            }
+            bail!(message)
+        }
+    }
+}
+
+/// Builds every provided agent file, keyed by its computed definition hash, and
+/// collects their MCP sessions for the caller to keep alive and close.
+async fn build_graph_agents(paths: &[PathBuf]) -> Result<(HashMap<String, Agent>, Vec<McpServer>)> {
+    let mut agents: HashMap<String, Agent> = HashMap::new();
+    let mut servers: Vec<McpServer> = Vec::new();
+    for path in paths {
+        let config = AgentConfig::load(path)?;
+        let (agent, agent_servers) = agent_config::build_agent(&config, path).await?;
+        agents.insert(agent.def_hash().to_owned(), agent);
+        servers.extend(agent_servers);
+    }
+    Ok((agents, servers))
+}
+
+/// Checks every agent and tool the graph references resolves from what was
+/// provided, before any run head is written. An `agent` node (or a
+/// model-decision `branch`) whose hash matches no provided `--agent` fails with
+/// the list of hashes that WERE provided; a `tool` node no provided agent
+/// carries fails naming the node and tool.
+fn check_graph_resolvable(graph: &Graph, agents: &HashMap<String, Agent>) -> Result<()> {
+    for node in &graph.nodes {
+        let referenced = match node {
+            Node::Agent(agent) => Some((agent.id.as_str(), agent.agent_hash.as_str())),
+            Node::Branch(branch) => branch
+                .agent_hash
+                .as_deref()
+                .map(|hash| (branch.id.as_str(), hash)),
+            _ => None,
+        };
+        if let Some((node_id, hash)) = referenced
+            && !agents.contains_key(hash)
+        {
+            let provided: Vec<&str> = agents.keys().map(String::as_str).collect();
+            let provided = if provided.is_empty() {
+                "none".to_owned()
+            } else {
+                provided.join(", ")
+            };
+            bail!(
+                "node `{node_id}` references agent `{hash}`, which none of the provided --agent \
+                 files supply (provided: {provided})"
+            );
+        }
+    }
+    for node in &graph.nodes {
+        if let Node::Tool(tool) = node
+            && !agents
+                .values()
+                .any(|agent| agent.tools().get(&tool.tool).is_some())
+        {
+            bail!(
+                "tool node `{}` names tool `{}`, which none of the provided agents carry",
+                tool.id,
+                tool.tool
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Whether a run's log is a graph run: its first event is `GraphRunStarted`.
+fn is_graph_run(log: &[EventEnvelope]) -> bool {
+    matches!(
+        log.first().map(|envelope| &envelope.event),
+        Some(Event::GraphRunStarted { .. })
+    )
+}
+
+/// The `graph_hash` recorded in a graph run's `GraphRunStarted` head.
+fn recorded_graph_hash(log: &[EventEnvelope]) -> Option<String> {
+    log.iter().find_map(|envelope| match &envelope.event {
+        Event::GraphRunStarted { graph_hash, .. } => Some(graph_hash.clone()),
+        _ => None,
+    })
+}
+
+/// The single agent path an agent-run resume needs, or a clear refusal when
+/// none or several were passed.
+fn single_agent(agents: &[PathBuf]) -> Result<&Path> {
+    match agents {
+        [one] => Ok(one),
+        [] => bail!("resuming an agent run needs its definition; pass --agent <file>"),
+        _ => bail!(
+            "an agent run resumes under exactly one --agent; pass --graph to resume a graph run \
+             with multiple agents"
+        ),
+    }
+}
+
+/// Parses `key=value` label arguments into the map the runtime stamps, checking
+/// the same bounds the server does. `None` when no labels were passed.
+fn parse_label_args(labels: &[String]) -> Result<Option<BTreeMap<String, String>>> {
+    if labels.is_empty() {
+        return Ok(None);
+    }
+    let mut map = BTreeMap::new();
+    for label in labels {
+        let (key, value) = label
+            .split_once('=')
+            .with_context(|| format!("label `{label}` must be key=value"))?;
+        map.insert(key.to_owned(), value.to_owned());
+    }
+    validate_labels(&map).map_err(anyhow::Error::msg)?;
+    Ok(Some(map))
+}
+
+/// Prints the result of a graph drive: the final output on completion, or a
+/// parked report telling the operator how to continue with `salvor resume
+/// --graph`. Both are exit code 0, exactly as an agent run's park is.
+fn report_graph_outcome(
+    outcome: GraphOutcome,
+    uuid: &str,
+    graph_path: &Path,
+    agents: &[PathBuf],
+) -> Result<u8> {
+    match outcome {
+        GraphOutcome::Completed { output } => {
+            println!("{}", render::pretty_json(&output));
+            Ok(0)
+        }
+        GraphOutcome::Parked { node, reason } => {
+            println!("graph run {uuid} parked at node `{node}`.");
+            match &reason {
+                ParkReason::Suspended { reason, .. } => println!("  reason: {reason}"),
+                ParkReason::BudgetExceeded { budget, observed } => {
+                    println!("  budget crossed: {budget:?} (observed {observed})");
+                }
+            }
+            let agent_flags: String = agents
+                .iter()
+                .map(|path| format!(" --agent {}", path.display()))
+                .collect();
+            println!(
+                "resume it with:\n  salvor resume {uuid} --graph {}{agent_flags} --input <json>",
+                graph_path.display()
+            );
+            Ok(0)
+        }
+    }
 }
 
 /// Builds a live agent from a submitted definition, for the `serve` factory.
