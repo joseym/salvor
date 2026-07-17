@@ -2,6 +2,7 @@ import { Component, computed, effect, inject, signal } from '@angular/core';
 import type { RunState, RunSummary } from '@salvor/client';
 
 import { RunsService, SALVOR_CLIENT, errorMessage } from '../../core/api';
+import { focusWhenRendered } from '../../core/focus';
 import { labelOf } from '../runs/run-model';
 import { BudgetCard } from './budget-card';
 import { shortId } from './inbox-model';
@@ -172,11 +173,15 @@ export class Inbox {
     }
   }
 
+  // The dock hand-off: opening focuses the panel's dismiss control and closing focuses the
+  // restore tab, so keyboard focus is never stranded on a control that just disappeared.
   closePanel(): void {
     this.panelOpen.set(false);
+    focusWhenRendered('.cpanel-tab[data-panel="inbox"]');
   }
   openPanel(): void {
     this.panelOpen.set(true);
+    focusWhenRendered('.cpanel[data-panel="inbox"] .cpanel-x');
   }
 
   // panel field helpers — every value read straight off the fresh RunState's own raw JSON

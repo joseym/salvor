@@ -12,6 +12,7 @@ import {
 
 import { RunsService, createConnectionStateMachine } from '../../core/api';
 import { ViewService } from '../../core/view';
+import { focusWhenRendered } from '../../core/focus';
 import {
   FIELDS,
   MENU_KEYS,
@@ -520,16 +521,15 @@ export class Runs {
   isSelected(id: string): boolean {
     return this.runSel() === id;
   }
+  // The dock hand-off: opening focuses the panel's dismiss control and closing focuses the
+  // restore tab, so keyboard focus is never stranded on a control that just disappeared.
   closePanel(): void {
     this.panelOpen.set(false);
+    focusWhenRendered('.cpanel-tab[data-panel="runs"]');
   }
   openPanel(): void {
     this.panelOpen.set(true);
-    // Opening via the dock tab hands focus to the panel's dismiss control, so keyboard focus
-    // always lands inside the panel when it opens, never stranded on the tab that opened it.
-    queueMicrotask(() => {
-      document.querySelector<HTMLButtonElement>('.cpanel[data-panel="runs"] .cpanel-x')?.focus();
-    });
+    focusWhenRendered('.cpanel[data-panel="runs"] .cpanel-x');
   }
   panelSub(): string {
     const r = this.selectedRow();
