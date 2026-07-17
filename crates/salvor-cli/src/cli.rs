@@ -169,4 +169,14 @@ pub struct ServeArgs {
     /// token itself, matching how agent files name key variables.
     #[arg(long, value_name = "ENV_VAR")]
     pub auth_token: Option<String>,
+    /// Kill the running `salvor serve` instead of serving. With no value,
+    /// discovers every running `salvor serve` (by inspecting the process
+    /// table, since there are no pid files): zero found is reported and this
+    /// exits; exactly one is killed; multiple print a numbered table and
+    /// prompt for a choice. Given a value (a pid or a listening port), kills
+    /// that one directly with no prompt. When present at all, this
+    /// short-circuits before `--bind` or `--store` are acted on: the process
+    /// never binds a port.
+    #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "PID|PORT")]
+    pub kill: Option<String>,
 }

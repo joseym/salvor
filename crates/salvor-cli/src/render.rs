@@ -15,6 +15,8 @@ use serde_json::Value;
 use std::path::Path;
 use time::OffsetDateTime;
 
+use crate::serve_kill::RunningServer;
+
 /// One `history` line: sequence, recorded time, kind, and the detail. The
 /// per-event `kind` and `detail` come from `salvor-runtime`, the same functions
 /// that format the live progress stream, so a step reads identically whether
@@ -146,6 +148,24 @@ pub fn list_table(rows: &[(RunSummary, String)]) -> String {
             summary.event_count,
             format_ts(summary.first_recorded_at),
             format_ts(summary.last_recorded_at),
+        ));
+    }
+    out
+}
+
+/// The `salvor serve --kill` table: one numbered row per discovered `salvor
+/// serve` process, so an operator picking one at the prompt can name it by
+/// number, pid, or port.
+#[must_use]
+pub fn server_table(servers: &[RunningServer]) -> String {
+    let mut out = format!("{:>3}  {:<8}  {:<21}  {}\n", "#", "PID", "BIND", "STORE");
+    for (index, server) in servers.iter().enumerate() {
+        out.push_str(&format!(
+            "{:>3}  {:<8}  {:<21}  {}\n",
+            index + 1,
+            server.pid,
+            server.bind,
+            server.store,
         ));
     }
     out

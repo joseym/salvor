@@ -12,6 +12,9 @@
 //! - [`commands`] is one handler per verb, wiring [`salvor_runtime`] and
 //!   [`salvor_store`] together.
 //! - [`render`] is pure value-to-text formatting, shared by the commands.
+//! - [`serve_kill`] is the process discovery and termination behind `salvor
+//!   serve --kill`, kept separate from [`commands::serve`] because it has
+//!   nothing to do with actually serving.
 //!
 //! # Where the durability comes from
 //!
@@ -31,6 +34,7 @@ pub mod commands;
 #[cfg(feature = "fixture")]
 pub mod demo_script;
 pub mod render;
+pub mod serve_kill;
 
 use anyhow::Result;
 

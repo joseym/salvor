@@ -48,6 +48,7 @@ use crate::cli::{
     ServeArgs,
 };
 use crate::render;
+use crate::serve_kill;
 
 /// `salvor run`: start a fresh run, print its id, drive it, and report.
 pub async fn run(store_path: &Path, args: RunArgs) -> Result<u8> {
@@ -261,7 +262,23 @@ pub async fn replay(store_path: &Path, args: ReplayArgs) -> Result<u8> {
 /// JSON) with the CLI's own [`AgentConfig`] and builds it, so the schema keeps
 /// its single home here. A submitted definition's relative paths (a prompt
 /// file, a wasm component) resolve against the server's working directory.
+///
+/// `--kill` short-circuits this handler before the store opens or a port
+/// binds: it never serves in the same invocation. That is a plain early
+/// return rather than a clap `conflicts_with`, because `--store` lives on the
+/// top-level [`crate::cli::Cli`] as a global flag, not on [`ServeArgs`], so
+/// there is no single sibling argument for clap to name; a handler-level
+/// check covers `--store` and `--bind` alike with one line, and keeps the
+/// process-discovery flow ([`serve_kill`]) unit-testable on its own.
 pub async fn serve(store_path: &Path, args: ServeArgs) -> Result<u8> {
+    if let Some(target) = &args.kill {
+        // `--kill` with no value arrives as `Some("")` (clap's
+        // `default_missing_value`); that is the "no target, discover and
+        // maybe prompt" case, not a literal empty target.
+        let target = (!target.is_empty()).then_some(target.as_str());
+        return serve_kill::run(target).await;
+    }
+
     let store = open_store(store_path)?;
 
     let factory: AgentFactory = Arc::new(|definition: AgentDefinition| {
