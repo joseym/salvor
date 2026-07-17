@@ -14,7 +14,8 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use crate::document::{Graph, MapBody, Node, SCHEMA_VERSION};
+use crate::document::{BranchCondition, Graph, MapBody, Node, SCHEMA_VERSION};
+use crate::expr;
 
 /// A single validation failure, naming the node or edge at fault.
 ///
@@ -107,6 +108,19 @@ pub enum GraphError {
         /// The destination node id (its input schema).
         to: String,
     },
+
+    /// A `branch` node case carries an expression condition that does not parse
+    /// in the [`crate::expr`] condition language. Caught at submit so a bad
+    /// expression is never a run-time failure.
+    #[error("branch node `{node}`: case `{case}` has an invalid condition expression: {error}")]
+    InvalidBranchExpression {
+        /// The branch node's id.
+        node: String,
+        /// The name of the offending case.
+        case: String,
+        /// The parse error's message.
+        error: String,
+    },
 }
 
 /// Formats an optional nearest-name suggestion as a trailing clause, or empty.
@@ -150,6 +164,7 @@ pub fn validate(graph: &Graph) -> Result<GraphSummary, Vec<GraphError>> {
     check_unique_node_ids(graph, &mut errors);
     check_referential_integrity(graph, &mut errors);
     check_node_fields(graph, &mut errors);
+    check_branch_expressions(graph, &mut errors);
     check_acyclic(graph, &mut errors);
     check_edge_type_compat(graph, &mut errors);
 
@@ -255,6 +270,33 @@ fn check_node_fields(graph: &Graph, errors: &mut Vec<GraphError>) {
             }
             // Tool and branch carry no field rule beyond the strict parse.
             Node::Tool(_) | Node::Branch(_) => {}
+        }
+    }
+}
+
+/// Every `branch` case whose condition is an expression must parse in the
+/// [`crate::expr`] condition language.
+///
+/// This is where the opaque expression string earns its meaning: the language
+/// is parsed AT SUBMIT, so a malformed condition is a node-precise error the
+/// author sees now, never a run-time failure inside a durable, replayed run.
+/// Each bad expression is one collected error naming the node and the case;
+/// `model_decision` conditions carry no expression and are skipped.
+fn check_branch_expressions(graph: &Graph, errors: &mut Vec<GraphError>) {
+    for node in &graph.nodes {
+        let Node::Branch(branch) = node else {
+            continue;
+        };
+        for case in &branch.cases {
+            if let BranchCondition::Expression(source) = &case.when
+                && let Err(error) = expr::parse(source)
+            {
+                errors.push(GraphError::InvalidBranchExpression {
+                    node: branch.id.clone(),
+                    case: case.name.clone(),
+                    error: error.to_string(),
+                });
+            }
         }
     }
 }
@@ -707,10 +749,10 @@ mod tests {
         assert!(errors.contains(&GraphError::DuplicateNodeId { id: "dup".into() }));
     }
 
-    /// A branch node with condition data validates clean (conditions are data,
-    /// never evaluated).
+    /// A branch node whose expression condition is well-formed validates clean;
+    /// a `model_decision` case carries no expression to check.
     #[test]
-    fn branch_conditions_are_data_only() {
+    fn valid_branch_expression_passes() {
         let branch = Node::Branch(BranchNode {
             id: "route".into(),
             on: Some("score".into()),
@@ -727,5 +769,35 @@ mod tests {
         });
         let g = graph(vec![agent("score"), branch], vec![edge("score", "route")]);
         assert!(validate(&g).is_ok());
+    }
+
+    /// A branch case whose expression does not parse is a node-precise error
+    /// naming the node and the case; a sibling `model_decision` case is skipped.
+    #[test]
+    fn invalid_branch_expression_is_reported() {
+        let branch = Node::Branch(BranchNode {
+            id: "route".into(),
+            on: None,
+            cases: vec![
+                BranchCase {
+                    name: "broken".into(),
+                    when: BranchCondition::Expression("score >".into()),
+                },
+                BranchCase {
+                    name: "fallback".into(),
+                    when: BranchCondition::ModelDecision,
+                },
+            ],
+        });
+        let g = graph(vec![branch], vec![]);
+        let errors = validate(&g).expect_err("invalid");
+        assert!(
+            matches!(
+                errors.as_slice(),
+                [GraphError::InvalidBranchExpression { node, case, .. }]
+                    if node == "route" && case == "broken"
+            ),
+            "one node/case-precise expression error: {errors:?}"
+        );
     }
 }

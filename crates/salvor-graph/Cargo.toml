@@ -15,3 +15,5 @@ thiserror.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+# Property tests for the condition-language parser and evaluator (expr.rs).
+proptest.workspace = true

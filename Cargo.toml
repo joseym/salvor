@@ -109,6 +109,10 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 async-trait = "0.1"
 sha2 = "0.10"
 schemars = "1"
+# Property-based testing for salvor-graph's condition-language parser/evaluator:
+# generate thousands of arbitrary and near-miss inputs to prove the parser never
+# panics and eval is total. Dev-only, so it adds nothing to any shipped tree.
+proptest = "1"
 syn = "2"
 quote = "1"
 proc-macro2 = "1"
