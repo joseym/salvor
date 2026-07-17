@@ -30,6 +30,16 @@
 //! authenticated caller still cannot drive another caller's run, and a second
 //! live driver without the current lease is refused. Re-opening a run mints a
 //! fresh lease, so a resuming tab always holds the current one.
+//!
+//! # Labels on a client-driven run
+//!
+//! The client, not this server, synthesizes the run's `RunStarted` (see [`open`]):
+//! there is no server-side "creation" step here the way [`crate::runs::start`]'s
+//! `StartRequest` has one. So the correlation `labels` a caller wants land in the
+//! `RunStarted` payload the client builds and appends, and the one place this
+//! server ever inspects them is [`append`], the moment that event is accepted:
+//! the sanity bounds (see `salvor_runtime::validate_labels`) are checked there,
+//! against whatever `labels` the submitted event carries, before it is written.
 
 use std::convert::Infallible;
 
@@ -42,7 +52,7 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use salvor_core::{Effect, Event, EventEnvelope, LogValidator, RunId, SequenceNumber, TokenUsage};
 use salvor_llm::{ContentDelta, MessageAccumulator, StreamEvent};
-use salvor_runtime::{RuntimeError, hash_value, response_value, usage_of};
+use salvor_runtime::{RuntimeError, hash_value, response_value, usage_of, validate_labels};
 use salvor_tools::{ToolCtx, ToolOutcome};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -271,6 +281,19 @@ pub async fn append(
             )));
         }
         reject_side_effecting_kind(&candidate)?;
+        // The client synthesizes its own `RunStarted` (see the module docs);
+        // this append is the one place the server ever sees it, so it is
+        // where the sanity bounds on any carried `labels` are enforced. A
+        // byte-identical retry at an already-recorded position (handled just
+        // below) was validated the first time it landed, so re-checking here
+        // is cheap and harmless, never a behavior change.
+        if let Event::RunStarted {
+            labels: Some(labels),
+            ..
+        } = &candidate.event
+        {
+            validate_labels(labels).map_err(ApiError::BadRequest)?;
+        }
 
         let next_seq = validator.next_seq();
         if candidate.seq < next_seq {

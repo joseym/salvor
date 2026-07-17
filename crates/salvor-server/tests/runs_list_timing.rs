@@ -41,6 +41,7 @@ async fn seed_run(store: &dyn EventStore, agent_def_hash: &str) {
         Event::RunStarted {
             agent_def_hash: agent_def_hash.to_owned(),
             input: json!({"topic": "durable execution"}),
+            labels: None,
         },
     );
     store.append(&envelope).await.expect("append RunStarted");

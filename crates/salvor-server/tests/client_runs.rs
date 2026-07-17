@@ -30,6 +30,7 @@ fn run_started() -> Event {
     Event::RunStarted {
         agent_def_hash: "sha256:agent".into(),
         input: json!({ "topic": "otters" }),
+        labels: None,
     }
 }
 
@@ -129,7 +130,7 @@ async fn open_append_legal_sequence_and_read_back() {
     assert!(cursor.is_replaying(), "a full log replays");
     // Drive the recorded run: each step comes from the log, none executes.
     assert!(matches!(
-        cursor.begin("sha256:agent").expect("begin"),
+        cursor.begin("sha256:agent", None).expect("begin"),
         salvor_core::Outcome::Replayed(_)
     ));
     assert!(matches!(
@@ -215,6 +216,7 @@ async fn divergent_bytes_at_existing_seq_is_409() {
         Event::RunStarted {
             agent_def_hash: "sha256:DIFFERENT".into(),
             input: json!({ "topic": "badgers" }),
+            labels: None,
         },
     );
     let (status, body) = append(&client, &server.base, &run, Some(&token), vec![divergent]).await;
@@ -448,4 +450,89 @@ async fn log_read_honors_from_seq() {
     let envelopes = log["log"].as_array().unwrap();
     assert_eq!(envelopes.len(), 2, "from_seq trims the prefix");
     assert_eq!(envelopes[0]["seq"], 1);
+}
+
+/// A client-synthesized `RunStarted` carrying labels over the sanity bounds is
+/// rejected on append: `400`, and nothing is written. The client, not this
+/// server, builds the event, so this is the one point the server ever
+/// inspects `labels` for a client-driven run.
+#[tokio::test]
+async fn appended_run_started_with_too_many_labels_is_rejected() {
+    let server = client_server().await;
+    let client = reqwest::Client::new();
+    let (run, token) = open_run(&client, &server.base).await;
+
+    let mut labels = std::collections::BTreeMap::new();
+    for i in 0..17 {
+        labels.insert(format!("k{i}"), "v".to_owned());
+    }
+    let over_the_cap = Event::RunStarted {
+        agent_def_hash: "sha256:agent".into(),
+        input: json!({ "topic": "otters" }),
+        labels: Some(labels),
+    };
+    let (status, body) = append(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        vec![env_value(&run, 0, over_the_cap)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], "bad_request");
+
+    let (status, log) = get_json(
+        &client,
+        &format!("{}/v1/client-runs/{run}/log", server.base),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        log["log"],
+        json!([]),
+        "a rejected RunStarted writes nothing"
+    );
+}
+
+/// A client-synthesized `RunStarted` with labels inside the bounds is accepted
+/// and comes back on the log unchanged, exercising the append path end to end
+/// for the labeled case (the happy-path append test above never sets labels).
+#[tokio::test]
+async fn appended_run_started_with_labels_round_trips() {
+    let server = client_server().await;
+    let client = reqwest::Client::new();
+    let (run, token) = open_run(&client, &server.base).await;
+
+    let labeled = Event::RunStarted {
+        agent_def_hash: "sha256:agent".into(),
+        input: json!({ "topic": "otters" }),
+        labels: Some(std::collections::BTreeMap::from([(
+            "build".to_owned(),
+            "42".to_owned(),
+        )])),
+    };
+    let (status, body) = append(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        vec![env_value(&run, 0, labeled)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, log) = get_json(
+        &client,
+        &format!("{}/v1/client-runs/{run}/log", server.base),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        log["log"][0]["event"]["payload"]["labels"],
+        json!({ "build": "42" }),
+        "the accepted labels come back on read exactly as submitted"
+    );
 }

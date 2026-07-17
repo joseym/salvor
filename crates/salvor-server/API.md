@@ -128,11 +128,20 @@ background (see [Driving a run](#driving-a-run)).
 - Request:
 
 ```json
-{ "agent": "sha256:34e0...", "input": <any json>, "run_id": "<uuid, optional>" }
+{ "agent": "sha256:34e0...", "input": <any json>, "run_id": "<uuid, optional>",
+  "labels": { "build": "42", "env": "prod" } }
 ```
 
 `input` defaults to `null`. `run_id` is optional; when omitted the server mints
 one. Passing one lets a client choose the id (a UUID).
+
+`labels` is optional: free-form correlation tags recorded once on the run's
+`RunStarted` event, so runs can be told apart in a list (which resume build
+was this). At most 16 labels, each key at most 64 bytes and each value at
+most 256 bytes; a label is a tag, not a payload. A run started with no
+`labels` records none, and that is a different, honest thing from an empty
+object (see [`GET /v1/runs`](#get-v1runs) below): omit the field rather than
+send `{}` unless an explicit empty set is genuinely what is meant.
 
 - Response `201`:
 
@@ -140,6 +149,8 @@ one. Passing one lets a client choose the id (a UUID).
 { "run": "6f...uuid", "status": "running" }
 ```
 
+- `400 bad_request` when `labels` violates the bounds above. Checked before the
+  run is spawned, so a rejected request creates no run at all.
 - `404 unknown_agent` when the agent is not registered.
 - `409 run_exists` when the chosen `run_id` already has history.
 
@@ -151,35 +162,44 @@ one. Passing one lets a client choose the id (a UUID).
     "event_count": 10, "first_recorded_at": "2026-...", "last_recorded_at": "2026-...",
     "usage": { "input_tokens": 250, "output_tokens": 50 },
     "step_count": 2,
-    "agent_def_hash": "sha256:34e0..." }
+    "agent_def_hash": "sha256:34e0...",
+    "labels": { "build": "42", "env": "prod" } }
 ] }
 ```
 
 Status is folded from each log, not stored, so it is always current.
 
-`usage`, `step_count`, and `agent_def_hash` are additive fields, folded from
-the same per-run log read and fold `status` has always come from — listing
-does not read a run's log twice. `usage` is the same shape as
+`usage`, `step_count`, `agent_def_hash`, and `labels` are additive fields,
+folded from the same per-run log read and fold `status` has always come from,
+so listing does not read a run's log twice. `usage` is the same shape as
 [`GET /v1/runs/{id}`](#get-v1runsid)'s `usage`. `step_count` is how many
 `ModelCallRequested` events the run's log holds. `agent_def_hash` is the hash
 recorded on the run's `RunStarted` event, the same value
 [`POST /v1/agents`](#post-v1agents) returned when the definition was
-registered.
+registered. `labels` is whatever correlation tags were recorded on
+`RunStarted` at [`POST /v1/runs`](#post-v1runs) time.
 
-**Honest absence, not zero.** These three fields are present, and are real
-counts, whenever a run's log folds — a run with no model calls yet reports a
-true `step_count: 0` and `usage` of all zeros, not a missing field, because
-that zero is known. They are *absent* (omitted from the object entirely, per
-`skip_serializing_if`, never `null` and never `0`) only when a run's log
-cannot be read at all (a corrupt or unreadable stored envelope). That failure
-is scoped to the one run whose row it is: the store's per-run summary
-(`event_count`, `first_recorded_at`, `last_recorded_at`) is a cheap aggregate
-that never touches the row's JSON payload, so it — and even `status`, which
-also depends on the unreadable log — are the only fields such a run's entry
-carries. Before this fold ran, a single unreadable log failed the whole
-listing (`500`); now it degrades only that one entry, so this is additive:
-old consumers reading only the pre-existing fields see the exact same JSON
-for every run whose log reads cleanly.
+**Honest absence, not zero.** `usage`, `step_count`, and `agent_def_hash` are
+present, and are real counts, whenever a run's log folds: a run with no model
+calls yet reports a true `step_count: 0` and `usage` of all zeros, not a
+missing field, because that zero is known. They are *absent* (omitted from the
+object entirely, per `skip_serializing_if`, never `null` and never `0`) only
+when a run's log cannot be read at all (a corrupt or unreadable stored
+envelope). That failure is scoped to the one run whose row it is: the store's
+per-run summary (`event_count`, `first_recorded_at`, `last_recorded_at`) is a
+cheap aggregate that never touches the row's JSON payload, so it, and even
+`status`, which also depends on the unreadable log, are the only fields such
+a run's entry carries. Before this fold ran, a single unreadable log failed
+the whole listing (`500`); now it degrades only that one entry, so this is
+additive: old consumers reading only the pre-existing fields see the exact
+same JSON for every run whose log reads cleanly.
+
+`labels` follows the same absence rule, one step further: it is omitted both
+when a run recorded no labels at all (an unlabeled run, or one from before
+labels existed) *and* when it recorded an explicit empty set. The API never
+emits `"labels": {}`, because an empty map is not a fact worth asserting any
+more than an unknown count is. A run that recorded at least one label reports
+exactly what was recorded.
 
 ### GET /v1/runs/{id}
 
@@ -465,6 +485,13 @@ The generic guarded append. Requires the `X-Drive-Token` header.
 
 The server re-folds and appends the batch in order. The whole batch is validated
 before anything is written, so a batch that turns illegal appends nothing.
+
+A `RunStarted` event in the batch may carry `labels` (the client builds this
+event itself; see [POST /v1/client-runs](#post-v1client-runs) above). The same
+bounds `POST /v1/runs` enforces apply here, at the one point this server ever
+sees them for a client-driven run: at most 16 labels, each key at most 64
+bytes, each value at most 256 bytes. A `RunStarted` carrying labels over the
+bounds is `400 bad_request`, and nothing in the batch is written.
 
 Semantics, keyed by sequence number:
 

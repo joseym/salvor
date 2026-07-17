@@ -232,3 +232,107 @@ async fn list_omits_folded_fields_for_a_run_whose_log_cannot_be_read() {
     assert!(!corrupt_str.contains("\"status\""));
     assert!(!corrupt_str.contains("\"usage\""));
 }
+
+/// A run started with `labels` reports them back on `GET /v1/runs`; a run
+/// started with none omits the key entirely (never `"labels": {}`), the same
+/// zero-vs-absent honesty `agent_def_hash` already gets.
+#[tokio::test]
+async fn list_reports_labels_when_present_and_omits_them_otherwise() {
+    let model = ScriptedModel::mount(vec![(1, text_response("done", 10, 2), None)]).await;
+    let factory = agent_factory(
+        model.uri(),
+        "record",
+        Effect::Read,
+        CountBehavior::Record,
+        counter(),
+    );
+    let server = TestServer::spawn(app_state(memory_store(), factory)).await;
+    let client = reqwest::Client::new();
+    let agent = register_agent(&client, &server.base, sample_toml(), None).await;
+
+    // Labeled run.
+    let (status, body) = post_json(
+        &client,
+        &format!("{}/v1/runs", server.base),
+        json!({
+            "agent": agent,
+            "input": "research otters",
+            "labels": { "build": "42", "env": "prod" },
+        }),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "start: {body}");
+    let labeled_run = body["run"].as_str().expect("run id").to_owned();
+    let mut reader = SseReader::open(&client, &server.base, &labeled_run, None, None, None).await;
+    reader.read_to_end().await;
+
+    // Unlabeled run.
+    let unlabeled_run = run_to_completion(&client, &server, &agent).await;
+
+    let (status, body) = get_json(&client, &format!("{}/v1/runs", server.base), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let runs = body["runs"].as_array().expect("runs array");
+
+    let labeled = runs
+        .iter()
+        .find(|r| r["run"] == labeled_run)
+        .expect("labeled run present");
+    assert_eq!(
+        labeled["labels"],
+        json!({ "build": "42", "env": "prod" }),
+        "labels recorded at creation come back on list"
+    );
+
+    let unlabeled = runs
+        .iter()
+        .find(|r| r["run"] == unlabeled_run)
+        .expect("unlabeled run present");
+    assert_eq!(
+        unlabeled.get("labels"),
+        None,
+        "no labels recorded means the key is absent, not an empty object"
+    );
+    assert!(
+        !unlabeled.to_string().contains("\"labels\""),
+        "absence is a missing key, never a null or empty placeholder"
+    );
+}
+
+/// `POST /v1/runs` rejects labels that violate the sanity bounds before the
+/// run is even spawned: a synchronous `400`, not a background task failure,
+/// and no run is created at all.
+#[tokio::test]
+async fn start_rejects_labels_over_the_bounds() {
+    let model = ScriptedModel::mount(vec![]).await;
+    let factory = agent_factory(
+        model.uri(),
+        "record",
+        Effect::Read,
+        CountBehavior::Record,
+        counter(),
+    );
+    let server = TestServer::spawn(app_state(memory_store(), factory)).await;
+    let client = reqwest::Client::new();
+    let agent = register_agent(&client, &server.base, sample_toml(), None).await;
+
+    let too_many: serde_json::Map<String, Value> =
+        (0..17).map(|i| (format!("k{i}"), json!("v"))).collect();
+    let (status, body) = post_json(
+        &client,
+        &format!("{}/v1/runs", server.base),
+        json!({ "agent": agent, "input": "x", "labels": too_many }),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], "bad_request");
+
+    let (status, body) = get_json(&client, &format!("{}/v1/runs", server.base), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["runs"].as_array().expect("runs array").len(),
+        0,
+        "a rejected start creates no run at all"
+    );
+}

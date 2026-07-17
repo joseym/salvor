@@ -43,6 +43,7 @@ fn run_started_env(run_id: &str) -> Value {
         Event::RunStarted {
             agent_def_hash: "sha256:agent".into(),
             input: json!({ "topic": "otters" }),
+            labels: None,
         },
     )
 }
@@ -547,7 +548,7 @@ async fn full_client_loop_then_replay_makes_no_live_call() {
     assert_eq!(log.len(), 4, "RunStarted, intent, completion, RunCompleted");
     let mut cursor = ReplayCursor::new(log).expect("the log is a well-formed run");
     assert!(matches!(
-        cursor.begin("sha256:agent").expect("begin"),
+        cursor.begin("sha256:agent", None).expect("begin"),
         Outcome::Replayed(_)
     ));
     assert!(matches!(

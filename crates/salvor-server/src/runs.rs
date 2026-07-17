@@ -31,13 +31,17 @@
 //! restart the definition is re-registered first; its hash is stable, so the
 //! run's recorded reference still resolves.
 
+use std::collections::BTreeMap;
+
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use salvor_core::{Event, EventEnvelope, PendingCall, RunId, RunStatus, derive_state};
-use salvor_runtime::{RuntimeError, validate_against_schema, validate_extension_input};
+use salvor_runtime::{
+    RuntimeError, validate_against_schema, validate_extension_input, validate_labels,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use time::OffsetDateTime;
@@ -60,6 +64,12 @@ struct StartRequest {
     /// An optional caller-chosen run id (a UUID). Minted when omitted.
     #[serde(default)]
     run_id: Option<String>,
+    /// Optional correlation tags for the run (a build id, an environment),
+    /// recorded once on `RunStarted`. Checked against the sanity bounds (see
+    /// [`validate_labels`]) before the run is spawned, so a caller sees a
+    /// synchronous `400` rather than a background task failure.
+    #[serde(default)]
+    labels: Option<BTreeMap<String, String>>,
 }
 
 /// The body of `POST /v1/runs/{id}/resume`.
@@ -79,7 +89,7 @@ struct ResolveRequest {
 
 /// Which verb a driver task runs.
 enum DriveVerb {
-    Start(Value),
+    Start(Value, Option<BTreeMap<String, String>>),
     Resume(Value),
     Recover,
 }
@@ -90,6 +100,9 @@ pub async fn start(
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
     let request: StartRequest = parse_body(&body)?;
+    if let Some(labels) = &request.labels {
+        validate_labels(labels).map_err(ApiError::BadRequest)?;
+    }
     let registered = state.agent(&request.agent).ok_or_else(|| {
         ApiError::UnknownAgent(format!("no agent registered under `{}`", request.agent))
     })?;
@@ -115,7 +128,12 @@ pub async fn start(
         )));
     }
 
-    spawn_drive(state, run_id, built, DriveVerb::Start(request.input));
+    spawn_drive(
+        state,
+        run_id,
+        built,
+        DriveVerb::Start(request.input, request.labels),
+    );
     Ok((
         StatusCode::CREATED,
         Json(json!({ "run": run_id.as_uuid().to_string(), "status": "running" })),
@@ -123,12 +141,12 @@ pub async fn start(
 }
 
 /// `GET /v1/runs`: one entry per run with its folded status, plus per-run
-/// `usage` totals, `step_count`, and `agent_def_hash` — additive fields
-/// folded from the SAME log read and the SAME [`derive_state`] call this
-/// handler has always run for `status`. No second read of the log and no
+/// `usage` totals, `step_count`, `agent_def_hash`, and `labels` — additive
+/// fields folded from the SAME log read and the SAME [`derive_state`] call
+/// this handler has always run for `status`. No second read of the log and no
 /// second fold pass: `usage` comes straight off the already-derived
-/// [`RunState`](salvor_core::RunState), and `step_count`/`agent_def_hash`
-/// are read off the same in-memory `log` slice already in hand.
+/// [`RunState`](salvor_core::RunState), and `step_count`/`agent_def_hash`/
+/// `labels` are read off the same in-memory `log` slice already in hand.
 ///
 /// `run`, `status`, `event_count`, `first_recorded_at`, and
 /// `last_recorded_at` keep their exact pre-existing shape and values; every
@@ -149,7 +167,13 @@ pub async fn start(
 ///   recorded first on every started run by construction, so it is present
 ///   in practice; it stays `Option` (omitted, not defaulted, if ever
 ///   missing) as a defensive honesty measure rather than a guarantee to
-///   invent a value for.
+///   invent a value for. `labels` is the same `Option` treatment one step
+///   further: absent whenever the run recorded none (an unlabeled run, or an
+///   old run from before labels existed), and *also* absent when the
+///   recorded value is an explicit empty map — the API never emits `"labels":
+///   {}`, because an empty map is not a fact worth claiming any more than an
+///   unknown count is. A run that recorded at least one label reports exactly
+///   what was recorded, and only that.
 /// - **The log cannot be read.** `store.read_log` can fail for one run's row
 ///   alone (a corrupt or unreadable envelope: [`StoreError::Serialization`]
 ///   or [`StoreError::Backend`]) without implicating any other run's row.
@@ -158,8 +182,8 @@ pub async fn start(
 ///   never parses the row's JSON payload, so it stays available even when
 ///   the payload itself does not. So an unreadable log degrades only that
 ///   one run's entry rather than failing the whole list: `status`,
-///   `usage`, `step_count`, and `agent_def_hash` are all omitted for it
-///   (every one of them needs the fold, which needs the log this run's row
+///   `usage`, `step_count`, `agent_def_hash`, and `labels` are all omitted for
+///   it (every one of them needs the fold, which needs the log this run's row
 ///   could not produce), while `run`, `event_count`, `first_recorded_at`,
 ///   and `last_recorded_at` stay present, since they never depended on that
 ///   read. This is strictly additive: before this change such a run took
@@ -199,6 +223,9 @@ pub async fn list(State(state): State<AppState>) -> Result<impl IntoResponse, Ap
                 map.insert("step_count".to_owned(), json!(step_count));
                 if let Some(hash) = recorded_agent_hash(&log) {
                     map.insert("agent_def_hash".to_owned(), json!(hash));
+                }
+                if let Some(labels) = recorded_labels(&log) {
+                    map.insert("labels".to_owned(), json!(labels));
                 }
             }
             Err(error) => {
@@ -390,11 +417,22 @@ fn spawn_drive(state: AppState, run_id: RunId, built: BuiltAgent, verb: DriveVer
         // The agent carries the resolved prompt-recording flag (per-agent
         // config over SALVOR_RECORD_PROMPTS over off), computed by the factory
         // when it built the agent; pass it to the runtime driving this run.
-        let runtime = task_state
+        let mut runtime = task_state
             .runtime()
             .with_record_prompts(agent.record_prompts());
         let result = match verb {
-            DriveVerb::Start(input) => runtime.start_with_id(&agent, run_id, input).await,
+            DriveVerb::Start(input, labels) => {
+                // The caller's labels win over any static labels on the
+                // registered agent definition: they name this run, not the
+                // agent it runs under. Bounds were already checked
+                // synchronously in `start`, before this task was spawned.
+                if let Some(labels) = labels {
+                    runtime = runtime.with_labels(labels);
+                } else if let Some(labels) = agent.labels() {
+                    runtime = runtime.with_labels(labels.clone());
+                }
+                runtime.start_with_id(&agent, run_id, input).await
+            }
             DriveVerb::Resume(input) => runtime.resume(&agent, run_id, input).await,
             DriveVerb::Recover => runtime.recover(&agent, run_id).await,
         };
@@ -430,6 +468,29 @@ fn recorded_agent_hash(log: &[EventEnvelope]) -> Option<String> {
         Event::RunStarted { agent_def_hash, .. } => Some(agent_def_hash.clone()),
         _ => None,
     })
+}
+
+/// The labels recorded in a run's `RunStarted` event, when present and
+/// non-empty. Read off the same `RunStarted` `recorded_agent_hash` reads, off
+/// the same in-memory log; no second read or second fold.
+///
+/// # The zero-vs-absent rule, extended to labels
+///
+/// `None` covers two cases the caller cannot (and need not) tell apart from
+/// this function alone: a run that recorded no `labels` field at all (an old
+/// or unlabeled run), and a run that recorded `labels: {}` explicitly. Both
+/// report as "no labels" on the wire, never `"labels": {}`: the API makes no
+/// empty-map claim, exactly as it never claims a zero it cannot back with a
+/// real count. A run that recorded at least one label reports exactly what
+/// was recorded.
+fn recorded_labels(log: &[EventEnvelope]) -> Option<BTreeMap<String, String>> {
+    log.iter()
+        .find_map(|envelope| match &envelope.event {
+            Event::RunStarted { labels, .. } => Some(labels.clone()),
+            _ => None,
+        })
+        .flatten()
+        .filter(|labels: &BTreeMap<String, String>| !labels.is_empty())
 }
 
 /// The reconciliation evidence: the recorded write intent, plus when it was
