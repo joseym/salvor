@@ -34,11 +34,19 @@ export class ViewService {
   private readonly _view = signal<ViewName>('runs');
   private readonly _runId = signal<string | undefined>(undefined);
   private readonly _query = signal<string>('');
+  private readonly _externalFilter = signal<{ readonly q: string; readonly nonce: number } | undefined>(
+    undefined,
+  );
 
   readonly view: Signal<ViewName> = this._view.asReadonly();
   readonly runId: Signal<string | undefined> = this._runId.asReadonly();
   /** The filter query carried in `?q=` on the Runs view. */
   readonly query: Signal<string> = this._query.asReadonly();
+  /** A filter applied from OUTSIDE the Runs view (Spend's hour-bucket click today) — Runs reads
+   * `query()` only once, at construction, since the Runs section is mounted for the app's whole
+   * life and a later `?q=` change is otherwise never re-read. This is the one other channel: a
+   * fresh object every call (the `nonce`), so clicking the same hour twice still re-applies it. */
+  readonly externalFilter = this._externalFilter.asReadonly();
   readonly title = computed(() => TITLES[this._view()]);
 
   /** A legacy hash captured at boot, redirected on the FIRST NavigationEnd so it wins the race
@@ -79,6 +87,13 @@ export class ViewService {
 
   openRun(runId: string): void {
     void this.router.navigate(['/inspector', runId]);
+  }
+
+  /** Navigate to Runs with `q` applied — the same filter mechanism Runs' own pills write, reached
+   * from another view (Spend's activity chart). */
+  filterRuns(q: string): void {
+    this._externalFilter.set({ q, nonce: Date.now() });
+    void this.router.navigate(['/runs'], { queryParams: { q } });
   }
 
   /** Reflect the Runs filter into `?q=` without adding a history entry. */

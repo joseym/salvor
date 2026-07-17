@@ -168,6 +168,16 @@ export class Runs {
       const iso = this.runsService.lastLoadedAt();
       if (iso) this.conn.driver.toSnapshot(iso);
     });
+
+    // a filter applied from another view (Spend's hour bucket) — Runs is mounted once for the
+    // app's whole life, so this is the one channel that reaches it after that initial read
+    effect(() => {
+      const ext = this.viewService.externalFilter();
+      if (!ext) return;
+      this.qTok.set(ext.q.trim().split(/\s+/).filter(Boolean));
+      this.pendingText.set('');
+      this.applyQuery();
+    });
   }
 
   private async load(): Promise<void> {
