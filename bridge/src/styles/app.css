@@ -139,6 +139,9 @@
 #view-title:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 
 .caption { margin: var(--space-3) 0 0; font-size: var(--text-xs); color: var(--muted); max-width: 78ch; text-wrap: pretty; letter-spacing: 0.16px; line-height: 1.5; }
+/* a lone caption is its own one-point apparatus, labelled once — the eyebrow that groups several
+   points into one .notes block (inspector.css) has the same job here, for a single point. */
+.caption::before { content: 'Note'; display: block; margin-bottom: var(--space-1); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--faint); }
 .caption code, .dpanel code, .empty-state code {
   font-family: var(--font-mono); font-size: 11.5px; letter-spacing: 0;
   padding: 0 var(--space-1); border: 1px solid var(--border); border-radius: 3px; color: var(--muted);
