@@ -28,6 +28,11 @@ const MIME = {
   '.svg': 'image/svg+xml',
   '.woff2': 'font/woff2',
   '.map': 'application/json; charset=utf-8',
+  // Without this, WebAssembly.instantiateStreaming() refuses the response (wrong MIME type) and
+  // every wasm-fold consumer (the Inspector's scrubber, Spend's burn-down) falls back to the
+  // slower buffer-then-compile path — real latency this harness should not be adding on top of
+  // the network fold Spend already deliberately pays for.
+  '.wasm': 'application/wasm',
 };
 
 function proxy(req, res) {
