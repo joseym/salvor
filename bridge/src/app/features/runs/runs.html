@@ -96,7 +96,10 @@
 }
 
 <div class="filters" data-od-id="run-filters">
-  <span class="flabel">Group</span>
+  <!-- "State" was labelled "Group", which collided with the new group-BY control below (item 15b):
+       these chips FILTER by state group, they do not group the table. Renamed so the two are not
+       confused, exactly as the design's own item 15 fix did. -->
+  <span class="flabel">State</span>
   <div class="chips" role="group" aria-label="Filter by state group">
     <button class="chip" type="button" data-term="group:waiting" [attr.aria-pressed]="chipPressed('group:waiting')" (click)="toggleTerm('group:waiting')">
       Waiting on you<span class="chip-n" data-count="waiting" [class.is-zero]="counts().waiting === 0">{{ counts().waiting }}</span>
@@ -108,6 +111,13 @@
       Terminal<span class="chip-n" data-count="terminal" [class.is-zero]="counts().terminal === 0">{{ counts().terminal }}</span>
     </button>
   </div>
+  <!-- GROUP BY (item 15b): cluster the runs by build (then agent) or show the flat list. A
+       persisted MODE, not a filter — it reorders and headers the same rows, it never hides any. -->
+  <span class="flabel flabel-grp">Group</span>
+  <div class="grpmode" role="group" aria-label="Group the runs">
+    <button class="gmode" type="button" [attr.aria-pressed]="groupModePressed('grouped')" (click)="setGroupMode('grouped')">Grouped</button>
+    <button class="gmode" type="button" [attr.aria-pressed]="groupModePressed('flat')" (click)="setGroupMode('flat')">Flat</button>
+  </div>
   <span class="count" id="runs-count">{{ countLabel() }}</span>
 </div>
 
@@ -117,6 +127,87 @@
       Runs waiting on you sort to the top — start there. Open any row to read its log: the list is a
       snapshot from <code>GET /v1/runs</code>, and the log is where a run is actually read.
     </p>
+    <!-- ONE row template, used by both the flat list and every group's runs — grouped and flat
+         modes cannot drift apart because there is only one place a row is written (item 15b). Kept
+         OUTSIDE <table> deliberately: an <ng-template> emits no DOM node of its own (the compiler
+         never renders it in place), but keeping it a sibling of <table> rather than a child of
+         <thead>/<tbody> sidesteps any HTML table-content-model surprise entirely — the reference
+         variable #rowTpl is still reachable from *ngTemplateOutlet anywhere in this template. -->
+    <ng-template #rowTpl let-r let-i="i">
+      <tr [ngClass]="rowClasses(r, i)" [attr.data-id]="r.id" (click)="onRowClick($event, r)">
+        <td class="c-caret">
+          <button
+            class="iact panel-open"
+            type="button"
+            [attr.data-detail]="r.id"
+            [attr.aria-pressed]="isSelected(r.id)"
+            aria-controls="runs-panel"
+            (click)="selectDetail(r.id); $event.stopPropagation()"
+          >
+            <span class="sr">Show {{ short(r.id) }} in the side detail panel (the row itself opens the run)</span>
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
+              <rect x="2" y="3.5" width="12" height="9" rx="1.5" />
+              <path d="M9.5 3.5v9" />
+              <rect x="9.5" y="3.5" width="4.5" height="9" rx="0" fill="currentColor" stroke="none" opacity="0.16" />
+            </svg>
+          </button>
+        </td>
+        <td>
+          <button
+            class="{{ statusClass(r.status) }}"
+            type="button"
+            [attr.data-group]="group(r.status)"
+            [attr.data-status]="r.status"
+            [attr.aria-pressed]="chipPressed('status:' + r.status)"
+            [attr.title]="'Filter the list to ' + label(r.status) + ' runs'"
+            (click)="toggleTerm('status:' + r.status); $event.stopPropagation()"
+          >{{ label(r.status) }}</button>
+        </td>
+        <td>
+          <span class="runref">
+            <span class="runid" [attr.title]="r.id">{{ short(r.id) }}</span>
+            <button class="copy" type="button" [attr.data-copy]="r.id" (click)="copy(r.id, $event)">
+              <span class="sr">Copy {{ r.id }}</span>
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true">
+                <rect x="5.5" y="5.5" width="8" height="8" rx="1.5" /><path d="M10.5 3.5v-1h-8v8h1" />
+              </svg>
+            </button>
+          </span>
+        </td>
+        <td class="num c-events">{{ r.eventCount }}</td>
+        <td class="num c-age">{{ age(r.last) }}</td>
+        <!-- AGENT CELL (item 15a) — agentIdentity's three honest renderings. A registry-resolved
+             NAME or a caller-supplied LABEL read in the body face (identity, not wire data) and
+             truncate with the CSS ellipsis (max-width, see styles); a resolved name's title
+             reveals its hash + provenance, a label's title reveals its full string. An
+             unregistered/unresolved HASH comes through the same runref markup the run id uses:
+             mono, truncated, copyable. -->
+        <td class="c-agent">
+          @if (identity(r); as id) {
+            @if (id.kind === 'hash') {
+              <span class="runref">
+                <span class="runid" [attr.title]="id.text">{{ hashShort(id.hash!) }}</span>
+                <button class="copy" type="button" [attr.data-copy]="id.hash" (click)="copy(id.hash!, $event)">
+                  <span class="sr">Copy {{ id.hash }}</span>
+                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true">
+                    <rect x="5.5" y="5.5" width="8" height="8" rx="1.5" /><path d="M10.5 3.5v-1h-8v8h1" />
+                  </svg>
+                </button>
+              </span>
+            } @else if (id.kind === 'none') {
+              <span class="unavail" [attr.title]="agentCellTitle(id)">{{ id.text }}</span>
+            } @else {
+              <span
+                class="agent-id"
+                [class.is-name]="id.kind === 'name'"
+                [class.is-label]="id.kind === 'label'"
+                [attr.title]="agentCellTitle(id)"
+              >{{ id.text }}</span>
+            }
+          }
+        </td>
+      </tr>
+    </ng-template>
     <div class="table-scroll" role="region" aria-label="Runs" tabindex="0">
       <table class="ledger" id="runs-table">
         <caption>Runs waiting on a human sort to the top.</caption>
@@ -135,7 +226,11 @@
             <th scope="col" class="num" data-sort="age" [attr.aria-sort]="ariaSort('age') === 'none' ? null : ariaSort('age')">
               <button type="button" (click)="sortBy('age')">Last activity</button>
             </th>
-            <th scope="col">Last event</th>
+            <!-- AGENT (item 15a) replaces the old "Last event" column — six columns kept, the
+                 EVENTS anchor kept. Sortable, like every other header. -->
+            <th scope="col" data-sort="agent" [attr.aria-sort]="ariaSort('agent') === 'none' ? null : ariaSort('agent')">
+              <button type="button" (click)="sortBy('agent')">Agent</button>
+            </th>
           </tr>
         </thead>
         <tbody id="runs-body" aria-live="polite" [attr.aria-busy]="listLoaded() ? 'false' : 'true'">
@@ -158,52 +253,43 @@
               No run matches <span class="mono">{{ getQuery() }}</span>. The filter narrows the page this list
               already fetched from <code>GET /v1/runs</code> — clear it to see all {{ totalCount() }}.
             </td></tr>
-          } @else {
+          } @else if (groupMode() === 'flat') {
             @for (r of visible(); track r.id; let i = $index) {
-              <tr [ngClass]="rowClasses(r, i)" [attr.data-id]="r.id" (click)="onRowClick($event, r)">
-                <td class="c-caret">
+              <ng-container *ngTemplateOutlet="rowTpl; context: { $implicit: r, i: i }"></ng-container>
+            }
+          } @else {
+            @for (g of groups(); track g.key) {
+              <!-- GROUP HEADER (item 15b): name, kind tag (build/agent), run count, worst-first
+                   aggregate. WAITING RUNS MUST NOT HIDE — a group holding one has its toggle
+                   disabled (with a title saying why), enforced at the control, not by convention. -->
+              <tr class="grp-head" [ngClass]="groupRowClasses(g)" [attr.data-grp-row]="g.key">
+                <td colspan="6">
                   <button
-                    class="iact panel-open"
+                    class="grp-toggle"
                     type="button"
-                    [attr.data-detail]="r.id"
-                    [attr.aria-pressed]="isSelected(r.id)"
-                    aria-controls="runs-panel"
-                    (click)="selectDetail(r.id); $event.stopPropagation()"
+                    [attr.aria-expanded]="!groupCollapsed(g)"
+                    [disabled]="!groupCanCollapse(g)"
+                    [attr.aria-disabled]="!groupCanCollapse(g) ? 'true' : null"
+                    [attr.title]="!groupCanCollapse(g) ? 'Holds runs waiting on you — it cannot be collapsed, so those runs are never hidden' : null"
+                    (click)="toggleGroupCollapse(g)"
                   >
-                    <span class="sr">Show {{ short(r.id) }} in the side detail panel (the row itself opens the run)</span>
-                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
-                      <rect x="2" y="3.5" width="12" height="9" rx="1.5" />
-                      <path d="M9.5 3.5v9" />
-                      <rect x="9.5" y="3.5" width="4.5" height="9" rx="0" fill="currentColor" stroke="none" opacity="0.16" />
-                    </svg>
+                    <span class="grp-chev" aria-hidden="true">{{ groupCollapsed(g) ? '▸' : '▾' }}</span>
+                    @if (groupKindTag(g)) {
+                      <span class="grp-kind">{{ groupKindTag(g) }}</span>
+                    }
+                    <span class="grp-name">{{ g.name }}</span>
+                    <span class="grp-meta"
+                      >{{ g.runs.length }} run{{ g.runs.length === 1 ? '' : 's' }} ·
+                      <span [class.grp-wait]="g.waiting > 0" [class.grp-agg]="g.waiting === 0">{{ groupAggregate(g) }}</span></span
+                    >
                   </button>
                 </td>
-                <td>
-                  <button
-                    class="{{ statusClass(r.status) }}"
-                    type="button"
-                    [attr.data-group]="group(r.status)"
-                    [attr.data-status]="r.status"
-                    [attr.aria-pressed]="chipPressed('status:' + r.status)"
-                    [attr.title]="'Filter the list to ' + label(r.status) + ' runs'"
-                    (click)="toggleTerm('status:' + r.status); $event.stopPropagation()"
-                  >{{ label(r.status) }}</button>
-                </td>
-                <td>
-                  <span class="runref">
-                    <span class="runid" [attr.title]="r.id">{{ short(r.id) }}</span>
-                    <button class="copy" type="button" [attr.data-copy]="r.id" (click)="copy(r.id, $event)">
-                      <span class="sr">Copy {{ r.id }}</span>
-                      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true">
-                        <rect x="5.5" y="5.5" width="8" height="8" rx="1.5" /><path d="M10.5 3.5v-1h-8v8h1" />
-                      </svg>
-                    </button>
-                  </span>
-                </td>
-                <td class="num c-events">{{ r.eventCount }}</td>
-                <td class="num c-age">{{ age(r.last) }}</td>
-                <td class="mono c-last">{{ lastEvent(r) }}</td>
               </tr>
+              @if (!groupCollapsed(g)) {
+                @for (r of g.runs; track r.id; let i = $index) {
+                  <ng-container *ngTemplateOutlet="rowTpl; context: { $implicit: r, i: i }"></ng-container>
+                }
+              }
             }
           }
         </tbody>

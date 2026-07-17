@@ -1,4 +1,4 @@
-import { NgClass } from '@angular/common';
+import { NgClass, NgTemplateOutlet } from '@angular/common';
 import {
   Component,
   ElementRef,
@@ -10,7 +10,7 @@ import {
   signal,
 } from '@angular/core';
 
-import { RunsService, createConnectionStateMachine } from '../../core/api';
+import { AgentRegistryService, RunsService, createConnectionStateMachine } from '../../core/api';
 import { ViewService } from '../../core/view';
 import { focusWhenRendered } from '../../core/focus';
 import {
@@ -22,17 +22,28 @@ import {
   parseQuery,
 } from './filter-vocab';
 import {
+  type AgentIdentity,
   type Group,
   type RunRow,
   age,
+  agentIdentity,
   groupOf,
   hourKey,
+  isHash,
   isWaiting,
   labelOf,
   toRunRow,
 } from './run-model';
+import {
+  type RunGroup,
+  buildRunGroups,
+  canCollapse as clusterCanCollapse,
+} from './run-groups';
 
-type SortKey = 'status' | 'id' | 'events' | 'age';
+type SortKey = 'status' | 'id' | 'events' | 'age' | 'agent';
+/** The Runs ledger's grouping mode — persisted, default Grouped. */
+type GroupMode = 'grouped' | 'flat';
+const GROUP_MODE_KEY = 'salvor.groupMode';
 
 interface AcItem {
   readonly id: string;
@@ -51,6 +62,23 @@ const WHY_UNREADABLE =
   'GET /v1/runs omits this field for a run whose log it could not fold. An omission is not a ' +
   'zero — the endpoint declines to answer rather than report a count it does not have.';
 
+/** Read the persisted group mode; defaults to Grouped, including when storage is unavailable
+ * (private browsing, a locked-down embed) — a read failure is never a reason to crash the view. */
+function readGroupMode(): GroupMode {
+  try {
+    return localStorage.getItem(GROUP_MODE_KEY) === 'flat' ? 'flat' : 'grouped';
+  } catch {
+    return 'grouped';
+  }
+}
+function writeGroupMode(mode: GroupMode): void {
+  try {
+    localStorage.setItem(GROUP_MODE_KEY, mode);
+  } catch {
+    /* persistence is a nicety, not a requirement — the in-memory signal still governs this session */
+  }
+}
+
 /**
  * The Runs ledger, complete: the 6-column table with the state rail / zebra / attention wash /
  * outline-selection channels, attention-first sort, the token filter field (pills, `@` combobox,
@@ -62,12 +90,13 @@ const WHY_UNREADABLE =
  */
 @Component({
   selector: 'bridge-runs',
-  imports: [NgClass],
+  imports: [NgClass, NgTemplateOutlet],
   templateUrl: './runs.html',
 })
 export class Runs {
   private readonly runsService = inject(RunsService);
   private readonly viewService = inject(ViewService);
+  private readonly agentRegistry = inject(AgentRegistryService);
 
   /** The Runs list is a REST snapshot — the pill's honest state here is Snapshot, driven by the
    * connection machine (no public setter; toSnapshot is called on each fetch). */
@@ -97,24 +126,39 @@ export class Runs {
   readonly dotKeyOpen = signal<boolean>(false);
   private seeded = false;
 
+  // ── GROUPING: a persisted mode, default Grouped. Collapse state is
+  // per-key and in-memory — a fresh load starts fully expanded, the honest default (nothing
+  // hidden until the operator collapses a group themselves). ──
+  readonly groupMode = signal<GroupMode>(readGroupMode());
+  private readonly collapsed = signal<ReadonlySet<string>>(new Set());
+
   readonly loading = this.runsService.loading;
   readonly loadError = this.runsService.error;
   readonly listLoaded = computed(() => !this.loading() && this.runsService.lastLoadedAt() !== undefined);
 
   readonly rows: Signal<RunRow[]> = computed(() => this.runsService.runs().map(toRunRow));
 
+  /** hash → resolved name, fed by {@link AgentRegistryService}. */
+  readonly agentNames = this.agentRegistry.names;
+
   readonly visible = computed<RunRow[]>(() => {
     const t = this.terms();
-    const filtered = this.rows().filter((r) => matchesAll(r, t));
+    const names = this.agentNames();
+    const filtered = this.rows().filter((r) => matchesAll(r, t, names));
     const key = this.sortKey();
     const dir = this.sortDir();
     return [...filtered].sort((a, b) => {
-      const av = this.sortVal(a, key);
-      const bv = this.sortVal(b, key);
+      const av = this.sortVal(a, key, names);
+      const bv = this.sortVal(b, key, names);
       const cmp = av < bv ? -1 : av > bv ? 1 : 0;
       return cmp * dir || this.statusRank(b) - this.statusRank(a);
     });
   });
+
+  /** GROUPED-mode presentation: the same {@link visible} rows, clustered worst-first. Attention
+   * survives grouping — any group holding a waiting run floats to the top, exactly as a waiting
+   * run would in the flat list (see `run-groups.ts#buildRunGroups`). */
+  readonly groups: Signal<RunGroup[]> = computed(() => buildRunGroups(this.visible(), this.agentNames()));
 
   readonly counts = computed(() => {
     const n = { waiting: 0, progress: 0, terminal: 0 } as Record<Group, number>;
@@ -152,13 +196,21 @@ export class Runs {
     }
     void this.load();
 
-    // cold-load: seed the rail with the top waiting run, once
+    // cold-load: seed the rail with the top waiting run, once — mode-aware since item 15b made
+    // Grouped the default DISPLAY order. In grouped mode the top waiting run is the first run of
+    // the top-ranked group: groups float worst-first (see run-groups.ts#buildRunGroups), and a
+    // group's own runs keep visible()'s attention-sorted order, so a rank-2 (waiting) group's
+    // first run is guaranteed to be a waiting run itself. Without this, the seeded selection could
+    // point at a row buried under a different group than the one actually on top of the screen.
     effect(() => {
       if (this.seeded || !this.listLoaded()) return;
-      const firstWaiting = this.visible().find((r) => isWaiting(r.status));
+      const top =
+        this.groupMode() === 'grouped'
+          ? this.groups()[0]?.runs[0]
+          : this.visible().find((r) => isWaiting(r.status));
       this.seeded = true;
-      if (firstWaiting) {
-        this.runSel.set(firstWaiting.id);
+      if (top) {
+        this.runSel.set(top.id);
         this.panelOpen.set(true);
       }
     });
@@ -167,6 +219,21 @@ export class Runs {
     effect(() => {
       const iso = this.runsService.lastLoadedAt();
       if (iso) this.conn.driver.toSnapshot(iso);
+    });
+
+    // AGENT COLUMN (item 15a): resolve every hash-shaped agent_def_hash the list carries. Batched
+    // and cached inside AgentRegistryService — a hash already attempted (resolved or not) is never
+    // re-fetched. Fire-and-forget: the service's own `names` signal (aliased as `agentNames`
+    // above) is what the template and the computed signals above actually read.
+    effect(() => {
+      const hashes = [
+        ...new Set(
+          this.rows()
+            .map((r) => r.agentDefHash)
+            .filter((h): h is string => h !== undefined && isHash(h)),
+        ),
+      ];
+      if (hashes.length) this.agentRegistry.resolve(hashes);
     });
 
     // a filter applied from another view (Spend's hour bucket) — Runs is mounted once for the
@@ -327,9 +394,10 @@ export class Runs {
     const part = m[2].toLowerCase();
     const read = FIELDS[key];
     if (!read) return [];
+    const names = this.agentNames();
     const countByValue = new Map<string, number>();
     for (const r of this.rows()) {
-      const v = String(read(r));
+      const v = String(read(r, names));
       countByValue.set(v, (countByValue.get(v) ?? 0) + 1);
     }
     return [...countByValue.keys()]
@@ -479,7 +547,7 @@ export class Runs {
     if (this.sortKey() !== key) return 'none';
     return this.sortDir() === 1 ? 'ascending' : 'descending';
   }
-  private sortVal(r: RunRow, key: SortKey): number | string {
+  private sortVal(r: RunRow, key: SortKey, names: ReadonlyMap<string, string>): number | string {
     switch (key) {
       case 'status':
         return this.statusRank(r);
@@ -489,6 +557,8 @@ export class Runs {
         return r.eventCount;
       case 'age':
         return -(r.last ? Date.parse(r.last) : 0);
+      case 'agent':
+        return agentIdentity(r, names).text.toLowerCase();
     }
   }
   private statusRank(r: RunRow): number {
@@ -521,10 +591,63 @@ export class Runs {
    age(iso: string | undefined): string {
     return age(iso);
   }
-  /** DIVERGENCE (filed): GET /v1/runs carries no last-event kind, so the "Last event" cell shows
-   * the folded resting state label — real list data, not a per-row log fetch. */
-  lastEvent(r: RunRow): string {
-    return labelOf(r.status);
+  // ── AGENT COLUMN (item 15a): replaces the old "Last event" cell — see run-model.ts#agentIdentity
+  // for the three honest renderings this reads. A resolved NAME's title reveals its hash and
+  // provenance; a truncated LABEL's title reveals its full string — the CSS truncates visually
+  // (max-width + ellipsis), nothing the cell shows is ever unrecoverable. ──
+  identity(r: RunRow): AgentIdentity {
+    return agentIdentity(r, this.agentNames());
+  }
+  agentCellTitle(id: AgentIdentity): string {
+    if (id.kind === 'none') return 'No agent recorded on this run';
+    if (id.kind === 'name') return `${id.hash} — resolved via GET /v1/agents/{hash}`;
+    return id.text;
+  }
+
+  // ── GROUPING (item 15b) ──
+  setGroupMode(mode: GroupMode): void {
+    if (this.groupMode() === mode) return;
+    this.groupMode.set(mode);
+    writeGroupMode(mode);
+  }
+  groupModePressed(mode: GroupMode): boolean {
+    return this.groupMode() === mode;
+  }
+  /** WAITING RUNS MUST NOT HIDE: the same predicate the template disables the toggle with. */
+  groupCanCollapse(g: RunGroup): boolean {
+    return clusterCanCollapse(g);
+  }
+  groupCollapsed(g: RunGroup): boolean {
+    return this.groupCanCollapse(g) && this.collapsed().has(g.key);
+  }
+  toggleGroupCollapse(g: RunGroup): void {
+    if (!this.groupCanCollapse(g)) return; // enforced at the control: a waiting group cannot hide
+    this.collapsed.update((set) => {
+      const next = new Set(set);
+      next.has(g.key) ? next.delete(g.key) : next.add(g.key);
+      return next;
+    });
+  }
+  /** The header's worst-first aggregate: a waiting count when present (the signal that must never
+   * hide), otherwise the plainest true summary of the group's distinct states. */
+  groupAggregate(g: RunGroup): string {
+    if (g.waiting) return `${g.waiting} waiting on you`;
+    return g.states.map((s) => labelOf(s)).join(' · ');
+  }
+  /** The header rail gets its OWN classes — `g-waiting`/`g-failed`, not the run row's own
+   * `attention`/`is-failed` — deliberately: several existing specs scope `tr.attention` /
+   * `tr.is-failed` to mean "a waiting/failed RUN row" (e.g. the cold-load-seed acceptance check,
+   * which reads the first `tr.attention` to find the top waiting RUN). Reusing those classes on a
+   * `tr.grp-head` — which carries no `data-id` at all — silently broke that query. Same amber/red
+   * rail, same worst-first meaning, disjoint vocabulary. */
+  groupRowClasses(g: RunGroup): Record<string, boolean> {
+    return {
+      'g-waiting': g.waiting > 0,
+      'g-failed': g.waiting === 0 && g.rank === 1,
+    };
+  }
+  groupKindTag(g: RunGroup): string {
+    return g.kind === 'build' || g.kind === 'agent' ? g.kind : '';
   }
 
   // ── detail panel ──

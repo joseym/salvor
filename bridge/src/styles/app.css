@@ -275,7 +275,57 @@
 /* one load-bearing figure per row: EVENTS takes the ink, the timestamp recedes */
 #runs-table td.c-events { color: var(--fg); font-weight: 600; }
 #runs-table td.c-age    { color: var(--faint); }
-#runs-table td.c-last   { font-size: 12px; color: var(--muted); }
+
+/* ── AGENT COLUMN (item 15a). Replaces the old "Last event" cell. A readable name/label reads in
+   the body face (identity, not wire data); an unregistered hash comes through the runref markup,
+   already mono. Truncate long identities with an ellipsis rather than letting them push EVENTS
+   around — the column earns the row, it does not take it over. ── */
+.ledger td.c-agent { max-width: 168px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-id { font-size: var(--text-sm); color: var(--fg-2); letter-spacing: 0.08px; }
+.agent-id.is-name  { color: var(--fg); }                 /* registry-resolved: the most trusted identity */
+.agent-id.is-label { font-family: var(--font-mono); font-size: 12px; color: var(--fg-2); }  /* caller string */
+
+/* ── GROUP HEADERS (item 15b). A ruled band spanning the row. `g-waiting`/`g-failed` are the
+   header's OWN rail classes — deliberately NOT the run row's `attention`/`is-failed` (several
+   existing specs scope those to mean "a waiting/failed RUN row", and a header row carries no
+   `data-id` at all, so reusing them would silently break that query). Same amber/red rail meaning,
+   disjoint vocabulary. No card, no shadow — ledger identity: a hairline above, the group's ink
+   below. ── */
+.ledger tr.grp-head > td { padding: 0; border-top: 1px solid var(--rule-firm); background: var(--wash); }
+.ledger tr.grp-head:first-child > td { border-top: 0; }
+.ledger tr.grp-head.g-waiting > td { box-shadow: inset 3px 0 0 0 var(--warn); }
+.ledger tr.grp-head.g-failed  > td { box-shadow: inset 3px 0 0 0 var(--danger); }
+.grp-toggle {
+  display: flex; align-items: baseline; gap: var(--space-2); width: 100%;
+  padding: var(--space-2) var(--space-3); background: none; border: 0; cursor: pointer;
+  font: inherit; color: var(--fg); text-align: left;
+}
+.grp-toggle[disabled] { cursor: default; }
+.grp-toggle:hover:not([disabled]) { background: var(--border-soft); }
+.grp-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.grp-chev { color: var(--muted); font-size: 10px; width: 10px; flex: none; }
+.grp-kind {
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--faint); padding: 1px 5px; border: 1px solid var(--border); border-radius: 3px;
+}
+.grp-name { font-weight: 600; letter-spacing: -0.01em; }
+.grp-head:not(.g-waiting):not(.g-failed) .grp-name { font-family: var(--font-mono); font-size: 12.5px; font-weight: 500; }
+.grp-meta { margin-left: auto; font-size: var(--text-xs); color: var(--muted); letter-spacing: 0.08px; }
+.grp-wait { color: var(--amber-ink); font-weight: 600; }
+.grp-agg { color: var(--muted); }
+
+/* ── GROUP-BY toggle (item 15b): a quiet segmented control, same weight as the state chips beside
+   it. ── */
+.flabel-grp { margin-left: var(--space-2); }
+.grpmode { display: inline-flex; border: 1px solid var(--border); border-radius: var(--radius-pill); overflow: hidden; }
+.gmode {
+  padding: 4px var(--space-3); background: var(--surface); border: 0; cursor: pointer;
+  font-size: 12px; color: var(--muted); letter-spacing: 0.08px;
+}
+.gmode + .gmode { border-left: 1px solid var(--border); }
+.gmode:hover { color: var(--fg); }
+.gmode[aria-pressed="true"] { background: color-mix(in oklab, var(--accent), var(--bg) 86%); color: var(--accent); font-weight: 600; }
+.gmode:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 /* the row-detail sidebar control */
 .iact { width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid transparent; border-radius: var(--radius-sm); background: none; cursor: pointer; color: var(--muted); }
