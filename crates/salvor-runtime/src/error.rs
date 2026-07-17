@@ -78,6 +78,14 @@ pub enum RuntimeError {
     #[error("resume input rejected: {0}")]
     ResumeInputRejected(String),
 
+    /// The labels a run is about to be created with violate the sanity
+    /// bounds (too many, or a key/value over its length cap). See
+    /// [`crate::validate_labels`]. Surfaces only on a genuinely fresh
+    /// `begin`; a replayed run never re-checks the labels it already
+    /// recorded.
+    #[error("invalid labels: {0}")]
+    InvalidLabels(String),
+
     /// `resolve` was called on a run that is not awaiting reconciliation. The
     /// hand-recorded completion is only ever appended to a run whose log ends
     /// at a dangling write intent; every other state is a caller mistake.

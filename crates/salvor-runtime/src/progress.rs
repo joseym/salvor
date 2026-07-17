@@ -77,6 +77,7 @@ pub fn event_detail(event: &Event) -> String {
         Event::RunStarted {
             agent_def_hash,
             input,
+            ..
         } => format!(
             "agent {} input {}",
             short_hash(agent_def_hash),
@@ -216,6 +217,7 @@ mod tests {
         let detail = event_detail(&Event::RunStarted {
             agent_def_hash: "sha256:abcdef0123456789".into(),
             input: json!({ "prompt": big }),
+            labels: None,
         });
         assert!(detail.contains('\u{2026}'), "detail should be truncated");
         assert!(

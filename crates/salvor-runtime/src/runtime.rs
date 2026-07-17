@@ -27,6 +27,7 @@
 //! per-run state at all: dropping it mid-run loses nothing, because every
 //! event was persisted the moment it happened. That is the kill -9 story.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use salvor_core::{Budget, Event, EventEnvelope, PendingCall, RunId, RunStatus, derive_state};
@@ -88,6 +89,10 @@ pub struct Runtime {
     /// full model request body. Off unless
     /// [`with_record_prompts`](Runtime::with_record_prompts) turns it on.
     record_prompts: bool,
+    /// Correlation tags every [`RunCtx`](crate::RunCtx) this runtime builds
+    /// stamps on a genuinely fresh run. Unset unless
+    /// [`with_labels`](Runtime::with_labels) sets them.
+    labels: Option<BTreeMap<String, String>>,
 }
 
 impl Runtime {
@@ -111,6 +116,7 @@ impl Runtime {
             clock,
             random,
             record_prompts: false,
+            labels: None,
         }
     }
 
@@ -127,6 +133,18 @@ impl Runtime {
     #[must_use]
     pub fn with_record_prompts(mut self, record_prompts: bool) -> Self {
         self.record_prompts = record_prompts;
+        self
+    }
+
+    /// Sets the correlation tags every run this runtime drives stamps on its
+    /// `RunStarted`, passed through to each [`RunCtx`](crate::RunCtx) it
+    /// builds. Unset by default. Chained builder style, mirroring
+    /// [`with_record_prompts`](Self::with_record_prompts); see
+    /// [`RunCtx::with_labels`](crate::RunCtx::with_labels) for the bounds
+    /// that apply and when they are checked.
+    #[must_use]
+    pub fn with_labels(mut self, labels: BTreeMap<String, String>) -> Self {
+        self.labels = Some(labels);
         self
     }
 
@@ -281,14 +299,18 @@ impl Runtime {
 
     /// Builds the per-run context with this runtime's hooks.
     fn ctx(&self, run_id: RunId, log: Vec<EventEnvelope>) -> Result<RunCtx, RuntimeError> {
-        Ok(RunCtx::with_hooks(
+        let mut ctx = RunCtx::with_hooks(
             self.store.clone(),
             run_id,
             log,
             self.clock.clone(),
             self.random.clone(),
         )?
-        .with_record_prompts(self.record_prompts))
+        .with_record_prompts(self.record_prompts);
+        if let Some(labels) = &self.labels {
+            ctx = ctx.with_labels(labels.clone());
+        }
+        Ok(ctx)
     }
 }
 

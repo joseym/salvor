@@ -60,6 +60,7 @@
 //! is recorded: an output, a suspension sentinel, or a failure object (see
 //! [`crate::wire`]).
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use salvor_core::{
@@ -75,6 +76,7 @@ use uuid::Uuid;
 
 use crate::error::RuntimeError;
 use crate::hash::hash_value;
+use crate::labels::validate_labels;
 use crate::model::{response_value, usage_of};
 use crate::wire::{
     ToolFailure, decode_failure, decode_suspension, encode_failure, encode_suspension,
@@ -139,6 +141,9 @@ pub struct RunCtx {
     /// `ModelCallRequested`. Off unless [`with_record_prompts`](Self::with_record_prompts)
     /// turns it on. See that method for the PII rationale.
     record_prompts: bool,
+    /// Correlation tags to stamp on a genuinely fresh `RunStarted`. Unset
+    /// unless [`with_labels`](Self::with_labels) sets them. See that method.
+    labels: Option<BTreeMap<String, String>>,
 }
 
 impl RunCtx {
@@ -192,6 +197,7 @@ impl RunCtx {
             random,
             resume_input: None,
             record_prompts: false,
+            labels: None,
         })
     }
 
@@ -214,6 +220,27 @@ impl RunCtx {
     #[must_use]
     pub fn with_record_prompts(mut self, record_prompts: bool) -> Self {
         self.record_prompts = record_prompts;
+        self
+    }
+
+    /// Sets the correlation tags to stamp on a genuinely fresh `RunStarted`.
+    ///
+    /// Additive and unset by default: the existing [`new`](Self::new) and
+    /// [`with_hooks`](Self::with_hooks) constructors leave it unset, so no
+    /// caller that predates this method changes behavior. Chained builder
+    /// style, mirroring [`with_record_prompts`](Self::with_record_prompts).
+    ///
+    /// Labels are checked against the sanity bounds (see
+    /// [`crate::validate_labels`]) only on [`begin`](Self::begin)'s live path,
+    /// the moment a `RunStarted` is actually about to be created;
+    /// [`RuntimeError::InvalidLabels`] surfaces there, not here, so this
+    /// setter itself is infallible. A replayed `begin` never re-checks them:
+    /// whatever the log already holds is trusted and returned as recorded.
+    /// Labels never enter `agent_def_hash` or any request hash; they are a
+    /// tag on the run, not part of its identity.
+    #[must_use]
+    pub fn with_labels(mut self, labels: BTreeMap<String, String>) -> Self {
+        self.labels = Some(labels);
         self
     }
 
@@ -245,23 +272,30 @@ impl RunCtx {
 
     /// Starts (or replays the start of) the run.
     ///
-    /// Live: records `RunStarted` with `input` and returns it. Replayed:
-    /// verifies `agent_def_hash` against the recorded event and returns the
-    /// *recorded* input, which always wins; the `input` argument is only
-    /// used when the log is empty.
+    /// Live: records `RunStarted` with `input` and the labels set through
+    /// [`with_labels`](Self::with_labels) (if any), and returns `input`.
+    /// Replayed: verifies `agent_def_hash` against the recorded event and
+    /// returns the *recorded* input, which always wins; the `input` argument
+    /// is only used when the log is empty, exactly like `labels`.
     ///
     /// # Errors
     ///
     /// [`RuntimeError::Replay`] on a definition-hash mismatch or any other
-    /// divergence; [`RuntimeError::Store`] when persistence fails.
+    /// divergence; [`RuntimeError::InvalidLabels`] when the labels set
+    /// through [`with_labels`](Self::with_labels) violate the sanity bounds
+    /// (only checked on the live path; see that method); [`RuntimeError::Store`]
+    /// when persistence fails.
     pub async fn begin(
         &mut self,
         agent_def_hash: &str,
         input: &Value,
     ) -> Result<Value, RuntimeError> {
-        match self.cursor.begin(agent_def_hash)? {
+        match self.cursor.begin(agent_def_hash, self.labels.clone())? {
             Outcome::Replayed(recorded) => Ok(recorded),
             Outcome::Live(permit) => {
+                if let Some(labels) = &self.labels {
+                    validate_labels(labels).map_err(RuntimeError::InvalidLabels)?;
+                }
                 let emitted = permit.record(input.clone());
                 persist(self.store.as_ref(), self.run_id, &self.clock, &emitted).await?;
                 Ok(input.clone())

@@ -38,6 +38,8 @@
 //! or when a cost budget is declared without [`Pricing`], since a cost
 //! check without rates cannot be computed at all.
 
+use std::collections::BTreeMap;
+
 use salvor_llm::{Client, Config};
 use salvor_tools::{DynTool, ToolHandler, ToolSet};
 use serde_json::{Value, json};
@@ -62,6 +64,7 @@ pub struct Agent {
     max_response_tokens: u32,
     def_hash: String,
     record_prompts: bool,
+    labels: Option<BTreeMap<String, String>>,
 }
 
 impl Agent {
@@ -129,6 +132,16 @@ impl Agent {
     pub fn record_prompts(&self) -> bool {
         self.record_prompts
     }
+
+    /// Correlation tags to stamp on every fresh run of this agent, when set
+    /// with [`AgentBuilder::labels`]. Like [`record_prompts`](Self::record_prompts),
+    /// this is operator/deployment metadata, not part of the definition, so
+    /// it is deliberately excluded from [`def_hash`](Self::def_hash):
+    /// relabeling an agent must not orphan its recorded runs.
+    #[must_use]
+    pub fn labels(&self) -> Option<&BTreeMap<String, String>> {
+        self.labels.as_ref()
+    }
 }
 
 /// Builds an [`Agent`]:
@@ -160,6 +173,7 @@ pub struct AgentBuilder {
     pricing: Option<Pricing>,
     max_response_tokens: Option<u32>,
     record_prompts: bool,
+    labels: Option<BTreeMap<String, String>>,
 }
 
 impl AgentBuilder {
@@ -247,6 +261,20 @@ impl AgentBuilder {
         self
     }
 
+    /// Sets correlation tags to stamp on every fresh run of this agent (a
+    /// build id, an environment name). Unset by default. Like
+    /// [`record_prompts`](Self::record_prompts), this is operator/deployment
+    /// metadata rather than part of what the agent runs, so it is excluded
+    /// from [`Agent::def_hash`] (see that method's docs). Sanity bounds on
+    /// the labels themselves are not checked here; they are enforced where a
+    /// run is actually created (see [`crate::validate_labels`]), so this
+    /// setter is infallible.
+    #[must_use]
+    pub fn labels(mut self, labels: BTreeMap<String, String>) -> Self {
+        self.labels = Some(labels);
+        self
+    }
+
     /// Builds the agent, computing its definition hash.
     ///
     /// # Errors
@@ -296,6 +324,7 @@ impl AgentBuilder {
                 .unwrap_or(DEFAULT_MAX_RESPONSE_TOKENS),
             def_hash,
             record_prompts: self.record_prompts,
+            labels: self.labels,
         })
     }
 }
@@ -484,6 +513,36 @@ mod tests {
             .build()
             .unwrap();
         assert_ne!(base.def_hash(), pricing_changed.def_hash());
+    }
+
+    /// Labels are operator/deployment metadata, not part of the definition:
+    /// setting them, changing them, or leaving them unset never changes
+    /// `def_hash`, mirroring how `record_prompts` is excluded. This is the
+    /// def-hash half of the "hashing is unaffected by labels" guarantee; the
+    /// request-hash half is proven in `salvor-runtime`'s `happy_path.rs`
+    /// integration test, alongside `record_prompts`'s identical proof.
+    #[test]
+    fn labels_never_affect_the_definition_hash() {
+        let unlabeled = base_builder().build().unwrap();
+        let labeled_a = base_builder()
+            .labels(BTreeMap::from([("build".to_owned(), "42".to_owned())]))
+            .build()
+            .unwrap();
+        let labeled_b = base_builder()
+            .labels(BTreeMap::from([
+                ("build".to_owned(), "43".to_owned()),
+                ("env".to_owned(), "staging".to_owned()),
+            ]))
+            .build()
+            .unwrap();
+
+        assert_eq!(unlabeled.def_hash(), labeled_a.def_hash());
+        assert_eq!(unlabeled.def_hash(), labeled_b.def_hash());
+        assert_eq!(unlabeled.labels(), None);
+        assert_eq!(
+            labeled_a.labels(),
+            Some(&BTreeMap::from([("build".to_owned(), "42".to_owned())]))
+        );
     }
 
     /// A cost budget without pricing is a build-time error, not a run-time

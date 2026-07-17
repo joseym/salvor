@@ -210,6 +210,7 @@ fn started() -> Event {
     Event::RunStarted {
         agent_def_hash: "sha256:agent".into(),
         input: json!("go"),
+        labels: None,
     }
 }
 

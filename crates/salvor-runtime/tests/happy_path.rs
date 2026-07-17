@@ -4,6 +4,7 @@
 
 mod common;
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -170,5 +171,115 @@ async fn recording_prompts_stores_body_without_changing_the_hash() {
     assert!(
         body["messages"].is_array(),
         "the recorded body carries the request messages"
+    );
+}
+
+/// Labels are recorded on `RunStarted` and never touch either hash. The same
+/// run driven with labels set and with none set records the identical
+/// `agent_def_hash` and the identical model-call `request_hash`; only the
+/// presence of `labels` on `RunStarted` differs. A run recovered from its own
+/// recorded log (a full replay, the cheapest divergence check there is) still
+/// carries the identical labels afterward, since they live in the log and
+/// recover touches nothing live once the terminal event is already recorded.
+/// Mirrors `recording_prompts_stores_body_without_changing_the_hash`'s proof
+/// for `request_body`.
+#[tokio::test]
+async fn labels_are_recorded_without_changing_either_hash() {
+    async fn drive_once(labels: Option<BTreeMap<String, String>>, tag: u8) -> (Event, String) {
+        let server = ScriptedModel::mount(vec![(1, text_response("done", 10, 5))]).await;
+        let agent = agent_builder(&server.uri()).build().expect("agent builds");
+        let store = Arc::new(SqliteStore::in_memory().expect("store opens"));
+        let mut runtime = Runtime::with_hooks(store.clone(), fixed_clock(), fixed_random());
+        if let Some(labels) = labels {
+            runtime = runtime.with_labels(labels);
+        }
+        let run_id = fixed_run_id(tag);
+        runtime
+            .start_with_id(&agent, run_id, json!("hello"))
+            .await
+            .expect("run completes");
+        let log = store.read_log(run_id).await.expect("log reads");
+        let started = log[0].event.clone();
+        let model_intent = log
+            .iter()
+            .find_map(|envelope| match &envelope.event {
+                event @ Event::ModelCallRequested { .. } => Some(event.clone()),
+                _ => None,
+            })
+            .expect("a model intent was recorded");
+        let Event::ModelCallRequested { request_hash, .. } = model_intent else {
+            unreachable!()
+        };
+        (started, request_hash)
+    }
+
+    let labels = BTreeMap::from([
+        ("build".to_owned(), "42".to_owned()),
+        ("env".to_owned(), "prod".to_owned()),
+    ]);
+    let (started_labeled, hash_labeled) = drive_once(Some(labels.clone()), 50).await;
+    let (started_unlabeled, hash_unlabeled) = drive_once(None, 51).await;
+
+    let Event::RunStarted {
+        agent_def_hash: hash_a,
+        labels: recorded_labels,
+        ..
+    } = &started_labeled
+    else {
+        panic!("expected RunStarted at seq 0");
+    };
+    let Event::RunStarted {
+        agent_def_hash: hash_b,
+        labels: recorded_none,
+        ..
+    } = &started_unlabeled
+    else {
+        panic!("expected RunStarted at seq 0");
+    };
+
+    // Same agent, so the same definition hash, whether or not labels are set.
+    assert_eq!(
+        hash_a, hash_b,
+        "labels must not change the recorded agent_def_hash"
+    );
+    // The model call's request hash is likewise unaffected; labels live on a
+    // different event entirely and never feed the request that is hashed.
+    assert_eq!(
+        hash_labeled, hash_unlabeled,
+        "labels must not change the model call's request_hash"
+    );
+
+    assert_eq!(recorded_labels, &Some(labels.clone()));
+    assert_eq!(recorded_none, &None);
+
+    // A full replay (recover on an already-completed run) reads the whole log
+    // back rather than executing anything; the labels it reports afterward are
+    // exactly what was recorded, unchanged by having been replayed.
+    let server = ScriptedModel::mount(vec![(1, text_response("done", 10, 5))]).await;
+    let agent = agent_builder(&server.uri()).build().expect("agent builds");
+    let store = Arc::new(SqliteStore::in_memory().expect("store opens"));
+    let runtime = Runtime::with_hooks(store.clone(), fixed_clock(), fixed_random())
+        .with_labels(labels.clone());
+    let run_id = fixed_run_id(52);
+    runtime
+        .start_with_id(&agent, run_id, json!("hello"))
+        .await
+        .expect("run completes");
+    runtime
+        .recover(&agent, run_id)
+        .await
+        .expect("recovering a completed run replays it end to end");
+    let replayed_log = store.read_log(run_id).await.expect("log reads");
+    let Event::RunStarted {
+        labels: replayed_labels,
+        ..
+    } = &replayed_log[0].event
+    else {
+        panic!("expected RunStarted at seq 0");
+    };
+    assert_eq!(
+        replayed_labels,
+        &Some(labels),
+        "a replayed (recovered) run preserves its recorded labels unchanged"
     );
 }

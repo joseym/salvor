@@ -71,6 +71,7 @@ mod ctx;
 mod driver;
 mod error;
 mod hash;
+mod labels;
 mod model;
 mod progress;
 mod runtime;
@@ -90,6 +91,7 @@ pub use ctx::{
 };
 pub use error::RuntimeError;
 pub use hash::{canonical_json, hash_value, sha256_hex};
+pub use labels::{MAX_LABEL_KEY_LEN, MAX_LABEL_VALUE_LEN, MAX_LABELS, validate_labels};
 pub use model::{clamp_tokens, response_value, usage_of};
 pub use progress::{event_detail, event_kind};
 pub use runtime::{ParkReason, RunOutcome, Runtime};
