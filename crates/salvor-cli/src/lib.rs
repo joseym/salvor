@@ -15,6 +15,10 @@
 //! - [`serve_kill`] is the process discovery and termination behind `salvor
 //!   serve --kill`, kept separate from [`commands::serve`] because it has
 //!   nothing to do with actually serving.
+//! - [`checkout`] is the salvor-checkout detection and login-shell subprocess
+//!   helper shared by `salvor build` and `salvor serve --dev`.
+//! - [`dev_server`] is the Angular dev server (`ng serve`) lifecycle behind
+//!   `salvor serve --dev`'s hot reload.
 //!
 //! # Where the durability comes from
 //!
@@ -29,10 +33,12 @@
 #![warn(missing_docs)]
 
 pub mod agent_config;
+pub mod checkout;
 pub mod cli;
 pub mod commands;
 #[cfg(feature = "fixture")]
 pub mod demo_script;
+pub mod dev_server;
 pub mod render;
 pub mod serve_kill;
 

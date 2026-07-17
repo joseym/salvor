@@ -179,4 +179,13 @@ pub struct ServeArgs {
     /// never binds a port.
     #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "PID|PORT")]
     pub kill: Option<String>,
+    /// Also start the Angular dev server (`ng serve`) for `bridge/`, hot
+    /// module reloading included, with `/v1` proxied to this API so a
+    /// browser at the dev server's own URL calls straight through. This
+    /// process's own bind/store handling is otherwise unchanged: the API
+    /// binds and serves exactly as plain `serve` does. Requires a salvor
+    /// checkout with a `bridge/` directory alongside it; the dashboard an
+    /// installed `salvor` embeds is prebuilt and does not hot-reload.
+    #[arg(long)]
+    pub dev: bool,
 }

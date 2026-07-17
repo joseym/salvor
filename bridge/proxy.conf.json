@@ -1,0 +1,19 @@
+{
+  // Default dev-server proxy for a plain `ng serve` / `npm start`, matching
+  // `salvor serve`'s own default --bind (127.0.0.1:8080). `salvor serve
+  // --dev` does not read this file: it generates its own, targeting the
+  // API's actual resolved bind address, and passes it explicitly on the `ng
+  // serve` invocation, so a custom --bind is always proxied correctly. This
+  // file exists for the case of running the API and the UI by hand in two
+  // terminals against the default bind.
+  //
+  // The app itself defaults to a same-origin (relative) API base URL (see
+  // src/app/app.config.ts), so every request already goes to whatever origin
+  // served the page; this just forwards that origin's /v1 requests on to the
+  // real API port instead of 404ing against the dev server itself.
+  "/v1": {
+    "target": "http://127.0.0.1:8080",
+    "secure": false,
+    "changeOrigin": true
+  }
+}

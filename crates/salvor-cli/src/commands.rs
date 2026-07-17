@@ -43,10 +43,12 @@ use tokio::net::TcpListener;
 use uuid::Uuid;
 
 use crate::agent_config::{self, AgentConfig};
+use crate::checkout;
 use crate::cli::{
     BuildArgs, GraphValidateArgs, HistoryArgs, ReplayArgs, ResolveArgs, ResumeArgs, RunArgs,
     ServeArgs,
 };
+use crate::dev_server::DevServer;
 use crate::render;
 use crate::serve_kill;
 
@@ -278,6 +280,16 @@ pub async fn replay(store_path: &Path, args: ReplayArgs) -> Result<u8> {
 /// there is no single sibling argument for clap to name; a handler-level
 /// check covers `--store` and `--bind` alike with one line, and keeps the
 /// process-discovery flow ([`serve_kill`]) unit-testable on its own.
+///
+/// `--dev` adds a second process to the same invocation: the Angular dev
+/// server (`ng serve`) for `bridge/`, hot module reloading included, proxying
+/// `/v1` to the API this same command just bound. The API itself binds and
+/// serves exactly as plain `serve` does; `--dev` only decides whether a
+/// second process joins it and whether this handler waits on a shutdown
+/// signal afterward to tear that second process down (see
+/// [`DevServer::shutdown`]). The checkout it needs is found through
+/// [`checkout::find_repo_root`], the same walk-up `salvor build` uses, so a
+/// `--dev` outside a checkout fails before anything binds or spawns.
 pub async fn serve(store_path: &Path, args: ServeArgs) -> Result<u8> {
     if let Some(target) = &args.kill {
         // `--kill` with no value arrives as `Some("")` (clap's
@@ -286,6 +298,21 @@ pub async fn serve(store_path: &Path, args: ServeArgs) -> Result<u8> {
         let target = (!target.is_empty()).then_some(target.as_str());
         return serve_kill::run(target).await;
     }
+
+    // Found and validated before the store opens or a port binds, so `--dev`
+    // outside a checkout fails fast and honestly, before any other work.
+    let bridge_dir = if args.dev {
+        Some(
+            checkout::find_repo_root()
+                .context(
+                    "--dev needs a salvor checkout with bridge/; the installed dashboard is \
+                     embedded and does not hot-reload",
+                )?
+                .join("bridge"),
+        )
+    } else {
+        None
+    };
 
     let store = open_store(store_path)?;
 
@@ -334,10 +361,62 @@ pub async fn serve(store_path: &Path, args: ServeArgs) -> Result<u8> {
     let addr = listener.local_addr().context("reading the bound address")?;
     println!("salvor control plane listening on http://{addr}");
     tracing::info!(%addr, "serving the control plane");
-    salvor_server::serve(listener, state)
-        .await
-        .context("serving the control plane")?;
+
+    let Some(bridge_dir) = bridge_dir else {
+        // The plain path, unchanged from before `--dev` existed: no signal
+        // handler installed here, so Ctrl-C or a `--kill` SIGTERM stops this
+        // process the ordinary way, at the OS's default disposition.
+        salvor_server::serve(listener, state)
+            .await
+            .context("serving the control plane")?;
+        return Ok(0);
+    };
+
+    let dev = DevServer::start(&bridge_dir, addr).await?;
+    println!(
+        "dev UI (hot reload): http://localhost:{}/  <- open this one",
+        dev.port()
+    );
+    println!("the API above stays reachable directly, e.g. for curl or an SDK");
+
+    // A signal handler is installed only on this path: `--dev` is the one
+    // case with a second process that must not outlive this one, so this is
+    // the one case that needs to intercept the shutdown signal instead of
+    // letting the OS's default disposition end the process immediately.
+    // Whichever finishes first wins the race; the server future is simply
+    // dropped on the signal branch (no in-flight request survives a plain
+    // kill today either, `--dev` or not), then the dev server is torn down
+    // before this returns, so `--kill` reliably reaps both.
+    tokio::select! {
+        result = salvor_server::serve(listener, state) => {
+            result.context("serving the control plane")?;
+        }
+        () = shutdown_signal() => {
+            tracing::info!("shutdown signal received, stopping the dev server");
+        }
+    }
+    dev.shutdown().await;
     Ok(0)
+}
+
+/// Waits for Ctrl-C (`SIGINT`) or, on Unix, `SIGTERM` (what `salvor serve
+/// --kill` sends). Only [`serve`]'s `--dev` path awaits this: it is the one
+/// case that needs to run cleanup code before the process exits, rather than
+/// letting the OS's default signal disposition end it immediately.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut terminate = signal(SignalKind::terminate()).expect("installing a SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 /// `salvor build`: build the whole product from a checkout.
@@ -353,23 +432,20 @@ pub async fn serve(store_path: &Path, args: ServeArgs) -> Result<u8> {
 /// process's streams, so the token gate and the compiler report scroll through
 /// live.
 pub async fn build(args: BuildArgs) -> Result<u8> {
-    let root = find_repo_root()?;
+    let root = checkout::find_repo_root()?;
     println!("salvor build: repo root at {}", root.display());
 
     let bridge = root.join("bridge");
-    if !bridge.join("node_modules").is_dir() {
-        println!("installing dashboard dependencies (npm ci)");
-        run_shell(&bridge, "npm ci").await?;
-    }
+    checkout::ensure_node_modules(&bridge).await?;
     println!("building the dashboard (npm run build)");
-    run_shell(&bridge, "npm run build").await?;
+    checkout::run_shell(&bridge, "npm run build").await?;
 
     println!("building the release binary (cargo build --release -p salvor-cli)");
-    run_shell(&root, "cargo build --release -p salvor-cli").await?;
+    checkout::run_shell(&root, "cargo build --release -p salvor-cli").await?;
 
     if args.install {
         println!("installing salvor onto the PATH (cargo install --path crates/salvor-cli)");
-        run_shell(&root, "cargo install --path crates/salvor-cli").await?;
+        checkout::run_shell(&root, "cargo install --path crates/salvor-cli").await?;
         println!(
             "salvor installed at {}",
             install_dir().join("salvor").display()
@@ -379,33 +455,6 @@ pub async fn build(args: BuildArgs) -> Result<u8> {
         println!("run `salvor build --install` to put it on your PATH");
     }
     Ok(0)
-}
-
-/// Walks up from the current directory for the workspace root: a directory with
-/// a `Cargo.toml` that declares the salvor workspace and a sibling `bridge/`
-/// tree. Names what it looked for when the search runs out.
-fn find_repo_root() -> Result<PathBuf> {
-    let start = std::env::current_dir().context("reading the current directory")?;
-    let mut dir = start.as_path();
-    loop {
-        let cargo = dir.join("Cargo.toml");
-        if cargo.is_file()
-            && dir.join("bridge").is_dir()
-            && std::fs::read_to_string(&cargo)
-                .map(|text| text.contains("[workspace]") && text.contains("crates/salvor-cli"))
-                .unwrap_or(false)
-        {
-            return Ok(dir.to_path_buf());
-        }
-        match dir.parent() {
-            Some(parent) => dir = parent,
-            None => bail!(
-                "not inside a salvor checkout: walked up from {} and found no workspace \
-                 Cargo.toml declaring the salvor members alongside a bridge/ directory",
-                start.display()
-            ),
-        }
-    }
 }
 
 /// The directory `cargo install` writes binaries to: `$CARGO_HOME/bin`, else
@@ -418,22 +467,6 @@ fn install_dir() -> PathBuf {
     } else {
         PathBuf::from("~/.cargo/bin")
     }
-}
-
-/// Runs one build step in `dir` through a login shell, inheriting this
-/// process's streams. Bails, naming the step, on a non-zero exit.
-async fn run_shell(dir: &Path, line: &str) -> Result<()> {
-    let status = tokio::process::Command::new("bash")
-        .arg("-lc")
-        .arg(line)
-        .current_dir(dir)
-        .status()
-        .await
-        .with_context(|| format!("spawning `{line}`"))?;
-    if !status.success() {
-        bail!("`{line}` failed ({status})");
-    }
-    Ok(())
 }
 
 /// `salvor graph validate <path>`: parse a graph document strictly and run

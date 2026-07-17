@@ -95,6 +95,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # real Windows support for both discovery and the kill signal, not just
 # Unix, matching the three platforms the dist pipeline ships.
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
+# `salvor serve --dev`'s process-group signal (tearing down `ng serve` and
+# anything it spawned as one unit; see salvor-cli's dev_server module). Only
+# `libc::kill` is used, on Unix. Already in the tree at 0.2 transitively
+# through sysinfo and tokio's own signal handling, so this promotes it to a
+# direct dependency rather than adding a new one.
+libc = "0.2"
 # Dev-only CLI test tooling: drive the real binary and assert on its output.
 assert_cmd = "2"
 predicates = "3"

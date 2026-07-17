@@ -105,6 +105,9 @@ toml.workspace = true
 # Process discovery + termination for `salvor serve --kill`; see the
 # workspace Cargo.toml for the version/feature-weight justification.
 sysinfo.workspace = true
+# The process-group kill behind `salvor serve --dev`'s teardown of `ng
+# serve`; see the workspace Cargo.toml for the justification.
+libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 time.workspace = true
