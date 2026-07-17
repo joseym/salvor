@@ -55,6 +55,7 @@ fn all_event_kinds() -> Vec<Event> {
         Event::RunStarted {
             agent_def_hash: "sha256:agent".into(),
             input: serde_json::json!({"topic": "otters"}),
+            labels: None,
         },
         Event::ModelCallRequested {
             seq: SequenceNumber::new(1),

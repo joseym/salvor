@@ -8,6 +8,8 @@
 //! full serialize/deserialize round trip of the log, the exact handoff point
 //! from replay to live, and the typed divergence errors.
 
+use std::collections::BTreeMap;
+
 use salvor_replay::{
     Effect, Emitted, Event, EventEnvelope, LoggedStep, ModelReply, Outcome, ReplayCursor,
     ReplayError, RequestedStep, RunId, RunStatus, SequenceNumber, TokenUsage, derive_state,
@@ -139,7 +141,7 @@ fn research_run(
     io: &mut dyn Io,
     sink: &mut Vec<EventEnvelope>,
 ) -> Result<DriveResult, ReplayError> {
-    let input = match cursor.begin(AGENT_HASH)? {
+    let input = match cursor.begin(AGENT_HASH, None)? {
         Outcome::Replayed(input) => input,
         Outcome::Live(permit) => {
             let input = json!({"topic": "otters"});
@@ -345,7 +347,7 @@ fn handoff_to_live_at_first_unrecorded_step() {
 fn divergence_on_kind_mismatch() {
     let (log, _, _) = record_reference_run();
     let mut cursor = ReplayCursor::new(log).expect("log is valid");
-    let Outcome::Replayed(_) = cursor.begin(AGENT_HASH).expect("begin replays") else {
+    let Outcome::Replayed(_) = cursor.begin(AGENT_HASH, None).expect("begin replays") else {
         panic!("begin must replay");
     };
 
@@ -367,7 +369,7 @@ fn divergence_on_kind_mismatch() {
 fn divergence_on_payload_mismatch() {
     let (log, _, _) = record_reference_run();
     let mut cursor = ReplayCursor::new(log).expect("log is valid");
-    cursor.begin(AGENT_HASH).expect("begin replays");
+    cursor.begin(AGENT_HASH, None).expect("begin replays");
     cursor.now().expect("now replays");
     cursor.random().expect("random replays");
 
@@ -421,7 +423,7 @@ fn divergence_when_orchestration_outruns_a_terminal_log() {
 fn divergence_when_orchestration_ends_before_the_log() {
     let (log, _, _) = record_reference_run();
     let mut cursor = ReplayCursor::new(log).expect("log is valid");
-    cursor.begin(AGENT_HASH).expect("begin replays");
+    cursor.begin(AGENT_HASH, None).expect("begin replays");
     cursor.now().expect("now replays");
     cursor.random().expect("random replays");
 
@@ -458,6 +460,7 @@ fn dangling_write_intent_needs_reconciliation() {
             Event::RunStarted {
                 agent_def_hash: AGENT_HASH.into(),
                 input: json!({}),
+                labels: None,
             },
         ),
         EventEnvelope::new(
@@ -476,7 +479,7 @@ fn dangling_write_intent_needs_reconciliation() {
     assert_eq!(derive_state(&log).status, RunStatus::NeedsReconciliation);
 
     let mut cursor = ReplayCursor::new(log).expect("log is valid");
-    cursor.begin(AGENT_HASH).expect("begin replays");
+    cursor.begin(AGENT_HASH, None).expect("begin replays");
     let err = cursor
         .tool_call("create_ticket", &ticket, Effect::Write, None)
         .expect_err("a dangling write must not re-execute");
@@ -506,6 +509,7 @@ fn dangling_idempotent_intent_retries_under_recorded_key() {
             Event::RunStarted {
                 agent_def_hash: AGENT_HASH.into(),
                 input: json!({}),
+                labels: None,
             },
         ),
         EventEnvelope::new(
@@ -523,7 +527,7 @@ fn dangling_idempotent_intent_retries_under_recorded_key() {
     ];
 
     let mut cursor = ReplayCursor::new(log).expect("log is valid");
-    cursor.begin(AGENT_HASH).expect("begin replays");
+    cursor.begin(AGENT_HASH, None).expect("begin replays");
     let Outcome::Live(permit) = cursor
         .tool_call("store", &doc, Effect::Idempotent, Some("key-9"))
         .expect("a dangling idempotent intent goes live")
@@ -561,6 +565,7 @@ fn recorded_request_body_does_not_change_replay() {
             Event::RunStarted {
                 agent_def_hash: AGENT_HASH.into(),
                 input: json!({"topic": "otters"}),
+                labels: None,
             },
             Event::ModelCallRequested {
                 seq: SequenceNumber::new(1),
@@ -594,7 +599,8 @@ fn recorded_request_body_does_not_change_replay() {
     fn replay_all(log: Vec<EventEnvelope>) -> (RunStatus, Value, ModelReply) {
         let status = derive_state(&log).status;
         let mut cursor = ReplayCursor::new(log).expect("log is valid");
-        let Outcome::Replayed(input) = cursor.begin(AGENT_HASH).expect("begin replays") else {
+        let Outcome::Replayed(input) = cursor.begin(AGENT_HASH, None).expect("begin replays")
+        else {
             panic!("begin should replay from a recorded log");
         };
         // Pass no body here on purpose: replay ignores the argument, so a log
@@ -628,4 +634,77 @@ fn recorded_request_body_does_not_change_replay() {
         with_body.2, without_body.2,
         "replayed model reply must be identical"
     );
+}
+
+/// Labels recorded on a live `begin` land on the `RunStarted` event exactly as
+/// given, and a replayed log preserves them by construction: they live in the
+/// recorded event itself, so folding the log back (the same mechanism a
+/// recovered or re-driven run uses) reads the identical map back, with no
+/// separate carry-through step to get wrong. This also proves the divergence
+/// check on `begin` never involves labels: a replaying caller who passes
+/// `None` (or a different map) still replays cleanly, matching
+/// `recorded_request_body_does_not_change_replay`'s proof for `request_body`.
+#[test]
+fn labels_recorded_live_survive_a_replayed_log() {
+    let mut cursor = ReplayCursor::new(Vec::new()).expect("empty log is valid");
+    let labels = BTreeMap::from([
+        ("build".to_owned(), "42".to_owned()),
+        ("env".to_owned(), "prod".to_owned()),
+    ]);
+    let Outcome::Live(permit) = cursor
+        .begin(AGENT_HASH, Some(labels.clone()))
+        .expect("begin")
+    else {
+        panic!("an empty log must hand back a live begin permit");
+    };
+    let emitted = permit.record(json!({"topic": "otters"}));
+    let Event::RunStarted {
+        labels: recorded, ..
+    } = &emitted.event
+    else {
+        panic!("begin must record a RunStarted event");
+    };
+    assert_eq!(recorded, &Some(labels.clone()), "labels land on the event");
+
+    // Round-trip the event through the wire form, the way a store would, then
+    // fold it into a fresh log and replay `begin` against it. The recorded
+    // labels come back unchanged, and replay needs no `labels` argument of its
+    // own to see them (it is passed `None` here on purpose, mirroring how
+    // `recorded_request_body_does_not_change_replay` replays with no body).
+    let envelope = EventEnvelope::new(run_id(), emitted.seq, ts(emitted.seq), emitted.event);
+    let wire = serde_json::to_string(&envelope).expect("serialize");
+    assert!(
+        wire.contains(r#""labels":{"build":"42","env":"prod"}"#),
+        "labels ride the wire form: {wire}"
+    );
+    let restored: EventEnvelope = serde_json::from_str(&wire).expect("deserialize");
+
+    // What replay reads is exactly `restored` (the cursor consumes the log it
+    // was built over unchanged), so asserting on it directly is asserting on
+    // what a replayed `begin` sees.
+    let Event::RunStarted {
+        labels: replayed_labels,
+        ..
+    } = &restored.event
+    else {
+        panic!("position 0 must be RunStarted");
+    };
+    assert_eq!(
+        replayed_labels,
+        &Some(labels.clone()),
+        "the round-tripped envelope preserves the recorded labels unchanged"
+    );
+
+    // And `begin` itself still replays cleanly against this log: the
+    // divergence check matches on `agent_def_hash` alone, so passing `None`
+    // here (a different `labels` argument than what was recorded) is not a
+    // mismatch, exactly as `recorded_request_body_does_not_change_replay`
+    // proves for `request_body`.
+    let mut replay_cursor = ReplayCursor::new(vec![restored]).expect("log is valid");
+    let Outcome::Replayed(_) = replay_cursor
+        .begin(AGENT_HASH, None)
+        .expect("begin replays")
+    else {
+        panic!("begin should replay from a recorded log");
+    };
 }

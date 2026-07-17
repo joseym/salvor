@@ -60,6 +60,7 @@
 //! The built-in agent loop consumes only this same public surface.
 
 use core::fmt;
+use std::collections::BTreeMap;
 
 use serde_json::Value;
 use thiserror::Error;
@@ -357,6 +358,14 @@ impl ReplayCursor {
     /// resume an old run) and returns the recorded input. Live: returns a
     /// [`BeginPermit`] the caller redeems with the run's input.
     ///
+    /// `labels` is the optional correlation tags to stamp on a genuinely
+    /// fresh [`Event::RunStarted`]; see the field's docs. It plays no part in
+    /// replay: a recorded `RunStarted` is matched on `agent_def_hash` alone,
+    /// and whatever `labels` the caller passes here is ignored on that path,
+    /// exactly as [`ReplayCursor::model_call`]'s `request_body` is ignored
+    /// when replaying. Bounds on `labels` are not checked here (see the
+    /// field's docs for why); a caller enforces them before calling.
+    ///
     /// # Errors
     ///
     /// [`ReplayError::Divergence`] on a hash mismatch, a different recorded
@@ -364,15 +373,20 @@ impl ReplayCursor {
     pub fn begin(
         &mut self,
         agent_def_hash: &str,
+        labels: Option<BTreeMap<String, String>>,
     ) -> Result<Outcome<Value, BeginPermit<'_>>, ReplayError> {
         let requested = RequestedStep::Begin {
             agent_def_hash: agent_def_hash.to_owned(),
         };
         self.guard_terminal(&requested)?;
         if self.pos < self.log.len() {
+            // The passed-in `labels` plays no part in this match: only the
+            // hash is compared, and the recorded event (labels included)
+            // wins, exactly as the recorded `input` does below.
             if let Event::RunStarted {
                 agent_def_hash: recorded_hash,
                 input,
+                ..
             } = &self.log[self.pos].event
                 && recorded_hash == agent_def_hash
             {
@@ -384,6 +398,7 @@ impl ReplayCursor {
         }
         Ok(Outcome::Live(BeginPermit {
             agent_def_hash: agent_def_hash.to_owned(),
+            labels,
             cursor: self,
         }))
     }
@@ -854,10 +869,13 @@ impl ReplayCursor {
 /// Live permission to start a fresh run.
 ///
 /// Handed out by [`ReplayCursor::begin`] when the log is empty. Redeem it
-/// with the run's input to obtain the [`Event::RunStarted`] to persist.
+/// with the run's input to obtain the [`Event::RunStarted`] to persist. The
+/// `labels` passed to [`begin`](ReplayCursor::begin) ride along on the permit
+/// and land on the recorded event unchanged.
 #[derive(Debug)]
 pub struct BeginPermit<'c> {
     agent_def_hash: String,
+    labels: Option<BTreeMap<String, String>>,
     cursor: &'c mut ReplayCursor,
 }
 
@@ -869,6 +887,7 @@ impl BeginPermit<'_> {
         let event = Event::RunStarted {
             agent_def_hash: self.agent_def_hash,
             input,
+            labels: self.labels,
         };
         self.cursor.emit(event)
     }
@@ -1120,6 +1139,7 @@ mod tests {
             Event::RunStarted {
                 agent_def_hash: "sha256:agent".into(),
                 input: serde_json::json!({}),
+                labels: None,
             },
         )];
         let err = ReplayCursor::new(log).expect_err("a truncated head must be rejected");

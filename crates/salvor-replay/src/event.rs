@@ -8,6 +8,8 @@
 //! live in the IO-free `salvor-replay` crate that the runtime and the v0.3
 //! browser inspector both fold events with.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -46,6 +48,11 @@ use crate::id::{RunId, SequenceNumber};
 /// deserializes with the field defaulted to `None`. An older reader that meets
 /// a log where the field *is* present ignores the unknown `request_body` key.
 /// So no version-1 event changes shape or meaning, and the version stays 1.
+///
+/// The optional `labels` on [`Event::RunStarted`] is the identical contract:
+/// `#[serde(default, skip_serializing_if = "Option::is_none")]`, absent by
+/// default, so an unlabeled run's `RunStarted` serializes byte for byte as it
+/// did before the field existed, and the version stays 1 for the same reason.
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// One record in a run's append-only log.
@@ -115,6 +122,27 @@ pub enum Event {
         agent_def_hash: String,
         /// The input the run started with.
         input: serde_json::Value,
+        /// Optional operator-supplied correlation tags for the run (for
+        /// example a build id or environment), set once at creation and
+        /// never rewritten. `BTreeMap` so the wire form serializes with keys
+        /// in sorted order regardless of insertion order, matching the
+        /// deterministic-serialization discipline the rest of this crate
+        /// holds to (see `salvor_runtime::hash::canonical_json`, which this
+        /// field is deliberately never fed into: labels are a tag, not part
+        /// of the run's identity, and never enter `agent_def_hash` or
+        /// `request_hash`).
+        ///
+        /// Absent by default. `#[serde(default, skip_serializing_if =
+        /// "Option::is_none")]` follows the identical additive contract
+        /// `request_body` on [`Event::ModelCallRequested`] set: with no
+        /// labels supplied at creation, this field is omitted from the wire
+        /// form entirely, so an unlabeled run's `RunStarted` serializes byte
+        /// for byte as it did before this field existed. Sanity bounds (at
+        /// most 16 labels, keys under 64 bytes, values under 256 bytes) are
+        /// enforced where a run is created, never here: a log already on
+        /// disk is trusted and replayed as recorded, whatever it holds.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        labels: Option<BTreeMap<String, String>>,
     },
     /// A model call was requested. Records the correlating sequence number and
     /// the hash of the request, so a later completion can be matched to it.
@@ -356,6 +384,15 @@ mod tests {
         assert_round_trips(Event::RunStarted {
             agent_def_hash: "sha256:abc".into(),
             input: serde_json::json!({"topic": "otters"}),
+            labels: None,
+        });
+        assert_round_trips(Event::RunStarted {
+            agent_def_hash: "sha256:abc".into(),
+            input: serde_json::json!({"topic": "otters"}),
+            labels: Some(BTreeMap::from([
+                ("build".to_owned(), "42".to_owned()),
+                ("env".to_owned(), "prod".to_owned()),
+            ])),
         });
         assert_round_trips(Event::ModelCallRequested {
             seq: SequenceNumber::new(1),
@@ -464,6 +501,49 @@ mod tests {
         });
         let json = serde_json::to_string(&env).expect("serialize");
         assert!(json.contains(r#""request_body":{"model":"m"}"#), "{json}");
+    }
+
+    /// Pins `RunStarted` with no labels: byte for byte the shape `RunStarted`
+    /// had before `labels` existed, no `labels` key at all. This is the
+    /// unchanged-wire-shape half of the additive contract [`SCHEMA_VERSION`]
+    /// documents, checked directly against a fixed string the way
+    /// [`envelope_serializes_to_pinned_json`] pins `ModelCallCompleted`.
+    #[test]
+    fn run_started_without_labels_serializes_to_pinned_json() {
+        let env = envelope(Event::RunStarted {
+            agent_def_hash: "sha256:abc".into(),
+            input: serde_json::json!({"topic": "otters"}),
+            labels: None,
+        });
+        let json = serde_json::to_string(&env).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"RunStarted","payload":{"agent_def_hash":"sha256:abc","input":{"topic":"otters"}}}}"#
+        );
+        assert!(
+            !json.contains("labels"),
+            "an unlabeled run must not emit the key: {json}"
+        );
+    }
+
+    /// Pins `RunStarted` with labels present: the `labels` key rides after
+    /// `input`, and the map serializes with its keys already in sorted order
+    /// (a `BTreeMap`'s own iteration order), independent of insertion order.
+    #[test]
+    fn run_started_with_labels_serializes_to_pinned_json() {
+        let env = envelope(Event::RunStarted {
+            agent_def_hash: "sha256:abc".into(),
+            input: serde_json::json!({"topic": "otters"}),
+            labels: Some(BTreeMap::from([
+                ("env".to_owned(), "prod".to_owned()),
+                ("build".to_owned(), "42".to_owned()),
+            ])),
+        });
+        let json = serde_json::to_string(&env).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"RunStarted","payload":{"agent_def_hash":"sha256:abc","input":{"topic":"otters"},"labels":{"build":"42","env":"prod"}}}}"#
+        );
     }
 
     /// Pins the exact serialized form of the two deterministic-context

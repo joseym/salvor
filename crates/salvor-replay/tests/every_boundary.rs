@@ -110,7 +110,7 @@ fn drive(script: &[Step], prefix: &[EventEnvelope]) -> Result<Drive, ReplayError
 
     for step in script {
         match step {
-            Step::Begin { hash, input } => match cursor.begin(hash)? {
+            Step::Begin { hash, input } => match cursor.begin(hash, None)? {
                 Outcome::Replayed(recorded) => assert_eq!(&recorded, input),
                 Outcome::Live(permit) => push!(permit.record(input.clone())),
             },

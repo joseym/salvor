@@ -371,6 +371,7 @@ mod tests {
         Event::RunStarted {
             agent_def_hash: "sha256:agent".into(),
             input: serde_json::json!({"topic": "otters"}),
+            labels: None,
         }
     }
 

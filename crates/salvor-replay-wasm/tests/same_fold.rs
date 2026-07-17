@@ -60,6 +60,7 @@ fn started() -> Event {
     Event::RunStarted {
         agent_def_hash: "sha256:agent-def".into(),
         input: json!({"topic": "otters", "nested": {"z": 1, "a": 2}}),
+        labels: None,
     }
 }
 
