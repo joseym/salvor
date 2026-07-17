@@ -120,19 +120,65 @@
   </main>
 </div>
 
-<!-- ⌘K palette (stub: routes to views) -->
-<div class="palette" id="palette" popover="auto" role="dialog" aria-label="Jump to a run, graph or view">
-  <input #paletteInput type="text" placeholder="Jump to a run, a graph or a view…" aria-label="Jump to" />
+<!-- ⌘K palette: jump to a view by name or a live run by id prefix. A combobox over a listbox;
+     the input owns focus and aria-activedescendant points at the highlighted row. -->
+<div class="palette" id="palette" popover="auto" role="dialog" aria-label="Jump to a run or a view" (toggle)="onPaletteToggle($event)">
+  <input
+    #paletteInput
+    type="text"
+    id="palette-input"
+    role="combobox"
+    [attr.aria-expanded]="paletteOpen()"
+    aria-controls="palette-list"
+    [attr.aria-activedescendant]="paletteActiveId()"
+    autocomplete="off"
+    autocapitalize="off"
+    spellcheck="false"
+    placeholder="Jump to a run or a view…"
+    aria-label="Jump to a run or a view"
+    [value]="paletteQuery()"
+    (input)="onPaletteInput($event)"
+    (keydown)="onPaletteKeydown($event)"
+  />
+  <ul class="palette-list" id="palette-list" role="listbox" aria-label="Runs and views">
+    @for (item of paletteItems(); track item.id; let i = $index) {
+      <li
+        class="palette-opt"
+        [id]="'pal-' + i"
+        role="option"
+        [attr.aria-selected]="i === paletteActive()"
+        [class.is-active]="i === paletteActive()"
+        (mousemove)="paletteActive.set(i)"
+        (click)="activatePaletteItem(item)"
+      >
+        <span class="palette-opt-label">{{ item.label }}</span>
+        <span class="palette-opt-hint">{{ item.hint }}</span>
+      </li>
+    } @empty {
+      @if (paletteOpen() && paletteQuery().trim()) {
+        <li class="palette-empty" role="option" aria-disabled="true">No run or view matches.</li>
+      }
+    }
+  </ul>
 </div>
 
-<!-- ? keyboard reference -->
+<!-- ? keyboard reference — the rows below mirror the bindings actually wired in the shell and the
+     Runs filter. Keep them in step when a binding changes. -->
 <div class="keys" id="keys" popover="auto" aria-label="Keyboard shortcuts">
   <div class="keys-group">
     <h4>Anywhere</h4>
     <dl>
-      <dt>⌘K</dt><dd>Jump to a run, a graph or a view.</dd>
+      <dt>⌘K</dt><dd>Jump to a run or a view.</dd>
       <dt>/</dt><dd>Go to Runs and put the cursor in the filter.</dd>
       <dt>?</dt><dd>This panel.</dd>
+      <dt>Esc</dt><dd>Close whichever overlay is open.</dd>
+    </dl>
+  </div>
+  <div class="keys-group">
+    <h4>The jump palette</h4>
+    <dl>
+      <dt>↑ ↓</dt><dd>Walk the offered runs and views.</dd>
+      <dt>Enter</dt><dd>Open the highlighted run or switch to the view.</dd>
     </dl>
   </div>
   <div class="keys-group">

@@ -141,14 +141,102 @@ export class App implements AfterViewInit {
     this.dotKeyOpen.update((v) => !v);
   }
 
+  @ViewChild('paletteInput') private paletteInput?: ElementRef<HTMLInputElement>;
+
+  // ── ⌘K palette: jump to one of the views by name, or to a live run by id prefix ──
+  readonly paletteQuery = signal('');
+  readonly paletteActive = signal(0);
+  /** Whether the palette popover is open. A closed palette holds no rows, no query and no active
+   * descendant — the list is genuinely empty, so nothing lingers behind the dismissed dialog. */
+  readonly paletteOpen = signal(false);
+
+  /** The visible palette rows: the named views that match, then live runs whose id starts with the
+   * query. An empty query offers every view and the most recent runs, so ⌘K then Enter is useful
+   * before a single key is typed. Empty while the palette is closed. */
+  readonly paletteItems = computed<readonly PaletteItem[]>(() => {
+    if (!this.paletteOpen()) return [];
+    const q = this.paletteQuery().trim().toLowerCase();
+    const views: PaletteItem[] = NAV_LINKS.map((l) => ({
+      kind: 'view' as const,
+      id: 'view:' + l.view,
+      label: l.label,
+      hint: 'view',
+      view: l.view,
+    }));
+    const viewMatches = q ? views.filter((v) => v.label.toLowerCase().includes(q)) : views;
+    const runs = this.runsService.runs();
+    const runMatches: PaletteItem[] = (q ? runs.filter((r) => r.run.toLowerCase().startsWith(q)) : runs.slice(0, 6))
+      .slice(0, 8)
+      .map((r) => ({
+        kind: 'run' as const,
+        id: 'run:' + r.run,
+        label: r.run.slice(0, 12),
+        hint: labelOf(r.status.state),
+        runId: r.run,
+      }));
+    return [...viewMatches, ...runMatches];
+  });
+
+  /** The id the input's `aria-activedescendant` points at, clamped to the current result count.
+   * Null while closed (no rows) so a dismissed palette leaves no dangling reference. */
+  readonly paletteActiveId = computed(() => {
+    const n = this.paletteItems().length;
+    return n ? 'pal-' + Math.min(this.paletteActive(), n - 1) : null;
+  });
+
   openPalette(): void {
+    this.paletteQuery.set('');
+    this.paletteActive.set(0);
+    this.paletteOpen.set(true);
     (document.getElementById('palette') as HTMLElement & { showPopover?: () => void })?.showPopover?.();
+    setTimeout(() => this.paletteInput?.nativeElement.focus(), 0);
+  }
+  private closePalette(): void {
+    (document.getElementById('palette') as HTMLElement & { hidePopover?: () => void })?.hidePopover?.();
+  }
+
+  /** The popover's own toggle event is the authority on open/closed — it fires for the light-dismiss
+   * (Escape, click-away) that never routes through {@link closePalette}. Closing clears the query,
+   * the active row and the open flag together, so the list empties and no state survives. */
+  onPaletteToggle(e: Event): void {
+    const open = (e as ToggleEvent).newState === 'open';
+    this.paletteOpen.set(open);
+    if (!open) {
+      this.paletteQuery.set('');
+      this.paletteActive.set(0);
+    }
   }
   openKeys(): void {
     (document.getElementById('keys') as HTMLElement & { showPopover?: () => void })?.showPopover?.();
   }
 
-  @ViewChild('paletteInput') private paletteInput?: ElementRef<HTMLInputElement>;
+  onPaletteInput(e: Event): void {
+    this.paletteQuery.set((e.target as HTMLInputElement).value);
+    this.paletteActive.set(0);
+  }
+
+  onPaletteKeydown(e: KeyboardEvent): void {
+    const items = this.paletteItems();
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      this.paletteActive.set(items.length ? Math.min(items.length - 1, this.paletteActive() + 1) : 0);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      this.paletteActive.set(Math.max(0, this.paletteActive() - 1));
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      const item = items[Math.min(this.paletteActive(), items.length - 1)];
+      if (item) this.activatePaletteItem(item);
+    }
+    // Escape is left to the popover's own light-dismiss.
+  }
+
+  activatePaletteItem(item: PaletteItem): void {
+    this.closePalette();
+    if (item.kind === 'view') this.viewService.go(item.view);
+    else this.viewService.openRun(item.runId);
+    setTimeout(() => document.getElementById('view-title')?.focus(), 0);
+  }
 
   onGlobalKeydown(e: KeyboardEvent): void {
     const inField = (e.target as HTMLElement)?.closest?.('input, textarea, select, [contenteditable]');
