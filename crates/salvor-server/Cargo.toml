@@ -5,6 +5,14 @@ version.workspace = true
 edition.workspace = true
 repository.workspace = true
 
+[features]
+# The embedded dashboard. On by default so the shipped `salvor serve` answers
+# both the API and the web app on one origin; off (`--no-default-features`, or a
+# feature set that omits it) builds a headless, API-only control plane that
+# pulls in neither rust-embed nor the asset tree.
+default = ["ui"]
+ui = ["dep:rust-embed"]
+
 [dependencies]
 salvor-core.workspace = true
 salvor-store.workspace = true
@@ -24,6 +32,9 @@ salvor-tools.workspace = true
 # async-trait attribute in its public surface.
 async-trait.workspace = true
 axum.workspace = true
+# Only the `ui` feature compiles the embedded dashboard; a headless build never
+# pulls it in.
+rust-embed = { workspace = true, optional = true }
 tokio.workspace = true
 tokio-stream.workspace = true
 serde.workspace = true

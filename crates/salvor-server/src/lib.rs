@@ -47,6 +47,8 @@ pub mod runs;
 pub mod sse;
 pub mod state;
 pub mod tool_registry;
+#[cfg(feature = "ui")]
+pub mod ui;
 
 use axum::Router;
 use axum::middleware::from_fn_with_state;
@@ -64,8 +66,14 @@ pub use tool_registry::ToolRegistry;
 
 /// Builds the control-plane router over `state`, with the bearer-auth layer in
 /// front of every route.
+///
+/// With the `ui` feature on, the embedded dashboard is served from the router's
+/// fallback, added after the auth layer so a browser can fetch the app shell
+/// and its assets without a bearer token; the `/v1` API keeps the auth it
+/// registered above. The fallback also holds the SPA rule: a non-API,
+/// non-file GET returns `index.html` so a deep link cold-loads.
 pub fn build_router(state: AppState) -> Router {
-    Router::new()
+    let api = Router::new()
         .route("/v1/agents", post(agents::register).get(agents::list))
         .route("/v1/agents/{hash}", get(agents::get))
         .route("/v1/runs", post(runs::start).get(runs::list))
@@ -86,8 +94,15 @@ pub fn build_router(state: AppState) -> Router {
             post(client_runs::tool_step),
         )
         .route("/v1/client-runs/{id}/resolve", post(client_runs::resolve))
-        .layer(from_fn_with_state(state.clone(), auth::require_bearer))
-        .with_state(state)
+        .layer(from_fn_with_state(state.clone(), auth::require_bearer));
+
+    // The dashboard fallback is added after the auth layer, so it sits outside
+    // it: static assets and the SPA shell answer without a bearer token, while
+    // every `/v1` route above keeps the auth it registered.
+    #[cfg(feature = "ui")]
+    let api = api.fallback(ui::static_handler);
+
+    api.with_state(state)
 }
 
 /// Serves the control plane on `listener` until the process ends.

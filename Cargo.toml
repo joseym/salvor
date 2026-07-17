@@ -70,6 +70,14 @@ wiremock = "0.6"
 axum = "0.8"
 tokio-stream = "0.1"
 tracing = "0.1"
+# The dashboard the control plane embeds behind salvor-server's `ui` feature.
+# rust-embed is chosen over include_dir for one property: in a debug build it
+# reads the asset folder from the filesystem at request time (embedding nothing
+# at compile time), so a developer rebuilding the Angular app sees the change on
+# the next request without recompiling Rust; a release build bakes the bytes
+# into the binary. include_dir bakes at compile time in every profile, which
+# would force a Rust rebuild for every UI edit.
+rust-embed = "8"
 # CLI surface. clap parses the command tree with its derive API; toml
 # parses the agent-definition file (agents are data); tracing-subscriber
 # renders the human-readable run/seq progress to stderr.
