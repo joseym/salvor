@@ -43,9 +43,13 @@
 //! After the last node the engine records the single terminal `RunCompleted`.
 //! There is no ambient clock or randomness in any decision: everything the
 //! engine feeds forward — the walk order, each node's input, the branch route,
-//! an idempotency key — is a pure function of the document or of values the
-//! `RunCtx` recorded, so a second drive over the recorded log replays with no
-//! live calls and produces a byte-identical log.
+//! an idempotent tool's idempotency key — is a pure function of the document or
+//! of values the `RunCtx` recorded, so a second drive over the recorded log
+//! replays with no live calls and produces a byte-identical log. The idempotency
+//! key is derived from the call's position in the graph (graph hash, node id,
+//! call index) rather than from drawn randomness, which is what lets a FORK of a
+//! run re-walk a segment and present the same key its origin recorded — see
+//! [`fork_safe_idempotency_key`] and the `salvor-server` fork endpoint.
 //!
 //! # Data flow
 //!
@@ -69,6 +73,7 @@
 #![warn(missing_docs)]
 
 mod error;
+pub mod fork;
 mod walk;
 
 use std::collections::{HashMap, HashSet};
@@ -83,6 +88,7 @@ use salvor_tools::DynTool;
 use serde_json::Value;
 
 pub use error::EngineError;
+pub use fork::{ForkError, ForkPlan, WriteHazard, plan_fork};
 
 /// Resolves an `agent` node's declared hash to the [`Agent`] that executes it.
 ///
@@ -260,11 +266,17 @@ pub async fn run_graph(
                     }
                 })?;
                 ctx.node_entered(id).await?;
-                // An idempotent tool's key derives from recorded randomness, so
-                // it reproduces on replay exactly as the built-in loop's does.
-                // Read and write tools carry no key (see the built-in loop).
+                // An idempotent tool's key is a PURE function of WHERE the call
+                // sits in the graph — the graph hash, the node id, the call index
+                // within the node — not of drawn randomness. That is what makes it
+                // fork-safe: a fork re-walks the segment from its fork node and
+                // re-executes the idempotent calls in it live, and this derivation
+                // hands each of them the IDENTICAL key its origin recorded, so the
+                // provider collapses the duplicate. It also leaves `Effect::Write`
+                // as the sole class a fork must have acknowledged. Read and write
+                // tools carry no key (see the built-in loop).
                 let idempotency_key = match tool.effect() {
-                    Effect::Idempotent => Some(format!("{:016x}", ctx.random().await?)),
+                    Effect::Idempotent => Some(fork_safe_idempotency_key(&hash, id, 0)),
                     Effect::Read | Effect::Write => None,
                 };
                 match ctx
@@ -386,6 +398,39 @@ pub async fn run_graph(
     Ok(GraphOutcome::Completed {
         output: last_output,
     })
+}
+
+/// The idempotency key a graph `tool` node's [`Effect::Idempotent`] call
+/// presents: a pure function of the call's POSITION in the graph — the graph
+/// hash, the node id, and the call index within the node — never of drawn
+/// randomness.
+///
+/// This is what makes an idempotent tool fork-safe. A fork re-walks the segment
+/// from its fork node, re-executing the idempotent calls in it live; deriving
+/// the key from position means each re-executed call presents the IDENTICAL key
+/// its origin recorded, so the provider collapses the duplicate. Drawing the key
+/// from [`RunCtx::random`](salvor_runtime::RunCtx::random) instead would mint a
+/// fresh key in the fork, and the provider would see a second, distinct call.
+/// With this derivation, [`Effect::Write`] is the only effect class a fork must
+/// have acknowledged, because a [`Effect::Read`] re-executes freely and a
+/// [`Effect::Idempotent`] retry collapses.
+///
+/// `call_index` is the zero-based position of the call within the node. A `tool`
+/// node makes exactly one call, so it is always `0` today; the parameter is
+/// carried so a future node kind issuing several calls keeps their keys distinct.
+///
+/// Reuses `salvor-runtime`'s canonical hashing (the same behind `graph_hash`
+/// itself), so the key is reproducible and stable across processes and
+/// languages. Existing recorded logs are not disturbed: a key is plain data in
+/// the log, and replay correlates on the RECORDED request, never on a
+/// re-derivation, so a log whose idempotent call recorded a random-drawn key
+/// still replays byte for byte under this build.
+fn fork_safe_idempotency_key(graph_hash: &str, node_id: &str, call_index: u64) -> String {
+    hash_value(&serde_json::json!({
+        "graph_hash": graph_hash,
+        "node": node_id,
+        "call": call_index,
+    }))
 }
 
 /// The reason recorded for every [`salvor_core::Event::NodeSkipped`]: a constant,

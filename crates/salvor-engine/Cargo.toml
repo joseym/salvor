@@ -12,6 +12,7 @@ salvor-runtime.workspace = true
 salvor-tools.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+time.workspace = true
 
 [dev-dependencies]
 salvor-replay.workspace = true

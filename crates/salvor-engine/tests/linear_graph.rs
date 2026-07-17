@@ -13,7 +13,7 @@ use common::{
     EchoTool, ScriptedModel, agent_builder, event_kinds, fixed_clock, fixed_random, fixed_run_id,
     text_response,
 };
-use salvor_core::Effect;
+use salvor_core::{Effect, EventEnvelope};
 use salvor_engine::{EngineError, GraphOutcome, graph_hash, run_graph};
 use salvor_graph::{AgentSpec, Graph, GraphBuilder, MapBody, MapSpec};
 use salvor_replay::{NodeState, derive_graph_projection};
@@ -272,6 +272,70 @@ async fn a_lone_map_refuses_with_only_the_head_recorded() {
 
     let log = store.read_log(run_id).await.expect("log reads");
     assert_eq!(event_kinds(&log), ["GraphRunStarted"]);
+}
+
+/// An idempotent `tool` node records a key that is a pure function of the call's
+/// POSITION in the graph, not of drawn randomness: two independent drives of the
+/// same document — under DIFFERENT run ids and with a different random source
+/// each — record the IDENTICAL `idempotency_key`, and neither records a
+/// `RandomObserved` for it. This is the engine-level proof of the fork-safe key:
+/// a fork re-walking this node live presents the same key its origin recorded,
+/// so the provider collapses the duplicate and only `Write` needs acknowledging.
+#[tokio::test]
+async fn an_idempotent_tool_node_key_is_position_derived_not_random() {
+    let graph = GraphBuilder::new()
+        .tool(salvor_graph::ToolSpec::new("notify", "notify_tool"))
+        .build();
+    let input = json!({"to": "ops"});
+
+    // Two random sources that would disagree if the key were drawn from them.
+    let drive = |run_id, random: salvor_runtime::RandomFn| {
+        let graph = graph.clone();
+        let input = input.clone();
+        async move {
+            let (notify, _calls) = EchoTool::new("notify_tool", Effect::Idempotent);
+            let mut tools: HashMap<String, Box<dyn DynTool>> = HashMap::new();
+            tools.insert("notify_tool".to_owned(), Box::new(notify));
+            let agents: HashMap<String, salvor_runtime::Agent> = HashMap::new();
+            let store = Arc::new(SqliteStore::in_memory().expect("store opens"));
+            let mut ctx = RunCtx::with_hooks(store.clone(), run_id, vec![], fixed_clock(), random)
+                .expect("ctx builds");
+            run_graph(&mut ctx, &graph, &input, &agents, &tools)
+                .await
+                .expect("graph drives");
+            store.read_log(run_id).await.expect("log reads")
+        }
+    };
+
+    let log_a = drive(fixed_run_id(20), Arc::new(|| 11)).await;
+    let log_b = drive(fixed_run_id(21), Arc::new(|| 999)).await;
+
+    let key_of = |log: &[EventEnvelope]| -> Option<String> {
+        log.iter().find_map(|e| match &e.event {
+            salvor_core::Event::ToolCallRequested {
+                idempotency_key, ..
+            } => idempotency_key.clone(),
+            _ => None,
+        })
+    };
+    let key_a = key_of(&log_a).expect("an idempotent tool records a key");
+    let key_b = key_of(&log_b).expect("an idempotent tool records a key");
+    assert_eq!(
+        key_a, key_b,
+        "the idempotent key must be identical across independent runs (position-derived, not random)"
+    );
+    assert!(
+        key_a.starts_with("sha256:"),
+        "the derived key is a canonical hash: {key_a}"
+    );
+
+    // The key no longer costs a RandomObserved: nothing draws randomness here.
+    assert!(
+        !log_a
+            .iter()
+            .any(|e| matches!(&e.event, salvor_core::Event::RandomObserved { .. })),
+        "a position-derived key must not record a RandomObserved"
+    );
 }
 
 /// An agent node whose hash the resolver cannot supply is a typed error.
