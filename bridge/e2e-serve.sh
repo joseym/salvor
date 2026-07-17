@@ -99,6 +99,19 @@ sed 's/^steps = 24/steps = 1/' demo/agent.toml > /tmp/salvor-bridge-e2e-tinybudg
 TINY_AGENT=$(curl -s -X POST "${API}/v1/agents" -H 'Content-Type: application/toml' \
   --data-binary @/tmp/salvor-bridge-e2e-tinybudget.toml | python3 -c 'import sys,json;print(json.load(sys.stdin)["agent"])')
 
+# 4b. Agent-name addition (additive only): register one more agent via JSON with a top-level
+#     `name`, so the registry has a resolvable name for a hash to demonstrate the Agent column's
+#     registry-resolved-NAME rendering end to end. The Bridge's lookup
+#     (bridge/src/app/core/api/agent-registry.ts) deliberately reads `name` only off a JSON-format
+#     definition's own top-level key, never a TOML body (to avoid mistaking a [[wasm_tools]]
+#     entry's nested `name` for the agent's own identity), so this registers as JSON specifically —
+#     a TOML registration would carry the same schema field but stay invisible to the column, by
+#     design. No run is started against it: registration alone makes the hash resolvable, which is
+#     all the column's lookup (GET /v1/agents/{hash}) needs.
+echo "[e2e-serve] registering a named agent (JSON) so the Agent column has a resolvable name to render"
+curl -s -X POST "${API}/v1/agents" -H 'Content-Type: application/json' \
+  -d '{"model":"claude-opus-4-8","name":"demo-writer"}' >/dev/null
+
 # 5. Start the runs — TWO completed + TWO budget-exceeded. The suite's row-channel tests need
 #    both a second WAITING row (besides the cold-seeded selection) and a zebra (odd-index)
 #    NON-waiting row, which needs two terminal rows below the two waiting ones.
