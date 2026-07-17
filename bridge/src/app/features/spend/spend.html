@@ -1,0 +1,272 @@
+<div class="view-work" data-panel-dock [attr.data-panel]="panelOpen() ? 'open' : 'closed'">
+  <div class="spend-grid">
+    <div>
+      <h3 class="section">Burn-down against declared budgets</h3>
+      <div id="meters">
+        @if (!listLoaded() || folding()) {
+          <p class="stub-note">Folding every run's log…</p>
+        } @else if (!meterRows().length) {
+          <p class="stub-note">No runs recorded yet.</p>
+        } @else {
+          @for (m of meterRows(); track m.row.id) {
+            <div
+              class="meter"
+              [class.over]="m.over"
+              [class.is-sel]="spendSel() === m.row.id"
+              [attr.data-run]="m.row.id"
+              (click)="openRun(m.row.id)"
+            >
+              <button
+                class="btn ghost ev-btn"
+                type="button"
+                [attr.data-breakdown]="m.row.id"
+                [attr.aria-pressed]="spendSel() === m.row.id"
+                (click)="toggleBreakdown(m.row.id); $event.stopPropagation()"
+              >
+                Breakdown
+              </button>
+              <div class="meter-head">
+                <bridge-run-ref [id]="m.row.id" />
+                <span class="agent">
+                  <span class="status" [attr.data-group]="group(m.row.status)">{{ label(m.row.status) }}</span>
+                </span>
+                <span class="figs" [attr.title]="whyFor(m.ceiling)">
+                  @if (!m.folded || !m.folded.readable) {
+                    <span class="tokens-only">log unreadable</span>
+                  } @else if (m.spent === null) {
+                    <span class="tokens-only"
+                      >{{ int(m.folded.usage.inputTokens + m.folded.usage.outputTokens) }} tokens · unpriced
+                      model</span
+                    >
+                  } @else if (m.known) {
+                    {{ usd(m.spent) }} / {{ usd(m.ceiling.usd!) }} <span class="tokens-only">crossed</span>
+                  } @else {
+                    {{ usd(m.spent) }} · <span style="color: var(--faint)">ceiling unknown</span>
+                  }
+                </span>
+                <span class="meter-pct">{{ m.pctText }}</span>
+              </div>
+              <div class="meter-track">
+                @if (m.known && m.spent !== null) {
+                  <div class="meter-fill" [style.width.%]="m.pct"></div>
+                } @else {
+                  <div class="meter-none"></div>
+                }
+              </div>
+            </div>
+          }
+        }
+      </div>
+      <!-- Two thoughts about what these figures mean, so one apparatus with two points rather than
+           two boxes each announcing themselves. -->
+      <div class="notes">
+        <p>
+          <b>A ceiling is shown only for a run that actually crossed one</b>, because the ceiling
+          reaches the log solely as a <code>BudgetExceeded</code> event carrying the limit and the
+          observed value. Every other run's ceiling is simply not on record here, so it reads
+          unknown. Tokens are exact from the fold; dollars are an estimate from a maintained price
+          table keyed by the model id on each completion — a run whose model is not in the table
+          degrades to <b>tokens only</b> rather than quoting a number that silently omits spend.
+        </p>
+        <p>
+          <b>A forked run's total would include usage it never incurred.</b> A fork's log is seeded
+          with a copy of its origin's events, and those events carry the origin's real
+          <code>ModelCallCompleted</code> usage — so folding the fork's whole log counts that spend a
+          second time. The fold itself is right; it sums events genuinely in the log. What would be
+          missing is a control plane that de-duplicates by origin when totals are added together —
+          not a concern this build hits yet, since forking has no runtime behind it here.
+        </p>
+      </div>
+    </div>
+
+    <div class="spend-tables">
+      <div>
+        <h3 class="section">By agent</h3>
+        <div class="tscroll" role="region" aria-label="Spend by agent" tabindex="0">
+          <table class="ledger" id="agents-table">
+            <caption class="sr">Token usage and spend, grouped by agent definition hash.</caption>
+            <thead>
+              <tr>
+                <th scope="col">Agent</th>
+                <th scope="col" class="num">Runs</th>
+                <th scope="col" class="num">Tokens</th>
+                <th scope="col" class="num">Spend</th>
+              </tr>
+            </thead>
+            <tbody id="agents-body">
+              @for (a of byAgent(); track a.key) {
+                <tr style="cursor: default">
+                  <td>
+                    <bridge-run-ref [id]="a.key" [kind]="a.isHash ? 'hash' : 'label'" />
+                  </td>
+                  <td class="num">{{ a.runs }}</td>
+                  <td class="num">{{ int(a.tokens) }}</td>
+                  <td class="num">
+                    @if (a.complete) {
+                      {{ usd(a.spend) }}
+                    } @else {
+                      <span class="tokens-only">tokens only</span>
+                    }
+                  </td>
+                </tr>
+              }
+            </tbody>
+          </table>
+        </div>
+        <p class="caption">
+          Keyed by <code>agent_def_hash</code> from each run's <code>RunStarted</code>. The log
+          records no human name for an agent, so none is shown.
+        </p>
+      </div>
+
+      <div>
+        <h3 class="section">By day</h3>
+        <div class="tscroll" role="region" aria-label="Spend by day" tabindex="0">
+          <table class="ledger" id="days-table">
+            <caption class="sr">Runs, tokens, and spend per day across the recorded window.</caption>
+            <thead>
+              <tr>
+                <th scope="col">Day</th>
+                <th scope="col" class="num">Runs</th>
+                <th scope="col" class="num">Tokens</th>
+                <th scope="col" class="num">Spend</th>
+              </tr>
+            </thead>
+            <tbody id="days-body">
+              @for (d of byDay(); track d.day) {
+                <tr style="cursor: default">
+                  <td class="mono" style="font-size: 12px">{{ d.day }}</td>
+                  <td class="num">{{ d.runs }}</td>
+                  <td class="num">{{ int(d.tokens) }}</td>
+                  <td class="num">
+                    @if (d.complete) {
+                      {{ usd(d.spend) }}
+                    } @else {
+                      <span class="tokens-only">tokens only</span>
+                    }
+                  </td>
+                </tr>
+              }
+            </tbody>
+          </table>
+        </div>
+        <p class="caption">
+          Every completed call's cost is attributed to the day it was <code>recorded_at</code>. A
+          window spanning only a day or two renders only that many rows — a chart drawing more bars
+          than there are days would be drawing data that does not exist.
+        </p>
+      </div>
+    </div>
+
+    <div>
+      <h3 class="section">Activity</h3>
+      <svg
+        #activityEl
+        class="hist"
+        id="activity"
+        viewBox="0 0 460 128"
+        height="128"
+        role="group"
+        aria-labelledby="activity-desc"
+        (click)="onActivityClick($event)"
+        (keydown)="onActivityKeydown($event)"
+      ></svg>
+      <p class="sr" id="activity-desc">{{ activityDesc() }}</p>
+      <ul class="legend" id="activity-legend">
+        <li><span class="swatch s-model"></span>model call</li>
+        <li><span class="swatch s-tool"></span>tool call</li>
+        <li><span class="swatch s-ctx"></span>context / lifecycle</li>
+        <li><span class="glyph g-park" aria-hidden="true">▲</span> hour a run parked</li>
+        <li><span class="glyph g-fail" aria-hidden="true">✕</span> hour a run failed</li>
+      </ul>
+      <!-- What the bars mean, and what a click on one means: two points about the same chart, so
+           one apparatus. -->
+      <div class="notes">
+        <p>
+          <b>One bar per hour, counting events by their own <code>recorded_at</code></b> — not by the
+          run's last touch. A run that worked for three hours spans three bars, which is what a chart
+          shaped like time has to mean. This lives on Spend because it needs every event's timestamp,
+          which means folding every log — the same cost Spend already pays for a dollar figure, and
+          the cost the run list refuses to pay.
+        </p>
+        <p>
+          <b>An hour filters the run list to the runs it can name — which is not the same set the bar
+          counted.</b>
+          The bar knows every event's own hour because Spend folded the logs; the list knows only
+          <code>last</code>, so <code>hour:</code> means <i>last active in this hour</i>. A run that
+          worked through 09:00 and ran on until 11:00 is in the 09:00 bar and not in the 09:00
+          filter. Each hour says both numbers before you click it, and an hour the list cannot name
+          is drawn but is not a button.
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <aside class="cpanel" data-drawer data-panel="spend" aria-label="Spend breakdown" [hidden]="!panelOpen()">
+    <div class="cpanel-head">
+      <div>
+        <h3 class="cpanel-title">Breakdown</h3>
+        <p class="cpanel-sub" [hidden]="!selectedRow()">
+          @if (selectedFolded(); as f) {
+            {{ int(f.usage.inputTokens + f.usage.outputTokens) }} tokens folded
+          }
+        </p>
+      </div>
+      <button class="cpanel-x" type="button" aria-label="Close the breakdown panel" (click)="closePanel()">×</button>
+    </div>
+    <div class="cpanel-body" id="spend-panel">
+      @if (selectedRow(); as r) {
+        <dl class="dpanel">
+          <div><dt>status</dt><dd><span class="status" [attr.data-group]="group(r.status)">{{ label(r.status) }}</span></dd></div>
+          <div>
+            <dt>agent</dt>
+            <dd>{{ selectedFolded()?.agent ?? '—' }}</dd>
+            <p class="gloss">The log records a hash, never a human name for an agent.</p>
+          </div>
+          <div>
+            <dt>tokens · exact from the fold</dt>
+            <dd>
+              @if (selectedFolded(); as f) {
+                {{ int(f.usage.inputTokens) }} in / {{ int(f.usage.outputTokens) }} out
+              } @else {
+                —
+              }
+            </dd>
+          </div>
+          <div>
+            <dt>cost</dt>
+            <dd>
+              @if (selectedFolded()?.cost?.complete) {
+                {{ usd(selectedFolded()!.cost.usd!) }}
+              } @else {
+                <span class="tokens-only">tokens only</span>
+              }
+            </dd>
+            <p class="gloss">
+              @if (selectedFolded()?.cost?.complete) {
+                An estimate from a maintained price table, keyed by the model id on each completion.
+              } @else {
+                {{ (selectedFolded()?.cost?.unpriced ?? []).join(', ') }} is not in the price table, so
+                this run degrades to tokens only. It never contributes a silent zero.
+              }
+            </p>
+          </div>
+          <div>
+            <dt>ceiling</dt>
+            <dd>
+              @if (selectedCeiling().usd !== null) {
+                {{ usd(selectedCeiling().usd!) }}
+              } @else {
+                unknown
+              }
+            </dd>
+            <p class="gloss">{{ whyFor(selectedCeiling()) }}</p>
+          </div>
+        </dl>
+      } @else {
+        <p class="stub-note">Select a run's <b>Breakdown</b> to see its folded figures.</p>
+      }
+    </div>
+  </aside>
+  <button class="cpanel-tab" type="button" data-drawer data-panel="spend" [hidden]="panelOpen()" (click)="openPanel()">Breakdown</button>
+</div>

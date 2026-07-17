@@ -18,6 +18,7 @@ import { Inbox } from './features/inbox/inbox';
 import { Inspector } from './features/inspector/inspector';
 import { groupOf } from './features/runs/run-model';
 import { Runs } from './features/runs/runs';
+import { Spend } from './features/spend/spend';
 
 type NavLink = { readonly view: ViewName; readonly label: string };
 
@@ -44,7 +45,7 @@ const SUBS: Readonly<Record<ViewName, string>> = {
  */
 @Component({
   selector: 'bridge-root',
-  imports: [Runs, Inspector, Inbox],
+  imports: [Runs, Inspector, Inbox, Spend],
   templateUrl: './app.html',
   host: { '(document:keydown)': 'onGlobalKeydown($event)' },
 })

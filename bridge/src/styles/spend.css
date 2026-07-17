@@ -1,0 +1,238 @@
+/* ============================================================
+   BRIDGE SPEND
+
+   Scope discipline, same rule as inbox.css: `app.css` already carries
+   `.btn`/`.btn.ghost`, `.ledger`/`.tscroll`-shaped table chrome, `.cpanel`/
+   `.view-work`, `.notes`/`.caption`, `.status`, `.tokens-only`, `.dpanel`,
+   and `.gloss` — this file reuses all of those AS SHIPPED and adds only
+   what Spend itself introduces: the burn-down bands, the by-agent/by-day
+   band layout, and the activity histogram. Every value routes through the
+   tokens in tokens.css.
+
+   THE BAND LAYOUT. The burn-down and the two ledgers do not compete for a
+   shared row: each block has its own natural measure and stops there
+   (`#meters`, `.hist`), and the two ledgers share a row only when both
+   genuinely fit (`.spend-tables`'s `auto-fit` with a measured minimum),
+   stacking full-width rather than ever needing a horizontal scroll. The
+   `.tscroll` regions inside each ledger stay as the safety net for widths
+   this layout does not reach.
+   ============================================================ */
+
+.spend-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-8);
+  align-items: start;
+}
+.spend-tables {
+  --ledger-min: 400px;
+  display: grid;
+  gap: var(--space-8);
+  align-items: start;
+  grid-template-columns: repeat(auto-fit, minmax(min(var(--ledger-min), 100%), 1fr));
+}
+#meters {
+  max-width: 780px;
+}
+.hist {
+  display: block;
+  width: 100%;
+  max-width: 460px;
+}
+.tscroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  max-width: 100%;
+}
+.tscroll:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ── the burn-down row ── */
+.meter {
+  position: relative;
+  margin-bottom: var(--space-5);
+  padding-top: var(--space-1);
+  padding-right: 84px;
+  border-top: 1px solid transparent;
+  cursor: pointer;
+}
+.meter.is-sel {
+  border-color: var(--accent);
+}
+.meter-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  font-size: 13px;
+}
+/* the Breakdown button sits at the row's top-right corner, clear of the head's own flex row so it
+   never competes with the status pill for the head's flex-shrink budget */
+.meter .ev-btn {
+  position: absolute;
+  top: 0;
+  right: 0;
+  padding: 2px var(--space-2);
+  min-height: 24px;
+  font-size: 11px;
+}
+.meter-head .agent {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.meter-head .figs {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+.meter-pct {
+  min-width: 44px;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--fg);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.meter.over .meter-pct {
+  color: var(--amber-ink);
+}
+.meter.over .figs {
+  color: var(--amber-ink);
+  font-weight: 500;
+}
+.meter-track {
+  height: 9px;
+  margin-top: var(--space-1);
+  border-radius: var(--radius-pill);
+  background: var(--border-soft);
+  overflow: hidden;
+}
+.meter-fill {
+  height: 100%;
+  min-width: 2px;
+  background: var(--fg-2);
+  border-radius: var(--radius-pill);
+}
+.meter.over .meter-fill {
+  background: var(--warn);
+}
+/* a meter with no known ceiling gets no fill — an empty, hatched track is the honest rendering of
+   "no denominator", not a zero-width bar */
+.meter-none {
+  height: 100%;
+  background: repeating-linear-gradient(90deg, var(--border) 0 3px, transparent 3px 6px);
+}
+:root[data-theme='dark'] .meter-none {
+  opacity: 0.55;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) .meter-none {
+    opacity: 0.55;
+  }
+}
+
+/* ── the activity histogram ── */
+/* `.pick` is the hour the run list can actually name — only it is a control, so only it takes the
+   pointer, the hover and the focus ring. */
+.hist .hbucket.pick {
+  cursor: pointer;
+}
+.hist .hhit {
+  fill: transparent;
+  pointer-events: all;
+  transition: fill var(--motion-fast) var(--ease-standard);
+}
+.hist .hbucket.pick:hover .hhit {
+  fill: color-mix(in oklab, var(--fg), transparent 95%);
+}
+.hist .hbucket.sel .hhit {
+  fill: color-mix(in oklab, var(--fg), transparent 90%);
+}
+.hist .hbucket:focus {
+  outline: none;
+}
+.hist .hbucket.pick:focus-visible .hhit {
+  fill: color-mix(in oklab, var(--fg), transparent 95%);
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+.hist .hfoot {
+  fill: transparent;
+}
+.hist .hbucket.hot .hfoot {
+  fill: var(--warn);
+}
+.hist .hbucket.bad .hfoot {
+  fill: var(--danger);
+}
+.hist .h-park {
+  fill: var(--amber-ink);
+}
+.hist .h-fail {
+  fill: var(--danger);
+}
+.hist .h-model {
+  fill: color-mix(in oklab, var(--accent), var(--bg) 30%);
+}
+.hist .h-tool {
+  fill: var(--fg);
+}
+.hist .empty-bar {
+  fill: var(--edge-strong);
+}
+.hist text {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  fill: var(--faint);
+  letter-spacing: 0;
+}
+
+/* chart legend — shape carries the meaning as well as colour, so the encoding is never colour-only
+   (WCAG 1.4.1) */
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  list-style: none;
+  margin: var(--space-3) 0 0;
+  padding: 0;
+}
+.legend li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--muted);
+  letter-spacing: 0.16px;
+}
+.legend .swatch {
+  width: 12px;
+  height: 12px;
+  flex: none;
+}
+.legend .swatch.s-model {
+  background: color-mix(in oklab, var(--accent), var(--bg) 30%);
+}
+.legend .swatch.s-tool {
+  background: var(--fg);
+}
+.legend .swatch.s-ctx {
+  background: var(--edge-strong);
+}
+.legend .glyph {
+  font-size: 12px;
+  line-height: 1;
+}
+.legend .g-park {
+  color: var(--amber-ink);
+}
+.legend .g-fail {
+  color: var(--danger);
+}
