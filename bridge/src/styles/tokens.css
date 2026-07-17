@@ -258,15 +258,24 @@
 }
 
 /* ============================================================
-   REDUCED MOTION — global blanket. Every transition and animation in
-   the app collapses to effectively-instant; no per-component opt-out.
+   REDUCED MOTION — one switch. Every transition and animation in the app is
+   timed off --motion-fast / --motion-base, so collapsing those two tokens is
+   the single source that stills the whole UI; anything reading the tokens from
+   JS (getComputedStyle) sees the same near-zero value. The universal rule below
+   is belt-and-braces for any duration that did not read a token — the token
+   gate keeps durations token-driven, so it should catch nothing.
    ============================================================ */
 @media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-fast: 0.01ms;
+    --motion-base: 0.01ms;
+  }
   *,
   *::before,
   *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }
