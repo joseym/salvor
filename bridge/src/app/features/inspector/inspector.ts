@@ -445,12 +445,20 @@ export class Inspector implements AfterViewInit {
     this.arrivedSeq = null; // the arrival has been drawn once
   }
 
-  /** The node under the playhead — the event the operator is looking at, or null when that event
-   * names no node (RunStarted, a budget event). Never walked to the "nearest" node: that would be
-   * inventing an intent nobody expressed; the canvas lets them point at one instead. */
+  /** The node under the playhead. A real log attributes events to nodes as RECORDED SPANS —
+   * `NodeEntered`/`NodeExited` pairs — not as a denormalised field on every envelope, so this
+   * folds the prefix: the node whose open span contains the playhead is the node under it. That
+   * is reading recorded structure, never guessing. Outside any span (RunStarted, the gap after an
+   * exit, a budget event) it is null — the canvas lets the operator point at a node instead. */
   private forkNodeAt(n: number): string | null {
-    const at = this.events().find((e) => e.seq === n - 1);
-    return (at?.payload['node'] as string | undefined) ?? null;
+    let current: string | null = null;
+    for (const e of this.events()) {
+      if (e.seq >= n) break;
+      const node = e.payload['node'] as string | undefined;
+      if (e.kind === 'NodeEntered' && node !== undefined) current = node;
+      else if (e.kind === 'NodeExited') current = null;
+    }
+    return current;
   }
 
   private renderForkHere(n: number): void {
@@ -529,11 +537,19 @@ export class Inspector implements AfterViewInit {
     this.setPrefix(Number((e.target as HTMLInputElement).value));
   }
   onRangeGrab(): void {
+    clearTimeout(this.releaseTimer);
     this.scrubEl()?.classList.add('dragging');
   }
   onRangeRelease(): void {
-    this.scrubEl()?.classList.remove('dragging');
+    // Zoneless rendering flushes on the NEXT animation frame, so the render a keypress queued can
+    // land after its own keyup. Clearing the class synchronously would make that render read "not
+    // scrubbing" and skip the follow — a keyboard scrub that never chases its boundary. Deferring
+    // the removal past the flush keeps the predicate true for the gesture's own render, and a
+    // re-grab (the next arrow keydown) cancels the pending release.
+    clearTimeout(this.releaseTimer);
+    this.releaseTimer = setTimeout(() => this.scrubEl()?.classList.remove('dragging'), 80);
   }
+  private releaseTimer?: ReturnType<typeof setTimeout>;
   private scrubEl(): HTMLElement | undefined {
     return this.stripEl?.nativeElement.closest('.scrub') as HTMLElement | undefined;
   }

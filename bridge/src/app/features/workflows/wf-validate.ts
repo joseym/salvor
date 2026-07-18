@@ -38,8 +38,9 @@ export interface WfError {
   readonly fix?: WfFix;
 }
 
-/** The hash shape an agent node must carry — a 16-hex-digit sha256 reference. */
-export const HASH_RE = /^sha256:[0-9a-f]{16}$/;
+/** The hash shape an agent node must carry: a full `sha256:<64 hex>` reference (the server's own
+ * format), or the 16-hex short form draft tooling writes. Anything else is malformed. */
+export const HASH_RE = /^sha256:(?:[0-9a-f]{16}|[0-9a-f]{64})$/;
 
 /** Levenshtein distance, small-string only (node ids). */
 function lev(a: string, b: string): number {

@@ -163,7 +163,7 @@ export class Workflows implements AfterViewInit {
   /** Cached run_id → projection for every graph run (fetched once on entry, a handful of runs). */
   private readonly projections = signal<ReadonlyMap<string, GraphProjection>>(new Map());
   private readonly capability = this.capabilityProbe.capabilities;
-  private loaded: Promise<void>;
+  private loaded?: Promise<void>;
 
   // ── canvas state ──
   readonly mode = signal<WfMode>('build');
@@ -413,7 +413,12 @@ export class Workflows implements AfterViewInit {
   });
 
   constructor() {
-    this.loaded = this.load();
+    // The canvas is MOUNTED from boot (its dialog, and fork intents, need it present), but its
+    // data is loaded on first genuine need — entering the view, or a fork intent — so every other
+    // view's page load is not taxed with graph documents and run projections it never shows.
+    effect(() => {
+      if (this.viewService.view() === 'workflows') untracked(() => this.ensureLoaded());
+    });
     // Fork requests from the Inspector or the Runs panel land whenever their view fires them;
     // consuming is untracked so acting on one never re-runs under its own signal writes.
     effect(() => {
@@ -421,6 +426,11 @@ export class Workflows implements AfterViewInit {
       if (!intent) return;
       untracked(() => void this.consumeIntent(intent));
     });
+  }
+
+  private ensureLoaded(): Promise<void> {
+    this.loaded ??= this.load();
+    return this.loaded;
   }
 
   ngAfterViewInit(): void {
@@ -464,6 +474,11 @@ export class Workflows implements AfterViewInit {
       const first = this.serverGraphs()[0]?.key ?? this.drafts()[0]?.key ?? '';
       this.currentKey.set(first);
     }
+    // Entry fit NOW, before the slower projection reads: the microtask runs before the first
+    // paint of the drawn nodes, so the operator (or a real pointer) can never slip a zoom in
+    // between the nodes appearing and the fit landing — a fit that arrived after the projections
+    // would quietly reset a zoom they had already chosen.
+    queueMicrotask(() => this.fit());
     // Graph-run projections (a handful), so Run mode and the node menu know which runs are real.
     try {
       const runs = await this.runsService.refresh();
@@ -485,7 +500,6 @@ export class Workflows implements AfterViewInit {
     } catch {
       /* runs unreachable — Run mode has nothing to project, which the empty picker states */
     }
-    queueMicrotask(() => this.fit());
   }
 
   private canvasEl(): HTMLElement | undefined {
@@ -799,7 +813,7 @@ export class Workflows implements AfterViewInit {
   // ── the app-wide fork door: Inspector + Runs requests land here ──
   private async consumeIntent(intent: ForkIntent): Promise<void> {
     this.forkIntent.clear();
-    await this.loaded;
+    await this.ensureLoaded();
     let proj = this.projections().get(intent.runId);
     if (!proj) {
       try {

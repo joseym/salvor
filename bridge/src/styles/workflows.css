@@ -273,6 +273,17 @@
   font-size: var(--text-xs);
   color: var(--muted);
 }
+/* On a narrow canvas (the panel column takes 340px of the work area) the legend would push the
+   floating bar under the minimap and swallow its right-hand controls — the exact captured-control
+   defect the chrome gate exists to catch. The legend is furniture; the controls are not. */
+.wf-canvas {
+  container-type: inline-size;
+}
+@container (max-width: 760px) {
+  .wf-legend {
+    display: none;
+  }
+}
 
 .wf-note {
   position: absolute;

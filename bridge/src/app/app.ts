@@ -106,6 +106,9 @@ export class App implements AfterViewInit {
     this.applyNav();
     // one probe at boot; the chip and every fork offer read the same signal
     void this.capabilityProbe.probe();
+    // the ⌘K palette offers stored graphs from anywhere, so the catalog SUMMARIES load at boot —
+    // one cheap call; the canvas loads full documents only when genuinely entered
+    void this.graphsService.refresh().catch(() => undefined);
   }
 
   ngAfterViewInit(): void {
