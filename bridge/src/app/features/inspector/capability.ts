@@ -1,24 +1,23 @@
-import { InjectionToken } from '@angular/core';
+import { InjectionToken, type Signal, inject } from '@angular/core';
+
+import { CapabilityProbeService } from '../../core/api';
 
 /**
- * What the control plane advertises it can do. So the Inspector's "Fork this run…" offer is
- * CAPABILITY-GATED: the code path exists and is exercised, but it renders only when
- * {@link ServerCapabilities.fork} is true.
+ * What the control plane advertises it can do. The Inspector's "Fork this run…" offer is
+ * CAPABILITY-GATED: it renders only when {@link ServerCapabilities.fork} is true.
  *
- * The v0.4 server now genuinely answers `GET /v1/capabilities`, and a REAL probe of it exists —
- * `core/api/capabilities.ts`'s `CapabilityProbeService`. This token stays pinned to
- * {@link NO_FORK_CAPABILITIES} regardless: the offer needs a fork-POINT to fork FROM, and that
- * picker lives on the graph canvas, which has not shipped yet. Wiring a true probe result to this
- * token before the canvas exists would light a "Fork this run…" button with nowhere to send the
- * operator — a dead end, not a feature. The canvas is what flips this token over to the real
- * probe, with no redesign here.
+ * Since the canvas landed, this token is wired to the REAL probe of `GET /v1/capabilities`
+ * (`core/api/capabilities.ts`'s {@link CapabilityProbeService}): the graph canvas now exists, so
+ * a fork offer has somewhere to send the operator. The probe degrades honestly — an unreachable
+ * or pre-v0.4 control plane resolves to `{ fork: false }` with nothing thrown and nothing logged,
+ * and the offer simply stays hidden.
  */
 export interface ServerCapabilities {
-  /** The server exposes a fork API (`POST /v1/runs/{id}/fork`). False today. */
+  /** The server exposes a fork API (`POST /v1/runs/{id}/fork`). */
   readonly fork: boolean;
 }
 
-/** The honest default for this build: no fork runtime behind the offer. */
+/** The honest default before a probe resolves, and after a failed one: no fork runtime assumed. */
 export const NO_FORK_CAPABILITIES: ServerCapabilities = { fork: false };
 
 /**
@@ -30,10 +29,15 @@ export function forkOffered(caps: ServerCapabilities): boolean {
 }
 
 /**
- * Injected capabilities, so a future surface (or a test) can supply a fork-advertising server without
- * touching the Inspector. Defaults to {@link NO_FORK_CAPABILITIES}.
+ * Injected capabilities, as a SIGNAL: the probe answers asynchronously, and a consumer reading a
+ * one-shot snapshot would freeze the pre-probe default forever. The factory also fires the probe,
+ * so injecting the token is enough — no consumer has to remember to ask.
  */
-export const SERVER_CAPABILITIES = new InjectionToken<ServerCapabilities>('SERVER_CAPABILITIES', {
+export const SERVER_CAPABILITIES = new InjectionToken<Signal<ServerCapabilities>>('SERVER_CAPABILITIES', {
   providedIn: 'root',
-  factory: () => NO_FORK_CAPABILITIES,
+  factory: () => {
+    const probe = inject(CapabilityProbeService);
+    void probe.probe();
+    return probe.capabilities;
+  },
 });

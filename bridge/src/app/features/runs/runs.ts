@@ -16,8 +16,10 @@ import {
   RunsService,
   createConnectionStateMachine,
 } from '../../core/api';
+import { ForkIntentService } from '../../core/fork-intent';
 import { ViewService } from '../../core/view';
 import { focusWhenRendered } from '../../core/focus';
+import { SERVER_CAPABILITIES } from '../inspector/capability';
 import {
   FIELDS,
   MENU_KEYS,
@@ -103,6 +105,8 @@ export class Runs {
   private readonly viewService = inject(ViewService);
   private readonly agentRegistry = inject(AgentRegistryService);
   private readonly graphRuns = inject(GraphRunService);
+  private readonly forkIntent = inject(ForkIntentService);
+  private readonly caps = inject(SERVER_CAPABILITIES);
 
   /** run_id → graph_hash, populated lazily when a GRAPH run is selected in the detail panel (its
    * hash lives behind GET /v1/runs/{id}/graph, never on the list row — see agentIdentity's 'graph'
@@ -636,6 +640,16 @@ export class Runs {
   /** The graph_hash of a selected GRAPH run once its projection has loaded (see the panel effect). */
   graphHashOf(r: RunRow): string | undefined {
     return this.graphHashes().get(r.id);
+  }
+
+  // ── FORK (audit item 6): a list row names no node, so this goes through the ONE fork door and
+  // lands the canvas in its node-picking state — the operator points at the fork point there. ──
+  forkOffered(r: RunRow): boolean {
+    return this.caps().fork && agentIdentity(r).kind === 'graph';
+  }
+  forkRun(runId: string): void {
+    this.forkIntent.request(runId);
+    this.viewService.go('workflows');
   }
 
   // ── GROUPING (item 15b) ──

@@ -379,6 +379,10 @@
               }
             </p>
             <button class="btn ghost" type="button" (click)="openRun(r.id)">Open in inspector</button>
+            @if (forkOffered(r)) {
+              <!-- a list row names no node, so this lands the canvas in its node-picking state -->
+              <button class="btn ghost" type="button" [attr.data-fork-run]="r.id" (click)="forkRun(r.id)">Fork this run…</button>
+            }
             <span class="endpoint" style="margin-left: 10px">GET /v1/runs/{{ short(r.id) }}…/events</span>
           </div>
         </dl>

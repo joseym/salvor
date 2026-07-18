@@ -12,6 +12,7 @@ import {
 import type { SalvorEvent } from '@salvor/client';
 
 import { RunEventsService, type RunEventsChannel } from '../../core/api';
+import { ForkIntentService } from '../../core/fork-intent';
 import { PillService } from '../../core/pill';
 import { RunsService } from '../../core/api';
 import { ViewService } from '../../core/view';
@@ -70,6 +71,7 @@ export class Inspector implements AfterViewInit {
   private readonly pill = inject(PillService);
   private readonly destroyRef = inject(DestroyRef);
   private readonly caps = inject(SERVER_CAPABILITIES);
+  private readonly forkIntent = inject(ForkIntentService);
 
   @ViewChild('statsEl') private statsEl?: ElementRef<HTMLElement>;
   @ViewChild('lineageEl') private lineageEl?: ElementRef<HTMLElement>;
@@ -183,11 +185,14 @@ export class Inspector implements AfterViewInit {
       this.renderScrubber();
     });
 
-    // (5) scrub-only render (derived panel, dim/cut, playhead, ticks, fork offer)
+    // (5) scrub-only render (derived panel, dim/cut, playhead, ticks, fork offer). Also re-runs
+    // when the capability probe answers — the fork offer is gated on it, and the probe resolves
+    // after the first paint.
     effect(() => {
       this.prefixN();
       this.events();
       this.foldReady();
+      this.caps();
       this.renderScrubber();
     });
 
@@ -440,23 +445,42 @@ export class Inspector implements AfterViewInit {
     this.arrivedSeq = null; // the arrival has been drawn once
   }
 
+  /** The node under the playhead — the event the operator is looking at, or null when that event
+   * names no node (RunStarted, a budget event). Never walked to the "nearest" node: that would be
+   * inventing an intent nobody expressed; the canvas lets them point at one instead. */
+  private forkNodeAt(n: number): string | null {
+    const at = this.events().find((e) => e.seq === n - 1);
+    return (at?.payload['node'] as string | undefined) ?? null;
+  }
+
   private renderForkHere(n: number): void {
     const el = this.forkHereEl?.nativeElement;
     if (!el) return;
-    // CAPABILITY GATE: render the offer only if the server advertises a fork API. It does not in
-    // this build, so this is '' in production — the path stays, honesty-gated, for v0.4.
-    if (!forkOffered(this.caps) || this.events().length === 0) {
+    // CAPABILITY GATE: render the offer only if the server genuinely advertises a fork API
+    // (GET /v1/capabilities, probed). A server without one gets no dead button.
+    if (!forkOffered(this.caps()) || this.events().length === 0) {
       el.innerHTML = '';
       return;
     }
-    const at = this.events().find((e) => e.seq === n - 1);
-    const node = (at?.payload['node'] as string | undefined) ?? '';
+    const node = this.forkNodeAt(n) ?? '';
     el.innerHTML = `<button class="btn ghost" type="button" id="fork-here-btn">Fork this run…</button>
       <p class="gloss">${
         node
-          ? `From <span class="mono">${esc(node)}</span> — the node under the playhead.`
-          : 'The event under the playhead names no node, so this opens the canvas to let you pick the fork point.'
+          ? `From <span class="mono">${esc(node)}</span> — the node under the playhead. Opens the hazard review on the canvas: every write recorded after that node will happen again, and each one needs your say-so.`
+          : 'The event under the playhead names no node, so this opens the canvas to let you pick the fork point. It will not choose one for you.'
       }</p>`;
+  }
+
+  /** The scrubber's fork offer, into the ONE fork door the canvas owns. The canvas resolves the
+   * run's graph, lands on the canonical `/workflows/<hashPrefix>` URL and opens the hazard review
+   * (or its refusal) — byte-identical to a canvas-originated fork. */
+  onForkHere(event: Event): void {
+    if (!(event.target as HTMLElement).closest('#fork-here-btn')) return;
+    const runId = this.viewService.runId();
+    if (runId === undefined) return;
+    const node = this.forkNodeAt(this.prefixN());
+    this.forkIntent.request(runId, node ?? undefined);
+    this.viewService.go('workflows');
   }
 
   // ── live ticker bar ───────────────────────────────────────────────────────

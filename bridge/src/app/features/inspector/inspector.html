@@ -86,7 +86,7 @@
 
       <!-- Fork, offered where the decision is made — capability-gated OFF (the server has no fork
            runtime yet). Rendered from the fold so it names the node under the playhead. -->
-      <div #forkHereEl id="fork-here"></div>
+      <div #forkHereEl id="fork-here" (click)="onForkHere($event)"></div>
 
       <p class="mechanism">
         <b>derive_state(&amp;log[0..n])</b><br />
