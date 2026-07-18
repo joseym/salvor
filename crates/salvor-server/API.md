@@ -653,8 +653,26 @@ What this build of the control plane can do, for a dashboard to probe before
 offering a capability-gated action. Additive and honest: a capability is
 advertised only when the feature genuinely exists on this server.
 
+The sibling `server` object names the exact build serving the response.
+`server.version` is the running binary's own `CARGO_PKG_VERSION`, so it always
+agrees with `salvor --version` for the same build. `server.commit` is the
+short git hash the build was compiled from, present only when that build had
+a `.git` history to read at compile time (a source tarball or a checkout with
+no `git` on `PATH` omits the key entirely rather than sending a placeholder
+like `"unknown"`), and suffixed `-dirty` when the working tree carried
+uncommitted changes at build time.
+
 ```json
-{ "capabilities": { "fork": true } }
+{
+  "capabilities": { "fork": true },
+  "server": { "version": "0.1.0", "commit": "a1b2c3d" }
+}
+```
+
+A build with no commit information available:
+
+```json
+{ "capabilities": { "fork": true }, "server": { "version": "0.1.0" } }
 ```
 
 ### Submitting a graph from the CLI

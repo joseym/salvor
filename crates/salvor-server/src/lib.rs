@@ -120,10 +120,24 @@ pub fn build_router(state: AppState) -> Router {
 /// only when the feature genuinely exists on this server, so a probe is never a
 /// promise the server cannot keep. This build advertises `fork: true`, the fork
 /// endpoint ([`graph::fork`]).
+///
+/// The sibling `server` object names the exact build serving the response, so
+/// a dashboard can always show precisely what it is talking to:
+/// `server.version` is `env!("CARGO_PKG_VERSION")`, compile-time-constant and
+/// therefore always correct for the running binary; `server.commit` is the
+/// short git hash `build.rs` shells out for at build time, present only when
+/// that build had a `.git` to ask, omitted entirely (never a placeholder)
+/// otherwise, and suffixed `-dirty` when the working tree carried uncommitted
+/// changes at build time.
 async fn capabilities() -> axum::response::Response {
-    axum::response::IntoResponse::into_response(axum::Json(
-        serde_json::json!({ "capabilities": { "fork": true } }),
-    ))
+    let mut server = serde_json::json!({ "version": env!("CARGO_PKG_VERSION") });
+    if let Some(commit) = option_env!("SALVOR_SERVER_GIT_COMMIT") {
+        server["commit"] = serde_json::Value::String(commit.to_owned());
+    }
+    axum::response::IntoResponse::into_response(axum::Json(serde_json::json!({
+        "capabilities": { "fork": true },
+        "server": server,
+    })))
 }
 
 /// Serves the control plane on `listener` until the process ends.

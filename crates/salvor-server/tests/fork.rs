@@ -390,4 +390,8 @@ async fn capabilities_advertises_fork() {
     let (status, body) = get_json(&client, &format!("{}/v1/capabilities", server.base), None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["capabilities"]["fork"], true);
+    // `server.version` names the exact build serving the response: always
+    // `env!("CARGO_PKG_VERSION")` of the binary that answered, so a dashboard
+    // reading it can never disagree with `salvor --version` of the same build.
+    assert_eq!(body["server"]["version"], env!("CARGO_PKG_VERSION"));
 }
