@@ -1,12 +1,17 @@
 import {
+  AfterViewInit,
   ChangeDetectionStrategy,
   Component,
+  DestroyRef,
   ElementRef,
   ViewChild,
   computed,
+  effect,
   inject,
   signal,
+  untracked,
 } from '@angular/core';
+import { Router } from '@angular/router';
 
 import {
   CapabilityProbeService,
@@ -17,13 +22,19 @@ import {
   type ForkOutcome,
 } from '../../core/api';
 import { focusWhenRendered } from '../../core/focus';
+import { ForkIntentService, type ForkIntent } from '../../core/fork-intent';
+import { ViewService } from '../../core/view';
+import { jsonHi } from '../../shared/json-hi';
 import { agentIdentity, toRunRow } from '../runs/run-model';
 import { loadDrafts, removeDraft, saveDraft } from './wf-draft';
 import {
+  NODE_H,
+  NODE_W,
   type WfView,
   layeredLayout,
   wfFit,
   wfReset,
+  wfTopo,
   wfZoom,
   zoomPercent,
 } from './wf-geometry';
@@ -33,7 +44,9 @@ import {
   type WfNode,
   type WfPickOption,
   fromServerGraph,
+  nodeDoes,
   pickOptions,
+  shortHash,
 } from './wf-model';
 import {
   type WfNodeProjection,
@@ -41,6 +54,7 @@ import {
   projectNodeStates,
   projectionUsable,
 } from './wf-projection';
+import { type WfError, applyFix, validateGraph, verdictOf } from './wf-validate';
 
 type WfMode = 'build' | 'run';
 type WfTool = 'pan' | 'sel';
@@ -54,6 +68,8 @@ interface NodeMenu {
 interface PositionedNode extends WfNode {
   readonly x: number;
   readonly y: number;
+  readonly does: string;
+  readonly bad: boolean;
   readonly run?: WfNodeProjection;
 }
 
@@ -65,31 +81,80 @@ interface PositionedEdge {
   readonly walked: boolean;
 }
 
+interface ListFrom {
+  readonly name: string;
+  readonly label?: string;
+}
+
+interface ListRow {
+  readonly node: WfNode;
+  readonly does: string;
+  readonly bad: boolean;
+  readonly froms: readonly ListFrom[];
+}
+
+interface MapTransform {
+  readonly pad: number;
+  readonly s: number;
+  readonly ox: number;
+  readonly oy: number;
+}
+
+interface MapRect {
+  readonly x: number;
+  readonly y: number;
+  readonly w: number;
+  readonly h: number;
+  readonly id?: string;
+}
+
+const KIND_BLURB: Record<string, string> = {
+  agent: 'a full agent loop, referenced by hash',
+  tool: 'one direct tool invocation',
+  gate: 'a human approval that suspends the run',
+  branch: 'routes on a recorded decision',
+  map: 'fans out a sub-run per element of a list',
+};
+
+/** The minimap's drawing units — its viewBox. The CSS box is 160x100, so the CTM (not the CSS
+ * rect) converts a pointer to these units; letterboxing would otherwise put the view off. */
+const MAP_W = 156;
+const MAP_H = 92;
+
 /**
- * THE WORKFLOWS CANVAS — the graph authoring + fork surface, ported from the prototype's
- * `salvor-bridge.html` canvas. Builder and Run modes; a picker over server graphs AND in-browser
- * drafts; pan/zoom with the {@link wfFit} legibility floor; a minimap; per-node ⋯ menus; and the
- * app's ONE modal, the fork hazard review, driven off the REAL fork API.
+ * THE WORKFLOWS CANVAS — the graph authoring + fork surface. Builder and Run modes; a picker over
+ * server graphs AND in-browser drafts; pan/zoom with the {@link wfFit} legibility floor; a live
+ * minimap (field click jumps, viewport rectangle drags); per-node ⋯ menus; a docked node
+ * inspector whose head is the validator's verdict; a narrow-viewport linear list; and the app's
+ * ONE modal, the fork hazard review, driven off the REAL fork API.
  *
- * HELD THIS SLICE. The suite un-holds Workflows only when a `.nav-link[data-view="workflows"]`
- * OR a `#wf-nodes` exists (the e2e suite's workflowsHeld probe). So this
- * component is rendered ONLY behind a dev-only `?wf=1` query flag (see `app.ts#wfDevFlag`), and the
- * nav link is not added — the structural detectors see the held state by default on both targets.
- * S8d removes the flag, adds the nav link, and flips `workflowsHeld` to false.
+ * Fork requests from other views (the Inspector's scrubber offer, the Runs detail panel) arrive
+ * through {@link ForkIntentService} and are consumed here, so `openFork` stays the only owner of
+ * every refusal, whichever door the operator came through.
  */
 @Component({
   selector: 'bridge-workflows',
   changeDetection: ChangeDetectionStrategy.OnPush,
   templateUrl: './workflows.html',
 })
-export class Workflows {
+export class Workflows implements AfterViewInit {
   private readonly graphsService = inject(GraphsService);
   private readonly graphRuns = inject(GraphRunService);
   private readonly runsService = inject(RunsService);
   private readonly capabilityProbe = inject(CapabilityProbeService);
+  private readonly forkIntent = inject(ForkIntentService);
+  private readonly viewService = inject(ViewService);
+  private readonly router = inject(Router);
+  private readonly destroyRef = inject(DestroyRef);
 
+  @ViewChild('wfWork') private workRef?: ElementRef<HTMLElement>;
   @ViewChild('wfCanvas') private canvasRef?: ElementRef<HTMLElement>;
+  @ViewChild('wfStage') private stageRef?: ElementRef<HTMLElement>;
+  @ViewChild('wfMapSvg') private mapSvgRef?: ElementRef<SVGSVGElement>;
   @ViewChild('forkDlg') private forkDlgRef?: ElementRef<HTMLDialogElement>;
+
+  readonly MAP_W = MAP_W;
+  readonly MAP_H = MAP_H;
 
   // ── graph catalog ──
   private readonly serverGraphs = signal<WfGraph[]>([]);
@@ -98,6 +163,7 @@ export class Workflows {
   /** Cached run_id → projection for every graph run (fetched once on entry, a handful of runs). */
   private readonly projections = signal<ReadonlyMap<string, GraphProjection>>(new Map());
   private readonly capability = this.capabilityProbe.capabilities;
+  private loaded: Promise<void>;
 
   // ── canvas state ──
   readonly mode = signal<WfMode>('build');
@@ -109,6 +175,12 @@ export class Workflows {
   readonly menu = signal<NodeMenu | undefined>(undefined);
   readonly forked = signal<string>('');
   readonly published = signal<string>('');
+  readonly panelOpen = signal(true);
+  /** The node-picking state: a fork was requested from a surface that names no node (a Runs list
+   * row), so the operator picks the fork point here rather than the app guessing one. */
+  readonly pickRun = signal<string | undefined>(undefined);
+  /** The canvas's viewport size, published by a ResizeObserver so the minimap math is reactive. */
+  private readonly canvasSize = signal<{ width: number; height: number }>({ width: 0, height: 0 });
 
   // ── fork dialog state ──
   readonly forkReview = signal<HazardReview | undefined>(undefined);
@@ -116,6 +188,7 @@ export class Workflows {
   readonly forkTitle = signal<string>('Fork this run');
   readonly forkSub = signal<string>('');
   readonly forkNode = signal<string | undefined>(undefined);
+  readonly forkOrigin = signal<string | undefined>(undefined);
   readonly forkRefusal = signal<string | undefined>(undefined);
 
   // ── history (undo/redo over draft edits) ──
@@ -133,7 +206,24 @@ export class Workflows {
 
   readonly graphName = computed(() => this.currentGraph()?.name ?? '—');
   readonly graphState = computed(() => this.currentGraph()?.state ?? 'draft');
+  readonly graphHash = computed(() => this.currentGraph()?.hash ?? null);
   readonly zoomLabel = computed(() => zoomPercent(this.view().k));
+
+  /** ONE error list per render — the canvas, the list, the panel and the publish gate all read
+   * this, so they can never disagree about an offender. */
+  readonly errors = computed<readonly WfError[]>(() => {
+    const g = this.currentGraph();
+    return g ? validateGraph(g) : [];
+  });
+  readonly verdict = computed(() => verdictOf(this.errors()));
+  private readonly badNodes = computed(
+    () => new Set(this.errors().filter((e) => e.node !== undefined).map((e) => e.node)),
+  );
+
+  readonly publishDisabled = computed(
+    () => this.errors().length > 0 || this.graphState() === 'published',
+  );
+  readonly publishLabel = computed(() => (this.graphState() === 'published' ? 'Published' : 'Publish'));
 
   private readonly layout = computed(() => {
     const g = this.currentGraph();
@@ -143,7 +233,7 @@ export class Workflows {
   /** The run's projection, when Run mode is on a run of the shown graph. */
   private readonly activeProjection = computed<GraphProjection | undefined>(() => {
     const id = this.runId();
-    return id ? this.projections().get(id) : undefined;
+    return id !== undefined ? this.projections().get(id) : undefined;
   });
 
   private readonly nodeStates = computed<Record<string, WfNodeProjection>>(() => {
@@ -158,12 +248,21 @@ export class Workflows {
     if (!g) return [];
     const layout = this.layout();
     const states = this.nodeStates();
-    return g.nodes.map((n) => ({
-      ...n,
-      x: layout[n.id]?.x ?? 0,
-      y: layout[n.id]?.y ?? 0,
-      run: states[n.id],
-    }));
+    const bad = this.badNodes();
+    // Two nodes claiming the SAME id cannot be placed apart by an id-keyed layout — that is the
+    // duplicate showing its consequence. Nudge the second so both are visible.
+    const dupSeen: Record<string, number> = {};
+    return g.nodes.map((n) => {
+      const seen = (dupSeen[n.id] = (dupSeen[n.id] ?? 0) + 1) - 1;
+      return {
+        ...n,
+        x: (layout[n.id]?.x ?? 0) + seen * 16,
+        y: (layout[n.id]?.y ?? 0) + seen * 16,
+        does: nodeDoes(n),
+        bad: bad.has(n.id),
+        run: states[n.id],
+      };
+    });
   });
 
   readonly edges = computed<PositionedEdge[]>(() => {
@@ -173,18 +272,64 @@ export class Workflows {
     const states = this.nodeStates();
     const inRun = this.mode() === 'run' && Object.keys(states).length > 0;
     const branchSources = new Set(g.nodes.filter((n) => n.kind === 'branch').map((n) => n.id));
-    return g.edges.map((e) => {
-      const a = layout[e.from] ?? { x: 0, y: 0 };
-      const b = layout[e.to] ?? { x: 0, y: 0 };
-      const x1 = a.x + 208;
-      const y1 = a.y + 52;
-      const x2 = b.x;
-      const y2 = b.y + 52;
-      const mid = (x1 + x2) / 2;
-      const d = `M ${x1} ${y1} C ${mid} ${y1}, ${mid} ${y2}, ${x2} ${y2}`;
-      const walked = inRun && edgeWalked(e.from, e.to, e.label, branchSources.has(e.from), states);
-      return e.label !== undefined ? { from: e.from, to: e.to, label: e.label, d, walked } : { from: e.from, to: e.to, d, walked };
-    });
+    return g.edges
+      .filter((e) => layout[e.from] !== undefined && layout[e.to] !== undefined)
+      .map((e) => {
+        const a = layout[e.from];
+        const b = layout[e.to];
+        const x1 = a.x + NODE_W;
+        const y1 = a.y + NODE_H / 2;
+        const x2 = b.x;
+        const y2 = b.y + NODE_H / 2;
+        const mid = (x1 + x2) / 2;
+        const d = `M ${x1} ${y1} C ${mid} ${y1}, ${mid} ${y2}, ${x2} ${y2}`;
+        const walked = inRun && edgeWalked(e.from, e.to, e.label, branchSources.has(e.from), states);
+        return e.label !== undefined
+          ? { from: e.from, to: e.to, label: e.label, d, walked }
+          : { from: e.from, to: e.to, d, walked };
+      });
+  });
+
+  /** The narrow viewport's one-dimensional rendering — the same graph, the same error list, the
+   * same selection, in topological reading order with every incoming edge named. */
+  readonly listRows = computed<ListRow[]>(() => {
+    const g = this.currentGraph();
+    if (!g) return [];
+    const byId = new Map(g.nodes.map((n) => [n.id, n] as const));
+    const bad = this.badNodes();
+    return wfTopo(g)
+      .map((id) => byId.get(id))
+      .filter((n): n is WfNode => n !== undefined)
+      .map((n) => ({
+        node: n,
+        does: nodeDoes(n),
+        bad: bad.has(n.id),
+        froms: g.edges
+          .filter((e) => e.to === n.id)
+          .map((e) =>
+            e.label !== undefined
+              ? { name: byId.get(e.from)?.name ?? e.from, label: e.label }
+              : { name: byId.get(e.from)?.name ?? e.from },
+          ),
+      }));
+  });
+
+  readonly selectedNodeObj = computed<WfNode | undefined>(() => {
+    const id = this.selectedNode();
+    return id !== undefined ? this.currentGraph()?.nodes.find((n) => n.id === id) : undefined;
+  });
+
+  readonly readOnly = computed(() => this.graphState() === 'published');
+
+  readonly panelTitle = computed(() => this.selectedNodeObj()?.name ?? 'Inspector');
+  readonly panelSub = computed(() => {
+    const n = this.selectedNodeObj();
+    if (!n) return this.verdict();
+    return `${n.kind} · ${
+      this.readOnly()
+        ? 'published, so this graph is frozen'
+        : 'draft — edits change the bytes, and the bytes are the identity'
+    }`;
   });
 
   /** The graph runs the run picker offers (agentIdentity 'graph' rows), newest first. */
@@ -210,33 +355,92 @@ export class Workflows {
     return `translate(${v.x}px, ${v.y}px) scale(${v.k})`;
   });
 
-  readonly canvasBox = computed<{ width: number; height: number }>(() => ({
-    width: 3000,
-    height: 2000,
-  }));
-
-  readonly minimapHidden = computed(() => {
-    // The minimap is furniture only when the graph overruns the viewport. A rough test: the scaled
-    // content is wider or taller than a nominal viewport at the current zoom. Recomputed on zoom.
+  // ── minimap projection: graph coordinates → map units, published so the pointer handlers run
+  //    the exact inverse of what was drawn ──
+  readonly mapT = computed<MapTransform | undefined>(() => {
     const g = this.currentGraph();
-    if (!g) return true;
+    if (!g || g.nodes.length === 0) return undefined;
     const layout = this.layout();
     const xs = g.nodes.map((n) => layout[n.id]?.x ?? 0);
     const ys = g.nodes.map((n) => layout[n.id]?.y ?? 0);
-    const w = (Math.max(...xs) + 208 - Math.min(...xs)) * this.view().k;
-    const h = (Math.max(...ys) + 104 - Math.min(...ys)) * this.view().k;
-    const box = this.canvasEl()?.getBoundingClientRect();
-    if (!box) return true;
-    return w <= box.width && h <= box.height;
+    const ox = Math.min(...xs);
+    const oy = Math.min(...ys);
+    const gw = Math.max(...xs) + NODE_W - ox;
+    const gh = Math.max(...ys) + NODE_H - oy;
+    const pad = 6;
+    const s = Math.min((MAP_W - pad * 2) / gw, (MAP_H - pad * 2) / gh);
+    return { pad, s, ox, oy };
+  });
+
+  readonly minimapHidden = computed(() => {
+    // The minimap is furniture unless the graph overruns the viewport at the current zoom.
+    const g = this.currentGraph();
+    const box = this.canvasSize();
+    if (!g || g.nodes.length === 0 || box.width === 0) return true;
+    const layout = this.layout();
+    const xs = g.nodes.map((n) => layout[n.id]?.x ?? 0);
+    const ys = g.nodes.map((n) => layout[n.id]?.y ?? 0);
+    const gw = (Math.max(...xs) + NODE_W - Math.min(...xs)) * this.view().k;
+    const gh = (Math.max(...ys) + NODE_H - Math.min(...ys)) * this.view().k;
+    return gw <= box.width && gh <= box.height;
+  });
+
+  readonly mapNodes = computed<MapRect[]>(() => {
+    const t = this.mapT();
+    const g = this.currentGraph();
+    if (!t || !g) return [];
+    const layout = this.layout();
+    return g.nodes.map((n) => ({
+      id: n.id,
+      x: t.pad + ((layout[n.id]?.x ?? 0) - t.ox) * t.s,
+      y: t.pad + ((layout[n.id]?.y ?? 0) - t.oy) * t.s,
+      w: NODE_W * t.s,
+      h: NODE_H * t.s,
+    }));
+  });
+
+  readonly mapView = computed<MapRect | undefined>(() => {
+    const t = this.mapT();
+    const box = this.canvasSize();
+    if (!t || box.width === 0) return undefined;
+    const v = this.view();
+    return {
+      x: t.pad + (-v.x / v.k - t.ox) * t.s,
+      y: t.pad + (-v.y / v.k - t.oy) * t.s,
+      w: (box.width / v.k) * t.s,
+      h: (box.height / v.k) * t.s,
+    };
   });
 
   constructor() {
-    void this.load();
+    this.loaded = this.load();
+    // Fork requests from the Inspector or the Runs panel land whenever their view fires them;
+    // consuming is untracked so acting on one never re-runs under its own signal writes.
+    effect(() => {
+      const intent = this.forkIntent.intent();
+      if (!intent) return;
+      untracked(() => void this.consumeIntent(intent));
+    });
+  }
+
+  ngAfterViewInit(): void {
+    const canvas = this.canvasEl();
+    if (!canvas) return;
+    const publish = (): void => {
+      const box = canvas.getBoundingClientRect();
+      this.canvasSize.set({ width: box.width, height: box.height });
+    };
+    publish();
+    if (typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver(publish);
+      ro.observe(canvas);
+      this.destroyRef.onDestroy(() => ro.disconnect());
+    }
   }
 
   private async load(): Promise<void> {
     this.drafts.set(loadDrafts());
-    // Probe fork capability for the canvas's own fork entry (the Inspector offer stays pinned off).
+    // Probe fork capability for the canvas's own fork entry and the app-wide offers.
     void this.capabilityProbe.probe();
     // Server graphs.
     try {
@@ -293,6 +497,9 @@ export class Workflows {
     this.currentKey.set(value);
     this.selectedNode.set(undefined);
     this.menu.set(undefined);
+    // A banner belongs to the moment it was made; changing graphs changes what you look at.
+    this.forked.set('');
+    this.published.set('');
     // A run only projects onto the graph it ran; leaving Run mode on a graph switch keeps the
     // canvas honest rather than inking a mismatched run.
     if (this.mode() === 'run' && this.runsOfGraph().length === 0) this.setMode('build');
@@ -345,12 +552,58 @@ export class Workflows {
     this.view.set(wfReset(g, this.layout(), { width: box.width, height: box.height }));
   }
 
+  /**
+   * Bring a node to the middle at a legible zoom (k in [1, 1.4], a deeper operator-chosen zoom
+   * left alone). Centres against the width the canvas SETTLES to once the panel column finishes
+   * animating open (340px + the grid gap), never the transient mid-animation width — measuring
+   * the live box would leave the node ~150px off when the panel lands.
+   */
+  private centerOn(id: string): void {
+    const at = this.layout()[id];
+    const canvas = this.canvasEl();
+    if (!at || !canvas) return;
+    // Below the breakpoint the canvas is display:none — its box is 0x0 and every number computed
+    // from it would be a measurement of nothing. The narrow list still opens the panel.
+    if (getComputedStyle(canvas).display === 'none') return;
+    const box = canvas.getBoundingClientRect();
+    const work = this.workRef?.nativeElement;
+    const wide = typeof matchMedia !== 'undefined' ? matchMedia('(min-width: 1101px)').matches : true;
+    const gap = wide && work ? parseFloat(getComputedStyle(work).columnGap) || 24 : 0;
+    const panelW = wide ? 340 : 0; // a selection opens the panel, so settle to the open width
+    const w = Math.max(200, (work?.clientWidth ?? box.width) - panelW - (panelW ? gap : 0));
+    const k = Math.min(1.4, Math.max(this.view().k, 1));
+    this.animateView({
+      k,
+      x: w / 2 - (at.x + NODE_W / 2) * k,
+      y: box.height / 2 - (at.y + NODE_H / 2) * k,
+    });
+  }
+
+  private settleTimer?: ReturnType<typeof setTimeout>;
+  /** Ease the stage to a new view. The inline transition is cleared once settled so "the ease is
+   * done" stays observable; reduced-motion gets the same landing instantly. */
+  private animateView(v: WfView): void {
+    const stage = this.stageRef?.nativeElement;
+    const reduced =
+      typeof matchMedia !== 'undefined' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (stage && !reduced) {
+      stage.style.transition = 'transform 320ms var(--ease-standard)';
+      clearTimeout(this.settleTimer);
+      this.settleTimer = setTimeout(() => {
+        stage.style.transition = '';
+      }, 360);
+    }
+    this.view.set(v);
+  }
+
   // ── pan (PAN_BLOCK: a pointerdown on a control never starts a canvas pan) ──
   private panStart?: { px: number; py: number; vx: number; vy: number };
   // A pan starts ONLY on the empty canvas paper. Every node and every floating control is blocked
-  // here so a pointerdown on it selects/acts (and is never captured by the canvas) — the exact
-  // defect 02-canvas-chrome-gate.spec.js exists to catch. A pan drags the background, nothing else.
-  private static readonly PAN_BLOCK = '.wf-node, .wf-chips, .wf-bar, .wf-map, .wf-menu, .wf-note, [data-more], button, select, input, label';
+  // here so a pointerdown on it selects/acts (and is never captured by the canvas). A blocklist of
+  // everything interactive, so a control added later is exempt by default rather than dead by
+  // default. Must not test [tabindex]: the canvas itself carries tabindex="-1".
+  private static readonly PAN_BLOCK =
+    '.wf-node, .wf-chips, .wf-bar, .wf-map, .wf-menu, .wf-note, [data-more], [role="button"], button, select, input, label';
 
   onCanvasPointerdown(event: PointerEvent): void {
     const target = event.target as HTMLElement;
@@ -372,28 +625,79 @@ export class Workflows {
     this.panStart = undefined;
   }
 
-  // ── minimap: click to jump the view to that graph point ──
-  onMinimapClick(event: MouseEvent): void {
-    const g = this.currentGraph();
-    const svg = event.currentTarget as SVGElement;
-    const box = this.canvasEl()?.getBoundingClientRect();
-    if (!g || !box) return;
-    const r = svg.getBoundingClientRect();
-    const layout = this.layout();
-    const xs = g.nodes.map((n) => layout[n.id]?.x ?? 0);
-    const ys = g.nodes.map((n) => layout[n.id]?.y ?? 0);
-    const gw = Math.max(...xs) + 208 - Math.min(...xs);
-    const gh = Math.max(...ys) + 104 - Math.min(...ys);
-    const fx = (event.clientX - r.left) / r.width;
-    const fy = (event.clientY - r.top) / r.height;
-    const gx = Math.min(...xs) + fx * gw;
-    const gy = Math.min(...ys) + fy * gh;
-    this.view.update((v) => ({ ...v, x: box.width / 2 - gx * v.k, y: box.height / 2 - gy * v.k }));
+  // ── minimap: the field jumps, the viewport rectangle drags — one gesture, one path ──
+  private mapDrag?: { gx: number; gy: number };
+
+  /** The pointer in the map's own drawing units, through the CTM — the svg's viewBox and CSS box
+   * have different aspect ratios, so a rect-relative read would be off by the letterbox. */
+  private mapPoint(event: PointerEvent): { x: number; y: number } | undefined {
+    const svg = this.mapSvgRef?.nativeElement;
+    const m = svg?.getScreenCTM();
+    if (!svg || !m) return undefined;
+    const p = new DOMPoint(event.clientX, event.clientY).matrixTransform(m.inverse());
+    return { x: p.x, y: p.y };
   }
 
-  // ── node selection + ⋯ menu ──
+  private mapPanTo(ux: number, uy: number): void {
+    const t = this.mapT();
+    const d = this.mapDrag;
+    if (!t || !d) return;
+    const vx = (ux - d.gx - t.pad) / t.s + t.ox;
+    const vy = (uy - d.gy - t.pad) / t.s + t.oy;
+    this.view.update((v) => ({ ...v, x: -vx * v.k, y: -vy * v.k }));
+  }
+
+  onMapPointerdown(event: PointerEvent): void {
+    const t = this.mapT();
+    const p = this.mapPoint(event);
+    if (!t || !p) return;
+    const target = event.target as Element;
+    const mv = this.mapView();
+    if (target.classList.contains('mm-view') && mv) {
+      // drag: keep the offset the rectangle was grabbed by, so it does not jump under the pointer
+      this.mapDrag = { gx: p.x - mv.x, gy: p.y - mv.y };
+    } else {
+      // the field: centre the view on the point pressed, then keep dragging from there
+      const box = this.canvasSize();
+      this.mapDrag = {
+        gx: ((box.width / this.view().k) * t.s) / 2,
+        gy: ((box.height / this.view().k) * t.s) / 2,
+      };
+      this.mapPanTo(p.x, p.y);
+    }
+    (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
+    event.preventDefault(); // no text-selection sweep across the map
+  }
+  onMapPointermove(event: PointerEvent): void {
+    if (!this.mapDrag) return;
+    const p = this.mapPoint(event);
+    if (p) this.mapPanTo(p.x, p.y);
+  }
+  onMapPointerup(): void {
+    this.mapDrag = undefined;
+  }
+
+  // ── node selection + activation ──
+  /** What activating a node MEANS, in one place, so the canvas and the narrow list cannot drift:
+   * in the picking state the click names the fork point and openFork takes it from there
+   * (including refusing a node the run never entered); otherwise it selects. */
+  nodeActivate(id: string): void {
+    const origin = this.pickRun();
+    if (origin !== undefined) {
+      this.pickRun.set(undefined);
+      this.selectNode(id);
+      void this.openFork(origin, id);
+      return;
+    }
+    this.selectNode(id);
+  }
+
+  /** Select a node: one selection, both surfaces. Selecting REVEALS — the panel may have been
+   * dismissed, and a selection is a request to see the thing, so it comes back. */
   selectNode(id: string): void {
-    this.selectedNode.set(this.selectedNode() === id ? undefined : id);
+    this.selectedNode.set(id);
+    this.panelOpen.set(true);
+    this.centerOn(id);
   }
   nodePressed(id: string): boolean {
     return this.selectedNode() === id;
@@ -402,15 +706,45 @@ export class Workflows {
     return n.run ? `is-${n.run.state}` : '';
   }
 
-  openMenu(event: MouseEvent, id: string): void {
+  /** Tab can move focus to a node that is off-screen. The browser would normally scroll it into
+   * view — but this stage is transformed and the canvas is `overflow: clip` (never a scroll
+   * container), so panning is the right instrument. */
+  onNodesFocusin(event: FocusEvent): void {
+    const el = (event.target as HTMLElement).closest<HTMLElement>('.wf-node');
+    if (el) this.ensureVisible(el);
+  }
+  private ensureVisible(el: HTMLElement): void {
+    const canvas = this.canvasEl();
+    if (!canvas) return;
+    const box = canvas.getBoundingClientRect();
+    const r = el.getBoundingClientRect();
+    const pad = 24;
+    let dx = 0;
+    let dy = 0;
+    if (r.left < box.left + pad) dx = box.left + pad - r.left;
+    if (r.right > box.right - pad) dx = box.right - pad - r.right;
+    if (r.top < box.top + pad) dy = box.top + pad - r.top;
+    if (r.bottom > box.bottom - pad) dy = box.bottom - pad - r.bottom;
+    if (!dx && !dy) return;
+    this.view.update((v) => ({ ...v, x: v.x + dx, y: v.y + dy }));
+  }
+
+  // ── the ⋯ menu ──
+  openMenu(event: Event, id: string): void {
     event.stopPropagation();
     const canvas = this.canvasEl()?.getBoundingClientRect();
     const btn = (event.currentTarget as HTMLElement).getBoundingClientRect();
     if (!canvas) return;
     this.menu.set({ nodeId: id, x: btn.left - canvas.left - 150, y: btn.top - canvas.top + 24 });
     // Focus the first ENABLED menu item once it renders (zoneless: next frame, not this microtask).
-    // Focusing the disabled Fork entry would trap the keyboard on a dead control — 03-fork asserts it.
+    // Focusing the disabled Fork entry would trap the keyboard on a dead control.
     focusWhenRendered('.wf-menu button:not([disabled])');
+  }
+  onMoreKeydown(event: KeyboardEvent, id: string): void {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    event.stopPropagation();
+    this.openMenu(event, id);
   }
   closeMenu(): void {
     this.menu.set(undefined);
@@ -424,7 +758,8 @@ export class Workflows {
 
   /** The one derived fact the node menu's three fork states read: is this graph forkable now? */
   private inRun(): boolean {
-    return this.mode() === 'run' && projectionUsable(this.currentGraph()!, this.activeProjection());
+    const g = this.currentGraph();
+    return this.mode() === 'run' && !!g && projectionUsable(g, this.activeProjection());
   }
   private hasRun(): boolean {
     return this.runsOfGraph().length > 0;
@@ -439,32 +774,78 @@ export class Workflows {
   menuFork(): void {
     const id = this.menu()?.nodeId;
     this.closeMenu();
-    if (id) void this.openFork(this.runId(), id);
+    if (id !== undefined) void this.openFork(this.runId(), id);
   }
   menuForkSwitch(): void {
     const id = this.menu()?.nodeId;
     const runs = this.runsOfGraph();
     if (!runs.includes(this.runId() ?? '')) this.runId.set(runs[0]);
     this.setMode('run');
-    if (id) this.selectedNode.set(id);
+    if (id !== undefined) this.selectedNode.set(id);
     this.closeMenu();
+  }
+  /** The canvas is a summary; the timeline is the record. Open it on the projected run. */
+  menuEvents(): void {
+    const runId = this.runId();
+    this.closeMenu();
+    if (runId !== undefined) this.viewService.openRun(runId);
   }
   menuCopy(): void {
     const id = this.menu()?.nodeId;
-    if (id && navigator.clipboard) void navigator.clipboard.writeText(id);
+    if (id !== undefined && navigator.clipboard) void navigator.clipboard.writeText(id);
     this.closeMenu();
+  }
+
+  // ── the app-wide fork door: Inspector + Runs requests land here ──
+  private async consumeIntent(intent: ForkIntent): Promise<void> {
+    this.forkIntent.clear();
+    await this.loaded;
+    let proj = this.projections().get(intent.runId);
+    if (!proj) {
+      try {
+        proj = await this.graphRuns.loadProjection(intent.runId);
+        const got = proj;
+        this.projections.update((m) => new Map(m).set(intent.runId, got));
+      } catch {
+        /* not a graph run, or its projection is unreadable — openFork below reports the refusal */
+      }
+    }
+    if (proj) {
+      const hash = proj.graphHash;
+      if ([...this.drafts(), ...this.serverGraphs()].some((g) => g.key === hash)) {
+        if (this.currentKey() !== hash) this.pick(hash);
+      }
+      this.runId.set(intent.runId);
+      this.setMode('run');
+      // The canonical URL — byte-identical to where a canvas fork leaves you.
+      void this.router.navigate(['/workflows', hash.replace(/^sha256:/, '').slice(0, 12)]);
+    }
+    if (intent.nodeId !== undefined) {
+      this.selectNode(intent.nodeId);
+      void this.openFork(intent.runId, intent.nodeId);
+    } else {
+      // The caller names no node, so the operator picks one — never guessed for them.
+      this.pickRun.set(intent.runId);
+    }
+  }
+
+  forkPickCancel(): void {
+    this.pickRun.set(undefined);
   }
 
   // ── the fork dialog: dry-run preview, acknowledge, resubmit ──
   async openFork(runId: string | undefined, nodeId: string): Promise<void> {
-    if (!runId) return;
+    if (runId === undefined) return;
     this.forkNode.set(nodeId);
+    this.forkOrigin.set(runId);
     this.forkAck.set(new Set());
     this.forkRefusal.set(undefined);
     this.forked.set('');
     const node = this.currentGraph()?.nodes.find((n) => n.id === nodeId);
     this.forkTitle.set(`Fork at ${node?.name ?? nodeId}`);
-    this.forkSub.set(`origin ${runId.slice(0, 8)} · node ${nodeId} · graph ${(this.currentGraph()?.hash ?? '').slice(0, 15)}`);
+    this.forkSub.set(
+      `origin ${runId.slice(0, 8)} · node ${nodeId} · graph ${(this.currentGraph()?.hash ?? '').slice(0, 15)}`,
+    );
     this.openDialog();
     try {
       const preview = await this.graphRuns.fork(runId, { fromNode: nodeId, dryRun: true });
@@ -500,9 +881,9 @@ export class Workflows {
   });
 
   async confirmFork(): Promise<void> {
-    const runId = this.runId();
+    const runId = this.forkOrigin() ?? this.runId();
     const nodeId = this.forkNode();
-    if (!runId || !nodeId) return;
+    if (runId === undefined || nodeId === undefined) return;
     const outcome: ForkOutcome = await this.graphRuns.fork(runId, {
       fromNode: nodeId,
       acknowledgeWrites: [...this.forkAck()],
@@ -512,7 +893,8 @@ export class Workflows {
       this.forked.set(`forked ${outcome.run.slice(0, 8)} from ${runId.slice(0, 8)} at ${nodeId}`);
       // The new run is real; fold it into the projection cache and the picker.
       try {
-        this.projections.update((m) => new Map(m).set(outcome.run, this.projections().get(runId)!));
+        const originProj = this.projections().get(runId);
+        if (originProj) this.projections.update((m) => new Map(m).set(outcome.run, originProj));
         void this.runsService.refresh();
       } catch {
         /* the confirmation stands even if the follow-up refresh fails */
@@ -532,6 +914,62 @@ export class Workflows {
     if (dlg?.open) dlg.close();
   }
 
+  // ── the docked node inspector panel ──
+  openPanel(): void {
+    this.panelOpen.set(true);
+    focusWhenRendered('.cpanel[data-panel="workflows"] .cpanel-x');
+  }
+  closePanel(): void {
+    this.panelOpen.set(false);
+    focusWhenRendered('.cpanel-tab[data-panel="workflows"]');
+  }
+
+  kindBlurb(kind: string): string {
+    return KIND_BLURB[kind] ?? '';
+  }
+  errWhere(er: WfError): string {
+    const g = this.currentGraph();
+    if (er.node !== undefined) return `node ${er.node}`;
+    const e = er.edge !== undefined ? g?.edges[er.edge] : undefined;
+    return `edge ${(er.edge ?? 0) + 1} · ${e?.from ?? '?'} → ${e?.to ?? '?'}`;
+  }
+
+  // ── draft editing: every mutation snapshots history and persists through the draft store ──
+  private updateDraft(mutate: (g: WfGraph) => WfGraph): void {
+    const g = this.currentGraph();
+    if (!g || g.state !== 'draft') return;
+    this.past.update((p) => [...p, g]);
+    this.future.set([]);
+    this.drafts.set(saveDraft(mutate(g)));
+  }
+
+  applyFixAt(index: number): void {
+    const er = this.errors()[index];
+    if (er?.fix) this.updateDraft((g) => applyFix(g, er.fix!));
+  }
+
+  private editSelected(patch: (n: WfNode) => WfNode): void {
+    const id = this.selectedNode();
+    if (id === undefined) return;
+    this.updateDraft((g) => ({ ...g, nodes: g.nodes.map((n) => (n.id === id ? patch(n) : n)) }));
+  }
+  editName(event: Event): void {
+    const v = (event.target as HTMLInputElement).value;
+    this.editSelected((n) => ({ ...n, name: v }));
+  }
+  editHash(event: Event): void {
+    const v = (event.target as HTMLInputElement).value.trim();
+    this.editSelected((n) => ({ ...n, agentHash: v }));
+  }
+  editEffect(event: Event): void {
+    const v = (event.target as HTMLSelectElement).value;
+    this.editSelected((n) => ({ ...n, effect: v }));
+  }
+  editConcurrency(event: Event): void {
+    const v = Number((event.target as HTMLInputElement).value);
+    this.editSelected((n) => ({ ...n, concurrency: v }));
+  }
+
   // ── save (local draft) / publish (POST /v1/graphs) ──
   save(): void {
     const g = this.currentGraph();
@@ -542,7 +980,7 @@ export class Workflows {
 
   async publish(): Promise<void> {
     const g = this.currentGraph();
-    if (!g || g.state !== 'draft') return;
+    if (!g || g.state !== 'draft' || this.errors().length > 0) return;
     try {
       const hash = await this.graphsService.submit(toServerDocument(g));
       this.drafts.set(removeDraft(g.key));
@@ -587,33 +1025,62 @@ export class Workflows {
   isAcked(seq: number): boolean {
     return this.forkAck().has(seq);
   }
-  inputJson(input: unknown): string {
-    try {
-      return JSON.stringify(input, null, 2);
-    } catch {
-      return String(input);
-    }
+  /** Escaped + token-highlighted JSON for the hazard review and the panel pres — one helper
+   * (`jsonHi`) across the whole app, copy-faithful at indent 1. */
+  jsonHtml(value: unknown): string {
+    return jsonHi(value, 1);
+  }
+  hashShort(hash: string): string {
+    return shortHash(hash);
   }
   capabilityFork(): boolean {
     return this.capability().fork;
   }
 }
 
-/** Convert a canvas draft back to a server document for publish. A draft node carries id/kind/name;
- * the server document is `{ kind, payload }` — the minimum each kind requires. */
+/** Convert a canvas draft back to a server document for publish — `{ kind, payload }` per node,
+ * carrying every field the draft genuinely holds and the minimum each kind requires. */
 function toServerDocument(g: WfGraph): import('@salvor/client').Graph {
   const nodes = g.nodes.map((n) => {
     switch (n.kind) {
       case 'agent':
-        return { kind: 'agent' as const, payload: { id: n.id, agent_hash: 'sha256:0000000000000000000000000000000000000000000000000000000000000000' } };
+        return {
+          kind: 'agent' as const,
+          payload: {
+            id: n.id,
+            agent_hash:
+              n.agentHash ?? 'sha256:0000000000000000000000000000000000000000000000000000000000000000',
+          },
+        };
       case 'tool':
-        return { kind: 'tool' as const, payload: { id: n.id, tool: 'unnamed_tool' } };
+        return { kind: 'tool' as const, payload: { id: n.id, tool: n.tool ?? 'unnamed_tool' } };
       case 'gate':
-        return { kind: 'gate' as const, payload: { id: n.id, approval_schema: { type: 'object' } } };
+        return {
+          kind: 'gate' as const,
+          payload: {
+            id: n.id,
+            approval_schema: (n.inputSchema as import('@salvor/client').JsonValue) ?? { type: 'object' },
+            ...(n.prompt !== undefined ? { prompt: n.prompt } : {}),
+          },
+        };
       case 'branch':
-        return { kind: 'branch' as const, payload: { id: n.id, cases: [] } };
+        return {
+          kind: 'branch' as const,
+          payload: {
+            id: n.id,
+            cases: (n.cases ?? []).map((name) => ({ name, when: { kind: 'model_decision' as const } })),
+          },
+        };
       case 'map':
-        return { kind: 'map' as const, payload: { id: n.id, over: '${input}', concurrency: 1, body: { kind: 'node' as const, value: n.id } } };
+        return {
+          kind: 'map' as const,
+          payload: {
+            id: n.id,
+            over: n.over ?? '${input}',
+            concurrency: n.concurrency ?? 1,
+            body: { kind: 'node' as const, value: n.body?.node ?? n.id },
+          },
+        };
     }
   });
   const edges = g.edges.map((e) => (e.label !== undefined ? { from: e.from, to: e.to, label: e.label } : { from: e.from, to: e.to }));

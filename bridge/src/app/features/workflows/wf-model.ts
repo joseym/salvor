@@ -5,11 +5,15 @@ import type { GraphSummary } from '../../core/api';
 /**
  * The canvas's internal graph model — one flat shape both a SERVER graph (`GET /v1/graphs/{hash}`,
  * a {@link Graph} document) and an in-browser DRAFT normalise into, so the renderer, the picker,
- * the topological layout and the node menu all read one thing. Ported from the prototype's `GRAPHS`
- * fixture shape (id/kind/name per node, from/to/label per edge, a nullable hash that IS the version
- * once published), but sourced from the real control plane rather than a canned object.
+ * the topological layout, the validator and the node menu all read one thing. Ported from the
+ * prototype's `GRAPHS` fixture shape (id/kind/name per node, from/to/label per edge, a nullable
+ * hash that IS the version once published), but sourced from the real control plane rather than a
+ * canned object.
  */
 export type WfNodeKind = 'agent' | 'tool' | 'gate' | 'branch' | 'map';
+
+/** A tool node's declared effect class — the field fork safety turns on. */
+export type WfEffect = 'read' | 'write' | 'idempotent';
 
 export interface WfNode {
   readonly id: string;
@@ -17,6 +21,20 @@ export interface WfNode {
   /** A human label. Server documents carry none (a node is its id), so the id is the honest
    * fallback — never an invented sentence. A draft may carry an author-typed name. */
   readonly name: string;
+  // Kind-specific payload, optional because each field belongs to exactly one kind. The node
+  // inspector panel and the validator read these; a field a document does not carry stays
+  // undefined rather than defaulted.
+  readonly agentHash?: string;
+  readonly tool?: string;
+  readonly effect?: string;
+  readonly idempotencyKey?: string | null;
+  readonly input?: unknown;
+  readonly prompt?: string;
+  readonly inputSchema?: unknown;
+  readonly cases?: readonly string[];
+  readonly over?: string;
+  readonly concurrency?: number;
+  readonly body?: { readonly tool?: string; readonly effect?: string; readonly node?: string };
 }
 
 export interface WfEdge {
@@ -42,13 +60,61 @@ function nodeId(n: GraphNode): string {
   return n.payload.id;
 }
 
+/** One line of plain prose — what a node DOES, not what kind it is. Guarded for the fields a
+ * server document may omit. */
+export function nodeDoes(n: WfNode): string {
+  switch (n.kind) {
+    case 'agent':
+      return `runs the agent at ${String(n.agentHash ?? '').slice(0, 13)}…`;
+    case 'tool':
+      return `calls ${n.tool ?? 'a tool'}`;
+    case 'gate':
+      return n.prompt ?? 'waits for a human approval';
+    case 'branch':
+      return `picks one of ${n.cases?.length ?? 0} cases`;
+    case 'map':
+      return `fans out over a list, ${n.concurrency ?? 0} at a time`;
+  }
+}
+
+/** Map one server node into the canvas model, keeping every kind-specific payload field the panel
+ * or validator reads. A published server graph carries no display names, so a node reads by its
+ * own id (honest: the document records no name to show). */
+function fromServerNode(n: GraphNode): WfNode {
+  const base = { id: nodeId(n), kind: n.kind, name: nodeId(n) } as const;
+  switch (n.kind) {
+    case 'agent':
+      return { ...base, agentHash: n.payload.agent_hash };
+    case 'tool':
+      return {
+        ...base,
+        tool: n.payload.tool,
+        ...(n.payload.input !== undefined ? { input: n.payload.input } : {}),
+      };
+    case 'gate':
+      return {
+        ...base,
+        ...(n.payload.prompt !== undefined ? { prompt: n.payload.prompt } : {}),
+        inputSchema: n.payload.approval_schema,
+      };
+    case 'branch':
+      return { ...base, cases: n.payload.cases.map((c) => c.name) };
+    case 'map':
+      return {
+        ...base,
+        over: n.payload.over,
+        concurrency: n.payload.concurrency,
+        body: n.payload.body.kind === 'node' ? { node: n.payload.body.value } : {},
+      };
+  }
+}
+
 /**
- * Normalise a stored server document into the canvas model. A published server graph carries no
- * display names, so each node reads by its own id (honest: the document records no name to show).
- * The `name` shown in the picker is the short hash — a published graph's identity is its hash.
+ * Normalise a stored server document into the canvas model. The `name` shown in the picker is the
+ * short hash — a published graph's identity is its hash.
  */
 export function fromServerGraph(hash: string, doc: Graph, summary?: GraphSummary): WfGraph {
-  const nodes: WfNode[] = doc.nodes.map((n) => ({ id: nodeId(n), kind: n.kind, name: nodeId(n) }));
+  const nodes: WfNode[] = doc.nodes.map(fromServerNode);
   const edges: WfEdge[] = doc.edges.map((e) => (e.label !== undefined ? { from: e.from, to: e.to, label: e.label } : { from: e.from, to: e.to }));
   void summary;
   return { key: hash, hash, name: shortHash(hash), state: 'published', nodes, edges };

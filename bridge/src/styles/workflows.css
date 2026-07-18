@@ -47,21 +47,26 @@
   display: none;
 }
 
-.wf-work {
-  display: flex;
-  gap: 12px;
-  align-items: stretch;
+/* .wf-work rides the shared .view-work dock grid (canvas column + 340px cpanel). */
+.wf-main {
+  min-width: 0;
 }
 .wf-canvas {
   position: relative;
-  flex: 1 1 auto;
   min-height: 520px;
-  overflow: hidden;
+  height: 560px;
+  /* `clip`, NOT `hidden`. Both clip; only `hidden` makes this a SCROLL CONTAINER, and the browser
+     scrolls a scroll container to reveal a focused descendant — Tab must PAN instead. */
+  overflow: clip;
   border: 1px solid var(--faint);
   border-radius: var(--radius-lg);
   background: var(--bg);
   touch-action: none;
   cursor: grab;
+}
+.wf-canvas.is-picking,
+.wf-canvas.is-picking .wf-node {
+  cursor: crosshair;
 }
 .wf-canvas.is-panning {
   cursor: grabbing;
@@ -111,10 +116,21 @@
   background: var(--surface);
   color: var(--fg);
   cursor: pointer;
+  /* a real <button>: reset the UA voice so the card reads as a card */
+  font: inherit;
+  text-align: left;
+  display: block;
+}
+.wf-node:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 .wf-node[aria-pressed='true'] {
   border-color: var(--accent);
   box-shadow: 0 0 0 1px var(--accent);
+}
+.wf-node.is-bad {
+  border-color: var(--danger);
 }
 .wf-node.is-current {
   border-color: var(--accent);
@@ -154,9 +170,16 @@
   color: var(--fg);
 }
 .wf-name {
+  display: block;
   margin: 6px 0 0;
-  font-size: var(--text-base);
+  font-size: 15px;
   font-family: Georgia, 'Times New Roman', serif;
+}
+.wf-does {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--text-xs);
+  color: var(--muted);
 }
 .wf-run-state {
   display: inline-block;
@@ -281,8 +304,17 @@
   height: 100%;
   cursor: pointer;
 }
-.wf-map-bg {
-  fill: var(--bg);
+.mm-node {
+  fill: var(--faint);
+}
+.mm-view {
+  fill: transparent;
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  cursor: grab;
+}
+.wf-map.is-dragging .mm-view {
+  cursor: grabbing;
 }
 
 .wf-menu {
@@ -442,8 +474,233 @@
   margin: 8px 0;
 }
 
+/* Publish speaks the toolbar's hairline language — same .fold-all family as its siblings, one
+   register stronger: full ink and 600 weight, never the filled-accent .btn. */
+.fold-all.strong {
+  font-weight: 600;
+  color: var(--fg);
+}
+
+/* ── the docked node inspector's fields + the one error list ── */
+.wf-hashwrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+.wf-field {
+  margin: 0 0 12px;
+}
+.wf-field .k,
+.wf-field label {
+  display: block;
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin-bottom: 3px;
+}
+.wf-field .v {
+  font-size: var(--text-sm);
+  color: var(--fg);
+}
+.wf-field input,
+.wf-field select {
+  font: inherit;
+  font-size: var(--text-sm);
+  width: 100%;
+  box-sizing: border-box;
+  padding: 5px 8px;
+  border: 1px solid var(--faint);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--fg);
+}
+.wf-field input[readonly],
+.wf-field select:disabled {
+  color: var(--muted);
+}
+.wf-field pre {
+  margin: 4px 0 0;
+  padding: 8px;
+  font-size: var(--text-xs);
+  background: var(--bg);
+  border: 1px solid var(--faint);
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+}
+.wf-why {
+  margin: 4px 0 0;
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+.wf-empty {
+  font-size: var(--text-sm);
+  color: var(--muted);
+}
+.wf-errs h5 {
+  margin: 0 0 8px;
+  font-size: var(--text-sm);
+  color: var(--danger);
+}
+.wf-err {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--faint);
+  border-left: 3px solid var(--danger);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  color: var(--fg);
+}
+.wf-err .where {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+.wf-err button {
+  display: block;
+  margin-top: 6px;
+  font: inherit;
+  font-size: var(--text-xs);
+  padding: 3px 8px;
+  border: 1px solid var(--faint);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--accent);
+  cursor: pointer;
+}
+.wf-err button:hover {
+  border-color: var(--accent);
+}
+.wf-ok {
+  font-size: var(--text-sm);
+  color: var(--success);
+}
+
+/* ── the node-picking banner ── */
+#wf-forkpick:empty {
+  display: none;
+}
+.wf-forkpick-line {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 6px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--warn);
+  border-radius: var(--radius-sm);
+  background: var(--amber-wash);
+  font-size: var(--text-sm);
+}
+.wf-forkpick-line .k {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--amber-ink);
+}
+.wf-forkpick-line .link-btn {
+  font: inherit;
+  font-size: var(--text-sm);
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 0;
+}
+
+/* ── the narrow one-dimensional list. Hidden wide; below 900px the canvas yields to it. ── */
+.wf-list {
+  display: none;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  position: relative;
+}
+.wf-lrow {
+  display: block;
+  position: relative;
+}
+.wf-froms {
+  list-style: none;
+  margin: 0;
+  padding: 8px 0 4px 12px;
+}
+.wf-from {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: var(--text-xs);
+}
+.wf-from-k {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+.wf-from-n {
+  color: var(--fg);
+}
+.wf-from.is-entry .wf-from-n {
+  color: var(--faint);
+  font-style: italic;
+}
+.wf-case {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--amber-ink);
+}
+.wf-lnode {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  text-align: left;
+  font: inherit;
+  padding: 10px 12px;
+  border: 1px solid var(--faint);
+  border-left: 3px solid var(--faint);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--fg);
+  cursor: pointer;
+}
+.wf-lnode:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.wf-lnode[aria-pressed='true'] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.wf-lnode.is-bad {
+  border-left-color: var(--danger);
+}
+.wf-lnode .wf-name {
+  margin-top: 4px;
+}
+.wf-lhead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 @media (max-width: 900px) {
-  .wf-work {
+  .wf-list {
+    display: flex;
     flex-direction: column;
+    gap: 0;
+  }
+  .wf-canvas {
+    display: none;
+  }
+  /* both header rows are toolbars; they can take two lines rather than force a sideways scroll */
+  .wf-title,
+  .wf-tools {
+    flex-wrap: wrap;
   }
 }

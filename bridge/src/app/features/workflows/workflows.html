@@ -2,6 +2,14 @@
   <div class="wf-title">
     <h3 class="section" id="wf-name">{{ graphName() }}</h3>
     <span class="wf-state" id="wf-state">{{ graphState() }}</span>
+    <!-- the hash, or the honest absence of one — a draft has no identity until published -->
+    <span class="wf-hashwrap" id="wf-hashwrap">
+      @if (graphHash(); as h) {
+        <span class="mono" [attr.title]="h">{{ hashShort(h) }}</span>
+      } @else {
+        <span class="wf-state" data-state="draft">no hash until published</span>
+      }
+    </span>
   </div>
   <div class="wf-tools" role="group" aria-label="Graph">
     <label class="sr" for="wf-pick">Graph</label>
@@ -11,8 +19,10 @@
       }
     </select>
     <button class="fold-all" type="button" id="wf-about-open" aria-haspopup="dialog" popovertarget="wf-about">About this canvas</button>
-    <button class="fold-all" type="button" id="wf-save" (click)="save()">Save draft</button>
-    <button class="fold-all strong" type="button" id="wf-publish" (click)="publish()">Publish</button>
+    <button class="fold-all" type="button" id="wf-save" [disabled]="readOnly()" (click)="save()">Save draft</button>
+    <button class="fold-all strong" type="button" id="wf-publish" [disabled]="publishDisabled()"
+            [attr.title]="errors().length ? errors().length + ' error' + (errors().length === 1 ? '' : 's') + ' must be resolved first.' : null"
+            (click)="publish()">{{ publishLabel() }}</button>
   </div>
 </div>
 
@@ -20,119 +30,269 @@
 <div id="wf-forked" role="status">{{ forked() }}</div>
 <div id="wf-published" role="status">{{ published() }}</div>
 
-<div class="wf-work">
-  <div
-    class="wf-canvas"
-    id="wf-canvas"
-    #wfCanvas
-    tabindex="-1"
-    [class.is-panning]="panning()"
-    [class.tool-sel]="tool() === 'sel'"
-    (pointerdown)="onCanvasPointerdown($event)"
-    (pointermove)="onCanvasPointermove($event)"
-    (pointerup)="onCanvasPointerup()"
-    (pointercancel)="onCanvasPointerup()"
-  >
-    <div class="wf-stage" id="wf-stage" [style.transform]="stageTransform()">
-      <svg class="wf-edges" id="wf-edges" aria-hidden="true">
-        @for (e of edges(); track e.from + '->' + e.to + (e.label ?? '')) {
-          <path class="wf-edge" [class.is-walked]="e.walked" [attr.d]="e.d" fill="none" />
-          @if (e.label) {
-            <text class="wf-edge-label" [attr.x]="0" [attr.y]="0"></text>
+<!-- the node-picking state: a live state the operator is standing in, not a receipt — it ends
+     when they pick or cancel -->
+<div id="wf-forkpick" role="status">@if (pickRun(); as origin) {<span class="wf-forkpick-line"><span class="k">pick a node</span>
+  <span>Click the node to fork <span class="mono">{{ origin.slice(0, 8) }}</span> from. It has to be a node this
+    run actually entered — pick one that did not and it will say so rather than invent a boundary.</span>
+  <button class="link-btn" type="button" id="wf-forkpick-cancel" (click)="forkPickCancel()">Cancel</button></span>}</div>
+
+<div class="view-work wf-work" #wfWork data-panel-dock [attr.data-panel]="panelOpen() ? 'open' : 'closed'">
+  <div class="wf-main">
+    <div
+      class="wf-canvas"
+      id="wf-canvas"
+      #wfCanvas
+      tabindex="-1"
+      [class.is-panning]="panning()"
+      [class.tool-sel]="tool() === 'sel'"
+      [class.is-picking]="pickRun() !== undefined"
+      (pointerdown)="onCanvasPointerdown($event)"
+      (pointermove)="onCanvasPointermove($event)"
+      (pointerup)="onCanvasPointerup()"
+      (pointercancel)="onCanvasPointerup()"
+    >
+      <div class="wf-stage" id="wf-stage" #wfStage [style.transform]="stageTransform()">
+        <svg class="wf-edges" id="wf-edges" aria-hidden="true">
+          @for (e of edges(); track $index) {
+            <path class="wf-edge" [class.is-walked]="e.walked" [attr.d]="e.d" fill="none" />
           }
-        }
-      </svg>
-      <div class="wf-nodes" id="wf-nodes">
-        @for (n of nodes(); track n.id) {
-          <div
-            class="wf-node"
-            [class]="'wf-node ' + nodeStateClass(n)"
-            [attr.data-node]="n.id"
-            [attr.aria-pressed]="nodePressed(n.id)"
-            [style.left.px]="n.x"
-            [style.top.px]="n.y"
-            (click)="selectNode(n.id)"
-          >
-            <div class="wf-node-head">
-              <span class="wf-kind" [attr.data-kind]="n.kind">{{ n.kind }}</span>
-              <button class="wf-more" type="button" [attr.data-more]="n.id" aria-label="Node actions" (click)="openMenu($event, n.id)">⋯</button>
-            </div>
-            <p class="wf-name">{{ n.name }}</p>
-            @if (n.run && mode() === 'run') {
-              <span class="wf-run-state" [attr.data-state]="n.run.state">{{ n.run.state }}</span>
+        </svg>
+        <!-- Tab walks the nodes (each is a real button); focus alone never selects — Enter/Space,
+             the button's own activation, is what selects. Focus pans an off-screen node into view. -->
+        <div class="wf-nodes" id="wf-nodes" (focusin)="onNodesFocusin($event)">
+          @for (n of nodes(); track $index) {
+            <button
+              type="button"
+              [class]="'wf-node ' + nodeStateClass(n) + (n.bad ? ' is-bad' : '')"
+              [attr.data-node]="n.id"
+              [attr.data-kind]="n.kind"
+              [attr.aria-pressed]="nodePressed(n.id)"
+              [attr.aria-invalid]="n.bad"
+              [style.left.px]="n.x"
+              [style.top.px]="n.y"
+              (click)="nodeActivate(n.id)"
+            >
+              <span class="wf-node-head">
+                <span class="wf-kind" [attr.data-kind]="n.kind">{{ n.kind }}</span>
+                <!-- a span with button semantics, never a nested <button> — invalid HTML would let
+                     the browser re-parent it and orphan the menu affordance -->
+                <span class="wf-more" role="button" tabindex="0" [attr.data-more]="n.id"
+                      [attr.aria-label]="'Actions for ' + n.name"
+                      (click)="openMenu($event, n.id)" (keydown)="onMoreKeydown($event, n.id)">⋯</span>
+              </span>
+              <span class="wf-name">{{ n.name }}</span>
+              <span class="wf-does">{{ n.does }}</span>
+              @if (n.run && mode() === 'run') {
+                <span class="wf-run-state" [attr.data-state]="n.run.state">{{ n.run.state }}</span>
+              }
+            </button>
+          }
+        </div>
+      </div>
+
+      <!-- history, top-left -->
+      <div class="wf-chips wf-tl" role="group" aria-label="History">
+        <button class="wf-chip" type="button" id="wf-undo" title="Undo" [disabled]="!canUndo()" (click)="undo()">Undo</button>
+        <button class="wf-chip" type="button" id="wf-redo" title="Redo" [disabled]="!canRedo()" (click)="redo()">Redo</button>
+      </div>
+
+      <!-- zoom, top-right -->
+      <div class="wf-chips wf-tr" role="group" aria-label="Zoom">
+        <button class="wf-chip" type="button" id="wf-out" title="Zoom out" (click)="zoomOut()"><span class="sr">Zoom out</span><span aria-hidden="true">−</span></button>
+        <span class="wf-chip is-read mono" id="wf-zoom">{{ zoomLabel() }}</span>
+        <button class="wf-chip" type="button" id="wf-in" title="Zoom in" (click)="zoomIn()"><span class="sr">Zoom in</span><span aria-hidden="true">+</span></button>
+        <button class="wf-chip" type="button" id="wf-fit" title="Fit the graph in view" (click)="fit()">Fit</button>
+        <button class="wf-chip" type="button" id="wf-reset" title="Reset to 100%" (click)="reset()">Reset</button>
+      </div>
+
+      <!-- mode + tools, floating along the bottom -->
+      <div class="wf-bar" role="toolbar" aria-label="Canvas mode">
+        <div class="wf-seg" role="group" aria-label="Mode">
+          <button class="wf-seg-b" type="button" id="wf-mode-build" [attr.aria-pressed]="mode() === 'build'" (click)="setMode('build')">Builder</button>
+          <button class="wf-seg-b" type="button" id="wf-mode-run" [attr.aria-pressed]="mode() === 'run'" (click)="setMode('run')">Run</button>
+        </div>
+        <label class="sr" for="wf-run">Run to project</label>
+        <select class="wf-runpick" id="wf-run" [hidden]="mode() !== 'run'" [value]="runId() ?? ''" (change)="onPickRun($event)">
+          @for (r of graphRunOptions(); track r.id) {
+            <option [value]="r.id">{{ r.label }} · {{ r.status }}</option>
+          }
+        </select>
+        <span class="wf-bar-sep" aria-hidden="true"></span>
+        <div class="wf-seg" role="group" aria-label="Tool">
+          <button class="wf-seg-b" type="button" id="wf-tool-pan" [attr.aria-pressed]="tool() === 'pan'" (click)="setTool('pan')">Pan</button>
+          <button class="wf-seg-b" type="button" id="wf-tool-sel" [attr.aria-pressed]="tool() === 'sel'" (click)="setTool('sel')">Select</button>
+        </div>
+        <span class="wf-bar-sep" aria-hidden="true"></span>
+        <span class="wf-legend mono" id="wf-legend">drag to pan · scroll to zoom · tab walks the nodes</span>
+      </div>
+
+      <p class="wf-note mono" id="wf-note">Fork from a node — <span class="wf-note-k">⋯</span> on any node the run entered.</p>
+
+      <!-- Minimap, bottom-right; only when the graph outruns the viewport. The field jumps the
+           view; the viewport rectangle drags. Named for the a11y tree, and honest about its
+           keyboard story: Tab reaches every node this map could, by name rather than position. -->
+      <div class="wf-map" id="wf-map" [hidden]="minimapHidden()" role="group"
+           aria-label="Minimap — click the field to jump the view, or drag the viewport rectangle to pan"
+           aria-describedby="wf-map-kbd"
+           (pointerdown)="onMapPointerdown($event)"
+           (pointermove)="onMapPointermove($event)"
+           (pointerup)="onMapPointerup()"
+           (pointercancel)="onMapPointerup()">
+        <svg id="wf-map-svg" #wfMapSvg [attr.viewBox]="'0 0 ' + MAP_W + ' ' + MAP_H" aria-hidden="true">
+          @for (r of mapNodes(); track $index) {
+            <rect class="mm-node" [attr.data-node]="r.id" [attr.x]="r.x" [attr.y]="r.y" [attr.width]="r.w" [attr.height]="r.h" rx="1" />
+          }
+          @if (mapView(); as mv) {
+            <rect class="mm-view" [attr.x]="mv.x" [attr.y]="mv.y" [attr.width]="mv.w" [attr.height]="mv.h" />
+          }
+        </svg>
+        <p class="sr" id="wf-map-kbd">A pointer shortcut. There is no keyboard equivalent here on
+          purpose: Tab walks the nodes and the canvas pans to each one, which reaches every node
+          this map could, by name rather than by position.</p>
+      </div>
+
+      <!-- the node ⋯ menu — the .wf-menu-why line carries the honesty for the two non-acting states -->
+      @if (menu(); as m) {
+        <div class="wf-menu" [style.left.px]="m.x" [style.top.px]="m.y" (keydown)="onMenuKeydown($event)">
+          @switch (forkMenuState()) {
+            @case ('act') {
+              <button type="button" data-act="fork" (click)="menuFork()">Fork from here…</button>
+              <button type="button" data-act="events" (click)="menuEvents()">Open this node's events</button>
             }
+            @case ('switch') {
+              <button type="button" data-act="fork-switch" (click)="menuForkSwitch()">Fork from here…</button>
+              <p class="wf-menu-why">A fork replays a recorded run. This switches to Run mode and picks one — then fork.</p>
+            }
+            @case ('disabled') {
+              <button type="button" data-act="fork" disabled aria-disabled="true">Fork from here…</button>
+              <p class="wf-menu-why">A fork replays a recorded run, and this graph has none yet. Publish it and start a run first.</p>
+            }
+          }
+          <button type="button" data-act="copy" (click)="menuCopy()">Copy node id</button>
+        </div>
+      }
+    </div>
+
+    <!-- THE NARROW LIST — below 900px the canvas yields to this one-dimensional rendering of the
+         SAME graph: topological reading order, every incoming edge named, same selection, same
+         error marks. Not a second view kept in step; the same computed state, rendered linearly. -->
+    <ul class="wf-list" id="wf-list">
+      @for (row of listRows(); track $index) {
+        <li class="wf-lrow">
+          @if (row.froms.length) {
+            <ul class="wf-froms">
+              @for (f of row.froms; track $index) {
+                <li class="wf-from" [attr.data-case]="f.label ? '1' : null">
+                  <span class="wf-from-k">from</span>
+                  <span class="wf-from-n">{{ f.name }}</span>
+                  @if (f.label) { <span class="wf-case">{{ f.label }}</span> }
+                </li>
+              }
+            </ul>
+          } @else {
+            <ul class="wf-froms">
+              <li class="wf-from is-entry"><span class="wf-from-k">entry</span><span class="wf-from-n">nothing precedes this node</span></li>
+            </ul>
+          }
+          <button class="wf-lnode" type="button" [class.is-bad]="row.bad"
+                  [attr.data-node]="row.node.id" [attr.data-kind]="row.node.kind"
+                  [attr.aria-pressed]="nodePressed(row.node.id)" [attr.aria-invalid]="row.bad"
+                  (click)="nodeActivate(row.node.id)">
+            <span class="wf-lhead"><span class="wf-kind">{{ row.node.kind }}</span></span>
+            <span class="wf-name">{{ row.node.name }}</span>
+            <span class="wf-does">{{ row.does }}</span>
+          </button>
+        </li>
+      }
+    </ul>
+  </div>
+
+  <!-- THE DOCKED NODE INSPECTOR. This rail keeps its width with nothing selected, alone among the
+       five, because it has something to say without a selection: the validator's verdict on the
+       whole graph — so the head IS the verdict. -->
+  <aside class="cpanel" data-drawer data-panel="workflows" aria-label="Node inspector" [hidden]="!panelOpen()">
+    <div class="cpanel-head">
+      <div>
+        <h3 class="cpanel-title">{{ panelTitle() }}</h3>
+        <p class="cpanel-sub">{{ panelSub() }}</p>
+      </div>
+      <button class="cpanel-x" type="button" aria-label="Close the node inspector" (click)="closePanel()">×</button>
+    </div>
+    <div class="cpanel-body" id="wf-panel">
+      @if (selectedNodeObj(); as n) {
+        <div class="wf-field"><span class="k">kind</span><div class="v">{{ n.kind }} — {{ kindBlurb(n.kind) }}</div></div>
+        <div class="wf-field"><label for="wf-f-name">display name</label>
+          <input id="wf-f-name" type="text" [value]="n.name" [readOnly]="readOnly()" (input)="editName($event)" />
+          <p class="wf-why">Renaming this does not touch the id below — every edge in the graph joins on the id.</p>
+        </div>
+        <div class="wf-field"><span class="k">id — the join key</span><div class="v mono">{{ n.id }}</div></div>
+
+        @if (n.kind === 'agent') {
+          <div class="wf-field"><label for="wf-f-hash">agent_def_hash</label>
+            <input id="wf-f-hash" type="text" [value]="n.agentHash ?? ''" [readOnly]="readOnly()" (input)="editHash($event)" />
+            <p class="wf-why">A node references an agent by hash only — no prompt, no model, no name inline.</p>
           </div>
         }
-      </div>
-    </div>
-
-    <!-- history, top-left -->
-    <div class="wf-chips wf-tl" role="group" aria-label="History">
-      <button class="wf-chip" type="button" id="wf-undo" title="Undo" [disabled]="!canUndo()" (click)="undo()">Undo</button>
-      <button class="wf-chip" type="button" id="wf-redo" title="Redo" [disabled]="!canRedo()" (click)="redo()">Redo</button>
-    </div>
-
-    <!-- zoom, top-right -->
-    <div class="wf-chips wf-tr" role="group" aria-label="Zoom">
-      <button class="wf-chip" type="button" id="wf-out" title="Zoom out" (click)="zoomOut()"><span class="sr">Zoom out</span><span aria-hidden="true">−</span></button>
-      <span class="wf-chip is-read mono" id="wf-zoom">{{ zoomLabel() }}</span>
-      <button class="wf-chip" type="button" id="wf-in" title="Zoom in" (click)="zoomIn()"><span class="sr">Zoom in</span><span aria-hidden="true">+</span></button>
-      <button class="wf-chip" type="button" id="wf-fit" title="Fit the graph in view" (click)="fit()">Fit</button>
-      <button class="wf-chip" type="button" id="wf-reset" title="Reset to 100%" (click)="reset()">Reset</button>
-    </div>
-
-    <!-- mode + tools, floating along the bottom -->
-    <div class="wf-bar" role="toolbar" aria-label="Canvas mode">
-      <div class="wf-seg" role="group" aria-label="Mode">
-        <button class="wf-seg-b" type="button" id="wf-mode-build" [attr.aria-pressed]="mode() === 'build'" (click)="setMode('build')">Builder</button>
-        <button class="wf-seg-b" type="button" id="wf-mode-run" [attr.aria-pressed]="mode() === 'run'" (click)="setMode('run')">Run</button>
-      </div>
-      <label class="sr" for="wf-run">Run to project</label>
-      <select class="wf-runpick" id="wf-run" [hidden]="mode() !== 'run'" [value]="runId()" (change)="onPickRun($event)">
-        @for (r of graphRunOptions(); track r.id) {
-          <option [value]="r.id">{{ r.label }} · {{ r.status }}</option>
+        @if (n.kind === 'tool') {
+          <div class="wf-field"><span class="k">tool</span><div class="v mono">{{ n.tool }}</div></div>
+          <div class="wf-field"><label for="wf-f-eff">effect class</label>
+            <select id="wf-f-eff" [disabled]="readOnly()" (change)="editEffect($event)">
+              <option value="read" [selected]="n.effect === 'read'">read</option>
+              <option value="write" [selected]="n.effect === 'write'">write</option>
+              <option value="idempotent" [selected]="n.effect === 'idempotent'">idempotent</option>
+            </select>
+            <p class="wf-why">A write re-runs on a fork — this is the field the hazard review turns on. Reads are never fork hazards.</p>
+          </div>
+          <div class="wf-field"><span class="k">idempotency_key</span><div class="v">{{ n.idempotencyKey == null ? 'null — the call cannot be safely retried' : n.idempotencyKey }}</div></div>
+          <div class="wf-field"><span class="k">input</span><div class="v"><pre [innerHTML]="jsonHtml(n.input ?? {})"></pre></div></div>
         }
-      </select>
-      <span class="wf-bar-sep" aria-hidden="true"></span>
-      <div class="wf-seg" role="group" aria-label="Tool">
-        <button class="wf-seg-b" type="button" id="wf-tool-pan" [attr.aria-pressed]="tool() === 'pan'" (click)="setTool('pan')">Pan</button>
-        <button class="wf-seg-b" type="button" id="wf-tool-sel" [attr.aria-pressed]="tool() === 'sel'" (click)="setTool('sel')">Select</button>
-      </div>
-      <span class="wf-bar-sep" aria-hidden="true"></span>
-      <span class="wf-legend mono" id="wf-legend">drag to pan · scroll to zoom · tab walks the nodes</span>
-    </div>
-
-    <p class="wf-note mono" id="wf-note">Fork from a node — <span class="wf-note-k">⋯</span> on any node the run entered.</p>
-
-    <!-- Minimap, bottom-right; only when the graph outruns the viewport. -->
-    <div class="wf-map" id="wf-map" [hidden]="minimapHidden()" role="group"
-         aria-label="Minimap — click the field to jump the view">
-      <svg id="wf-map-svg" viewBox="0 0 160 100" (click)="onMinimapClick($event)" aria-hidden="true">
-        <rect x="0" y="0" width="160" height="100" class="wf-map-bg" />
-      </svg>
-    </div>
-
-    <!-- the node ⋯ menu — the .wf-menu-why line carries the honesty for the two non-acting states -->
-    @if (menu(); as m) {
-      <div class="wf-menu" [style.left.px]="m.x" [style.top.px]="m.y" (keydown)="onMenuKeydown($event)">
-        @switch (forkMenuState()) {
-          @case ('act') {
-            <button type="button" data-act="fork" (click)="menuFork()">Fork from here…</button>
-            <button type="button" data-act="events" (click)="closeMenu()">Open this node's events</button>
+        @if (n.kind === 'gate') {
+          @if (n.prompt) {
+            <div class="wf-field"><span class="k">prompt</span><div class="v">{{ n.prompt }}</div></div>
           }
-          @case ('switch') {
-            <button type="button" data-act="fork-switch" (click)="menuForkSwitch()">Fork from here…</button>
-            <p class="wf-menu-why">A fork replays a recorded run. This switches to Run mode and picks one — then fork.</p>
-          }
-          @case ('disabled') {
-            <button type="button" data-act="fork" disabled aria-disabled="true">Fork from here…</button>
-            <p class="wf-menu-why">A fork replays a recorded run, and this graph has none yet. Publish it and start a run first.</p>
+          <div class="wf-field"><span class="k">approval schema</span><div class="v"><pre [innerHTML]="jsonHtml(n.inputSchema ?? {})"></pre></div>
+            <p class="wf-why">This is the schema the run log records on <span class="mono">Suspended</span>, and the Inbox form is generated from it.</p>
+          </div>
+        }
+        @if (n.kind === 'branch') {
+          <div class="wf-field"><span class="k">cases</span><div class="v">{{ (n.cases ?? []).join(' · ') }}</div>
+            <p class="wf-why">Each outbound edge names the case it realizes.</p>
+          </div>
+        }
+        @if (n.kind === 'map') {
+          <div class="wf-field"><span class="k">over</span><div class="v mono">{{ n.over }}</div></div>
+          <div class="wf-field"><label for="wf-f-conc">concurrency</label>
+            <input id="wf-f-conc" type="number" min="1" step="1" [value]="n.concurrency ?? 0" [readOnly]="readOnly()" (input)="editConcurrency($event)" />
+          </div>
+          @if (n.body?.tool) {
+            <div class="wf-field"><span class="k">body</span><div class="v">{{ n.body?.tool }} · {{ n.body?.effect }}</div></div>
           }
         }
-        <button type="button" data-act="copy" (click)="menuCopy()">Copy node id</button>
-      </div>
-    }
-  </div>
+      } @else {
+        <p class="wf-empty">Select a node to inspect it — click one, or Tab into the canvas and press Enter.</p>
+      }
+
+      <!-- ONE error list per render: these are the same offenders the canvas marks. -->
+      @if (errors().length) {
+        <div class="wf-errs">
+          <h5>{{ verdict() }}</h5>
+          @for (er of errors(); track $index; let i = $index) {
+            <div class="wf-err">
+              <span class="where">{{ errWhere(er) }}</span>
+              {{ er.msg }}
+              @if (er.fix) {
+                <button type="button" [attr.data-fix]="i" (click)="applyFixAt(i)">{{ er.fix.label }}</button>
+              }
+            </div>
+          }
+        </div>
+      } @else {
+        <p class="wf-ok">No errors. This graph can be published.</p>
+      }
+    </div>
+  </aside>
+  <button class="cpanel-tab" type="button" data-drawer data-panel="workflows" [hidden]="panelOpen()" (click)="openPanel()">Inspector</button>
 </div>
 
 <!-- THE HAZARD REVIEW — a real <dialog>, showModal(), the app's ONE modal. Escape closes it;
@@ -165,7 +325,7 @@
                   <span class="seq">seq {{ h.seq }} · ran {{ h.recordedAt }}</span>
                 </div>
                 <p class="haz-k" [class.is-null]="h.key === null">idempotency_key: {{ h.key === null ? 'null — the call cannot be safely retried, so the provider will not collapse the repeat' : h.key }}</p>
-                <pre>{{ inputJson(h.input) }}</pre>
+                <pre [innerHTML]="jsonHtml(h.input)"></pre>
                 <label class="haz-ack" [attr.for]="'ack-' + h.seq">I acknowledge that <span class="mono">{{ h.tool }}</span> will run a second time with this input.</label>
               </div>
             </div>
@@ -186,24 +346,3 @@
     </div>
   </div>
 </dialog>
-
-<!-- ABOUT THIS CANVAS — a popover=auto (light-dismiss + Escape at the platform level), NOT the
-     modal. The fork dialog above is the app's only modal. -->
-<div class="wf-about" id="wf-about" popover="auto" role="dialog" aria-labelledby="wf-about-title">
-  <div class="wf-about-inner">
-    <div class="fork-head">
-      <div>
-        <h3 class="cpanel-title" id="wf-about-title">About this canvas</h3>
-        <p class="cpanel-sub">What this is, and how the canvas works.</p>
-      </div>
-      <button class="cpanel-x" type="button" id="wf-about-x" aria-label="Close" popovertarget="wf-about" popovertargetaction="hide">×</button>
-    </div>
-    <div class="wf-about-body">
-      <p>Builder authors a graph; Run projects a real run's route onto it, folded from
-        <code>GET /v1/runs/&lt;id&gt;/graph</code> — the road actually taken, never a designer's happy path.</p>
-      <p>Forking a node replays the origin's recorded prefix and re-executes from there. Every write
-        in the re-walked segment runs a second time; the hazard review makes you acknowledge each,
-        and your acknowledgement is written permanently into the new run's log.</p>
-    </div>
-  </div>
-</div>

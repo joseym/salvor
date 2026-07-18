@@ -14,27 +14,31 @@ import type { WfGraph } from './wf-model';
  */
 const DRAFTS_KEY = 'salvor.wf.drafts';
 
-/** The ported prototype draft. Node names are the author's; edges carry the deliberate defects. */
+/** The ported prototype draft — deliberately broken, one defect per validator error class: a
+ * malformed agent hash, a duplicate node id, a zero-worker fan-out, a dangling edge one keystroke
+ * from a real node, a cycle, and a case label on a non-branch edge. Six errors, exactly. */
 export const REFUND_SWEEP_DRAFT: WfGraph = {
   key: 'draft:refund-sweep',
   hash: null,
   name: 'refund-sweep',
   state: 'draft',
   nodes: [
-    { id: 'n_start', kind: 'agent', name: 'Pick the invoices' },
-    { id: 'n_fetch', kind: 'tool', name: 'Fetch the invoice' },
-    { id: 'n_charge', kind: 'tool', name: 'Charge the card' },
-    { id: 'n_pick', kind: 'branch', name: 'Retry or give up' },
-    { id: 'n_fan', kind: 'map', name: 'Email each watcher' },
-    { id: 'n_notify', kind: 'agent', name: 'Draft the closing note' },
+    { id: 'n_start', kind: 'agent', name: 'Pick the invoices', agentHash: 'sha256:not-a-real-hash' } /* malformed hash */,
+    { id: 'n_fetch', kind: 'tool', name: 'Fetch the invoice', tool: 'lookup_invoice', effect: 'read', input: {} },
+    { id: 'n_charge', kind: 'tool', name: 'Charge the card', tool: 'charge_card', effect: 'write', idempotencyKey: null, input: {} },
+    { id: 'n_charge', kind: 'tool', name: 'Charge the card again', tool: 'charge_card', effect: 'write', idempotencyKey: null, input: {} } /* duplicate id */,
+    { id: 'n_pick', kind: 'branch', name: 'Retry or give up', cases: ['retry', 'give_up'] },
+    { id: 'n_fan', kind: 'map', name: 'Email each watcher', over: '${n_fetch.watchers}', concurrency: 0, body: { tool: 'send_email', effect: 'idempotent' } } /* fans out to nobody */,
+    { id: 'n_notify', kind: 'agent', name: 'Draft the closing note', agentHash: 'sha256:9f2c41b7c0e5a8d3' },
   ],
   edges: [
     { from: 'n_start', to: 'n_fetch' },
     { from: 'n_fetch', to: 'n_charge' },
     { from: 'n_charge', to: 'n_pick' },
     { from: 'n_pick', to: 'n_fan', label: 'retry' },
-    { from: 'n_fan', to: 'n_fetch' } /* closes a cycle, on purpose */,
-    { from: 'n_notify', to: 'n_notify' } /* a draft node with no inbound path yet */,
+    { from: 'n_pick', to: 'n_notifyy', label: 'give_up' } /* dangling — one key off */,
+    { from: 'n_fan', to: 'n_fetch' } /* closes a cycle */,
+    { from: 'n_charge', to: 'n_notify', label: 'final' } /* case label, but not a branch */,
   ],
 };
 
