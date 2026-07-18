@@ -419,6 +419,74 @@ impl RunCtx {
         }
     }
 
+    /// Records (or replays) that a map node fanned out over a resolved item list.
+    ///
+    /// Recorded between the map node's [`node_entered`](Self::node_entered) and its
+    /// per-iteration markers. The `items` must be a deterministic function of
+    /// recorded values — the map's `over` reference resolved against the recorded
+    /// routed value — so replay reproduces the identical fan-out, which is what
+    /// makes the derived per-iteration child ids reproducible.
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeError::Replay`] on divergence; [`RuntimeError::Store`] when
+    /// persistence fails.
+    pub async fn map_fanned_out(&mut self, node: &str, items: &Value) -> Result<(), RuntimeError> {
+        match self.cursor.map_fanned_out(node, items)? {
+            Outcome::Replayed(()) => Ok(()),
+            Outcome::Live(emitted) => {
+                persist(self.store.as_ref(), self.run_id, &self.clock, &emitted).await
+            }
+        }
+    }
+
+    /// Records (or replays) that one iteration of a map fan-out started, as a child
+    /// run with the derived id `child_run`. The `child_run` is derived from the
+    /// parent run id, the node id, and the index. On replay the RECORDED id wins
+    /// and the match is on `node` + `index` alone, so a fork — which replays the
+    /// origin's prefix under a new run id and thus re-derives a different id —
+    /// still replays its inherited map markers cleanly.
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeError::Replay`] on divergence; [`RuntimeError::Store`] when
+    /// persistence fails.
+    pub async fn map_iteration_started(
+        &mut self,
+        node: &str,
+        index: u64,
+        child_run: &str,
+    ) -> Result<(), RuntimeError> {
+        match self.cursor.map_iteration_started(node, index, child_run)? {
+            Outcome::Replayed(()) => Ok(()),
+            Outcome::Live(emitted) => {
+                persist(self.store.as_ref(), self.run_id, &self.clock, &emitted).await
+            }
+        }
+    }
+
+    /// Records (or replays) that one iteration of a map fan-out joined back into
+    /// the map node's output. Joins must be recorded in index order, never
+    /// completion order, so the concurrency of the fan-out never influences the
+    /// parent log's byte sequence.
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeError::Replay`] on divergence; [`RuntimeError::Store`] when
+    /// persistence fails.
+    pub async fn map_iteration_joined(
+        &mut self,
+        node: &str,
+        index: u64,
+    ) -> Result<(), RuntimeError> {
+        match self.cursor.map_iteration_joined(node, index)? {
+            Outcome::Replayed(()) => Ok(()),
+            Outcome::Live(emitted) => {
+                persist(self.store.as_ref(), self.run_id, &self.clock, &emitted).await
+            }
+        }
+    }
+
     /// The recorded clock: reads the injected clock once, live, and replays
     /// the identical instant forever after.
     ///
