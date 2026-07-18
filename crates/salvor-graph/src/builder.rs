@@ -186,6 +186,7 @@ impl GraphBuilder {
 pub struct AgentSpec {
     id: String,
     agent_hash: String,
+    name: Option<String>,
     input_schema: Option<Value>,
     output_schema: Option<Value>,
 }
@@ -198,9 +199,21 @@ impl AgentSpec {
         Self {
             id: id.into(),
             agent_hash: agent_hash.into(),
+            name: None,
             input_schema: None,
             output_schema: None,
         }
+    }
+
+    /// Sets a short display label for this node. Bounds (a 64-character cap,
+    /// not empty or all whitespace) are checked by [`crate::validate`], not
+    /// here; see [`crate::document`]'s "The optional node display name"
+    /// section for why this field, unlike an agent's own `name`, is part of
+    /// the graph's content hash.
+    #[must_use]
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
     }
 
     /// Declares the JSON Schema for the payload this agent consumes.
@@ -221,6 +234,7 @@ impl AgentSpec {
         Node::Agent(AgentNode {
             id: self.id,
             agent_hash: self.agent_hash,
+            name: self.name,
             input_schema: self.input_schema,
             output_schema: self.output_schema,
         })
@@ -232,6 +246,7 @@ impl AgentSpec {
 pub struct ToolSpec {
     id: String,
     tool: String,
+    name: Option<String>,
     input: std::collections::BTreeMap<String, String>,
     input_schema: Option<Value>,
     output_schema: Option<Value>,
@@ -244,10 +259,22 @@ impl ToolSpec {
         Self {
             id: id.into(),
             tool: tool.into(),
+            name: None,
             input: std::collections::BTreeMap::new(),
             input_schema: None,
             output_schema: None,
         }
+    }
+
+    /// Sets a short display label for this node. Bounds (a 64-character cap,
+    /// not empty or all whitespace) are checked by [`crate::validate`], not
+    /// here; see [`crate::document`]'s "The optional node display name"
+    /// section for why this field, unlike an agent's own `name`, is part of
+    /// the graph's content hash.
+    #[must_use]
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
     }
 
     /// Adds one input mapping: a tool input field name to an opaque source
@@ -276,6 +303,7 @@ impl ToolSpec {
         Node::Tool(ToolNode {
             id: self.id,
             tool: self.tool,
+            name: self.name,
             input: self.input,
             input_schema: self.input_schema,
             output_schema: self.output_schema,
@@ -287,6 +315,7 @@ impl ToolSpec {
 #[derive(Clone, Debug)]
 pub struct GateSpec {
     id: String,
+    name: Option<String>,
     prompt: Option<String>,
     approval_schema: Value,
 }
@@ -298,9 +327,21 @@ impl GateSpec {
     pub fn new(id: impl Into<String>, approval_schema: Value) -> Self {
         Self {
             id: id.into(),
+            name: None,
             prompt: None,
             approval_schema,
         }
+    }
+
+    /// Sets a short display label for this node. Bounds (a 64-character cap,
+    /// not empty or all whitespace) are checked by [`crate::validate`], not
+    /// here; see [`crate::document`]'s "The optional node display name"
+    /// section for why this field, unlike an agent's own `name`, is part of
+    /// the graph's content hash.
+    #[must_use]
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
     }
 
     /// Sets the human-readable prompt shown in the approval inbox.
@@ -313,6 +354,7 @@ impl GateSpec {
     fn into_node(self) -> Node {
         Node::Gate(GateNode {
             id: self.id,
+            name: self.name,
             prompt: self.prompt,
             approval_schema: self.approval_schema,
         })
@@ -323,6 +365,7 @@ impl GateSpec {
 #[derive(Clone, Debug)]
 pub struct BranchSpec {
     id: String,
+    name: Option<String>,
     on: Option<String>,
     agent_hash: Option<String>,
     cases: Vec<BranchCase>,
@@ -334,10 +377,22 @@ impl BranchSpec {
     pub fn new(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
+            name: None,
             on: None,
             agent_hash: None,
             cases: Vec::new(),
         }
+    }
+
+    /// Sets a short display label for this node. Bounds (a 64-character cap,
+    /// not empty or all whitespace) are checked by [`crate::validate`], not
+    /// here; see [`crate::document`]'s "The optional node display name"
+    /// section for why this field, unlike an agent's own `name`, is part of
+    /// the graph's content hash.
+    #[must_use]
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
     }
 
     /// Sets the opaque reference to the typed value the branch routes on.
@@ -372,6 +427,7 @@ impl BranchSpec {
     fn into_node(self) -> Node {
         Node::Branch(BranchNode {
             id: self.id,
+            name: self.name,
             on: self.on,
             agent_hash: self.agent_hash,
             cases: self.cases,
@@ -384,6 +440,7 @@ impl BranchSpec {
 #[derive(Clone, Debug)]
 pub struct MapSpec {
     id: String,
+    name: Option<String>,
     over: String,
     concurrency: u32,
     body: MapBody,
@@ -402,11 +459,23 @@ impl MapSpec {
     ) -> Self {
         Self {
             id: id.into(),
+            name: None,
             over: over.into(),
             concurrency,
             body,
             output_schema: None,
         }
+    }
+
+    /// Sets a short display label for this node. Bounds (a 64-character cap,
+    /// not empty or all whitespace) are checked by [`crate::validate`], not
+    /// here; see [`crate::document`]'s "The optional node display name"
+    /// section for why this field, unlike an agent's own `name`, is part of
+    /// the graph's content hash.
+    #[must_use]
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
     }
 
     /// Declares the JSON Schema for the joined list this node produces.
@@ -419,6 +488,7 @@ impl MapSpec {
     fn into_node(self) -> Node {
         Node::Map(MapNode {
             id: self.id,
+            name: self.name,
             over: self.over,
             concurrency: self.concurrency,
             body: self.body,
@@ -539,5 +609,48 @@ mod tests {
             "unset optional field must stay off the wire: {map_payload}"
         );
         assert_eq!(value["edges"][1]["label"], json!("high"));
+    }
+
+    /// `.name(...)` is available on every node kind's spec, puts the name on
+    /// the wire when set, and validates clean; a sibling node with no `.name`
+    /// call carries none, proving the two coexist in one document.
+    #[test]
+    fn every_spec_kind_accepts_a_display_name() {
+        let graph = GraphBuilder::new()
+            .agent(
+                AgentSpec::new("research", format!("sha256:{}", "1".repeat(64)))
+                    .name("Research the topic"),
+            )
+            .tool(ToolSpec::new("publish", "http_post").name("Publish the draft"))
+            .gate(GateSpec::new("approve", json!({"type": "object"})).name("Approve the draft"))
+            .branch(
+                BranchSpec::new("route")
+                    .name("Route on confidence")
+                    .case("high", BranchCondition::Expression("score > 0.8".into())),
+            )
+            .map(
+                MapSpec::new("fanout", "route.items", 2, MapBody::Node("research".into()))
+                    .name("Notify each watcher"),
+            )
+            .edge("research", "publish")
+            .build();
+
+        let summary = crate::validate(&graph).expect("named nodes still validate");
+        assert_eq!(summary.node_count, 5);
+
+        let value = serde_json::to_value(&graph).expect("serialize");
+        for (index, expected) in [
+            (0, "Research the topic"),
+            (1, "Publish the draft"),
+            (2, "Approve the draft"),
+            (3, "Route on confidence"),
+            (4, "Notify each watcher"),
+        ] {
+            assert_eq!(
+                value["nodes"][index]["payload"]["name"],
+                json!(expected),
+                "node {index} carries its display name on the wire"
+            );
+        }
     }
 }

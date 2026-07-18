@@ -250,10 +250,15 @@ async fn submit_is_strict_and_idempotent() {
     ))
     .await;
     let client = reqwest::Client::new();
+    // The gate carries an optional display `name`, so this test doubles as the
+    // server's coverage that a named node round-trips byte-faithfully end to
+    // end: submitted, stored content-addressed, and returned unchanged.
     let document = json!({
         "schema_version": 1,
         "nodes": [
-            { "kind": "gate", "payload": { "id": "approve", "approval_schema": { "type": "object" } } }
+            { "kind": "gate", "payload": {
+                "id": "approve", "name": "Approve the draft", "approval_schema": { "type": "object" }
+            } }
         ],
         "edges": []
     });
@@ -285,6 +290,10 @@ async fn submit_is_strict_and_idempotent() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(got["graph"], hash);
     assert_eq!(got["document"]["schema_version"], 1);
+    assert_eq!(
+        got["document"]["nodes"][0]["payload"]["name"], "Approve the draft",
+        "the node's optional display name round-trips byte-faithfully"
+    );
 
     let (_, list) = get_json(&client, &format!("{}/v1/graphs", server.base), None).await;
     let entry = list["graphs"]

@@ -51,7 +51,7 @@ pub use document::{
     Node, SCHEMA_VERSION, ToolNode,
 };
 pub use expr::{Expr, ExprError, MAX_EXPRESSION_LEN, parse as parse_expression};
-pub use validate::{GraphError, GraphSummary, validate};
+pub use validate::{GraphError, GraphSummary, MAX_NODE_NAME_LEN, validate};
 
 /// Returns the graph document's JSON Schema as a [`serde_json::Value`].
 ///

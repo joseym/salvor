@@ -17,6 +17,13 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use crate::document::{BranchCondition, Graph, MapBody, Node, SCHEMA_VERSION};
 use crate::expr;
 
+/// The longest an optional node `name` may be, in characters. Mirrors the
+/// agent definition's own name bound
+/// (`salvor_cli::agent_config::MAX_NAME_LEN`); see [`crate::document`]'s "The
+/// optional node display name" section for why the two fields, though bounded
+/// alike, differ in whether they hash.
+pub const MAX_NODE_NAME_LEN: usize = 64;
+
 /// A single validation failure, naming the node or edge at fault.
 ///
 /// `PartialEq` is derived so tests can assert on the exact error value. Each
@@ -134,6 +141,24 @@ pub enum GraphError {
         /// The name of the model-decision case with no agent.
         case: String,
     },
+
+    /// A node's optional `name` is over [`MAX_NODE_NAME_LEN`] characters.
+    #[error("node `{id}`: `name` is {len} characters, over the {max}-character cap")]
+    NodeNameTooLong {
+        /// The node's id.
+        id: String,
+        /// The name's length, in characters (`chars().count()`, not bytes).
+        len: usize,
+        /// [`MAX_NODE_NAME_LEN`], repeated here so the error is self-contained.
+        max: usize,
+    },
+
+    /// A node's optional `name` is set but empty or all whitespace.
+    #[error("node `{id}`: `name`, if set, must not be empty or all whitespace")]
+    BlankNodeName {
+        /// The node's id.
+        id: String,
+    },
 }
 
 /// Formats an optional nearest-name suggestion as a trailing clause, or empty.
@@ -177,6 +202,7 @@ pub fn validate(graph: &Graph) -> Result<GraphSummary, Vec<GraphError>> {
     check_unique_node_ids(graph, &mut errors);
     check_referential_integrity(graph, &mut errors);
     check_node_fields(graph, &mut errors);
+    check_node_names(graph, &mut errors);
     check_branch_expressions(graph, &mut errors);
     check_acyclic(graph, &mut errors);
     check_edge_type_compat(graph, &mut errors);
@@ -283,6 +309,33 @@ fn check_node_fields(graph: &Graph, errors: &mut Vec<GraphError>) {
             }
             // Tool and branch carry no field rule beyond the strict parse.
             Node::Tool(_) | Node::Branch(_) => {}
+        }
+    }
+}
+
+/// A node's optional `name`, when set, must not be empty or all whitespace,
+/// and must be at most [`MAX_NODE_NAME_LEN`] characters
+/// (`chars().count()`, not bytes). Applies uniformly across all five node
+/// kinds through [`Node::name`], mirroring the agent definition's own name
+/// rule.
+fn check_node_names(graph: &Graph, errors: &mut Vec<GraphError>) {
+    for node in &graph.nodes {
+        let Some(name) = node.name() else {
+            continue;
+        };
+        if name.trim().is_empty() {
+            errors.push(GraphError::BlankNodeName {
+                id: node.id().to_owned(),
+            });
+            continue;
+        }
+        let len = name.chars().count();
+        if len > MAX_NODE_NAME_LEN {
+            errors.push(GraphError::NodeNameTooLong {
+                id: node.id().to_owned(),
+                len,
+                max: MAX_NODE_NAME_LEN,
+            });
         }
     }
 }
@@ -544,6 +597,7 @@ mod tests {
 
     fn agent(id: &str) -> Node {
         Node::Agent(AgentNode {
+            name: None,
             id: id.into(),
             agent_hash: hash(),
             input_schema: None,
@@ -553,6 +607,7 @@ mod tests {
 
     fn gate(id: &str) -> Node {
         Node::Gate(GateNode {
+            name: None,
             id: id.into(),
             prompt: None,
             approval_schema: json!({"type": "object"}),
@@ -619,6 +674,7 @@ mod tests {
     fn malformed_agent_hash_is_reported() {
         let g = graph(
             vec![Node::Agent(AgentNode {
+                name: None,
                 id: "research".into(),
                 agent_hash: "sha256:not-hex".into(),
                 input_schema: None,
@@ -643,6 +699,7 @@ mod tests {
             vec![
                 agent("worker"),
                 Node::Map(MapNode {
+                    name: None,
                     id: "fanout".into(),
                     over: "items".into(),
                     concurrency: 0,
@@ -664,6 +721,7 @@ mod tests {
     fn dangling_map_body_is_reported() {
         let g = graph(
             vec![Node::Map(MapNode {
+                name: None,
                 id: "fanout".into(),
                 over: "items".into(),
                 concurrency: 2,
@@ -704,12 +762,14 @@ mod tests {
     #[test]
     fn edge_type_mismatch_is_reported() {
         let producer = Node::Agent(AgentNode {
+            name: None,
             id: "producer".into(),
             agent_hash: hash(),
             input_schema: None,
             output_schema: Some(json!({"type": "string"})),
         });
         let consumer = Node::Tool(ToolNode {
+            name: None,
             id: "consumer".into(),
             tool: "t".into(),
             input: BTreeMap::new(),
@@ -728,12 +788,14 @@ mod tests {
     #[test]
     fn matching_edge_schemas_pass() {
         let producer = Node::Agent(AgentNode {
+            name: None,
             id: "producer".into(),
             agent_hash: hash(),
             input_schema: None,
             output_schema: Some(json!({"type": "string"})),
         });
         let consumer = Node::Tool(ToolNode {
+            name: None,
             id: "consumer".into(),
             tool: "t".into(),
             input: BTreeMap::new(),
@@ -763,6 +825,7 @@ mod tests {
         let g = graph(
             vec![
                 Node::Agent(AgentNode {
+                    name: None,
                     id: "bad".into(),
                     agent_hash: "nope".into(),
                     input_schema: None,
@@ -792,6 +855,7 @@ mod tests {
     #[test]
     fn valid_branch_expression_passes() {
         let branch = Node::Branch(BranchNode {
+            name: None,
             id: "route".into(),
             on: Some("score".into()),
             agent_hash: Some(hash()),
@@ -815,6 +879,7 @@ mod tests {
     #[test]
     fn invalid_branch_expression_is_reported() {
         let branch = Node::Branch(BranchNode {
+            name: None,
             id: "route".into(),
             on: None,
             agent_hash: Some(hash()),
@@ -847,6 +912,7 @@ mod tests {
     #[test]
     fn model_decision_without_agent_is_reported() {
         let branch = Node::Branch(BranchNode {
+            name: None,
             id: "route".into(),
             on: None,
             agent_hash: None,
@@ -871,6 +937,7 @@ mod tests {
     #[test]
     fn malformed_branch_agent_hash_is_reported() {
         let branch = Node::Branch(BranchNode {
+            name: None,
             id: "route".into(),
             on: None,
             agent_hash: Some("sha256:not-hex".into()),
@@ -887,6 +954,93 @@ mod tests {
                 hash: "sha256:not-hex".into(),
             }),
             "names the branch node and its malformed hash: {errors:?}"
+        );
+    }
+
+    /// A node `name` at exactly the character cap is valid; a node with no
+    /// `name` set is unaffected by the check.
+    #[test]
+    fn node_name_at_the_cap_is_valid() {
+        let mut named = agent("research");
+        if let Node::Agent(a) = &mut named {
+            a.name = Some("a".repeat(MAX_NODE_NAME_LEN));
+        }
+        let g = graph(
+            vec![named, agent("review")],
+            vec![edge("research", "review")],
+        );
+        assert!(validate(&g).is_ok());
+    }
+
+    /// A node `name` over the character cap is a node-precise error, counting
+    /// characters rather than bytes (a multi-byte character over the cap is
+    /// still one character over, not several).
+    #[test]
+    fn node_name_too_long_is_reported() {
+        let mut named = agent("research");
+        let long_name = "é".repeat(MAX_NODE_NAME_LEN + 1);
+        if let Node::Agent(a) = &mut named {
+            a.name = Some(long_name.clone());
+        }
+        let g = graph(vec![named], vec![]);
+        let errors = validate(&g).expect_err("invalid");
+        assert!(
+            errors.contains(&GraphError::NodeNameTooLong {
+                id: "research".into(),
+                len: MAX_NODE_NAME_LEN + 1,
+                max: MAX_NODE_NAME_LEN,
+            }),
+            "names the node and the character count, not the byte count: {errors:?}"
+        );
+    }
+
+    /// An empty or all-whitespace `name` is rejected, node-precise, across
+    /// every node kind.
+    #[test]
+    fn blank_node_name_is_reported() {
+        for blank in ["", "   ", "\t\n"] {
+            let mut named = gate("approve");
+            if let Node::Gate(g) = &mut named {
+                g.name = Some(blank.to_owned());
+            }
+            let g = graph(vec![named], vec![]);
+            let errors = validate(&g).expect_err("invalid");
+            assert!(
+                errors.contains(&GraphError::BlankNodeName {
+                    id: "approve".into(),
+                }),
+                "blank name {blank:?} should be reported: {errors:?}"
+            );
+        }
+    }
+
+    /// Every check runs together: a document with both a blank name on one
+    /// node and an oversized name on another reports both, collect-all style.
+    #[test]
+    fn multiple_node_name_errors_are_all_collected() {
+        let mut blank = agent("research");
+        if let Node::Agent(a) = &mut blank {
+            a.name = Some("   ".into());
+        }
+        let mut long = gate("approve");
+        if let Node::Gate(g) = &mut long {
+            g.name = Some("x".repeat(MAX_NODE_NAME_LEN + 5));
+        }
+        let g = graph(vec![blank, long], vec![]);
+        let errors = validate(&g).expect_err("invalid");
+        assert!(
+            errors.contains(&GraphError::BlankNodeName {
+                id: "research".into(),
+            }),
+            "{errors:?}"
+        );
+        assert!(
+            errors.contains(&GraphError::NodeNameTooLong {
+                id: "approve".into(),
+                len: MAX_NODE_NAME_LEN + 5,
+                max: MAX_NODE_NAME_LEN,
+            }),
+            "{errors:?}"
         );
     }
 }

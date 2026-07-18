@@ -812,6 +812,12 @@ fn graph_error_json(error: &GraphError) -> Value {
         GraphError::ModelDecisionWithoutAgent { node, case } => json!({
             "code": "model_decision_without_agent", "message": message, "node": node, "case": case,
         }),
+        GraphError::NodeNameTooLong { id, len, max } => json!({
+            "code": "node_name_too_long", "message": message, "node": id, "len": len, "max": max,
+        }),
+        GraphError::BlankNodeName { id } => json!({
+            "code": "blank_node_name", "message": message, "node": id,
+        }),
     }
 }
 

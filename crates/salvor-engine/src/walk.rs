@@ -100,6 +100,7 @@ mod tests {
         Node::Agent(AgentNode {
             id: id.to_owned(),
             agent_hash: format!("sha256:{}", "1".repeat(64)),
+            name: None,
             input_schema: None,
             output_schema: None,
         })
@@ -109,6 +110,7 @@ mod tests {
         Node::Tool(ToolNode {
             id: id.to_owned(),
             tool: "publish".to_owned(),
+            name: None,
             input: BTreeMap::new(),
             input_schema: None,
             output_schema: None,

@@ -433,7 +433,14 @@ drives nothing.
 
 A graph document is a control document: an acyclic set of nodes (`agent`,
 `tool`, `gate`, `branch`, `map`) authored once, submitted, hashed, and frozen
-for a run. A graph run is an ordinary run with a richer log: its head is
+for a run. Every node payload may carry an optional `name`: a short display
+label (at most 64 characters, and, when set, not empty or all whitespace;
+`400 invalid_graph` reports a violation node-precise as `node_name_too_long`
+or `blank_node_name`). Unlike an agent definition's own `name` (excluded from
+its `agent_def_hash` so a rename never mints a new agent identity), a node's
+`name` is an ordinary field on the payload and hashes like any other: a graph
+document IS its content hash, so renaming a node is authoring a new document
+version, by design. A graph run is an ordinary run with a richer log: its head is
 `GraphRunStarted` instead of `RunStarted`, and its nodes narrate the walk, so
 [`GET /v1/runs/{id}`](#get-v1runsid), [`/replay`](#get-v1runsidreplay),
 [`/events`](#get-v1runsidevents), the enriched [`GET /v1/runs`](#get-v1runs)

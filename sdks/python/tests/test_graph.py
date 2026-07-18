@@ -19,6 +19,7 @@ import unittest
 from pathlib import Path
 
 from salvor import GraphBuilder
+from salvor.graph import BranchCase, expression, map_node
 
 CANONICAL = (
     Path(__file__).resolve().parents[3]
@@ -93,6 +94,49 @@ class BuildsCanonicalDocument(unittest.TestCase):
         built = json.loads(json.dumps(built))
         canonical = json.loads(CANONICAL.read_text())
         self.assertEqual(built, canonical)
+
+    def test_every_node_kind_accepts_an_optional_display_name(self):
+        graph = (
+            GraphBuilder()
+            .agent(
+                "research",
+                f"sha256:{'1' * 64}",
+                name="Research the topic",
+            )
+            .tool("publish", "http_post", name="Publish the draft")
+            .gate("approve", {"type": "object"}, name="Approve the draft")
+            .branch(
+                "route",
+                [BranchCase("high", expression("score > 0.8"))],
+                name="Route on confidence",
+            )
+            .map(
+                "fanout",
+                "route.items",
+                2,
+                map_node("research"),
+                name="Notify each watcher",
+            )
+            .edge("research", "publish")
+            .build()
+        )
+        names = [node["payload"].get("name") for node in graph.nodes]
+        self.assertEqual(
+            names,
+            [
+                "Research the topic",
+                "Publish the draft",
+                "Approve the draft",
+                "Route on confidence",
+                "Notify each watcher",
+            ],
+        )
+
+        # Unset stays entirely off the wire, never a defaulted ``None`` value.
+        unnamed = GraphBuilder().gate("approve", {"type": "object"}).build()
+        self.assertEqual(
+            list(unnamed.nodes[0]["payload"].keys()), ["id", "approval_schema"]
+        )
 
 
 if __name__ == "__main__":

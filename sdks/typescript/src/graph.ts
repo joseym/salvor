@@ -16,6 +16,18 @@
  * `salvor graph validate`, run over the emitted JSON.
  *
  * Zero runtime dependencies: everything here is plain objects and one class.
+ *
+ * ## The optional node display name
+ *
+ * Every node payload may carry an optional `name`: a short, purely
+ * presentational label ("Approve the draft"). Bounds mirror the agent
+ * definition's own `name` precedent: at most 64 characters, and, when set,
+ * not empty or all whitespace — `salvor graph validate` (and `POST
+ * /v1/graphs`) enforce both, node-precise. Unlike an agent's `name` (excluded
+ * from its definition hash so a rename never mints a new agent identity), a
+ * node's `name` is an ordinary field on the payload and hashes like any
+ * other: a graph document IS its content hash, so renaming a node is
+ * authoring a new document version, by design.
  */
 
 /** Any JSON value. Used for the schema fields a node may declare. */
@@ -31,6 +43,8 @@ export type JsonValue =
 export interface AgentPayload {
   id: string;
   agent_hash: string;
+  /** Optional short display label. See the module docs' "The optional node display name" note. */
+  name?: string;
   input_schema?: JsonValue;
   output_schema?: JsonValue;
 }
@@ -39,6 +53,8 @@ export interface AgentPayload {
 export interface ToolPayload {
   id: string;
   tool: string;
+  /** Optional short display label. See the module docs' "The optional node display name" note. */
+  name?: string;
   input?: Record<string, string>;
   input_schema?: JsonValue;
   output_schema?: JsonValue;
@@ -47,6 +63,8 @@ export interface ToolPayload {
 /** The `gate` node payload: human approval that suspends the run. */
 export interface GatePayload {
   id: string;
+  /** Optional short display label. See the module docs' "The optional node display name" note. */
+  name?: string;
   prompt?: string;
   approval_schema: JsonValue;
 }
@@ -65,6 +83,8 @@ export interface BranchCase {
 /** The `branch` node payload: routes on a typed output. */
 export interface BranchPayload {
   id: string;
+  /** Optional short display label. See the module docs' "The optional node display name" note. */
+  name?: string;
   on?: string;
   cases: BranchCase[];
 }
@@ -77,6 +97,8 @@ export type MapBody =
 /** The `map` node payload: fan-out a sub-run per element of a typed list. */
 export interface MapPayload {
   id: string;
+  /** Optional short display label. See the module docs' "The optional node display name" note. */
+  name?: string;
   over: string;
   concurrency: number;
   body: MapBody;
@@ -113,12 +135,14 @@ export const SCHEMA_VERSION = 1;
 
 /** The optional fields an agent node may declare. */
 export interface AgentOptions {
+  name?: string;
   inputSchema?: JsonValue;
   outputSchema?: JsonValue;
 }
 
 /** The optional fields a tool node may declare. */
 export interface ToolOptions {
+  name?: string;
   input?: Record<string, string>;
   inputSchema?: JsonValue;
   outputSchema?: JsonValue;
@@ -126,16 +150,19 @@ export interface ToolOptions {
 
 /** The optional fields a gate node may declare. */
 export interface GateOptions {
+  name?: string;
   prompt?: string;
 }
 
 /** The optional fields a branch node may declare. */
 export interface BranchOptions {
+  name?: string;
   on?: string;
 }
 
 /** The optional fields a map node may declare. */
 export interface MapOptions {
+  name?: string;
   outputSchema?: JsonValue;
 }
 
@@ -156,6 +183,7 @@ export class GraphBuilder {
   /** Adds an `agent` node, referenced by its `sha256:<64 hex>` hash. */
   agent(id: string, agentHash: string, options: AgentOptions = {}): this {
     const payload: AgentPayload = { id, agent_hash: agentHash };
+    if (options.name !== undefined) payload.name = options.name;
     if (options.inputSchema !== undefined) payload.input_schema = options.inputSchema;
     if (options.outputSchema !== undefined) payload.output_schema = options.outputSchema;
     this.nodes.push({ kind: "agent", payload });
@@ -165,6 +193,7 @@ export class GraphBuilder {
   /** Adds a `tool` node for one direct invocation of a registered tool. */
   tool(id: string, tool: string, options: ToolOptions = {}): this {
     const payload: ToolPayload = { id, tool };
+    if (options.name !== undefined) payload.name = options.name;
     if (options.input !== undefined) payload.input = options.input;
     if (options.inputSchema !== undefined) payload.input_schema = options.inputSchema;
     if (options.outputSchema !== undefined) payload.output_schema = options.outputSchema;
@@ -175,6 +204,7 @@ export class GraphBuilder {
   /** Adds a `gate` node. The approval schema is required. */
   gate(id: string, approvalSchema: JsonValue, options: GateOptions = {}): this {
     const payload: GatePayload = { id, approval_schema: approvalSchema };
+    if (options.name !== undefined) payload.name = options.name;
     if (options.prompt !== undefined) payload.prompt = options.prompt;
     this.nodes.push({ kind: "gate", payload });
     return this;
@@ -183,6 +213,7 @@ export class GraphBuilder {
   /** Adds a `branch` node with its named cases. */
   branch(id: string, cases: BranchCase[], options: BranchOptions = {}): this {
     const payload: BranchPayload = { id, cases };
+    if (options.name !== undefined) payload.name = options.name;
     if (options.on !== undefined) payload.on = options.on;
     this.nodes.push({ kind: "branch", payload });
     return this;
@@ -197,6 +228,7 @@ export class GraphBuilder {
     options: MapOptions = {},
   ): this {
     const payload: MapPayload = { id, over, concurrency, body };
+    if (options.name !== undefined) payload.name = options.name;
     if (options.outputSchema !== undefined) payload.output_schema = options.outputSchema;
     this.nodes.push({ kind: "map", payload });
     return this;

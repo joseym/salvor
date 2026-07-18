@@ -18,6 +18,29 @@
 //! discipline (see [`SCHEMA_VERSION`]): a graph that was recorded under an
 //! older build must still parse and validate under a newer one. Strict in,
 //! additive-tolerant out.
+//!
+//! # The optional node display name, and why it hashes unlike an agent's
+//!
+//! Every node payload carries an optional `name`: a short, purely
+//! presentational label ("Approve the draft") an author can hang on a node so
+//! a rendered graph reads by intent instead of by id. Bounds mirror the
+//! precedent set by the agent definition's own `name`
+//! (`salvor_cli::agent_config::MAX_NAME_LEN`): at most 64 CHARACTERS
+//! (`chars().count()`, not bytes), and, when set, not empty or all
+//! whitespace. [`crate::validate`] enforces both, node-precise.
+//!
+//! An agent's `name` is deliberately excluded from its `agent_def_hash`: an
+//! agent is a long-lived identity that a run keeps replaying under the same
+//! hash while an operator relabels it, so a rename must not mint a new
+//! identity (see `salvor_runtime::Agent::def_hash`). A graph document has no
+//! such identity to protect — it IS its hash, the whole reason `POST
+//! /v1/graphs` stores it content-addressed. So a node's `name` gets NO
+//! special treatment: it is an ordinary field on the payload struct, present
+//! on the wire exactly when set (`skip_serializing_if = "Option::is_none"`),
+//! and folds into the canonical JSON `salvor_engine::graph_hash` hashes like
+//! any other field. Renaming a node is therefore authoring a new document
+//! version, by design, the same way changing a `prompt` or an `over`
+//! reference is.
 
 use std::collections::BTreeMap;
 
@@ -142,6 +165,19 @@ impl Node {
         }
     }
 
+    /// The node's optional display name, whatever its kind. See the module
+    /// docs' "The optional node display name" section.
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            Node::Agent(n) => n.name.as_deref(),
+            Node::Tool(n) => n.name.as_deref(),
+            Node::Gate(n) => n.name.as_deref(),
+            Node::Branch(n) => n.name.as_deref(),
+            Node::Map(n) => n.name.as_deref(),
+        }
+    }
+
     /// The JSON Schema this node declares for the payload it CONSUMES, if any.
     /// Absent means the node does not declare an input type, and an edge into
     /// it passes the type-compatibility check unchecked.
@@ -182,6 +218,12 @@ pub struct AgentNode {
     /// agent-definition schema and lets the same definition be shared across
     /// nodes and runs by identity.
     pub agent_hash: String,
+    /// Optional short display label for this node. See the module docs' "The
+    /// optional node display name" section for the bound and the deliberate
+    /// hash-inclusion contrast with the agent `name` field. Additive: absent
+    /// on the wire when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// Optional JSON Schema for the payload this node consumes. Additive: absent
     /// on the wire when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -199,6 +241,12 @@ pub struct ToolNode {
     pub id: String,
     /// The tool's name, as registered with the runtime.
     pub tool: String,
+    /// Optional short display label for this node. See the module docs' "The
+    /// optional node display name" section for the bound and the deliberate
+    /// hash-inclusion contrast with the agent `name` field. Additive: absent
+    /// on the wire when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// The input mapping: tool input field name to an opaque source reference.
     /// Recorded as DATA; this crate does not resolve or evaluate the references.
     /// Additive: omitted on the wire when empty.
@@ -218,6 +266,12 @@ pub struct ToolNode {
 pub struct GateNode {
     /// The node's stable id, unique within the document.
     pub id: String,
+    /// Optional short display label for this node. See the module docs' "The
+    /// optional node display name" section for the bound and the deliberate
+    /// hash-inclusion contrast with the agent `name` field. Additive: absent
+    /// on the wire when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// Optional human-readable prompt shown in the approval inbox.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
@@ -233,6 +287,12 @@ pub struct GateNode {
 pub struct BranchNode {
     /// The node's stable id, unique within the document.
     pub id: String,
+    /// Optional short display label for this node. See the module docs' "The
+    /// optional node display name" section for the bound and the deliberate
+    /// hash-inclusion contrast with the agent `name` field. Additive: absent
+    /// on the wire when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// Optional opaque reference to the typed value the branch routes on.
     /// Recorded as DATA; not resolved in this crate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -298,6 +358,12 @@ pub enum BranchCondition {
 pub struct MapNode {
     /// The node's stable id, unique within the document.
     pub id: String,
+    /// Optional short display label for this node. See the module docs' "The
+    /// optional node display name" section for the bound and the deliberate
+    /// hash-inclusion contrast with the agent `name` field. Additive: absent
+    /// on the wire when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// Opaque reference to the typed list this node fans out over. Data only,
     /// not resolved in this crate.
     pub over: String,
@@ -364,11 +430,13 @@ mod tests {
                 Node::Agent(AgentNode {
                     id: "research".into(),
                     agent_hash: format!("sha256:{}", "a".repeat(64)),
+                    name: None,
                     input_schema: None,
                     output_schema: Some(json!({"type": "object"})),
                 }),
                 Node::Gate(GateNode {
                     id: "approve".into(),
+                    name: None,
                     prompt: Some("Approve publication?".into()),
                     approval_schema: json!({"type": "object"}),
                 }),
@@ -391,12 +459,15 @@ mod tests {
     }
 
     /// A node serializes with the adjacent `kind`/`payload` shape, and the id
-    /// rides inside the payload.
+    /// rides inside the payload. No `name` was set, so none appears on the
+    /// wire: this is the byte-stability guarantee the optional node name
+    /// must not disturb.
     #[test]
     fn node_uses_adjacent_kind_payload_shape() {
         let node = Node::Tool(ToolNode {
             id: "publish".into(),
             tool: "http_post".into(),
+            name: None,
             input: BTreeMap::new(),
             input_schema: None,
             output_schema: None,
@@ -405,6 +476,39 @@ mod tests {
         assert_eq!(
             json,
             r#"{"kind":"tool","payload":{"id":"publish","tool":"http_post"}}"#
+        );
+    }
+
+    /// Setting a node's `name` puts it on the wire; leaving it unset keeps the
+    /// payload byte-identical to a document written before the field existed.
+    #[test]
+    fn node_name_is_present_only_when_set() {
+        let named = Node::Tool(ToolNode {
+            id: "publish".into(),
+            tool: "http_post".into(),
+            name: Some("Publish the draft".into()),
+            input: BTreeMap::new(),
+            input_schema: None,
+            output_schema: None,
+        });
+        let json = serde_json::to_string(&named).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"kind":"tool","payload":{"id":"publish","tool":"http_post","name":"Publish the draft"}}"#
+        );
+
+        let unnamed = Node::Tool(ToolNode {
+            id: "publish".into(),
+            tool: "http_post".into(),
+            name: None,
+            input: BTreeMap::new(),
+            input_schema: None,
+            output_schema: None,
+        });
+        assert_eq!(
+            serde_json::to_string(&unnamed).expect("serialize"),
+            r#"{"kind":"tool","payload":{"id":"publish","tool":"http_post"}}"#,
+            "an unset name must not appear on the wire"
         );
     }
 

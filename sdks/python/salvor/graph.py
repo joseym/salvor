@@ -16,6 +16,19 @@ SEMANTIC checks (hash shape, referential integrity, acyclicity) are not done
 here; they stay with ``salvor graph validate``, run over the emitted JSON.
 
 Standard library only. No third-party dependency is imported.
+
+The optional node display name
+-------------------------------
+
+Every node type may carry an optional ``name``: a short, purely
+presentational label ("Approve the draft"). Bounds mirror the agent
+definition's own ``name`` precedent: at most 64 characters, and, when set,
+not empty or all whitespace -- ``salvor graph validate`` (and ``POST
+/v1/graphs``) enforce both, node-precise. Unlike an agent's ``name``
+(excluded from its definition hash so a rename never mints a new agent
+identity), a node's ``name`` is an ordinary field on the payload and hashes
+like any other: a graph document IS its content hash, so renaming a node is
+authoring a new document version, by design.
 """
 
 from __future__ import annotations
@@ -41,11 +54,14 @@ class AgentNode:
 
     id: str
     agent_hash: str
+    name: Optional[str] = None
     input_schema: Optional[JsonValue] = None
     output_schema: Optional[JsonValue] = None
 
     def to_node(self) -> Json:
         payload: Json = {"id": self.id, "agent_hash": self.agent_hash}
+        if self.name is not None:
+            payload["name"] = self.name
         if self.input_schema is not None:
             payload["input_schema"] = self.input_schema
         if self.output_schema is not None:
@@ -59,12 +75,15 @@ class ToolNode:
 
     id: str
     tool: str
+    name: Optional[str] = None
     input: Optional[dict[str, str]] = None
     input_schema: Optional[JsonValue] = None
     output_schema: Optional[JsonValue] = None
 
     def to_node(self) -> Json:
         payload: Json = {"id": self.id, "tool": self.tool}
+        if self.name is not None:
+            payload["name"] = self.name
         if self.input:
             payload["input"] = dict(self.input)
         if self.input_schema is not None:
@@ -80,10 +99,13 @@ class GateNode:
 
     id: str
     approval_schema: JsonValue
+    name: Optional[str] = None
     prompt: Optional[str] = None
 
     def to_node(self) -> Json:
         payload: Json = {"id": self.id}
+        if self.name is not None:
+            payload["name"] = self.name
         if self.prompt is not None:
             payload["prompt"] = self.prompt
         payload["approval_schema"] = self.approval_schema
@@ -117,10 +139,13 @@ class BranchNode:
 
     id: str
     cases: list[BranchCase]
+    name: Optional[str] = None
     on: Optional[str] = None
 
     def to_node(self) -> Json:
         payload: Json = {"id": self.id}
+        if self.name is not None:
+            payload["name"] = self.name
         if self.on is not None:
             payload["on"] = self.on
         payload["cases"] = [case.to_dict() for case in self.cases]
@@ -145,6 +170,7 @@ class MapNode:
     over: str
     concurrency: int
     body: Json
+    name: Optional[str] = None
     output_schema: Optional[JsonValue] = None
 
     def to_node(self) -> Json:
@@ -154,6 +180,8 @@ class MapNode:
             "concurrency": self.concurrency,
             "body": self.body,
         }
+        if self.name is not None:
+            payload["name"] = self.name
         if self.output_schema is not None:
             payload["output_schema"] = self.output_schema
         return {"kind": "map", "payload": payload}
@@ -207,12 +235,18 @@ class GraphBuilder:
         id: str,
         agent_hash: str,
         *,
+        name: Optional[str] = None,
         input_schema: Optional[JsonValue] = None,
         output_schema: Optional[JsonValue] = None,
     ) -> "GraphBuilder":
-        """Adds an ``agent`` node, referenced by its ``sha256:<64 hex>`` hash."""
+        """Adds an ``agent`` node, referenced by its ``sha256:<64 hex>`` hash.
+
+        ``name`` is an optional short display label (see the module docs'
+        "The optional node display name" section); its bounds are checked by
+        ``salvor graph validate``, not here.
+        """
         self._nodes.append(
-            AgentNode(id, agent_hash, input_schema, output_schema).to_node()
+            AgentNode(id, agent_hash, name, input_schema, output_schema).to_node()
         )
         return self
 
@@ -221,13 +255,14 @@ class GraphBuilder:
         id: str,
         tool: str,
         *,
+        name: Optional[str] = None,
         input: Optional[dict[str, str]] = None,
         input_schema: Optional[JsonValue] = None,
         output_schema: Optional[JsonValue] = None,
     ) -> "GraphBuilder":
         """Adds a ``tool`` node for one direct invocation of a registered tool."""
         self._nodes.append(
-            ToolNode(id, tool, input, input_schema, output_schema).to_node()
+            ToolNode(id, tool, name, input, input_schema, output_schema).to_node()
         )
         return self
 
@@ -236,10 +271,11 @@ class GraphBuilder:
         id: str,
         approval_schema: JsonValue,
         *,
+        name: Optional[str] = None,
         prompt: Optional[str] = None,
     ) -> "GraphBuilder":
         """Adds a ``gate`` node. The approval schema is required."""
-        self._nodes.append(GateNode(id, approval_schema, prompt).to_node())
+        self._nodes.append(GateNode(id, approval_schema, name, prompt).to_node())
         return self
 
     def branch(
@@ -247,10 +283,11 @@ class GraphBuilder:
         id: str,
         cases: list[BranchCase],
         *,
+        name: Optional[str] = None,
         on: Optional[str] = None,
     ) -> "GraphBuilder":
         """Adds a ``branch`` node with its named cases."""
-        self._nodes.append(BranchNode(id, cases, on).to_node())
+        self._nodes.append(BranchNode(id, cases, name, on).to_node())
         return self
 
     def map(
@@ -260,11 +297,12 @@ class GraphBuilder:
         concurrency: int,
         body: Json,
         *,
+        name: Optional[str] = None,
         output_schema: Optional[JsonValue] = None,
     ) -> "GraphBuilder":
         """Adds a ``map`` node with its fan-out reference, cap, and body."""
         self._nodes.append(
-            MapNode(id, over, concurrency, body, output_schema).to_node()
+            MapNode(id, over, concurrency, body, name, output_schema).to_node()
         )
         return self
 
