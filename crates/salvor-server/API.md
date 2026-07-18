@@ -793,6 +793,18 @@ sees them for a client-driven run: at most 16 labels, each key at most 64
 bytes, each value at most 256 bytes. A `RunStarted` carrying labels over the
 bounds is `400 bad_request`, and nothing in the batch is written.
 
+Every envelope's `recorded_at` is **server-stamped**: the server overwrites it
+with its own clock reading before folding or writing the event, regardless of
+what the submitted envelope carries in that field. `recorded_at` is a required
+field on the wire (the pinned `EventEnvelope` shape every event stream and
+`salvor history --json` share), so a client must still send one, but its value
+is ignored entirely: a client may send the current time, the Unix epoch, or
+anything else, and the server's stamp always wins. This keeps `recorded_at`
+meaning "when this store durably recorded the event" rather than "whatever a
+browser's clock happened to read," uniformly with the model-step and tool-step
+endpoints below, which have always stamped their own intents and completions
+this way.
+
 Semantics, keyed by sequence number:
 
 - A byte-identical re-append at an already-recorded seq is a `200` no-op (the

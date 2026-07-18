@@ -5,8 +5,8 @@
 mod common;
 
 use common::{
-    CountBehavior, ScriptedModel, TestServer, agent_factory, app_state, counter, get_json,
-    memory_store, post_json,
+    CountBehavior, ScriptedModel, TestServer, agent_factory, app_state, counter, fixed_clock,
+    get_json, memory_store, post_json,
 };
 use reqwest::StatusCode;
 use salvor_core::{Effect, Event, EventEnvelope, ReplayCursor, RunId, SequenceNumber};
@@ -14,15 +14,30 @@ use serde_json::{Value, json};
 use time::macros::datetime;
 use uuid::Uuid;
 
-/// A fixed recorded timestamp, so hand-built envelopes are stable.
+/// A fixed recorded timestamp, so hand-built envelopes are stable. Distinct
+/// from the server's own clock (see [`fixed_clock`]): a test that wants to
+/// prove the server's stamp wins picks a `recorded_at` that could never be
+/// confused with the server's.
 fn ts() -> time::OffsetDateTime {
     datetime!(2026-07-11 12:00:00 UTC)
 }
 
-/// The wire JSON of an envelope for `run_id` at `seq`.
+/// The wire JSON of an envelope for `run_id` at `seq`, carrying `ts()` as the
+/// client's claimed `recorded_at`. The server overwrites this on every
+/// append (see [`client_runs::append`](salvor_server) and the module docs on
+/// `crates/salvor-server/src/client_runs.rs`), so the value chosen here is
+/// never what lands in the store; [`env_value_at`] exists for tests that need
+/// to choose it explicitly to prove exactly that.
 fn env_value(run_id: &str, seq: u64, event: Event) -> Value {
+    env_value_at(run_id, seq, ts(), event)
+}
+
+/// The wire JSON of an envelope for `run_id` at `seq`, carrying a caller-chosen
+/// claimed `recorded_at`. Used to submit an absurd stamp (the Unix epoch, a
+/// far-future date) and confirm the server discards it.
+fn env_value_at(run_id: &str, seq: u64, recorded_at: time::OffsetDateTime, event: Event) -> Value {
     let run_id = RunId::from_uuid(Uuid::parse_str(run_id).expect("run id"));
-    let envelope = EventEnvelope::new(run_id, SequenceNumber::new(seq), ts(), event);
+    let envelope = EventEnvelope::new(run_id, SequenceNumber::new(seq), recorded_at, event);
     serde_json::to_value(envelope).expect("serialize envelope")
 }
 
@@ -534,5 +549,118 @@ async fn appended_run_started_with_labels_round_trips() {
         log["log"][0]["event"]["payload"]["labels"],
         json!({ "build": "42" }),
         "the accepted labels come back on read exactly as submitted"
+    );
+}
+
+/// The real-world bug this fix closes: a client that claims the Unix epoch
+/// (or a wildly far-future date) for `recorded_at` on `RunStarted`,
+/// `NowObserved`, and `RunCompleted` gets back the SERVER's stamp on every one
+/// of them, never its own claim. The stamp is `fixed_clock()`'s constant, the
+/// same clock hook every server-performed step already stamped with, which is
+/// this test's proof of the stamp's source: the recorded envelopes carry that
+/// exact constant regardless of what the client sent or when the test
+/// actually ran.
+#[tokio::test]
+async fn absurd_client_recorded_at_is_overwritten_with_the_server_stamp() {
+    let server = client_server().await;
+    let client = reqwest::Client::new();
+    let (run, token) = open_run(&client, &server.base).await;
+
+    let epoch = datetime!(1970-01-01 00:00:00 UTC);
+    let far_future = datetime!(2999-12-31 23:59:59 UTC);
+
+    let events = vec![
+        env_value_at(&run, 0, epoch, run_started()),
+        env_value_at(&run, 1, far_future, Event::NowObserved { now: ts() }),
+        env_value_at(
+            &run,
+            2,
+            epoch,
+            Event::RunCompleted {
+                output: json!({ "done": true }),
+            },
+        ),
+    ];
+    let (status, body) = append(&client, &server.base, &run, Some(&token), events).await;
+    assert_eq!(status, StatusCode::OK, "append: {body}");
+    assert_eq!(body["appended"], json!([0, 1, 2]));
+
+    let (status, log) = get_json(
+        &client,
+        &format!("{}/v1/client-runs/{run}/log", server.base),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let envelopes: Vec<EventEnvelope> =
+        serde_json::from_value(log["log"].clone()).expect("decode log");
+    assert_eq!(envelopes.len(), 3, "every event landed");
+
+    let server_stamp = fixed_clock()();
+    for envelope in &envelopes {
+        assert_eq!(
+            envelope.recorded_at, server_stamp,
+            "the server's own clock stamps every appended envelope, never the client's claim"
+        );
+    }
+
+    // The append-guard and the replay cursor never look at `recorded_at`
+    // (salvor-replay/src/validate.rs's `validate_next` and
+    // salvor-replay/src/replay.rs's `ReplayCursor` match only on `.event`
+    // content), so overwriting it here cannot desynchronize replay: the run
+    // still folds to completion from the stamped log.
+    let mut cursor = ReplayCursor::new(envelopes).expect("the log is a well-formed run");
+    assert!(matches!(
+        cursor.begin("sha256:agent", None).expect("begin"),
+        salvor_core::Outcome::Replayed(_)
+    ));
+    assert!(matches!(
+        cursor.now().expect("now"),
+        salvor_core::Outcome::Replayed(_)
+    ));
+    assert!(matches!(
+        cursor
+            .complete_run(&json!({ "done": true }))
+            .expect("complete"),
+        salvor_core::Outcome::Replayed(_)
+    ));
+    assert!(
+        cursor.is_finished(),
+        "the run replays to its terminal event even though every recorded_at was rewritten"
+    );
+}
+
+/// A retry submitted with a different claimed `recorded_at` than the original
+/// is still a no-op: `recorded_at` was never the client's fact to assert, so
+/// it plays no part in deciding whether a resend at an already-recorded
+/// position is the same event again.
+#[tokio::test]
+async fn retry_with_a_different_claimed_recorded_at_is_still_idempotent() {
+    let server = client_server().await;
+    let client = reqwest::Client::new();
+    let (run, token) = open_run(&client, &server.base).await;
+
+    let epoch = datetime!(1970-01-01 00:00:00 UTC);
+    let far_future = datetime!(2999-12-31 23:59:59 UTC);
+
+    let first = env_value_at(&run, 0, epoch, run_started());
+    let (status, _) = append(&client, &server.base, &run, Some(&token), vec![first]).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let retry = env_value_at(&run, 0, far_future, run_started());
+    let (status, body) = append(&client, &server.base, &run, Some(&token), vec![retry]).await;
+    assert_eq!(status, StatusCode::OK, "retry: {body}");
+    assert_eq!(body["appended"], json!([0]));
+
+    let (_, log) = get_json(
+        &client,
+        &format!("{}/v1/client-runs/{run}/log", server.base),
+        None,
+    )
+    .await;
+    assert_eq!(
+        log["log"].as_array().unwrap().len(),
+        1,
+        "no duplicate row from the retry"
     );
 }

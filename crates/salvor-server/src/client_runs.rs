@@ -40,6 +40,24 @@
 //! server ever inspects them is [`append`], the moment that event is accepted:
 //! the sanity bounds (see `salvor_runtime::validate_labels`) are checked there,
 //! against whatever `labels` the submitted event carries, before it is written.
+//!
+//! # `recorded_at` is stamped here, never trusted from the wire
+//!
+//! Every [`EventEnvelope`] carries a `recorded_at`. On the server-performed
+//! steps ([`model_step`], [`tool_step`], and their completions) it was always
+//! [`AppState::now`], because this server built those envelopes itself. This
+//! generic append is the one surface where the envelope arrives already built,
+//! by the client, and it is the one place `recorded_at` used to be taken on
+//! faith: a browser's clock is not this store's clock, and a run with an
+//! honest server-performed step next to a client-appended `RunStarted` stamped
+//! at the Unix epoch is a store that no longer tells the truth about when
+//! things happened. So [`append`] overwrites every incoming envelope's
+//! `recorded_at` with [`AppState::now`] before it is folded or written;
+//! whatever the client sent in that field is discarded. The event kind, its
+//! payload, and its `seq` are still exactly what the client submitted (those
+//! remain the client's fact, since the client is the one driving the run); only
+//! the "when was this durably recorded" stamp is the server's, uniformly,
+//! everywhere an envelope is written.
 
 use std::convert::Infallible;
 
@@ -241,6 +259,11 @@ pub async fn get_log(
 /// belong to the server-performed model-step and tool-step endpoints, not to
 /// this generic append. The whole batch is validated
 /// before anything is written, so a batch that turns illegal appends nothing.
+///
+/// Every envelope's `recorded_at` is overwritten with [`AppState::now`] before
+/// it is folded or written (see the module docs): `recorded_at` is the store's
+/// fact, not the client's claim, so whatever a submitted envelope carries in
+/// that field is never trusted or stored.
 pub async fn append(
     State(state): State<AppState>,
     Path(run_id_text): Path<String>,
@@ -272,7 +295,7 @@ pub async fn append(
     let mut appended: Vec<u64> = Vec::with_capacity(request.events.len());
     let mut to_append: Vec<EventEnvelope> = Vec::new();
 
-    for candidate in request.events {
+    for mut candidate in request.events {
         if candidate.run_id != run_id {
             return Err(ApiError::Divergence(format!(
                 "event names run {} but the path is run {}",
@@ -298,8 +321,14 @@ pub async fn append(
         let next_seq = validator.next_seq();
         if candidate.seq < next_seq {
             // An already-recorded position: idempotent retry or divergence.
+            // `recorded_at` is the store's fact, not the client's claim (see
+            // the module docs), so a retry's legality never turns on whatever
+            // timestamp this attempt happened to carry: canonicalize it to
+            // the already-recorded stamp before comparing the rest byte for
+            // byte.
             let index = candidate.seq.get() as usize;
             let recorded = &validator.log()[index];
+            candidate.recorded_at = recorded.recorded_at;
             if *recorded == candidate {
                 appended.push(candidate.seq.get());
                 continue;
@@ -310,7 +339,13 @@ pub async fn append(
             )));
         }
 
-        // A new position: the append-guard decides legality.
+        // A new position: the server stamps its own clock reading, the same
+        // source every server-performed step uses, and ignores whatever
+        // `recorded_at` the client submitted. `recorded_at` is the store's
+        // fact, not the client's claim.
+        candidate.recorded_at = state.now();
+
+        // The append-guard decides legality.
         validator
             .push(candidate.clone())
             .map_err(|error| ApiError::Divergence(error.to_string()))?;
