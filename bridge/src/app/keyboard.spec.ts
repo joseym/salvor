@@ -45,14 +45,13 @@ describe('shell keyboard layer', () => {
 
   afterEach(() => vi.unstubAllGlobals());
 
-  it('offers the four views by name, and no held-out Workflows, in the ⌘K palette', () => {
+  it('offers all five views by name, Workflows included, in the ⌘K palette', () => {
     const fixture = TestBed.createComponent(App);
     fixture.detectChanges();
     const app = fixture.componentInstance;
     app.paletteOpen.set(true);
     const labels = app.paletteItems().map((i) => i.label);
-    expect(labels).toEqual(['Runs', 'Inspector', 'Inbox', 'Spend']);
-    expect(labels).not.toContain('Workflows');
+    expect(labels).toEqual(['Runs', 'Inspector', 'Inbox', 'Workflows', 'Spend']);
   });
 
   it('filters views by name and runs by id prefix from the live list', async () => {

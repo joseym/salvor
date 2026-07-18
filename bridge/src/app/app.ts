@@ -10,7 +10,7 @@ import {
   signal,
 } from '@angular/core';
 
-import { RunsService } from './core/api';
+import { CapabilityProbeService, GraphsService, RunsService } from './core/api';
 import { PillService } from './core/pill';
 import { ThemeService } from './core/theme';
 import { ViewService, type ViewName } from './core/view';
@@ -19,22 +19,22 @@ import { Inspector } from './features/inspector/inspector';
 import { groupOf, labelOf } from './features/runs/run-model';
 import { Runs } from './features/runs/runs';
 import { Spend } from './features/spend/spend';
+import { shortHash } from './features/workflows/wf-model';
 import { Workflows } from './features/workflows/workflows';
 
 type NavLink = { readonly view: ViewName; readonly label: string };
 
-/** One row in the ⌘K palette: a named view to switch to, or a live run to open by id. */
+/** One row in the ⌘K palette: a named view, a live run to open by id, or a stored graph. */
 type PaletteItem =
   | { readonly kind: 'view'; readonly id: string; readonly label: string; readonly hint: string; readonly view: ViewName }
-  | { readonly kind: 'run'; readonly id: string; readonly label: string; readonly hint: string; readonly runId: string };
+  | { readonly kind: 'run'; readonly id: string; readonly label: string; readonly hint: string; readonly runId: string }
+  | { readonly kind: 'graph'; readonly id: string; readonly label: string; readonly hint: string; readonly hash: string };
 
-// Workflows is not a navigable view: the graph canvas ships with the v0.4 engine. It is absent
-// from the nav, but /workflows still resolves (see routes) so a deep link lands on an honest note
-// rather than a dead end.
 const NAV_LINKS: readonly NavLink[] = [
   { view: 'runs', label: 'Runs' },
   { view: 'inspector', label: 'Inspector' },
   { view: 'inbox', label: 'Inbox' },
+  { view: 'workflows', label: 'Workflows' },
   { view: 'spend', label: 'Spend' },
 ];
 
@@ -42,7 +42,7 @@ const SUBS: Readonly<Record<ViewName, string>> = {
   runs: 'A snapshot of GET /v1/runs — waiting-first.',
   inspector: 'One run, read from its log.',
   inbox: 'Runs waiting on a human decision.',
-  workflows: 'Ships with the graph engine.',
+  workflows: 'Author graphs; project and fork real runs.',
   spend: 'Folded usage, by agent and by day.',
 };
 
@@ -60,6 +60,8 @@ const SUBS: Readonly<Record<ViewName, string>> = {
 })
 export class App implements AfterViewInit {
   private readonly runsService = inject(RunsService);
+  private readonly graphsService = inject(GraphsService);
+  private readonly capabilityProbe = inject(CapabilityProbeService);
   private readonly viewService = inject(ViewService);
   private readonly destroyRef = inject(DestroyRef);
   private readonly pill = inject(PillService);
@@ -70,18 +72,25 @@ export class App implements AfterViewInit {
   readonly navLinks = NAV_LINKS;
   readonly view = this.viewService.view;
 
-  /**
-   * DEV-ONLY workflows un-hold flag. Workflows stays STRUCTURALLY HELD for now — no nav
-   * link and, by default, no canvas — so the suite's `workflowsHeld` detector (no
-   * `.nav-link[data-view="workflows"]` AND no `#wf-nodes`) sees the held state on both targets. A
-   * `?wf=1` query param renders the real canvas for manual verification only; it is never set by the
-   * suite. S8d REMOVES this flag, adds the nav link, and flips `workflowsHeld` to false.
-   */
-  readonly wfDevFlag = signal<boolean>(
-    typeof location !== 'undefined' && new URLSearchParams(location.search).get('wf') === '1',
-  );
   readonly title = this.viewService.title;
   readonly sub = computed(() => SUBS[this.view()]);
+
+  /**
+   * The topbar honesty chip must not lie: "no graph engine" was true before the v0.4 server and
+   * is FALSE the moment the capability probe sees a fork API — so the clause is derived from the
+   * probe, never hardcoded. An unreachable or pre-v0.4 control plane degrades to fork:false and
+   * keeps the old sentence honestly.
+   */
+  readonly specChipText = computed(() =>
+    this.capabilityProbe.capabilities().fork
+      ? 'Live control plane · graph engine'
+      : 'Live control plane · no graph engine',
+  );
+  readonly specChipLabel = computed(() =>
+    this.capabilityProbe.capabilities().fork
+      ? 'This dashboard reads a real Salvor control plane, graph engine included. Click to read what this canvas is.'
+      : 'This dashboard reads a real Salvor control plane. There is no graph engine yet: Workflows and fork have no runtime behind them.',
+  );
 
   readonly navCollapsed = signal(false);
   readonly dotKeyOpen = signal(false);
@@ -95,6 +104,8 @@ export class App implements AfterViewInit {
   constructor() {
     // apply the collapse choice to the document root so the CSS rail rules fire
     this.applyNav();
+    // one probe at boot; the chip and every fork offer read the same signal
+    void this.capabilityProbe.probe();
   }
 
   ngAfterViewInit(): void {
@@ -162,9 +173,10 @@ export class App implements AfterViewInit {
    * descendant — the list is genuinely empty, so nothing lingers behind the dismissed dialog. */
   readonly paletteOpen = signal(false);
 
-  /** The visible palette rows: the named views that match, then live runs whose id starts with the
-   * query. An empty query offers every view and the most recent runs, so ⌘K then Enter is useful
-   * before a single key is typed. Empty while the palette is closed. */
+  /** The visible palette rows: the named views that match, then stored graphs, then live runs
+   * whose id starts with the query. An empty query offers every KIND of destination — views,
+   * graphs AND runs — so ⌘K then Enter is useful before a single key is typed, and no kind falls
+   * off the end of a flat cap. Empty while the palette is closed. */
   readonly paletteItems = computed<readonly PaletteItem[]>(() => {
     if (!this.paletteOpen()) return [];
     const q = this.paletteQuery().trim().toLowerCase();
@@ -176,6 +188,16 @@ export class App implements AfterViewInit {
       view: l.view,
     }));
     const viewMatches = q ? views.filter((v) => v.label.toLowerCase().includes(q)) : views;
+    const graphs = this.graphsService.graphs().map((g) => ({
+      kind: 'graph' as const,
+      id: 'graph:' + g.graph,
+      label: shortHash(g.graph),
+      hint: `${g.nodeCount} nodes`,
+      hash: g.graph,
+    }));
+    const graphMatches: PaletteItem[] = q
+      ? graphs.filter((g) => g.label.toLowerCase().includes(q) || g.hash.toLowerCase().includes(q))
+      : graphs.slice(0, 4);
     const runs = this.runsService.runs();
     const runMatches: PaletteItem[] = (q ? runs.filter((r) => r.run.toLowerCase().startsWith(q)) : runs.slice(0, 6))
       .slice(0, 8)
@@ -186,7 +208,7 @@ export class App implements AfterViewInit {
         hint: labelOf(r.status.state),
         runId: r.run,
       }));
-    return [...viewMatches, ...runMatches];
+    return [...viewMatches, ...graphMatches, ...runMatches];
   });
 
   /** The id the input's `aria-activedescendant` points at, clamped to the current result count.
@@ -246,6 +268,7 @@ export class App implements AfterViewInit {
   activatePaletteItem(item: PaletteItem): void {
     this.closePalette();
     if (item.kind === 'view') this.viewService.go(item.view);
+    else if (item.kind === 'graph') this.viewService.openGraph(item.hash);
     else this.viewService.openRun(item.runId);
     setTimeout(() => document.getElementById('view-title')?.focus(), 0);
   }

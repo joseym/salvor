@@ -112,7 +112,7 @@
   align-self: center; flex: none;
   display: inline-flex; align-items: center; gap: var(--space-2);
   padding: 4px var(--space-3); border: 1px dashed var(--edge-strong); border-radius: var(--radius-pill);
-  background: none; color: var(--muted); font-size: var(--text-xs); letter-spacing: 0.08px; cursor: pointer;
+  background: none; color: var(--muted); font-family: inherit; font-size: var(--text-xs); letter-spacing: 0.08px; cursor: pointer;
 }
 .wf-spec:hover { color: var(--fg-2); border-color: var(--fg-2); }
 .wf-spec:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -425,6 +425,7 @@
 .palette-opt { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-4); padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); cursor: pointer; }
 .palette-opt-label { font-family: var(--font-mono); font-size: 13px; color: var(--fg); }
 .palette-opt-hint { font-size: 11px; color: var(--faint); text-transform: lowercase; white-space: nowrap; }
+.qac-kind { margin-left: auto; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); border: 1px solid var(--border-soft); border-radius: var(--radius-pill); padding: 0 6px; flex: none; }
 /* The highlight is aria-activedescendant's visual twin — the input keeps DOM focus, so the active
    row cannot rely on :focus and is driven from [aria-selected] / .is-active instead. */
 .palette-opt.is-active, .palette-opt[aria-selected="true"] { background: var(--wash); }

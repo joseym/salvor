@@ -64,13 +64,13 @@
       <button class="info" type="button" id="dot-key" aria-label="What the status dots mean" aria-controls="dot-key-note" [attr.aria-expanded]="dotKeyOpen()" (click)="toggleDotKey()">i</button>
 
       <!-- This build talks to a REAL control plane, so Runs and the Inspector read the live
-           server — no fixtures involved. What's still true is that there is NO graph engine (v0.4):
-           Workflows and fork have no runtime behind them. The chip states that. It is a status,
-           not a control: nothing opens from it, so it carries no button or popup semantics — its
-           full sentence is its accessible name. -->
-      <span class="wf-spec" id="spec-chip" role="note" aria-label="This dashboard reads a real Salvor control plane. There is no graph engine yet: Workflows and fork have no runtime behind them.">
-        <span class="spec-dot" aria-hidden="true"></span>Live control plane · no graph engine
-      </span>
+           server. Whether a graph engine sits behind it is PROBED (GET /v1/capabilities), and the
+           chip derives its clause from the answer — it must never claim "no graph engine" over a
+           server that forks. Clicking it opens the About panel, which explains the canvas. -->
+      <button class="wf-spec" type="button" id="spec-chip" aria-haspopup="dialog" popovertarget="wf-about"
+              [attr.title]="specChipLabel()">
+        <span class="spec-dot" aria-hidden="true"></span>{{ specChipText() }}
+      </button>
 
       <button class="palette-open" type="button" id="palette-open" aria-haspopup="dialog" title="Jump to a run or a view" (click)="openPalette()">
         Jump to… <kbd class="kbd">⌘K</kbd>
@@ -101,28 +101,11 @@
     </section>
 
     <!-- ---------------- VIEW: WORKFLOWS ----------------
-         STRUCTURALLY HELD for now. Not a nav destination, and by default no canvas — so a
-         pasted /workflows deep link lands on this honest note, and the suite's workflowsHeld
-         detector (no nav link AND no #wf-nodes) sees the held state. The canvas component is built
-         and route-registered, but rendered only behind the dev-only ?wf=1 flag (see app.ts#wfDevFlag)
-         for manual verification. S8d removes the flag, adds the nav link, and un-holds. -->
+         Mounted eagerly like every other view section: the fork hazard dialog, the About popover
+         chip and the fork intents from Inspector/Runs all need the canvas present from boot, not
+         behind a lazy chunk that may not have landed when a fork request arrives. -->
     <section class="view" id="view-workflows" data-od-id="workflows" [class.is-active]="isActive('workflows')" [hidden]="!isActive('workflows')">
-      @if (wfDevFlag()) {
-        <!-- @defer keeps the whole canvas OUT of the default bundle: a held, dev-only view should
-             not ship its code to every user. Loads only when the ?wf=1 flag is set. -->
-        @defer (on immediate) {
-          <bridge-workflows />
-        }
-      } @else {
-        <div class="empty-state">
-          <h4>Workflows arrives with the graph engine</h4>
-          <p>
-            This is where agent graphs will be authored, validated and watched as they run. The server
-            holds graph documents today, but has no engine to run them — that lands in v0.4. Until
-            then there is nothing here to show, so the view is kept out of the way.
-          </p>
-        </div>
-      }
+      <bridge-workflows />
     </section>
 
     <!-- ---------------- VIEW: SPEND (stub) ---------------- -->
@@ -164,6 +147,7 @@
         (click)="activatePaletteItem(item)"
       >
         <span class="palette-opt-label">{{ item.label }}</span>
+        <span class="qac-kind">{{ item.kind }}</span>
         <span class="palette-opt-hint">{{ item.hint }}</span>
       </li>
     } @empty {
@@ -172,6 +156,63 @@
       }
     }
   </ul>
+</div>
+
+<!-- ABOUT THIS CANVAS — a popover=auto (light-dismiss + Escape at the platform level), NOT a
+     modal; the fork hazard review is the app's only modal. It lives at the SHELL level, outside
+     every [hidden] view section, because the topbar chip opens it from any view — a popover
+     inside a display:none ancestor would never paint. -->
+<div class="wf-about" id="wf-about" popover="auto" role="dialog" aria-labelledby="wf-about-title">
+  <div class="wf-about-inner">
+    <div class="fork-head">
+      <div>
+        <h3 class="cpanel-title" id="wf-about-title">About this canvas</h3>
+        <p class="cpanel-sub">What this is, and how the canvas works.</p>
+      </div>
+      <button class="cpanel-x" type="button" id="wf-about-x" aria-label="Close" popovertarget="wf-about" popovertargetaction="hide">×</button>
+    </div>
+    <div class="wf-about-body">
+      <!-- ONE standfirst framing the section (no NOTE eyebrow — it is the opening sentence, not a
+           note), then the four load-bearing points as one .notes apparatus, each opening with its
+           own run-in thesis. -->
+      <p class="lede">
+        <b>The canvas is the topology, not the record.</b> It is here to author a graph and to fork a
+        run — the two things a timeline cannot do. To <em>read</em> a run you still use the Inspector,
+        where the log folds event by event. A static picture cannot honestly show a data-dependent
+        branch, so this view will never try to replace it.
+      </p>
+      <div class="notes">
+        <p id="wf-projection-note">
+          <b>The projection is a summary; the log is the record.</b> In Run mode every node is coloured
+          from the server's own projection of the run's one append-only log
+          (<span class="mono">GET /v1/runs/&#123;id&#125;/graph</span>) — the same log the Inspector folds, no
+          second copy. The inked route is the case the run <em>recorded</em> at the branch, never a
+          guess, and the road not taken reads as <b>skipped</b>, not as absent.
+        </p>
+        <p>
+          <b>Where a node sits is presentation, not part of the graph.</b> The hash is taken over the
+          nodes and edges only; the drawing is derived from them. So a node's position can never change
+          a graph's identity, and editing a published graph is impossible the same way: a changed byte
+          is a different hash, which is a different graph.
+        </p>
+        <p id="wf-fork-note">
+          <b>A fork cannot edit the graph.</b> It reuses the origin's hash — a run of a different graph
+          would not be a fork of this one. What a fork <em>does</em> change is what has already happened
+          in the world: every <b>write</b> the origin recorded downstream of the fork point will run a
+          second time. The hazard review lists each one and refuses to proceed until you have
+          acknowledged it — and then writes your acknowledgement into the new run's log, permanently.
+        </p>
+        <p id="wf-lineage-note">
+          <b>"Forks of this run" is derived. The parent recorded nothing.</b> A forked run carries its
+          origin in its <em>own</em> log; the parent's log is append-only and was closed before its
+          children existed, so it can never point forward at them. The server indexes every run's
+          <span class="mono">ForkedFrom</span> and answers the reverse question
+          (<span class="mono">GET /v1/runs/&#123;id&#125;/forks</span>) as a projection, labelled derived on its
+          face rather than passing for memory.
+        </p>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- ? keyboard reference — the rows below mirror the bindings actually wired in the shell and the

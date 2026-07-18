@@ -18,7 +18,7 @@ describe('App', () => {
     expect(app).toBeTruthy();
   });
 
-  it('should render the shell brand, the four nav links and the theme toggle', async () => {
+  it('should render the shell brand, the five nav links and the theme toggle', async () => {
     const fixture = TestBed.createComponent(App);
     fixture.detectChanges();
     await fixture.whenStable();
@@ -26,11 +26,10 @@ describe('App', () => {
     expect(compiled.querySelector('#app-nav')).toBeTruthy();
     expect(compiled.textContent).toContain('Salvor');
     expect(compiled.textContent).toContain('bridge v0.3');
-    // Workflows is deliberately not a nav link (it ships with the v0.4 engine) — Runs, Inspector,
-    // Inbox, Spend only.
-    expect(compiled.querySelectorAll('.nav-link').length).toBe(4);
+    // All five views are nav destinations — Workflows joined when the graph engine shipped.
+    expect(compiled.querySelectorAll('.nav-link').length).toBe(5);
     const labels = Array.from(compiled.querySelectorAll('.nav-link .nav-text')).map((n) => n.textContent?.trim());
-    expect(labels).toEqual(['Runs', 'Inspector', 'Inbox', 'Spend']);
+    expect(labels).toEqual(['Runs', 'Inspector', 'Inbox', 'Workflows', 'Spend']);
     expect(compiled.querySelector('#theme-toggle')).toBeTruthy();
   });
 });

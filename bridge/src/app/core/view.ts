@@ -89,6 +89,11 @@ export class ViewService {
     void this.router.navigate(['/inspector', runId]);
   }
 
+  /** Open the canvas on a stored graph — the same `/workflows/<hashPrefix>` door a fork lands on. */
+  openGraph(hash: string): void {
+    void this.router.navigate(['/workflows', hash.replace(/^sha256:/, '').slice(0, 12)]);
+  }
+
   /** Navigate to Runs with `q` applied — the same filter mechanism Runs' own pills write, reached
    * from another view (Spend's activity chart). */
   filterRuns(q: string): void {
