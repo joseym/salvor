@@ -18,8 +18,10 @@ export type WfEffect = 'read' | 'write' | 'idempotent';
 export interface WfNode {
   readonly id: string;
   readonly kind: WfNodeKind;
-  /** A human label. Server documents carry none (a node is its id), so the id is the honest
-   * fallback — never an invented sentence. A draft may carry an author-typed name. */
+  /** A human label. A server document's payload may carry its own `name` (the graph format's
+   * optional node display name); when it does not, the id is the honest fallback — never an
+   * invented sentence. A draft always carries an author-typed name (possibly still the id, if
+   * never edited). */
   readonly name: string;
   // Kind-specific payload, optional because each field belongs to exactly one kind. The node
   // inspector panel and the validator read these; a field a document does not carry stays
@@ -78,10 +80,11 @@ export function nodeDoes(n: WfNode): string {
 }
 
 /** Map one server node into the canvas model, keeping every kind-specific payload field the panel
- * or validator reads. A published server graph carries no display names, so a node reads by its
- * own id (honest: the document records no name to show). */
+ * or validator reads. A server document's node payload may carry its own optional `name`; when it
+ * does, the node reads by that display name, and when it does not, the id is the honest fallback
+ * (never an invented sentence). */
 function fromServerNode(n: GraphNode): WfNode {
-  const base = { id: nodeId(n), kind: n.kind, name: nodeId(n) } as const;
+  const base = { id: nodeId(n), kind: n.kind, name: n.payload.name ?? nodeId(n) } as const;
   switch (n.kind) {
     case 'agent':
       return { ...base, agentHash: n.payload.agent_hash };

@@ -214,6 +214,11 @@ pkill -f 'examples/reconciliation/model_server.py' 2>/dev/null || true
 #      Submitted once via POST /v1/graphs; every seed run below starts a fresh /v1/graph-runs of
 #      the SAME stored hash, so GET /v1/graphs lists one document with three runs against it.
 #
+#      Optional node-name addition (additive only): each node payload also carries its new,
+#      optional display `name` ("Research the topic" / "Approve the draft" / "Follow up"), so the
+#      served target's canvas and node list render real names instead of falling back to the ids
+#      "research" / "approve" / "followup" used above for the topology narrative.
+#
 #      Seed A (graph-run-completed): started, awaited to the gate, resumed with {"approved":true}
 #      through the ORDINARY /v1/runs/{id}/resume endpoint (no graph-specific verb), awaited to
 #      completion.
@@ -235,9 +240,12 @@ agent_hash = sys.argv[1]
 doc = {
     "schema_version": 1,
     "nodes": [
-        {"kind": "agent", "payload": {"id": "research", "agent_hash": agent_hash}},
+        {"kind": "agent", "payload": {
+            "id": "research", "agent_hash": agent_hash, "name": "Research the topic",
+        }},
         {"kind": "gate", "payload": {
             "id": "approve",
+            "name": "Approve the draft",
             "prompt": "Approve this research pass before the follow-up round?",
             "approval_schema": {
                 "type": "object",
@@ -245,7 +253,9 @@ doc = {
                 "required": ["approved"],
             },
         }},
-        {"kind": "agent", "payload": {"id": "followup", "agent_hash": agent_hash}},
+        {"kind": "agent", "payload": {
+            "id": "followup", "agent_hash": agent_hash, "name": "Follow up",
+        }},
     ],
     "edges": [
         {"from": "research", "to": "approve"},
