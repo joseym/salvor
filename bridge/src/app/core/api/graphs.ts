@@ -16,10 +16,9 @@ import {
 /**
  * The graph catalog: `GET /v1/graphs` (list), `GET /v1/graphs/{hash}` (read one document back),
  * `POST /v1/graphs/validate` (submit's dry run, node/edge-precise — see `API.md`, "Graphs and
- * graph runs"). Graph SUBMISSION (`POST /v1/graphs`) is deliberately not part of this surface:
- * authoring a graph is the canvas's job; this service only reads what a graph author has
- * already stored, the same read-only posture `AgentRegistryService` takes toward the agent
- * registry.
+ * graph runs"), and `POST /v1/graphs` (submit — {@link submit}). Submission joined this surface
+ * with the canvas: publishing a draft stores it content-addressed by its reproducible
+ * hash, so the canvas's Publish has a real endpoint behind it rather than a local-only promotion.
  */
 @Injectable({ providedIn: 'root' })
 export class GraphsService {
@@ -49,6 +48,18 @@ export class GraphsService {
     } finally {
       this._loading.set(false);
     }
+  }
+
+  /**
+   * Submit a document for storage (`POST /v1/graphs`). On success the server stores it
+   * content-addressed and answers `{ graph: <hash>, created: <bool> }` (`created: false` on an
+   * idempotent re-submit of an identical document); a validation failure throws `SalvorApiError`
+   * (`invalid_graph`) carrying the error list, exactly like {@link validate}'s refusal path. Returns
+   * the stored hash — the graph's new, real identity, the same value publishing mints on the canvas.
+   */
+  async submit(document: Graph): Promise<string> {
+    const obj = await graphRequest(this.client, this.config, 'POST', '/v1/graphs', document);
+    return obj['graph'] as string;
   }
 
   /** Read one stored graph document back by hash. Throws `SalvorApiError` (`unknown_graph`) if
