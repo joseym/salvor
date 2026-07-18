@@ -19,6 +19,7 @@ import { Inspector } from './features/inspector/inspector';
 import { groupOf, labelOf } from './features/runs/run-model';
 import { Runs } from './features/runs/runs';
 import { Spend } from './features/spend/spend';
+import { Workflows } from './features/workflows/workflows';
 
 type NavLink = { readonly view: ViewName; readonly label: string };
 
@@ -53,7 +54,7 @@ const SUBS: Readonly<Record<ViewName, string>> = {
  */
 @Component({
   selector: 'bridge-root',
-  imports: [Runs, Inspector, Inbox, Spend],
+  imports: [Runs, Inspector, Inbox, Spend, Workflows],
   templateUrl: './app.html',
   host: { '(document:keydown)': 'onGlobalKeydown($event)' },
 })
@@ -68,6 +69,17 @@ export class App implements AfterViewInit {
 
   readonly navLinks = NAV_LINKS;
   readonly view = this.viewService.view;
+
+  /**
+   * DEV-ONLY workflows un-hold flag. Workflows stays STRUCTURALLY HELD for now — no nav
+   * link and, by default, no canvas — so the suite's `workflowsHeld` detector (no
+   * `.nav-link[data-view="workflows"]` AND no `#wf-nodes`) sees the held state on both targets. A
+   * `?wf=1` query param renders the real canvas for manual verification only; it is never set by the
+   * suite. S8d REMOVES this flag, adds the nav link, and flips `workflowsHeld` to false.
+   */
+  readonly wfDevFlag = signal<boolean>(
+    typeof location !== 'undefined' && new URLSearchParams(location.search).get('wf') === '1',
+  );
   readonly title = this.viewService.title;
   readonly sub = computed(() => SUBS[this.view()]);
 

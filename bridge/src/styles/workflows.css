@@ -1,0 +1,449 @@
+/* THE WORKFLOWS CANVAS. Tokens only (the build gate forbids literal white/black in color-mix and
+   `transition: all`); layout distances are raw px, which the gate does not police. */
+
+.wf-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.wf-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.wf-state {
+  font-size: var(--text-xs);
+  color: var(--muted);
+  border: 1px solid var(--faint);
+  border-radius: var(--radius-pill);
+  padding: 1px 8px;
+}
+.wf-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.wf-tools #wf-pick {
+  font: inherit;
+  font-size: var(--text-sm);
+  padding: 4px 8px;
+  border: 1px solid var(--faint);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--fg);
+}
+
+#wf-forked,
+#wf-published {
+  min-height: 0;
+  color: var(--amber-ink);
+  font-size: var(--text-sm);
+}
+#wf-forked:empty,
+#wf-published:empty {
+  display: none;
+}
+
+.wf-work {
+  display: flex;
+  gap: 12px;
+  align-items: stretch;
+}
+.wf-canvas {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 520px;
+  overflow: hidden;
+  border: 1px solid var(--faint);
+  border-radius: var(--radius-lg);
+  background: var(--bg);
+  touch-action: none;
+  cursor: grab;
+}
+.wf-canvas.is-panning {
+  cursor: grabbing;
+}
+.wf-canvas.tool-sel {
+  cursor: default;
+}
+
+.wf-stage {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+.wf-edges {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 4000px;
+  height: 3000px;
+  overflow: visible;
+  pointer-events: none;
+}
+.wf-edge {
+  stroke: var(--faint);
+  stroke-width: 2;
+}
+.wf-edge.is-walked {
+  stroke: var(--accent);
+  stroke-width: 3;
+}
+
+.wf-nodes {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+.wf-node {
+  position: absolute;
+  width: 208px;
+  min-height: 88px;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border: 1px solid var(--faint);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--fg);
+  cursor: pointer;
+}
+.wf-node[aria-pressed='true'] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.wf-node.is-current {
+  border-color: var(--accent);
+}
+.wf-node.is-exited {
+  border-color: var(--success);
+}
+.wf-node.is-skipped {
+  opacity: 0.55;
+}
+.wf-node.is-not-reached {
+  border-style: dashed;
+}
+.wf-node-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.wf-kind {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.wf-more {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--text-lg);
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+  border-radius: var(--radius-sm);
+}
+.wf-more:hover {
+  color: var(--fg);
+}
+.wf-name {
+  margin: 6px 0 0;
+  font-size: var(--text-base);
+  font-family: Georgia, 'Times New Roman', serif;
+}
+.wf-run-state {
+  display: inline-block;
+  margin-top: 6px;
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+
+.wf-chips {
+  position: absolute;
+  display: flex;
+  gap: 4px;
+  z-index: 3;
+}
+.wf-tl {
+  top: 12px;
+  left: 12px;
+}
+.wf-tr {
+  top: 12px;
+  right: 12px;
+}
+.wf-chip {
+  font: inherit;
+  font-size: var(--text-sm);
+  padding: 3px 9px;
+  border: 1px solid var(--faint);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--fg);
+  cursor: pointer;
+}
+.wf-chip:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.wf-chip.is-read {
+  cursor: default;
+  min-width: 3.5em;
+  text-align: center;
+}
+
+.wf-bar {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border: 1px solid var(--faint);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  z-index: 3;
+}
+.wf-seg {
+  display: inline-flex;
+  border: 1px solid var(--faint);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.wf-seg-b {
+  font: inherit;
+  font-size: var(--text-sm);
+  padding: 3px 10px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.wf-seg-b[aria-pressed='true'] {
+  background: var(--accent);
+  color: var(--bg);
+}
+.wf-bar-sep {
+  width: 1px;
+  height: 18px;
+  background: var(--faint);
+}
+.wf-runpick {
+  font: inherit;
+  font-size: var(--text-sm);
+  padding: 2px 6px;
+  border: 1px solid var(--faint);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--fg);
+}
+.wf-legend {
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+
+.wf-note {
+  position: absolute;
+  top: 52px;
+  left: 12px;
+  margin: 0;
+  max-width: 260px;
+  font-size: var(--text-xs);
+  color: var(--muted);
+  z-index: 2;
+  /* a passive note ON the paper — it must never intercept a click meant for a node beneath it */
+  pointer-events: none;
+}
+
+.wf-map {
+  position: absolute;
+  bottom: 12px;
+  right: 12px;
+  width: 160px;
+  height: 100px;
+  border: 1px solid var(--faint);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  overflow: hidden;
+  z-index: 3;
+}
+.wf-map svg {
+  width: 100%;
+  height: 100%;
+  cursor: pointer;
+}
+.wf-map-bg {
+  fill: var(--bg);
+}
+
+.wf-menu {
+  position: absolute;
+  z-index: 10;
+  min-width: 180px;
+  display: flex;
+  flex-direction: column;
+  padding: 6px;
+  border: 1px solid var(--faint);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: 0 8px 24px var(--faint);
+}
+.wf-menu button {
+  font: inherit;
+  font-size: var(--text-sm);
+  text-align: left;
+  padding: 6px 8px;
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.wf-menu button:hover:not(:disabled) {
+  background: var(--bg);
+}
+.wf-menu button:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+.wf-menu-why {
+  margin: 2px 8px 6px;
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+
+/* THE FORK DIALOG — the app's one modal. Amber, never danger/red: acknowledged is not the same as
+   safe, so the review reads as caution, not alarm. */
+.fork {
+  border: 1px solid var(--faint);
+  border-radius: var(--radius-lg);
+  padding: 0;
+  max-width: 620px;
+  width: calc(100vw - 48px);
+  background: var(--surface);
+  color: var(--fg);
+}
+.fork::backdrop {
+  background: var(--fg);
+  opacity: 0.35;
+}
+.fork-inner {
+  padding: 18px 20px;
+}
+.fork-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.fork-body {
+  margin: 14px 0;
+  max-height: 52vh;
+  overflow-y: auto;
+}
+.haz {
+  display: flex;
+  gap: 10px;
+  padding: 10px 12px;
+  margin: 8px 0;
+  border: 1px solid var(--warn);
+  border-radius: var(--radius-md);
+  background: var(--amber-wash);
+}
+.haz.is-ack {
+  background: var(--surface);
+  border-color: var(--faint);
+}
+.haz input[type='checkbox'] {
+  accent-color: var(--warn);
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+}
+.haz-t {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.haz .seq {
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+.haz-k {
+  margin: 6px 0;
+  font-size: var(--text-xs);
+  color: var(--amber-ink);
+}
+.haz-k.is-null {
+  color: var(--amber-ink);
+}
+.haz pre {
+  margin: 6px 0;
+  padding: 8px;
+  font-size: var(--text-xs);
+  background: var(--bg);
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+}
+.haz-ack {
+  display: block;
+  margin-top: 6px;
+  font-size: var(--text-sm);
+}
+.fork-clean,
+.fork-refusal {
+  padding: 12px;
+  border: 1px solid var(--faint);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+}
+.fork-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.fork-foot .spacer {
+  flex: 1 1 auto;
+}
+.fork-count {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+
+/* ABOUT — a popover panel, not a modal. */
+.wf-about {
+  border: 1px solid var(--faint);
+  border-radius: var(--radius-lg);
+  padding: 0;
+  max-width: 520px;
+  width: calc(100vw - 48px);
+  background: var(--surface);
+  color: var(--fg);
+}
+.wf-about-inner {
+  padding: 18px 20px;
+}
+.wf-about-body {
+  margin-top: 12px;
+  font-size: var(--text-sm);
+}
+.wf-about-body p {
+  margin: 8px 0;
+}
+
+@media (max-width: 900px) {
+  .wf-work {
+    flex-direction: column;
+  }
+}
