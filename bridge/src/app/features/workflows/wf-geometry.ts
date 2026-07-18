@@ -11,6 +11,18 @@ export const NODE_H = 104;
 export const PITCH_X = 300;
 export const PITCH_Y = 160;
 
+/** The corner radius an orthogonal trace turns with — the prototype's `r`, one value everywhere. */
+const CORNER_R = 10;
+/** The gap below the whole node band where a rerouted trace runs its horizontal — clear of every
+ * card by this margin, so a channel run never grazes a node. */
+const CHANNEL_MARGIN = 40;
+/** Parallel channel traces are stacked this far apart, so two reroutes never merge into one rule. */
+const LANE_STEP = 28;
+/** The horizontal a rerouted trace steps into the column GAP by, on the way out of the source and
+ * into the target — half the layered gap (PITCH_X − NODE_W = 92), so the vertical runs sit clear of
+ * both the node they leave and the node they enter. */
+const CHANNEL_STUB = 46;
+
 /**
  * THE LEGIBILITY FLOOR. `.wf-name` is a 15px serif; below 11px it stops reading, so zoom never
  * drops below 11/15. Fit obeys it: a graph too wide to fit above the floor clamps to the floor and
@@ -137,42 +149,208 @@ export interface WfEdgePath {
   readonly ly: number;
 }
 
+export type Pt = readonly [number, number];
+
+/** A node box for routing: its top-left corner; every box is {@link NODE_W}×{@link NODE_H}. */
+export interface WfBox {
+  readonly x: number;
+  readonly y: number;
+}
+
 /**
- * An ORTHOGONAL trace, the way a wiring diagram runs one: out of the source's right port, along to
- * the halfway column, down or up with a small corner radius, then into the target's left port.
- * Cubics look organic; a graph of machine steps is not, so it elbows. A same-rank edge is a
- * straight rule. Ported verbatim from the prototype's `wfPath`, arrowhead included.
+ * The routing context {@link wfRoutes} hands each edge. When {@link channelY} is set the trace is
+ * rerouted through a clear horizontal channel below the node band (a back-edge, or a forward edge
+ * whose direct elbow would cut through a card); otherwise the direct elbow is drawn. Keeping this a
+ * plain data input is what lets {@link wfPath} stay a pure function of its arguments, unit-testable
+ * with and without a reroute.
  */
-export function wfPath(
-  a: { readonly x: number; readonly y: number },
-  b: { readonly x: number; readonly y: number },
-): WfEdgePath {
+export interface WfPathCtx {
+  /** Absolute y of the below-band channel this trace runs its horizontal along, when rerouted. */
+  readonly channelY?: number;
+  /** How far the exit/approach stubs step into the column gap; defaults to {@link CHANNEL_STUB}. */
+  readonly stub?: number;
+}
+
+/**
+ * THE POLYLINE a trace follows, in graph coordinates — the ordered corner points, before any corner
+ * radius is applied. This is the single source the drawn `d`, the arrowhead, and the node-clearance
+ * check all derive from, so what is tested for intersections is exactly what is drawn.
+ *
+ * - A same-rank forward edge is two points: a straight rule.
+ * - A rerouted edge ({@link WfPathCtx.channelY} set) leaves the source toward the target, steps into
+ *   the adjacent column gap, drops to the channel below the whole band, runs across it, rises in the
+ *   gap before the target, and enters the target's LEFT port horizontally — so the arrowhead stays
+ *   the same fine horizontal triangle on every route. Back-edges leave the LEFT port (the trace then
+ *   flows leftward and never doubles back across its own card); forward edges leave the RIGHT port.
+ * - Otherwise it is the prototype's elbow: out the right port, to the halfway column, up or down,
+ *   into the left port.
+ */
+export function edgePoints(a: WfBox, b: WfBox, ctx?: WfPathCtx): Pt[] {
   const x1 = a.x + NODE_W;
   const y1 = a.y + NODE_H / 2;
   const x2 = b.x;
   const y2 = b.y + NODE_H / 2;
+  if (Math.abs(y2 - y1) < 1 && b.x > a.x && ctx?.channelY === undefined) {
+    return [
+      [x1, y1],
+      [x2, y2],
+    ]; // same rank, forward, and not rerouted: a straight rule
+  }
+  if (ctx?.channelY !== undefined) {
+    const stub = ctx.stub ?? CHANNEL_STUB;
+    const forward = b.x >= a.x;
+    const ex = forward ? a.x + NODE_W : a.x; // leave the right port going forward, the left going back
+    const sx = ex + (forward ? stub : -stub); // step into the column gap beside the source
+    const ax = x2 - stub; // rise in the gap just before the target's left port
+    return [
+      [ex, y1],
+      [sx, y1],
+      [sx, ctx.channelY],
+      [ax, ctx.channelY],
+      [ax, y2],
+      [x2, y2],
+    ];
+  }
   const mx = (x1 + x2) / 2;
-  const r = Math.min(10, Math.abs(y2 - y1) / 2, Math.abs(mx - x1));
-  let d: string;
+  return [
+    [x1, y1],
+    [mx, y1],
+    [mx, y2],
+    [x2, y2],
+  ];
+}
+
+/** The fine horizontal arrowhead at a target's left port — one triangle, the prototype's exactly. */
+function arrowAt(x: number, y: number): string {
+  return `M ${x - 7} ${y - 4} L ${x} ${y} L ${x - 7} ${y + 4} Z`;
+}
+
+/** An orthogonal polyline drawn with a rounded corner (a quadratic joint) at every interior vertex,
+ * the radius clamped per corner so it never overshoots a short segment. Straight two-point runs pass
+ * through as a plain `L`. This is the ONE corner treatment, so the elbow and the channel reroute
+ * turn identically. */
+function orthoRound(pts: readonly Pt[], r: number): string {
+  if (pts.length < 2) return '';
+  if (pts.length === 2) return `M ${pts[0][0]} ${pts[0][1]} L ${pts[1][0]} ${pts[1][1]}`;
+  let d = `M ${pts[0][0]} ${pts[0][1]}`;
+  for (let i = 1; i < pts.length - 1; i++) {
+    const [px, py] = pts[i - 1];
+    const [cx, cy] = pts[i];
+    const [nx, ny] = pts[i + 1];
+    const inLen = Math.hypot(cx - px, cy - py) || 1;
+    const outLen = Math.hypot(nx - cx, ny - cy) || 1;
+    const rr = Math.min(r, inLen / 2, outLen / 2);
+    const sx = cx - ((cx - px) / inLen) * rr;
+    const sy = cy - ((cy - py) / inLen) * rr;
+    const qx = cx + ((nx - cx) / outLen) * rr;
+    const qy = cy + ((ny - cy) / outLen) * rr;
+    d += ` L ${round(sx)} ${round(sy)} Q ${cx} ${cy} ${round(qx)} ${round(qy)}`;
+  }
+  const last = pts[pts.length - 1];
+  d += ` L ${last[0]} ${last[1]}`;
+  return d;
+}
+
+function round(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+/**
+ * An ORTHOGONAL trace, the way a wiring diagram runs one, built from its {@link edgePoints}. Without
+ * a reroute context this is the prototype's elbow (out the right port, to the halfway column, into
+ * the left port) or a straight same-rank rule. With {@link WfPathCtx.channelY} set it runs the
+ * clear below-band channel {@link wfRoutes} assigned it. The stroke, the single fine arrowhead, and
+ * the label knockout are the prototype's — only the geometry is aware of the cards now.
+ */
+export function wfPath(a: WfBox, b: WfBox, ctx?: WfPathCtx): WfEdgePath {
+  const pts = edgePoints(a, b, ctx);
+  const [tx, ty] = pts[pts.length - 1];
+  const arrow = arrowAt(tx, ty);
+  const d = orthoRound(pts, CORNER_R);
   let lx: number;
   let ly: number;
-  if (Math.abs(y2 - y1) < 1) {
-    d = `M ${x1} ${y1} L ${x2} ${y2}`; // same rank: a straight rule, label ON the line
-    lx = mx;
-    ly = y1;
+  if (pts.length === 2) {
+    lx = (pts[0][0] + pts[1][0]) / 2;
+    ly = pts[0][1]; // same rank: the label sits ON the rule
+  } else if (ctx?.channelY !== undefined) {
+    lx = pts[1][0]; // the label rides the source drop, staying near the card it leaves
+    ly = Math.min(ctx.channelY - CORNER_R, pts[0][1] + 22);
   } else {
-    const dir = y2 > y1 ? 1 : -1;
-    d =
-      `M ${x1} ${y1} L ${mx - r} ${y1}` +
-      ` Q ${mx} ${y1} ${mx} ${y1 + r * dir}` +
-      ` L ${mx} ${y2 - r * dir}` +
-      ` Q ${mx} ${y2} ${mx + r} ${y2}` +
-      ` L ${x2} ${y2}`;
-    lx = mx;
-    ly = (y1 + y2) / 2; // the label rides the vertical run
+    lx = pts[1][0]; // the elbow's vertical run
+    ly = (pts[0][1] + pts[2][1]) / 2;
   }
-  const arrow = `M ${x2 - 7} ${y2 - 4} L ${x2} ${y2} L ${x2 - 7} ${y2 + 4} Z`;
   return { d, arrow, lx, ly };
+}
+
+/** Every axis-aligned segment of a route, as [start, end] pairs — what a node-clearance check walks. */
+export function edgeSegments(a: WfBox, b: WfBox, ctx?: WfPathCtx): [Pt, Pt][] {
+  const pts = edgePoints(a, b, ctx);
+  const segs: [Pt, Pt][] = [];
+  for (let i = 0; i < pts.length - 1; i++) segs.push([pts[i], pts[i + 1]]);
+  return segs;
+}
+
+/** True iff an axis-aligned segment enters a node's box, padded by `pad` on every side. Both a
+ * segment and a padded box are rectangles, so this is a rectangle overlap; strict inequalities mean
+ * a trace lying exactly on the padded edge does not count as a strike. */
+export function segHitsBox(seg: readonly [Pt, Pt], box: WfBox, pad = 0): boolean {
+  const bx0 = box.x - pad;
+  const by0 = box.y - pad;
+  const bx1 = box.x + NODE_W + pad;
+  const by1 = box.y + NODE_H + pad;
+  const sx0 = Math.min(seg[0][0], seg[1][0]);
+  const sx1 = Math.max(seg[0][0], seg[1][0]);
+  const sy0 = Math.min(seg[0][1], seg[1][1]);
+  const sy1 = Math.max(seg[0][1], seg[1][1]);
+  return sx0 < bx1 && sx1 > bx0 && sy0 < by1 && sy1 > by0;
+}
+
+/** True iff any segment of a route strikes a node OTHER than the edge's own endpoints. The one
+ * predicate {@link wfRoutes} reroutes on, and the tests assert never holds on the drawn routes. */
+export function routeHitsForeignNode(
+  a: WfBox,
+  b: WfBox,
+  boxes: readonly (WfBox & { id: string })[],
+  from: string,
+  to: string,
+  ctx?: WfPathCtx,
+  pad = 0,
+): boolean {
+  const segs = edgeSegments(a, b, ctx);
+  return boxes.some(
+    (box) => box.id !== from && box.id !== to && segs.some((s) => segHitsBox(s, box, pad)),
+  );
+}
+
+/**
+ * ROUTE EVERY EDGE of a laid-out graph so no trace runs through a card. Aligned to `g.edges` (an
+ * edge whose endpoints are not both laid out is `undefined`). A trace keeps its direct elbow when
+ * that elbow is clear; a back-edge, or a forward edge whose elbow would cut through an intervening
+ * card, is rerouted through a horizontal channel below the whole node band. Reroutes get their own
+ * stacked lanes so two never merge, and each still enters the target's left port horizontally so the
+ * arrowhead and the visual grammar are unchanged — only the geometry now clears the cards.
+ *
+ * Pure: derived entirely from the graph and its layout, so it is unit-testable without a DOM.
+ */
+export function wfRoutes(g: WfGraph, layout: WfLayout): (WfEdgePath | undefined)[] {
+  const boxes = g.nodes
+    .filter((n) => layout[n.id] !== undefined)
+    .map((n) => ({ id: n.id, x: layout[n.id].x, y: layout[n.id].y }));
+  const bandBottom = boxes.length ? Math.max(...boxes.map((box) => box.y + NODE_H)) : 0;
+  let lane = 0;
+  return g.edges.map((e) => {
+    const a = layout[e.from];
+    const b = layout[e.to];
+    if (a === undefined || b === undefined) return undefined;
+    // A back-edge is rerouted on sight (its direct trace would double back across its own card);
+    // a forward edge only when its direct elbow actually strikes an intervening card.
+    const reroute =
+      b.x <= a.x || routeHitsForeignNode(a, b, boxes, e.from, e.to);
+    if (!reroute) return wfPath(a, b);
+    const channelY = bandBottom + CHANNEL_MARGIN + lane * LANE_STEP;
+    lane += 1;
+    return wfPath(a, b, { channelY });
+  });
 }
 
 /** The bounding box of a laid-out graph, in graph coordinates. */

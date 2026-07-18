@@ -30,17 +30,19 @@ import { loadDrafts, removeDraft, saveDraft } from './wf-draft';
 import {
   NODE_H,
   NODE_W,
+  type WfEdgePath,
   type WfView,
   layoutFor,
   wfFit,
-  wfPath,
   wfReset,
+  wfRoutes,
   wfTopo,
   wfZoom,
   zoomPercent,
 } from './wf-geometry';
 import { type HazardReview, type HazardRow, forkReady, reviewOf } from './wf-hazard';
 import {
+  type WfEdge,
   type WfGraph,
   type WfNode,
   type WfPickOption,
@@ -291,11 +293,15 @@ export class Workflows implements AfterViewInit {
     const states = this.nodeStates();
     const inRun = this.mode() === 'run' && Object.keys(states).length > 0;
     const branchSources = new Set(g.nodes.filter((n) => n.kind === 'branch').map((n) => n.id));
+    // ONE routing pass over the whole graph: a trace keeps its direct elbow unless it would cut
+    // through a card, in which case it reroutes through a clear channel below the band. Aligned to
+    // g.edges, so an edge whose endpoint is unlaid (a dangling reference) is simply not drawn.
+    const routes = wfRoutes(g, layout);
     return g.edges
-      .filter((e) => layout[e.from] !== undefined && layout[e.to] !== undefined)
-      .map((e) => {
+      .map((e, i) => ({ e, i, path: routes[i] }))
+      .filter((r): r is { e: WfEdge; i: number; path: WfEdgePath } => r.path !== undefined)
+      .map(({ e, path }) => {
         const isBranch = branchSources.has(e.from);
-        const path = wfPath(layout[e.from], layout[e.to]);
         const walked = inRun && edgeWalked(e.from, e.to, e.label, isBranch, states);
         // The road not taken: a decided branch's OTHER arm. Ghosted, never deleted — "we did not
         // go that way" is information the canvas keeps rather than a route it quietly drops.

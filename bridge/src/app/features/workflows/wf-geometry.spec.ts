@@ -5,12 +5,17 @@ import {
   NODE_H,
   NODE_W,
   WF_MIN_K,
+  type WfBox,
   type WfLayout,
+  edgePoints,
   layeredLayout,
   layoutBounds,
   layoutFor,
+  routeHitsForeignNode,
+  segHitsBox,
   wfFit,
   wfPath,
+  wfRoutes,
   wfTopo,
   wfZoom,
   zoomPercent,
@@ -135,6 +140,145 @@ describe('wfPath — orthogonal elbows with one fine arrowhead', () => {
     // target left port is at x = 300, y = NODE_H/2
     expect(path.arrow).toContain(`L 300 ${NODE_H / 2}`);
     expect(path.arrow.trim().endsWith('Z')).toBe(true);
+  });
+});
+
+/** Every coordinate pair in a path `d`, in order, as consecutive segments — the drawn polyline
+ * (corner chords included). What the router draws is exactly what this walks for clearance. */
+function pathSegments(d: string): [readonly [number, number], readonly [number, number]][] {
+  const nums = (d.match(/-?\d+(?:\.\d+)?/g) ?? []).map(Number);
+  const pts: [number, number][] = [];
+  for (let i = 0; i + 1 < nums.length; i += 2) pts.push([nums[i], nums[i + 1]]);
+  const segs: [readonly [number, number], readonly [number, number]][] = [];
+  for (let i = 0; i + 1 < pts.length; i++) segs.push([pts[i], pts[i + 1]]);
+  return segs;
+}
+
+/** For each drawn route, the ids of any node OTHER than the edge's own endpoints its polyline
+ * enters (padded). The routing invariant: this is empty for every edge, on every graph. */
+function routeFouls(g: WfGraph, layout: WfLayout, pad: number): string[] {
+  const boxes = g.nodes
+    .filter((n) => layout[n.id] !== undefined)
+    .map((n) => ({ id: n.id, x: layout[n.id].x, y: layout[n.id].y }));
+  const routes = wfRoutes(g, layout);
+  const fouls: string[] = [];
+  g.edges.forEach((e, i) => {
+    const route = routes[i];
+    if (!route) return;
+    const segs = pathSegments(route.d);
+    for (const box of boxes) {
+      if (box.id === e.from || box.id === e.to) continue;
+      if (segs.some((s) => segHitsBox(s, box, pad))) fouls.push(`${e.from}->${e.to} through ${box.id}`);
+    }
+  });
+  return fouls;
+}
+
+describe('wfRoutes — no trace runs through a card', () => {
+  it('DEFECT 2: the direct elbow cut through cards; the router reroutes those and clears them', () => {
+    const layout = layoutFor(REFUND_SWEEP_DRAFT);
+    const boxes = REFUND_SWEEP_DRAFT.nodes.map((n) => ({ id: n.id, ...layout[n.id] }));
+    // the two offenders the operator saw: the cycle back-edge n_fan->n_fetch (the bracket that
+    // exited the far-right port and doubled back through n_charge) and n_charge->n_notify (its
+    // mid-column elbow struck n_pick). Both foul as a DIRECT elbow...
+    const fan = { a: layout['n_fan'], b: layout['n_fetch'] };
+    const chg = { a: layout['n_charge'], b: layout['n_notify'] };
+    expect(routeHitsForeignNode(fan.a, fan.b, boxes, 'n_fan', 'n_fetch')).toBe(true);
+    expect(routeHitsForeignNode(chg.a, chg.b, boxes, 'n_charge', 'n_notify')).toBe(true);
+    // ...and are clear once wfRoutes reroutes them through the below-band channel.
+    expect(routeFouls(REFUND_SWEEP_DRAFT, layout, 12)).toEqual([]);
+  });
+
+  it('a computed layout with a column-skip AND a back-edge routes both clear of every card', () => {
+    // a seeded server graph carries no sidecar, so it is drawn by layeredLayout. This shape has a
+    // forward edge that skips a column (a->d, past c) and a back-edge (d->b) — the two cases the
+    // router must reroute — so the assertion bites on a computed layout, not only the draft.
+    const seeded: WfGraph = {
+      key: 'sha256:seed',
+      hash: 'sha256:seed',
+      name: 'seed',
+      state: 'published',
+      nodes: [
+        { id: 'a', kind: 'agent', name: 'a' },
+        { id: 'b', kind: 'tool', name: 'b' },
+        { id: 'c', kind: 'tool', name: 'c' },
+        { id: 'd', kind: 'agent', name: 'd' },
+      ],
+      edges: [
+        { from: 'a', to: 'b' },
+        { from: 'b', to: 'c' },
+        { from: 'c', to: 'd' },
+        { from: 'a', to: 'd' }, // skips column c
+        { from: 'd', to: 'b' }, // back-edge
+      ],
+    };
+    expect(routeFouls(seeded, layeredLayout(seeded), 12)).toEqual([]);
+  });
+
+  it('leaves a clean forward edge on its direct elbow (only fouling traces are rerouted)', () => {
+    const layout = layoutFor(REFUND_SWEEP_DRAFT);
+    const routes = wfRoutes(REFUND_SWEEP_DRAFT, layout);
+    // n_start->n_fetch is a clean same-rank rule; edge index 0. It keeps the straight two-point form.
+    expect(routes[0]?.d).toMatch(/^M \S+ \S+ L \S+ \S+$/);
+    // the dangling edge (index 4, n_pick->n_notifyy) has an unlaid endpoint, so it is not drawn.
+    expect(routes[4]).toBeUndefined();
+  });
+});
+
+describe('a back-edge routes the designed below-band shape (DEFECT 2)', () => {
+  const a: WfBox = { x: 1200, y: 30 }; // source, far right / top
+  const b: WfBox = { x: 300, y: 180 }; // target, to the LEFT — a back-edge
+  const channelY = 474;
+
+  it('leaves the source LEFT port and never doubles back across its own card', () => {
+    const pts = edgePoints(a, b, { channelY });
+    // exits at the source's left edge (x = a.x), NOT the right port (a.x + NODE_W) the old elbow used
+    expect(pts[0][0]).toBe(a.x);
+    // every x on the route is <= the source's left edge — the trace flows leftward toward the
+    // target and never crosses back over the source (the old bracket's defect).
+    for (const [x] of pts) expect(x).toBeLessThanOrEqual(a.x);
+  });
+
+  it('runs its long horizontal in a channel BELOW the whole node band, then rises into the target', () => {
+    const pts = edgePoints(a, b, { channelY });
+    // the two channel corners sit at channelY, below both cards (max card bottom here is 180+104)
+    const ys = pts.map((p) => p[1]);
+    expect(Math.max(...ys)).toBe(channelY);
+    expect(channelY).toBeGreaterThan(180 + NODE_H);
+    // it still enters the target's LEFT port horizontally, so the arrowhead is unchanged
+    const last = pts[pts.length - 1];
+    expect(last).toEqual([b.x, b.y + NODE_H / 2]);
+    expect(wfPath(a, b, { channelY }).arrow).toContain(`L ${b.x} ${b.y + NODE_H / 2}`);
+  });
+
+  it('separates parallel reroutes into distinct channel lanes', () => {
+    // wfRoutes stacks each rerouted trace a lane deeper, so two never merge into one rule. The
+    // computed seed above has two reroutes (a->d skip, d->b back); their channel ys must differ.
+    const seeded: WfGraph = {
+      key: 'k',
+      hash: 'sha256:k',
+      name: 'k',
+      state: 'published',
+      nodes: [
+        { id: 'a', kind: 'agent', name: 'a' },
+        { id: 'b', kind: 'tool', name: 'b' },
+        { id: 'c', kind: 'tool', name: 'c' },
+        { id: 'd', kind: 'agent', name: 'd' },
+      ],
+      edges: [
+        { from: 'a', to: 'b' },
+        { from: 'b', to: 'c' },
+        { from: 'c', to: 'd' },
+        { from: 'a', to: 'd' },
+        { from: 'd', to: 'b' },
+      ],
+    };
+    const routes = wfRoutes(seeded, layeredLayout(seeded));
+    const channelYOf = (d: string): number =>
+      Math.max(...(d.match(/-?\d+(?:\.\d+)?/g) ?? []).map(Number).filter((_, i) => i % 2 === 1));
+    const skipY = channelYOf(routes[3]!.d);
+    const backY = channelYOf(routes[4]!.d);
+    expect(skipY).not.toBe(backY);
   });
 });
 

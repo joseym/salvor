@@ -58,7 +58,8 @@
             <!-- an orthogonal trace, a single fine arrowhead, and the paper knocked out behind any
                  case label. In Run mode the recorded route inks and the road not taken ghosts. -->
             <path class="wf-edge" [class.is-case]="e.isCase" [class.is-inked]="e.walked"
-                  [class.is-ghost]="e.ghost" [attr.d]="e.d" fill="none" />
+                  [class.is-ghost]="e.ghost" [attr.d]="e.d"
+                  [attr.data-from]="e.from" [attr.data-to]="e.to" fill="none" />
             <path class="wf-arrow" [class.is-inked]="e.walked" [class.is-ghost]="e.ghost"
                   [attr.d]="e.arrow" />
             @if (e.label; as lbl) {
