@@ -92,6 +92,19 @@ export class App implements AfterViewInit {
       : 'This dashboard reads a real Salvor control plane. There is no graph engine yet: Workflows and fork have no runtime behind them.',
   );
 
+  /**
+   * The exact build answering this dashboard's requests, read straight off the same capability
+   * probe the honesty chip above reads (`GET /v1/capabilities`'s sibling `server` object) — so the
+   * About panel can never name a build the server has not itself confirmed. An em dash, never a
+   * fabricated version, before the probe resolves or against a server built before this field
+   * existed.
+   */
+  readonly serverMetaText = computed(() => {
+    const server = this.capabilityProbe.capabilities().server;
+    if (!server) return '—';
+    return server.commit ? `server v${server.version} (${server.commit})` : `server v${server.version}`;
+  });
+
   readonly navCollapsed = signal(false);
   readonly dotKeyOpen = signal(false);
 

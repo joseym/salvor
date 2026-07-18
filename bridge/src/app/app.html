@@ -211,6 +211,15 @@
           face rather than passing for memory.
         </p>
       </div>
+      <!-- The build colophon: same register as the Inspector's empty-state endpoint note, sitting
+           OUTSIDE the four-point .notes apparatus above rather than as a fifth point in it. Reads
+           straight off the same GET /v1/capabilities probe the honesty chip reads, so it can never
+           name a build the server has not itself confirmed. -->
+      <p class="mechanism" id="wf-server-note">
+        This dashboard is reading <span id="wf-server-version">{{ serverMetaText() }}</span>, from the same
+        <code>GET /v1/capabilities</code> probe the honesty chip above reads. A dash means the probe has
+        not resolved yet, or the server predates this field.
+      </p>
     </div>
   </div>
 </div>

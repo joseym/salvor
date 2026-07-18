@@ -5,7 +5,8 @@ import { graphRequest } from './graph-http';
 import { type CapabilityProbe, parseCapabilityProbe } from './graph-types';
 
 /** The honest default before a probe resolves, and the honest fallback when one fails: no
- * capability is ever assumed. */
+ * capability is ever assumed, and `server` stays absent rather than naming a build nobody has
+ * confirmed. */
 export const UNPROBED_CAPABILITIES: CapabilityProbe = { fork: false, raw: {} };
 
 /**

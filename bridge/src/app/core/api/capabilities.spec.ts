@@ -84,4 +84,35 @@ describe('CapabilityProbeService — the real GET /v1/capabilities probe', () =>
 
     expect(result.fork).toBe(false);
   });
+
+  it('parses the server build block, commit included, when the server sends it', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ capabilities: { fork: true }, server: { version: '0.1.0', commit: 'a1b2c3d' } }),
+    );
+    const service = TestBed.inject(CapabilityProbeService);
+
+    const result = await service.probe();
+
+    expect(result.server).toEqual({ version: '0.1.0', commit: 'a1b2c3d' });
+  });
+
+  it('parses the server build block with commit absent (a tarball or no-git build)', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ capabilities: { fork: true }, server: { version: '0.1.0' } }));
+    const service = TestBed.inject(CapabilityProbeService);
+
+    const result = await service.probe();
+
+    expect(result.server).toEqual({ version: '0.1.0' });
+    expect(result.server?.commit).toBeUndefined();
+  });
+
+  it('ABSENT-TOLERANT: a pre-server-block server (no `server` key at all) still decodes fork cleanly, with server left undefined', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ capabilities: { fork: true } }));
+    const service = TestBed.inject(CapabilityProbeService);
+
+    const result = await service.probe();
+
+    expect(result.fork).toBe(true);
+    expect(result.server).toBeUndefined();
+  });
 });

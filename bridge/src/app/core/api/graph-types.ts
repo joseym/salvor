@@ -354,12 +354,35 @@ export function parseForksIndex(obj: Record<string, unknown>): ForksIndex {
 
 // -- GET /v1/capabilities --------------------------------------------------------------------------
 
+/** The exact build serving the response (`API.md`, "GET /v1/capabilities"): `version` is the
+ * server's own `CARGO_PKG_VERSION`, always present; `commit` is the short git hash the build was
+ * compiled from, present only when that build had a `.git` history to read — absent, never a
+ * fabricated placeholder, for a source-tarball or no-git build. */
+export interface ServerBuildInfo {
+  readonly version: string;
+  readonly commit?: string;
+}
+
 export interface CapabilityProbe {
   readonly fork: boolean;
+  /** Absent when the server predates this field (a pre-`server`-block build): a decoder that only
+   * ever sees `capabilities.fork` still parses cleanly, matching the `raw` escape hatch's own
+   * absent-vs-null posture above. */
+  readonly server?: ServerBuildInfo;
   readonly raw: Record<string, unknown>;
+}
+
+function parseServerBuildInfo(obj: Record<string, unknown>): ServerBuildInfo | undefined {
+  const server = obj['server'] as Record<string, unknown> | undefined;
+  if (typeof server?.['version'] !== 'string') return undefined;
+  const commit = server['commit'];
+  return typeof commit === 'string' ? { version: server['version'], commit } : { version: server['version'] };
 }
 
 export function parseCapabilityProbe(obj: Record<string, unknown>): CapabilityProbe {
   const caps = (obj['capabilities'] as Record<string, unknown>) ?? {};
-  return { fork: caps['fork'] === true, raw: obj };
+  const server = parseServerBuildInfo(obj);
+  return server === undefined
+    ? { fork: caps['fork'] === true, raw: obj }
+    : { fork: caps['fork'] === true, server, raw: obj };
 }
