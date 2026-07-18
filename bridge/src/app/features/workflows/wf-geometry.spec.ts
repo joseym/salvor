@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  DUP_STACK_OFFSET,
   LAYOUTS,
   NODE_H,
   NODE_W,
@@ -279,6 +280,12 @@ describe('a back-edge routes the designed below-band shape (DEFECT 2)', () => {
     const skipY = channelYOf(routes[3]!.d);
     const backY = channelYOf(routes[4]!.d);
     expect(skipY).not.toBe(backY);
+  });
+});
+
+describe('DUP_STACK_OFFSET — the intentional stack nudge', () => {
+  it('is larger than the prototype 16px, so the under-card title stays readable', () => {
+    expect(DUP_STACK_OFFSET).toBeGreaterThan(16);
   });
 });
 

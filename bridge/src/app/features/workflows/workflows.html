@@ -109,6 +109,19 @@
                     (click)="openMenu($event, n.id)" (keydown)="onMoreKeydown($event, n.id)">⋯</span>
             </button>
           }
+          <!-- DUPLICATE-ID STACK CAPTIONS. One chip per collision, anchored to the top card of the
+               nudged stack: it names the shared id and the count, in the same danger ink as the
+               error dot, and opens the validator's own duplicate-id error (with its rename fix).
+               Present ONLY when ids actually collide — a clean graph renders none. -->
+          @for (s of dupStacks(); track s.id) {
+            <button type="button" class="wf-dup-chip" [attr.data-dup]="s.id"
+                    [style.left.px]="s.x" [style.top.px]="s.y"
+                    [attr.aria-label]="s.count + ' nodes share the id ' + s.id + '. Open the duplicate-id error.'"
+                    (click)="openDupError(s)">
+              <span class="wf-dup-dot" aria-hidden="true">!</span>
+              <span class="wf-dup-txt mono" aria-hidden="true">id {{ s.id }} ×{{ s.count }}</span>
+            </button>
+          }
         </div>
       </div>
 

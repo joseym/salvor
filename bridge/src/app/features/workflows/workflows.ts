@@ -28,6 +28,7 @@ import { jsonHi } from '../../shared/json-hi';
 import { agentIdentity, toRunRow } from '../runs/run-model';
 import { loadDrafts, removeDraft, saveDraft } from './wf-draft';
 import {
+  DUP_STACK_OFFSET,
   NODE_H,
   NODE_W,
   type WfEdgePath,
@@ -97,6 +98,17 @@ interface PositionedEdge {
   /** Run mode: the recorded route inks; the road not taken ghosts; everything else is quiet. */
   readonly walked: boolean;
   readonly ghost: boolean;
+}
+
+/** A canvas caption for a duplicate-id stack: the shared id, how many cards claim it, and where the
+ * chip sits (anchored to the top card of the nudged stack). Derived from the validator's
+ * `duplicate_id` errors — the one source of truth — so the cue can never disagree with the panel. */
+interface DupStack {
+  readonly id: string;
+  readonly count: number;
+  readonly x: number;
+  readonly y: number;
+  readonly errorIndex: number;
 }
 
 interface ListFrom {
@@ -275,8 +287,8 @@ export class Workflows implements AfterViewInit {
       const eff = n.effect ?? n.body?.effect;
       return {
         ...n,
-        x: (layout[n.id]?.x ?? 0) + seen * 16,
-        y: (layout[n.id]?.y ?? 0) + seen * 16,
+        x: (layout[n.id]?.x ?? 0) + seen * DUP_STACK_OFFSET,
+        y: (layout[n.id]?.y ?? 0) + seen * DUP_STACK_OFFSET,
         does: nodeDoes(n),
         fields: nodeFields(n),
         ...(eff !== undefined ? { eff } : {}),
@@ -284,6 +296,32 @@ export class Workflows implements AfterViewInit {
         run: states[n.id],
       };
     });
+  });
+
+  /**
+   * THE DUPLICATE-ID STACK CAPTIONS. When two or more nodes claim one id the layout can only place
+   * them at one slot, so the renderer nudges each down-and-right into a small stack — and this chip
+   * sits on the top card to SAY so, `id n_charge × 2`, in the same danger ink as the error dot, so
+   * the overlap reads as a named collision rather than a rendering glitch. Derived straight from the
+   * validator's `duplicate_id` errors (the one detection), so it appears only when ids actually
+   * collide and never disagrees with the panel; on a clean graph there are none.
+   */
+  readonly dupStacks = computed<DupStack[]>(() => {
+    const g = this.currentGraph();
+    if (!g) return [];
+    const layout = this.layout();
+    const errs = this.errors();
+    const stacks: DupStack[] = [];
+    errs.forEach((er, errorIndex) => {
+      if (er.code !== 'duplicate_id' || er.node === undefined) return;
+      const id = er.node;
+      const count = g.nodes.filter((n) => n.id === id).length;
+      const base = layout[id] ?? { x: 0, y: 0 };
+      // Anchor to the TOP card of the nudged stack, the one drawn last and never occluded.
+      const top = (count - 1) * DUP_STACK_OFFSET;
+      stacks.push({ id, count, x: base.x + top, y: base.y + top, errorIndex });
+    });
+    return stacks;
   });
 
   readonly edges = computed<PositionedEdge[]>(() => {
@@ -806,6 +844,14 @@ export class Workflows implements AfterViewInit {
   }
   nodePressed(id: string): boolean {
     return this.selectedNode() === id;
+  }
+
+  /** Activate a duplicate-stack caption: select the shared node, open the inspector, and focus the
+   * validator's own `duplicate_id` error for it — the same error, with its rename fix, that gates
+   * publish. The chip is a shortcut INTO the one error list, never a second explanation of it. */
+  openDupError(stack: DupStack): void {
+    this.selectNode(stack.id);
+    focusWhenRendered(`.wf-errs [data-fix="${stack.errorIndex}"]`);
   }
   nodeStateClass(n: PositionedNode): string {
     return n.run ? `is-${n.run.state}` : '';

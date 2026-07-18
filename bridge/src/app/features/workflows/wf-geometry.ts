@@ -11,6 +11,15 @@ export const NODE_H = 104;
 export const PITCH_X = 300;
 export const PITCH_Y = 160;
 
+/**
+ * THE DUPLICATE-STACK OFFSET. Two nodes claiming the same id cannot be placed apart by an id-keyed
+ * layout, so the renderer nudges each successive one down-and-right by this much — the consequence
+ * of the duplicate, made visible rather than hidden. Larger than the prototype's 16px so the
+ * under-card's kind eyebrow and title stay readable under the top card, and paired on the canvas
+ * with the {@link WfDupStack} caption chip so the overlap READS as a shared id, not a glitch.
+ */
+export const DUP_STACK_OFFSET = 24;
+
 /** The corner radius an orthogonal trace turns with — the prototype's `r`, one value everywhere. */
 const CORNER_R = 10;
 /** The gap below the whole node band where a rerouted trace runs its horizontal — clear of every

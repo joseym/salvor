@@ -129,6 +129,13 @@
   top: 0;
   left: 0;
   transform-origin: 0 0;
+}
+/* The stage is promoted to its own compositor layer only WHILE panning. A layer is rasterized once
+   at the scale it was promoted at and the transform then scales that bitmap, so an always-on
+   `will-change: transform` renders every zoom step from a stale raster and the serif names go to
+   mush. Scoping it to the drag keeps the pan cheap and lets the browser re-rasterize at the settled
+   scale the moment the pointer lifts, which is when legibility actually matters. */
+.wf-canvas.is-panning .wf-stage {
   will-change: transform;
 }
 .wf-edges {
@@ -332,6 +339,60 @@
   background: var(--danger);
   border-radius: 50%;
 }
+/* THE DUPLICATE-ID STACK CAPTION. A stack of same-id cards is drawn deliberately (each nudged by
+   DUP_STACK_OFFSET), and this chip on the top card SAYS so — `id n_charge ×2` in the danger ink of
+   the error dot, so the overlap reads as a named collision, never a rendering glitch. It is a real
+   button: Tab reaches it, Enter opens the validator's duplicate-id error (its rename fix included).
+   Anchored to the top card's top-left and lifted to sit just above it, clear of the card content. */
+.wf-dup-chip {
+  position: absolute;
+  transform: translateY(-100%);
+  margin-top: -4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 248px;
+  padding: 2px 7px 2px 3px;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  color: var(--danger);
+  background: color-mix(in oklab, var(--danger), var(--bg) 88%);
+  border: 1px solid color-mix(in oklab, var(--danger), var(--bg) 64%);
+  border-radius: var(--radius-pill);
+  box-shadow: var(--elev-ring);
+  white-space: nowrap;
+}
+.wf-dup-dot {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--accent-on);
+  background: var(--danger);
+  border-radius: 50%;
+}
+.wf-dup-txt {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wf-dup-chip:hover {
+  background: color-mix(in oklab, var(--danger), var(--bg) 80%);
+  border-color: var(--danger);
+}
+.wf-dup-chip:focus-visible {
+  outline: 2px solid var(--danger);
+  outline-offset: 2px;
+}
+
 /* the run status rides the END of the field strip, never on top of it */
 .wf-st {
   margin-left: auto;
