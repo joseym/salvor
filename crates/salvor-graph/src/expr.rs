@@ -147,6 +147,70 @@ impl Expr {
     }
 }
 
+/// A parsed reference into a routed value: a dot-separated path with array
+/// indexing, the same `path` grammar the expression language uses for an
+/// operand, standing alone as a value reference rather than inside a boolean.
+///
+/// This is how a `map` node's `over` field names the list it fans out over: the
+/// reference is resolved against the node's routed value at fan-out time, and the
+/// engine reuses the identical missing-path semantics the branch expressions use,
+/// so references resolve one consistent way across the whole document. It owns
+/// its whole path, borrows nothing, and holds no IO, clock, or randomness, so it
+/// is safe to keep and re-resolve for the life of a run.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Reference {
+    segments: Vec<Segment>,
+}
+
+impl Reference {
+    /// Resolves the reference against a routed value, returning the value it
+    /// names or `None` when the path is missing (an absent key, an index past the
+    /// end, or a descent into a non-container).
+    ///
+    /// This is TOTAL: it never panics for any `value`, and its missing-path
+    /// semantics are exactly those [`Expr::eval`] uses for a path operand.
+    #[must_use]
+    pub fn resolve<'a>(&self, value: &'a Value) -> Option<&'a Value> {
+        resolve_path(&self.segments, value)
+    }
+}
+
+/// Parses a bare reference path (`items`, `output.items`, `results.0.items`), the
+/// standalone counterpart of a `path` operand in the expression grammar.
+///
+/// The [`MAX_EXPRESSION_LEN`]-character cap is enforced first, exactly as [`parse`]
+/// does. Only a path is accepted: a literal (`5`, `"x"`, `true`) is rejected, so a
+/// reference always names a location in the routed value rather than a constant.
+///
+/// # Errors
+///
+/// Returns an [`ExprError`] when the input exceeds the length cap, is not a
+/// well-formed path, or is a bare literal rather than a path.
+pub fn parse_reference(input: &str) -> Result<Reference, ExprError> {
+    let chars: Vec<char> = input.chars().collect();
+    if chars.len() > MAX_EXPRESSION_LEN {
+        return Err(ExprError::new(format!(
+            "reference is {} characters long, which exceeds the {MAX_EXPRESSION_LEN}-character limit",
+            chars.len()
+        )));
+    }
+
+    let tokens = lex(&chars)?;
+    let mut parser = Parser {
+        tokens: &tokens,
+        pos: 0,
+        end: chars.len(),
+    };
+    let operand = parser.parse_operand()?;
+    parser.expect_end()?;
+    match operand {
+        Operand::Path(segments) => Ok(Reference { segments }),
+        Operand::Literal(_) => Err(ExprError::new(
+            "a reference must be a path into the routed value, not a literal",
+        )),
+    }
+}
+
 /// A boolean-valued node of the AST.
 #[derive(Clone, Debug, PartialEq)]
 enum Bool {
@@ -678,18 +742,25 @@ fn eval_bool(node: &Bool, root: &Value) -> bool {
 fn resolve<'a>(operand: &'a Operand, root: &'a Value) -> Option<&'a Value> {
     match operand {
         Operand::Literal(value) => Some(value),
-        Operand::Path(segments) => {
-            let mut current = root;
-            for segment in segments {
-                current = match (current, segment) {
-                    (Value::Object(map), Segment::Key(key)) => map.get(key)?,
-                    (Value::Array(items), Segment::Index(index)) => items.get(*index)?,
-                    _ => return None,
-                };
-            }
-            Some(current)
-        }
+        Operand::Path(segments) => resolve_path(segments, root),
     }
+}
+
+/// Walks a path of segments from the root of a value, returning the value it
+/// names or `None` when the path is missing (an absent key, an index past the
+/// end, or a descent into a non-container). Shared by the expression evaluator
+/// and by [`Reference::resolve`], so a `map` node's `over` reference and a branch
+/// path resolve a routed value the identical way.
+fn resolve_path<'a>(segments: &[Segment], root: &'a Value) -> Option<&'a Value> {
+    let mut current = root;
+    for segment in segments {
+        current = match (current, segment) {
+            (Value::Object(map), Segment::Key(key)) => map.get(key)?,
+            (Value::Array(items), Segment::Index(index)) => items.get(*index)?,
+            _ => return None,
+        };
+    }
+    Some(current)
 }
 
 fn eval_compare(left: &Operand, op: CmpOp, right: &Operand, root: &Value) -> bool {
@@ -963,6 +1034,73 @@ mod tests {
         ] {
             assert!(parse(bad).is_err(), "`{bad}` should be a parse error");
         }
+    }
+
+    // --- References (the `map` `over` resolver). ---
+
+    #[test]
+    fn a_reference_resolves_a_top_level_and_nested_array() {
+        let top = parse_reference("items").expect("`items` parses");
+        assert_eq!(
+            top.resolve(&json!({"items": [1, 2, 3]})),
+            Some(&json!([1, 2, 3]))
+        );
+        let nested = parse_reference("output.items").expect("`output.items` parses");
+        assert_eq!(
+            nested.resolve(&json!({"output": {"items": ["a"]}})),
+            Some(&json!(["a"]))
+        );
+        let indexed = parse_reference("results.0.items").expect("indexed path parses");
+        assert_eq!(
+            indexed.resolve(&json!({"results": [{"items": [true]}]})),
+            Some(&json!([true]))
+        );
+    }
+
+    #[test]
+    fn a_missing_reference_resolves_to_none() {
+        let reference = parse_reference("items").expect("parses");
+        assert_eq!(reference.resolve(&json!({})), None);
+        assert_eq!(reference.resolve(&json!({"other": [1]})), None);
+        // Descending into a non-container is missing, exactly as in eval.
+        let deep = parse_reference("x.items").expect("parses");
+        assert_eq!(deep.resolve(&json!({"x": 5})), None);
+    }
+
+    #[test]
+    fn a_reference_may_name_any_json_value_not_only_arrays() {
+        // The resolver is type-agnostic; the engine decides an array is required.
+        let reference = parse_reference("value").expect("parses");
+        assert_eq!(reference.resolve(&json!({"value": 5})), Some(&json!(5)));
+        assert_eq!(
+            reference.resolve(&json!({"value": {"k": 1}})),
+            Some(&json!({"k": 1}))
+        );
+    }
+
+    #[test]
+    fn a_literal_or_malformed_reference_is_rejected() {
+        assert!(
+            parse_reference("5").is_err(),
+            "a bare literal is not a path"
+        );
+        assert!(
+            parse_reference("\"x\"").is_err(),
+            "a string literal is not a path"
+        );
+        assert!(parse_reference("true").is_err(), "a keyword is not a path");
+        assert!(
+            parse_reference("items ==").is_err(),
+            "trailing tokens rejected"
+        );
+        assert!(
+            parse_reference("items.").is_err(),
+            "a dangling dot is rejected"
+        );
+        assert!(
+            parse_reference("").is_err(),
+            "an empty reference is rejected"
+        );
     }
 
     // --- Property tests. ---
