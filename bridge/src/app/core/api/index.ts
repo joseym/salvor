@@ -16,6 +16,14 @@
  * two streaming surfaces (`RunEventsService`'s channels reach `Snapshot`/`Live`/`Ended`;
  * `ClientRunService`'s channels reach `Snapshot`/`Polling`/`Ended` — never `Live`, since
  * a client-driven run has no server push to be live about).
+ *
+ * The v0.4 graph surface (`API.md`, "Graphs and graph runs") adds three more, all reading over
+ * `graphRequest` (a raw-fetch primitive — `@salvor/client` does not wrap these endpoints yet):
+ *
+ *   - {@link GraphsService}          — the graph catalog: list, read one back, validate-only
+ *   - {@link GraphRunService}        — `POST /v1/graph-runs`, the per-node projection, fork, forks
+ *   - {@link CapabilityProbeService} — `GET /v1/capabilities`, a real probe NOT yet wired to the
+ *     Inspector's fork offer (`features/inspector/capability.ts` stays pinned off — see its comment)
  */
 
 export { SALVOR_API_CONFIG, SALVOR_CLIENT, type SalvorApiConfig, provideSalvorApi } from './client';
@@ -31,3 +39,23 @@ export { RunsService } from './runs';
 export { RunDetailService } from './run-detail';
 export { type RunEventsChannel, RunEventsService } from './run-events';
 export { type ClientRunChannel, ClientRunService } from './client-run';
+export { CapabilityProbeService, UNPROBED_CAPABILITIES } from './capabilities';
+export { type ForkRequest, GraphRunService } from './graph-run';
+export { GraphsService } from './graphs';
+export {
+  type CapabilityProbe,
+  type ForkHazardWrite,
+  type ForkListEntry,
+  type ForkOrigin,
+  type ForkOutcome,
+  type ForksIndex,
+  type GraphDocumentRecord,
+  type GraphProjection,
+  type GraphRunStart,
+  type GraphSummary,
+  type GraphSummaryCounts,
+  type GraphValidationError,
+  type NodeProgress,
+  type NodeState,
+  type ValidateResult,
+} from './graph-types';

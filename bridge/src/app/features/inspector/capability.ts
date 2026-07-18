@@ -1,15 +1,20 @@
 import { InjectionToken } from '@angular/core';
 
 /**
- * What the control plane advertises it can do. Today this build talks to a real Salvor server that
- * has NO fork API — forking is a v0.4 plan (see the M16.A decomposition, "the server has no graph
- * engine, no fork API"). So the Inspector's "Fork this run…" offer is CAPABILITY-GATED: the code
- * path exists and is exercised, but it renders only when {@link ServerCapabilities.fork} is true,
- * which in production means never — until v0.4 flips this one flag and lights the path up with no
- * redesign.
+ * What the control plane advertises it can do. So the Inspector's "Fork this run…" offer is
+ * CAPABILITY-GATED: the code path exists and is exercised, but it renders only when
+ * {@link ServerCapabilities.fork} is true.
+ *
+ * The v0.4 server now genuinely answers `GET /v1/capabilities`, and a REAL probe of it exists —
+ * `core/api/capabilities.ts`'s `CapabilityProbeService`. This token stays pinned to
+ * {@link NO_FORK_CAPABILITIES} regardless: the offer needs a fork-POINT to fork FROM, and that
+ * picker lives on the graph canvas, which has not shipped yet. Wiring a true probe result to this
+ * token before the canvas exists would light a "Fork this run…" button with nowhere to send the
+ * operator — a dead end, not a feature. The canvas is what flips this token over to the real
+ * probe, with no redesign here.
  */
 export interface ServerCapabilities {
-  /** The server exposes a fork API (`POST /v1/runs/{id}/forks` or equivalent). False today. */
+  /** The server exposes a fork API (`POST /v1/runs/{id}/fork`). False today. */
   readonly fork: boolean;
 }
 
