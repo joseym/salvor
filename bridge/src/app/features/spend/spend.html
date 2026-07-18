@@ -172,6 +172,9 @@
         (keydown)="onActivityKeydown($event)"
       ></svg>
       <p class="sr" id="activity-desc">{{ activityDesc() }}</p>
+      @if (activityExclusion(); as note) {
+        <p class="stub-note">{{ note }}</p>
+      }
       <ul class="legend" id="activity-legend">
         <li><span class="swatch s-model"></span>model call</li>
         <li><span class="swatch s-tool"></span>tool call</li>

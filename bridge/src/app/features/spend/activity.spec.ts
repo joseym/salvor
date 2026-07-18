@@ -1,6 +1,6 @@
 import type { SalvorEvent } from '@salvor/client';
 
-import { activityDescText, bucketEvents, hourTermOf, renderActivityHtml } from './activity';
+import { activityDescText, activityExclusionNote, bucketEvents, hourTermOf, renderActivityHtml } from './activity';
 
 function ev(kind: string, recordedAt: string, seq = 0): SalvorEvent {
   return { runId: 'run-1', seq, schemaVersion: 1, recordedAt, kind, payload: {} };
@@ -43,30 +43,102 @@ describe('bucketEvents', () => {
   });
 });
 
-describe('a very wide window does not overflow the call stack', () => {
-  // A single stray 1970 timestamp beside real 2026 events (exactly what the owner's store held:
-  // some events recorded_at = 0) stretches the window to ~495k hourly buckets. Spreading that many
-  // buckets into `Math.max(...)` — as the render/desc/extent code once did — throws `RangeError:
-  // Maximum call stack size exceeded`. These fold the whole pipeline over that window and must
-  // simply return, iteratively.
+describe('a very wide PLAUSIBLE window does not overflow the call stack', () => {
+  // Two real, plausible events years apart (the owner's store also holds long-running data,
+  // not just the epoch-zero case below) still stretch the window to tens of thousands of hourly
+  // buckets. Spreading that many buckets into `Math.max(...)` — as the render/desc/extent code
+  // once did — throws `RangeError: Maximum call stack size exceeded`. These fold the whole
+  // pipeline over that window and must simply return, iteratively, regardless of the exclusion
+  // rule below (both stamps here are plausible, so nothing is excluded).
   const wide = bucketEvents([
-    [ev('ModelCallCompleted', '1970-01-01T00:00:00Z'), ev('ModelCallCompleted', '2026-07-12T18:00:00Z')],
+    [ev('ModelCallCompleted', '2020-01-01T00:00:00Z'), ev('ModelCallCompleted', '2026-07-12T18:00:00Z')],
   ])!;
 
   it('bucketEvents spans the full range without spreading its stamps', () => {
     expect(wide).toBeDefined();
-    expect(wide.nBuckets).toBeGreaterThan(400_000);
+    expect(wide.excluded).toBe(0);
+    expect(wide.nBuckets).toBeGreaterThan(50_000);
   });
 
   it('renderActivityHtml renders both real bars over that window', () => {
     const html = renderActivityHtml(wide, () => 1, undefined);
-    // two non-empty hours (1970 and 2026); every other bucket is empty and draws nothing
+    // two non-empty hours (2020 and 2026); every other bucket is empty and draws nothing
     expect((html.match(/class="hbucket/g) ?? []).length).toBe(2);
   });
 
   it('activityDescText reports the window without spreading its buckets', () => {
     const text = activityDescText(wide, () => 1);
     expect(text).toMatch(/Peak 1 events? in one hour/);
+  });
+});
+
+describe('disclose and exclude: implausible recorded_at stamps', () => {
+  // The real bug: a production store held events stamped 1970-01-01T00:00:00Z — the client's own
+  // placeholder, trusted verbatim until the server started stamping recorded_at itself. Beside a
+  // real 2026 event this used to stretch the window to 56 years and collapse every real bar onto
+  // the right edge. Now the epoch stamp is excluded from the window entirely and disclosed.
+
+  it('a mixed window builds its extent from the plausible stamp only, and discloses the rest', () => {
+    const win = bucketEvents([
+      [ev('ModelCallCompleted', '1970-01-01T00:00:00Z'), ev('ModelCallCompleted', '2026-07-12T18:00:00Z')],
+    ])!;
+    expect(win).toBeDefined();
+    expect(win.excluded).toBe(1);
+    expect(win.nBuckets).toBe(1); // just the one plausible hour — no 56-year stretch
+    expect(win.buckets[0].model).toBe(1);
+
+    const html = renderActivityHtml(win, () => 1, undefined);
+    expect((html.match(/class="hbucket/g) ?? []).length).toBe(1); // one real bar, drawn cleanly
+
+    expect(activityExclusionNote(win)).toBe('1 event carries no plausible timestamp — excluded from the timeline.');
+    expect(activityDescText(win, () => 1)).toContain(
+      '1 event carries no plausible timestamp — excluded from the timeline.',
+    );
+  });
+
+  it('a stamp exactly at the plausibility floor is kept; the instant before it is excluded', () => {
+    const atFloor = bucketEvents([[ev('ModelCallCompleted', '2020-01-01T00:00:00Z')]])!;
+    expect(atFloor.excluded).toBe(0);
+    expect(atFloor.nBuckets).toBe(1);
+
+    const beforeFloor = bucketEvents([[ev('ModelCallCompleted', '2019-12-31T23:59:59Z')]])!;
+    expect(beforeFloor.excluded).toBe(1);
+    expect(beforeFloor.nBuckets).toBe(0);
+  });
+
+  it('an all-plausible window discloses nothing — zero-vs-absent, no note at all', () => {
+    const win = bucketEvents([[ev('ModelCallCompleted', '2026-07-17T09:00:00Z')]])!;
+    expect(win.excluded).toBe(0);
+    expect(activityExclusionNote(win)).toBeUndefined();
+    expect(activityExclusionNote(undefined)).toBeUndefined();
+    expect(activityDescText(win, () => 1)).not.toMatch(/plausible timestamp/);
+  });
+
+  it('an all-implausible window is an honest empty state, not a broken axis', () => {
+    const win = bucketEvents([
+      [
+        ev('ModelCallCompleted', '1970-01-01T00:00:00Z'),
+        ev('ModelCallCompleted', '1970-01-01T00:05:00Z'),
+        ev('ModelCallCompleted', '1970-01-01T00:10:00Z'),
+      ],
+    ])!;
+    expect(win).toBeDefined();
+    expect(win.excluded).toBe(3);
+    expect(win.nBuckets).toBe(0);
+    expect(win.buckets).toEqual([]);
+
+    // nothing to draw — renderActivityHtml must not fabricate a window from lo=hi=0
+    expect(renderActivityHtml(win, () => 1, undefined)).toBe('');
+
+    expect(activityExclusionNote(win)).toBe('3 events carry no plausible timestamp — there is nothing to chart.');
+    expect(activityDescText(win, () => 1)).toBe(
+      '3 events carry no plausible timestamp — there is nothing to chart.',
+    );
+  });
+
+  it('bucketEvents is still undefined when there are no events at all — a different absence than all-implausible', () => {
+    expect(bucketEvents([])).toBeUndefined();
+    expect(bucketEvents([[]])).toBeUndefined();
   });
 });
 

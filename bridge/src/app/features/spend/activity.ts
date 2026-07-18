@@ -11,9 +11,23 @@ import { hourKey } from '../runs/run-model';
  * One bar per UTC hour, counting events by their OWN `recorded_at` — never by a run's last touch.
  * A run that worked for three hours spans three bars, which is the only thing a chart shaped like
  * time can honestly mean.
+ *
+ * DISCLOSE AND EXCLUDE: a `recorded_at` cannot be trusted just because it parses. A production
+ * store held events stamped `1970-01-01T00:00:00Z` — a client placeholder the server took on
+ * faith before it started stamping `recorded_at` itself (see `client_runs.rs`'s server-clock
+ * fix). A single such stray beside real 2026 events stretches the window to 56 years and collapses
+ * every real bar onto the right edge; clamping it silently would draw a window that never
+ * happened. Instead, an implausible stamp is EXCLUDED from the window/bucket computation and its
+ * count is disclosed ({@link ActivityWindow.excluded}) — the event is real spend and still counts
+ * everywhere else in Spend, only its place on this timeline is unknowable.
  */
 
 const HOUR_MS = 3600_000;
+
+/** Salvor cannot have recorded a real event before it existed. Any `recorded_at` older than this
+ * is not a real timestamp — in practice, the epoch-zero client placeholder above — so it is
+ * excluded from the window rather than trusted to place a bar. */
+const PLAUSIBLE_FLOOR_MS = Date.parse('2020-01-01T00:00:00Z');
 
 export interface HourBucket {
   model: number;
@@ -28,9 +42,17 @@ export interface ActivityWindow {
   readonly hi: number;
   readonly nBuckets: number;
   readonly buckets: readonly HourBucket[];
+  /** Events whose `recorded_at` fell before {@link PLAUSIBLE_FLOOR_MS} — excluded from `lo`/`hi`/
+   * `buckets` above, counted here rather than dropped silently. Zero when every stamp was
+   * plausible. `nBuckets` is 0 (an honest empty window, not a broken axis) when NO stamp was
+   * plausible; `excluded` alone still reports how many events that was. */
+  readonly excluded: number;
 }
 
-/** Bucket every event from every folded run's log by the UTC hour its own `recorded_at` falls in. */
+/** Bucket every event from every folded run's log by the UTC hour its own `recorded_at` falls in.
+ * Events with an implausible `recorded_at` (see {@link PLAUSIBLE_FLOOR_MS}) never enter the
+ * window's extent or its buckets — only plausible stamps place a bar — but they are counted in
+ * the returned window's `excluded` so nothing is dropped without being said. */
 export function bucketEvents(allEvents: readonly (readonly SalvorEvent[])[]): ActivityWindow | undefined {
   const stamps: { t: number; kind: string }[] = [];
   for (const events of allEvents) {
@@ -41,12 +63,23 @@ export function bucketEvents(allEvents: readonly (readonly SalvorEvent[])[]): Ac
   }
   if (stamps.length === 0) return undefined;
 
-  // Iterate for the extent rather than `Math.min(...stamps.map(...))`: a run with a hundred
+  let excluded = 0;
+  const plausible: { t: number; kind: string }[] = [];
+  for (const s of stamps) {
+    if (s.t < PLAUSIBLE_FLOOR_MS) excluded++;
+    else plausible.push(s);
+  }
+  if (plausible.length === 0) {
+    // every recorded_at was implausible — an honest empty window, not a broken axis
+    return { lo: 0, hi: 0, nBuckets: 0, buckets: [], excluded };
+  }
+
+  // Iterate for the extent rather than `Math.min(...plausible.map(...))`: a run with a hundred
   // thousand events would spread that many arguments into `Math.min`/`Math.max` and overflow
   // the call stack. A loop is bounded by nothing but the array's own length.
   let minT = Infinity;
   let maxT = -Infinity;
-  for (const s of stamps) {
+  for (const s of plausible) {
     if (s.t < minT) minT = s.t;
     if (s.t > maxT) maxT = s.t;
   }
@@ -60,7 +93,7 @@ export function bucketEvents(allEvents: readonly (readonly SalvorEvent[])[]): Ac
     park: false,
     fail: false,
   }));
-  for (const s of stamps) {
+  for (const s of plausible) {
     const i = Math.round((Math.floor(s.t / HOUR_MS) * HOUR_MS - lo) / HOUR_MS);
     const b = buckets[i];
     if (!b) continue;
@@ -70,7 +103,7 @@ export function bucketEvents(allEvents: readonly (readonly SalvorEvent[])[]): Ac
     if (s.kind === 'Suspended' || s.kind === 'BudgetExceeded') b.park = true;
     if (s.kind === 'RunFailed') b.fail = true;
   }
-  return { lo, hi, nBuckets, buckets };
+  return { lo, hi, nBuckets, buckets, excluded };
 }
 
 /** The `hour:` term a click on bucket `i` would apply — same vocabulary Runs' own filter reads. */
@@ -113,6 +146,7 @@ export function renderActivityHtml(
   selectedHourTerm: string | undefined,
 ): string {
   const { lo, nBuckets, buckets } = win;
+  if (nBuckets === 0) return ''; // no plausible stamp to place a bar at — an empty chart, not a broken axis
   const max = peakTotal(buckets);
   const step = (W - PAD_L - 6) / nBuckets;
   const bw = Math.max(3, step - 2);
@@ -178,8 +212,23 @@ export function renderActivityHtml(
     <text x="${W}" y="${BASE + 26}" text-anchor="end">${new Date(win.hi).toISOString().slice(5, 10)}</text>`;
 }
 
+/** The disclosure sentence for events {@link bucketEvents} excluded as implausible — undefined
+ * (not an empty string) when nothing was excluded, so the view can render no note at all rather
+ * than an empty one: zero-vs-absent. When every stamp was implausible (`nBuckets === 0`) the
+ * chart itself has nothing to draw, so the sentence says that rather than naming a timeline the
+ * excluded events were merely left off of. */
+export function activityExclusionNote(win: ActivityWindow | undefined): string | undefined {
+  if (!win || win.excluded === 0) return undefined;
+  const noun = `${win.excluded} event${win.excluded === 1 ? '' : 's'}`;
+  const verb = win.excluded === 1 ? 'carries' : 'carry';
+  return win.nBuckets === 0
+    ? `${noun} ${verb} no plausible timestamp — there is nothing to chart.`
+    : `${noun} ${verb} no plausible timestamp — excluded from the timeline.`;
+}
+
 /** The `#activity-desc` `.sr` text: the chart's content, said in words for anyone not reading bars. */
 export function activityDescText(win: ActivityWindow, lastActiveCount: (hourTerm: string) => number): string {
+  if (win.nBuckets === 0) return activityExclusionNote(win) ?? '';
   const { nBuckets, buckets, lo } = win;
   const max = peakTotal(buckets);
   let pickable = 0;
@@ -187,9 +236,10 @@ export function activityDescText(win: ActivityWindow, lastActiveCount: (hourTerm
     const b = buckets[i];
     if (b.model + b.tool + b.other && lastActiveCount(hourTermOf(lo, i))) pickable++;
   }
-  return (
+  const base =
     `Events per hour across the ${nBuckets}-hour window, stacked by kind. Peak ${max} events in one hour. ` +
     `${pickable} of these hours can filter the run list to the runs last active in them; the rest hold events ` +
-    `from runs that have since moved on, which the list response cannot place here.`
-  );
+    `from runs that have since moved on, which the list response cannot place here.`;
+  const note = activityExclusionNote(win);
+  return note ? `${base} ${note}` : base;
 }

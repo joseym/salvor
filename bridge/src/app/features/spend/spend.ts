@@ -18,6 +18,7 @@ import { groupOf, hourKey, labelOf, toRunRow, type RunRow } from '../runs/run-mo
 import {
   type ActivityWindow,
   activityDescText,
+  activityExclusionNote,
   bucketEvents,
   hourTermOf,
   renderActivityHtml,
@@ -177,6 +178,10 @@ export class Spend implements AfterViewInit {
     const win = this.activityWindow();
     return win ? activityDescText(win, (hr) => this.lastActiveCount(hr)) : '';
   });
+  /** Disclose-and-exclude: events whose `recorded_at` was too implausible to place on the
+   * timeline (see `activity.ts`'s `PLAUSIBLE_FLOOR_MS`), said in words next to the chart —
+   * undefined, not an empty string, when nothing was excluded, so no note renders at all. */
+  readonly activityExclusion = computed(() => activityExclusionNote(this.activityWindow()));
   readonly pickableHours = computed(() => {
     const win = this.activityWindow();
     if (!win) return 0;
