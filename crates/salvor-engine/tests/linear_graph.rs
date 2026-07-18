@@ -1,7 +1,11 @@
 //! The linear-graph contract: a linear graph runs to completion against a mock model,
 //! a second drive over the recorded log replays with zero live calls and a
-//! byte-identical log, the unsupported-node refusal is typed and writes nothing
-//! past the refusal, and the graph projection shows the nodes in order.
+//! byte-identical log, and the graph projection shows the nodes in order. The two
+//! map-refusal tests here were repurposed when the engine gained map fan-out:
+//! map nodes are no longer refused wholesale, so they now cover the typed refusals
+//! that remain — a `map` whose `over` reference resolves to a non-list, and a
+//! `map` whose body is an (unsupported) embedded subgraph. The full fan-out
+//! behaviour lives in `map_graph.rs`.
 
 mod common;
 
@@ -15,7 +19,7 @@ use common::{
 };
 use salvor_core::{Effect, EventEnvelope};
 use salvor_engine::{EngineError, GraphOutcome, graph_hash, run_graph};
-use salvor_graph::{AgentSpec, Graph, GraphBuilder, MapBody, MapSpec};
+use salvor_graph::{AgentSpec, Graph, GraphBuilder, MapBody, MapSpec, ToolSpec};
 use salvor_replay::{NodeState, derive_graph_projection};
 use salvor_runtime::RunCtx;
 use salvor_store::{EventStore, SqliteStore};
@@ -180,13 +184,16 @@ async fn linear_graph_runs_replays_and_projects() {
     );
 }
 
-/// Acceptance 3: a graph with a still-unsupported map node hits the typed
-/// unsupported-node error, and no events are written past the refusal point.
-/// (Gate and branch nodes are executed; map is the remaining
-/// unsupported kind, so it now carries this "refuse before recording" coverage.)
+/// Repurposed (was `a_map_node_is_refused_before_it_records_anything`): a `map`
+/// whose `over` reference does not resolve to a list is a typed
+/// `MapOverNotAList`, refused BEFORE the map's `NodeEntered`, so nothing lands in
+/// the log past the refusal. The upstream agent still runs, proving the refusal is
+/// at the map, not the graph head. The worker body node is never walked (it is
+/// map-owned) and never reached (the map refused).
 #[tokio::test]
-async fn a_map_node_is_refused_before_it_records_anything() {
-    // research (agent) -> fanout (map). The agent runs; the map is refused.
+async fn a_map_over_a_non_list_is_refused_before_it_records_anything() {
+    // research (agent) -> fanout (map). research produces a string, so `over`
+    // ("items") resolves to a missing path (not a list) and the map refuses.
     let research_server = ScriptedModel::mount(vec![(1, text_response("a draft", 3, 2))]).await;
     let research_agent = agent_builder(&research_server.uri()).build().unwrap();
     let mut agents: HashMap<String, salvor_runtime::Agent> = HashMap::new();
@@ -199,8 +206,9 @@ async fn a_map_node_is_refused_before_it_records_anything() {
             "fanout",
             "items",
             2,
-            MapBody::Node("research".into()),
+            MapBody::Node("worker".into()),
         ))
+        .tool(ToolSpec::new("worker", "worker_tool"))
         .edge("research", "fanout")
         .build();
 
@@ -211,13 +219,13 @@ async fn a_map_node_is_refused_before_it_records_anything() {
 
     let error = run_graph(&mut ctx, &graph, &json!({}), &agents, &tools)
         .await
-        .expect_err("a map node must be refused");
+        .expect_err("a map over a non-list must be refused");
     match error {
-        EngineError::UnsupportedNode { node, kind } => {
+        EngineError::MapOverNotAList { node, over } => {
             assert_eq!(node, "fanout");
-            assert_eq!(kind, "map");
+            assert_eq!(over, "items");
         }
-        other => panic!("expected UnsupportedNode, got {other:?}"),
+        other => panic!("expected MapOverNotAList, got {other:?}"),
     }
 
     // The research node ran (its own events are present), but nothing for the
@@ -235,28 +243,36 @@ async fn a_map_node_is_refused_before_it_records_anything() {
         ],
         "no NodeEntered for the map, and no terminal"
     );
-    // Doubly explicit: the map node never appears in the log.
+    // Doubly explicit: neither the map nor its worker body ever appears entered.
     assert!(
         !log.iter().any(|e| matches!(
             &e.event,
-            salvor_core::Event::NodeEntered { node } if node == "fanout"
+            salvor_core::Event::NodeEntered { node } if node == "fanout" || node == "worker"
         )),
-        "the map must not have been entered"
+        "the map (and its map-owned worker) must not have been entered"
     );
 }
 
-/// A single map node (no agent ahead of it) is refused immediately, with only
-/// the graph head in the log.
+/// A `map`
+/// whose body is an embedded subgraph is a typed `UnsupportedMapBody`, refused
+/// BEFORE the map's `NodeEntered`, so a lone such map leaves only the graph head
+/// in the log. (The node-body variant ships; the subgraph body does not.)
 #[tokio::test]
-async fn a_lone_map_refuses_with_only_the_head_recorded() {
+async fn a_map_with_a_subgraph_body_refuses_with_only_the_head_recorded() {
     let agents: HashMap<String, salvor_runtime::Agent> = HashMap::new();
     let tools: HashMap<String, Box<dyn DynTool>> = HashMap::new();
+
+    // A minimal (unused) embedded subgraph body; the engine refuses before it
+    // would ever be walked.
+    let subgraph = GraphBuilder::new()
+        .tool(ToolSpec::new("inner", "inner_tool"))
+        .build();
     let graph = GraphBuilder::new()
         .map(MapSpec::new(
             "fanout",
             "items",
             1,
-            MapBody::Node("fanout".into()),
+            MapBody::Subgraph(Box::new(subgraph)),
         ))
         .build();
 
@@ -265,10 +281,13 @@ async fn a_lone_map_refuses_with_only_the_head_recorded() {
     let mut ctx = RunCtx::with_hooks(store.clone(), run_id, vec![], fixed_clock(), fixed_random())
         .expect("ctx builds");
 
-    let error = run_graph(&mut ctx, &graph, &json!({}), &agents, &tools)
+    let error = run_graph(&mut ctx, &graph, &json!({"items": [1, 2]}), &agents, &tools)
         .await
-        .expect_err("a lone map must be refused");
-    assert!(matches!(error, EngineError::UnsupportedNode { .. }));
+        .expect_err("a subgraph body must be refused");
+    match error {
+        EngineError::UnsupportedMapBody { node, .. } => assert_eq!(node, "fanout"),
+        other => panic!("expected UnsupportedMapBody, got {other:?}"),
+    }
 
     let log = store.read_log(run_id).await.expect("log reads");
     assert_eq!(event_kinds(&log), ["GraphRunStarted"]);

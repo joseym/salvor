@@ -1,13 +1,14 @@
 //! [`EngineError`]: everything that can stop a graph drive.
 //!
 //! Two families sit here. The first is the engine's own refusals, each naming
-//! the offending node: a node kind the engine does not execute yet
-//! ([`EngineError::UnsupportedNode`]), an agent or tool the resolver could not
-//! supply, a graph whose topology is not a well-formed DAG, a branch that no
-//! case matched or whose model decision named no case, or a tool that failed.
-//! Most are returned **before** recording anything for the node they name, so
-//! the log never carries events past the refusal; the two branch-decision errors
-//! that require running a model first are the documented exception (their
+//! the offending node: a `map` node whose `over` reference does not resolve to a
+//! list ([`EngineError::MapOverNotAList`]) or whose body form is not
+//! executable ([`EngineError::UnsupportedMapBody`]), an agent or tool the resolver
+//! could not supply, a graph whose topology is not a well-formed DAG, a branch
+//! that no case matched or whose model decision named no case, or a tool that
+//! failed. Most are returned **before** recording anything for the node they
+//! name, so the log never carries events past the refusal; the two branch-decision
+//! errors that require running a model first are the documented exception (their
 //! `NodeEntered` and the model's events are already recorded when the mapping
 //! fails). The second family is [`EngineError::Runtime`], the plain pass-through
 //! of a [`RuntimeError`] from the `RunCtx` operations the engine drives.
@@ -18,16 +19,34 @@ use thiserror::Error;
 /// Why a graph drive could not continue.
 #[derive(Debug, Error)]
 pub enum EngineError {
-    /// The walk reached a node whose kind the engine does not execute yet
-    /// (a `map`). Returned before any event for the node is recorded, so nothing
-    /// lands in the log past the refusal. The document layer still validates
-    /// these as legal graphs; only the engine declines to run them for now.
-    #[error("node `{node}`: the engine does not support `{kind}` nodes yet")]
-    UnsupportedNode {
-        /// The id of the node that could not be executed.
+    /// A `map` node's `over` reference did not resolve to a JSON array against the
+    /// routed value (it was missing, or resolved to a non-array value). A map can
+    /// only fan out over a list, so the engine refuses deterministically rather
+    /// than guessing. Returned **before** the map's `NodeEntered` is recorded, so
+    /// nothing lands in the log past the refusal, and it reproduces on replay: the
+    /// same recorded routed value re-resolves to the same non-list.
+    #[error("map node `{node}`: the `over` reference `{over}` did not resolve to a list")]
+    MapOverNotAList {
+        /// The id of the map node.
         node: String,
-        /// Its kind name (`map`).
-        kind: &'static str,
+        /// The `over` reference that failed to resolve to a list.
+        over: String,
+    },
+
+    /// A `map` node's body is a form that is not executable: an embedded
+    /// `subgraph` (per-item sub-walks need their own
+    /// log per iteration to keep node ids unambiguous, which is not implemented
+    /// yet), or a `node` body that
+    /// names a node whose kind cannot be a per-item worker (only `agent` and
+    /// `tool` bodies run). Returned **before** the map's `NodeEntered` is recorded,
+    /// so nothing lands in the log past the refusal. The document layer still
+    /// validates these as legal graphs; only the engine declines to run them.
+    #[error("map node `{node}`: {detail}")]
+    UnsupportedMapBody {
+        /// The id of the map node.
+        node: String,
+        /// What about the body is not supported.
+        detail: String,
     },
 
     /// An expression `branch` reached with no case whose condition evaluated
