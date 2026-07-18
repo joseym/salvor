@@ -161,6 +161,29 @@ pub enum RequestedStep {
         /// The case name orchestration presented.
         case: String,
     },
+    /// [`ReplayCursor::map_fanned_out`] for this map node.
+    MapFannedOut {
+        /// The map node id orchestration presented.
+        node: String,
+        /// The resolved item list orchestration presented.
+        items: Value,
+    },
+    /// [`ReplayCursor::map_iteration_started`] for this map node and index.
+    MapIterationStarted {
+        /// The map node id orchestration presented.
+        node: String,
+        /// The zero-based iteration index orchestration presented.
+        index: u64,
+        /// The derived child run id orchestration presented.
+        child_run: String,
+    },
+    /// [`ReplayCursor::map_iteration_joined`] for this map node and index.
+    MapIterationJoined {
+        /// The map node id orchestration presented.
+        node: String,
+        /// The zero-based iteration index orchestration presented.
+        index: u64,
+    },
     /// [`ReplayCursor::now`].
     Now,
     /// [`ReplayCursor::random`].
@@ -640,6 +663,146 @@ impl ReplayCursor {
         let emitted = self.emit(Event::BranchTaken {
             node: node.to_owned(),
             case: case.to_owned(),
+        });
+        Ok(Outcome::Live(emitted))
+    }
+
+    /// Records (or replays) that a map node fanned out over a resolved item list.
+    ///
+    /// Recorded between the map node's [`node_entered`](ReplayCursor::node_entered)
+    /// and its per-iteration markers. Replayed: matches the recorded
+    /// [`Event::MapFannedOut`] for `node` and `items` (the resolved list is part of
+    /// the recorded fact, so a fan-out that recorded one list live cannot replay
+    /// under another). Live: returns the event to persist. The `items` a caller
+    /// passes must be a deterministic function of recorded values (the `over`
+    /// reference resolved against the recorded routed value) so replay reproduces
+    /// the identical fan-out, which is what makes the derived per-iteration child
+    /// ids reproducible.
+    ///
+    /// # Errors
+    ///
+    /// [`ReplayError::Divergence`] on a node-id or item-list mismatch, a different
+    /// recorded event, or a request after the run already ended.
+    pub fn map_fanned_out(
+        &mut self,
+        node: &str,
+        items: &Value,
+    ) -> Result<Outcome<(), Emitted>, ReplayError> {
+        let requested = RequestedStep::MapFannedOut {
+            node: node.to_owned(),
+            items: items.clone(),
+        };
+        self.guard_terminal(&requested)?;
+        if self.pos < self.log.len() {
+            if let Event::MapFannedOut {
+                node: recorded_node,
+                items: recorded_items,
+            } = &self.log[self.pos].event
+                && recorded_node == node
+                && recorded_items == items
+            {
+                self.pos += 1;
+                return Ok(Outcome::Replayed(()));
+            }
+            return Err(self.mismatch(requested));
+        }
+        let emitted = self.emit(Event::MapFannedOut {
+            node: node.to_owned(),
+            items: items.clone(),
+        });
+        Ok(Outcome::Live(emitted))
+    }
+
+    /// Records (or replays) that one iteration of a map fan-out started, as a child
+    /// run with the derived id `child_run`.
+    ///
+    /// Replayed: matches the recorded [`Event::MapIterationStarted`] on its
+    /// STRUCTURAL position — `node` and `index` — and the RECORDED `child_run`
+    /// wins, exactly as the recorded input wins in [`begin`](ReplayCursor::begin).
+    /// The passed `child_run` is compared only loosely (it is derived data), for a
+    /// deliberate reason: the id is `sha256:` over the parent run id, the node, and
+    /// the index, and a FORK replays the origin's prefix under a NEW run id, so a
+    /// caller re-deriving the id there produces a different value than the origin
+    /// recorded. Trusting the recorded id keeps a fork's inherited map markers
+    /// replayable while `node`/`index` still pin the structural position. Live:
+    /// returns the event to persist with the caller's derived `child_run`.
+    ///
+    /// # Errors
+    ///
+    /// [`ReplayError::Divergence`] on a node-id or index mismatch, a different
+    /// recorded event, or a request after the run already ended.
+    pub fn map_iteration_started(
+        &mut self,
+        node: &str,
+        index: u64,
+        child_run: &str,
+    ) -> Result<Outcome<(), Emitted>, ReplayError> {
+        let requested = RequestedStep::MapIterationStarted {
+            node: node.to_owned(),
+            index,
+            child_run: child_run.to_owned(),
+        };
+        self.guard_terminal(&requested)?;
+        if self.pos < self.log.len() {
+            if let Event::MapIterationStarted {
+                node: recorded_node,
+                index: recorded_index,
+                ..
+            } = &self.log[self.pos].event
+                && recorded_node == node
+                && *recorded_index == index
+            {
+                self.pos += 1;
+                return Ok(Outcome::Replayed(()));
+            }
+            return Err(self.mismatch(requested));
+        }
+        let emitted = self.emit(Event::MapIterationStarted {
+            node: node.to_owned(),
+            index,
+            child_run: child_run.to_owned(),
+        });
+        Ok(Outcome::Live(emitted))
+    }
+
+    /// Records (or replays) that one iteration of a map fan-out joined back into
+    /// the map node's output.
+    ///
+    /// Joins are recorded in index order, never completion order, so the
+    /// concurrency of the fan-out never influences the parent log's byte sequence.
+    /// Replayed: matches the recorded [`Event::MapIterationJoined`] for `node` and
+    /// `index`. Live: returns the event to persist.
+    ///
+    /// # Errors
+    ///
+    /// [`ReplayError::Divergence`] on a node-id or index mismatch, a different
+    /// recorded event, or a request after the run already ended.
+    pub fn map_iteration_joined(
+        &mut self,
+        node: &str,
+        index: u64,
+    ) -> Result<Outcome<(), Emitted>, ReplayError> {
+        let requested = RequestedStep::MapIterationJoined {
+            node: node.to_owned(),
+            index,
+        };
+        self.guard_terminal(&requested)?;
+        if self.pos < self.log.len() {
+            if let Event::MapIterationJoined {
+                node: recorded_node,
+                index: recorded_index,
+            } = &self.log[self.pos].event
+                && recorded_node == node
+                && *recorded_index == index
+            {
+                self.pos += 1;
+                return Ok(Outcome::Replayed(()));
+            }
+            return Err(self.mismatch(requested));
+        }
+        let emitted = self.emit(Event::MapIterationJoined {
+            node: node.to_owned(),
+            index,
         });
         Ok(Outcome::Live(emitted))
     }
@@ -1360,6 +1523,18 @@ impl fmt::Display for RequestedStep {
                 write!(f, "NodeSkipped(node={node}, reason={reason})")
             }
             Self::BranchTaken { node, case } => write!(f, "BranchTaken(node={node}, case={case})"),
+            Self::MapFannedOut { node, .. } => write!(f, "MapFannedOut(node={node})"),
+            Self::MapIterationStarted {
+                node,
+                index,
+                child_run,
+            } => write!(
+                f,
+                "MapIterationStarted(node={node}, index={index}, child_run={child_run})"
+            ),
+            Self::MapIterationJoined { node, index } => {
+                write!(f, "MapIterationJoined(node={node}, index={index})")
+            }
             Self::Now => write!(f, "Now"),
             Self::Random => write!(f, "Random"),
             Self::ModelCall { request_hash } => write!(f, "ModelCall(request_hash={request_hash})"),
@@ -1649,6 +1824,167 @@ mod tests {
         let err = cursor
             .node_entered("publish")
             .expect_err("a different node id must diverge");
+        assert!(
+            matches!(err, ReplayError::Divergence { position, .. } if position == SequenceNumber::new(1))
+        );
+    }
+
+    /// The three map markers emit live at contiguous positions and replay from
+    /// history with no divergence: a fan-out of two, joined in index order.
+    #[test]
+    fn map_markers_emit_live_and_replay() {
+        let run_id =
+            RunId::from_uuid(Uuid::parse_str("00000000-0000-4000-8000-00000000000b").unwrap());
+        let items = serde_json::json!(["a", "b"]);
+
+        let mut cursor = ReplayCursor::new(vec![]).expect("fresh run");
+        let mut emitted = Vec::new();
+        match cursor.begin_graph("sha256:g", None, None).expect("begin") {
+            Outcome::Live(p) => emitted.push(p.record(serde_json::json!({}))),
+            Outcome::Replayed(_) => panic!("fresh must be live"),
+        }
+        let mut push_live = |outcome: Outcome<(), Emitted>| match outcome {
+            Outcome::Live(e) => emitted.push(e),
+            Outcome::Replayed(()) => panic!("fresh must be live"),
+        };
+        push_live(cursor.node_entered("fanout").expect("enter"));
+        push_live(cursor.map_fanned_out("fanout", &items).expect("fanout"));
+        push_live(
+            cursor
+                .map_iteration_started("fanout", 0, "sha256:c0")
+                .expect("start 0"),
+        );
+        push_live(
+            cursor
+                .map_iteration_started("fanout", 1, "sha256:c1")
+                .expect("start 1"),
+        );
+        push_live(cursor.map_iteration_joined("fanout", 0).expect("join 0"));
+        push_live(cursor.map_iteration_joined("fanout", 1).expect("join 1"));
+        push_live(cursor.node_exited("fanout").expect("exit"));
+
+        let positions: Vec<u64> = emitted.iter().map(|e| e.seq.get()).collect();
+        assert_eq!(positions, [0, 1, 2, 3, 4, 5, 6, 7], "contiguous positions");
+
+        let log: Vec<EventEnvelope> = emitted
+            .iter()
+            .map(|e| {
+                EventEnvelope::new(
+                    run_id,
+                    e.seq,
+                    datetime!(2026-07-14 12:00:00 UTC),
+                    e.event.clone(),
+                )
+            })
+            .collect();
+        let mut replay = ReplayCursor::new(log).expect("well formed");
+        replay.begin_graph("sha256:g", None, None).expect("begin");
+        assert!(matches!(
+            replay.node_entered("fanout").expect("enter"),
+            Outcome::Replayed(())
+        ));
+        assert!(matches!(
+            replay.map_fanned_out("fanout", &items).expect("fanout"),
+            Outcome::Replayed(())
+        ));
+        assert!(matches!(
+            replay
+                .map_iteration_started("fanout", 0, "sha256:c0")
+                .expect("start 0"),
+            Outcome::Replayed(())
+        ));
+        assert!(matches!(
+            replay
+                .map_iteration_started("fanout", 1, "sha256:c1")
+                .expect("start 1"),
+            Outcome::Replayed(())
+        ));
+        assert!(matches!(
+            replay.map_iteration_joined("fanout", 0).expect("join 0"),
+            Outcome::Replayed(())
+        ));
+        assert!(matches!(
+            replay.map_iteration_joined("fanout", 1).expect("join 1"),
+            Outcome::Replayed(())
+        ));
+        assert!(matches!(
+            replay.node_exited("fanout").expect("exit"),
+            Outcome::Replayed(())
+        ));
+        assert!(!replay.is_replaying(), "history fully consumed");
+    }
+
+    /// A map iteration replays on its STRUCTURAL position (node + index); the
+    /// RECORDED child run id wins even when a caller re-derives a different one.
+    /// This is what keeps a fork's inherited map markers replayable: the fork
+    /// replays the origin's prefix under a new run id, so its re-derived child ids
+    /// differ from the origin's, and trusting the recorded id is correct.
+    #[test]
+    fn a_replayed_map_iteration_honors_the_recorded_child_run() {
+        let run_id =
+            RunId::from_uuid(Uuid::parse_str("00000000-0000-4000-8000-00000000000c").unwrap());
+        let log = vec![
+            EventEnvelope::new(
+                run_id,
+                SequenceNumber::new(0),
+                datetime!(2026-07-14 12:00:00 UTC),
+                Event::GraphRunStarted {
+                    graph_hash: "sha256:g".into(),
+                    input: serde_json::json!({}),
+                    labels: None,
+                    forked_from: None,
+                },
+            ),
+            EventEnvelope::new(
+                run_id,
+                SequenceNumber::new(1),
+                datetime!(2026-07-14 12:00:00 UTC),
+                Event::MapIterationStarted {
+                    node: "fanout".into(),
+                    index: 0,
+                    child_run: "sha256:origin-derived".into(),
+                },
+            ),
+        ];
+        let mut cursor = ReplayCursor::new(log).expect("well formed");
+        cursor.begin_graph("sha256:g", None, None).expect("begin");
+        // A different (fork-re-derived) child id still replays: node + index pin
+        // the position, and the recorded id stands.
+        assert!(matches!(
+            cursor
+                .map_iteration_started("fanout", 0, "sha256:fork-re-derived")
+                .expect("a re-derived child id must still replay on node+index"),
+            Outcome::Replayed(())
+        ));
+        // But a wrong INDEX at this position is a genuine divergence.
+        let mut cursor = ReplayCursor::new(vec![
+            EventEnvelope::new(
+                run_id,
+                SequenceNumber::new(0),
+                datetime!(2026-07-14 12:00:00 UTC),
+                Event::GraphRunStarted {
+                    graph_hash: "sha256:g".into(),
+                    input: serde_json::json!({}),
+                    labels: None,
+                    forked_from: None,
+                },
+            ),
+            EventEnvelope::new(
+                run_id,
+                SequenceNumber::new(1),
+                datetime!(2026-07-14 12:00:00 UTC),
+                Event::MapIterationStarted {
+                    node: "fanout".into(),
+                    index: 0,
+                    child_run: "sha256:origin-derived".into(),
+                },
+            ),
+        ])
+        .expect("well formed");
+        cursor.begin_graph("sha256:g", None, None).expect("begin");
+        let err = cursor
+            .map_iteration_started("fanout", 1, "sha256:origin-derived")
+            .expect_err("a different index must diverge");
         assert!(
             matches!(err, ReplayError::Divergence { position, .. } if position == SequenceNumber::new(1))
         );
