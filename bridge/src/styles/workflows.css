@@ -252,6 +252,7 @@
 }
 .wf-node.is-bad {
   border-color: var(--danger);
+  box-shadow: var(--elev-ring), inset 3px 0 0 0 var(--danger);
 }
 
 .wf-kind {
@@ -311,19 +312,24 @@
   color: var(--success);
   background: color-mix(in oklab, var(--success), var(--bg) 90%);
 }
-.wf-badge {
+/* the error marker on a node card — a FILLED corner dot hung off the top-right corner, clear of the
+   .wf-eff effect badge that sits INSIDE that same corner. The two must never share a lane: at
+   `right: 30px` this dot printed straight over the effect word ("idemp!ent", "!ite"). Ported from
+   the prototype's `.wf-node.is-bad .wf-badge` (top/right -8px, solid danger, accent-on glyph). */
+.wf-node.is-bad .wf-badge {
   position: absolute;
-  top: var(--space-2);
-  right: 30px;
-  width: 16px;
-  height: 16px;
+  top: -8px;
+  right: -8px;
+  width: 18px;
+  height: 18px;
   display: grid;
   place-items: center;
   font-family: var(--font-mono);
   font-size: 11px;
   font-weight: 700;
-  color: var(--danger);
-  background: color-mix(in oklab, var(--danger), var(--bg) 88%);
+  line-height: 1;
+  color: var(--accent-on);
+  background: var(--danger);
   border-radius: 50%;
 }
 /* the run status rides the END of the field strip, never on top of it */
