@@ -19,6 +19,20 @@
 # reconciliation card never calls resume). The four runs above are untouched; this only adds a
 # fifth. See step 5.5 below.
 #
+# Graph-seeds ADDITION, on top of everything above, unchanged: three real v0.4 graph-engine
+# runs over ONE stored document (`research` agent -> `approve` gate -> `followup` agent), agent and
+# gate nodes ONLY — the stock server's tool registry is empty and wiring a tool node is a Rust
+# change out of scope here. Both agent nodes reference the SAME registered demo agent (DEMO_AGENT,
+# step 4), so every agent-node walk genuinely drives demo/agent.toml's 20-turn research loop against
+# the offline model and the salvor-demo-research MCP fixture already up from step 2 — no new
+# process, no new Rust. One run is driven to completion (parks at the gate, resumed through the
+# ordinary /resume endpoint), one is left parked at the gate on purpose, and one is a fork of the
+# completed run from the gate boundary. See step 5.6 below, including a note on a discovery made
+# while seeding: forking past `approve` is NOT hazard-free with a real MCP-backed agent (the
+# `followup` node's own internal `save_finding` writes are real `Effect::Write` tool calls the fork
+# engine's flat log scan sees), so that seed exercises the genuine refuse-then-record acknowledgement
+# flow rather than a hazard-free fork.
+#
 # Usage:
 #     bridge/e2e-serve.sh                 # start everything, print TARGET_URL, stay up
 #     bridge/e2e-serve.sh --stop          # tear down the servers this script started
@@ -193,6 +207,178 @@ else
   fi
 fi
 pkill -f 'examples/reconciliation/model_server.py' 2>/dev/null || true
+
+# 5.6. Gate-graph addition (additive only): three real graph-engine seeds, agent + gate nodes only.
+#
+#      Document: research (agent, DEMO_AGENT) -> approve (gate) -> followup (agent, DEMO_AGENT).
+#      Submitted once via POST /v1/graphs; every seed run below starts a fresh /v1/graph-runs of
+#      the SAME stored hash, so GET /v1/graphs lists one document with three runs against it.
+#
+#      Seed A (graph-run-completed): started, awaited to the gate, resumed with {"approved":true}
+#      through the ORDINARY /v1/runs/{id}/resume endpoint (no graph-specific verb), awaited to
+#      completion.
+#      Seed B (graph-run-parked): started, awaited to the gate, left suspended on purpose — a
+#      second, independent parked run.
+#      Seed C (graph-run-forked): forks seed A from the "approve" gate boundary. A dry run first
+#      discovers the exact hazard seqs (found empirically while writing this seed: forking past
+#      "approve" is NOT hazard-free here, because "followup" is the SAME demo agent and its own
+#      internal save_finding MCP calls are real Effect::Write tool calls sitting in the origin's
+#      log — the fork engine's hazard scan is a flat per-run log scan with no node-kind filter, so
+#      it sees them same as it would a graph tool node's write), then the real fork acknowledges
+#      exactly those seqs. The child re-enters "approve" fresh (a fork's prefix ends BELOW the fork
+#      node's NodeEntered, so the origin's Resumed event is excluded) and is left parked there,
+#      proving forked_from without paying for a second full MCP walk to re-drive it to completion.
+echo "[e2e-serve] submitting the gate graph document (research -agent-> approve -gate-> followup -agent->)"
+cat > /tmp/salvor-bridge-e2e-graph-build.py <<'PYEOF'
+import json, sys
+agent_hash = sys.argv[1]
+doc = {
+    "schema_version": 1,
+    "nodes": [
+        {"kind": "agent", "payload": {"id": "research", "agent_hash": agent_hash}},
+        {"kind": "gate", "payload": {
+            "id": "approve",
+            "prompt": "Approve this research pass before the follow-up round?",
+            "approval_schema": {
+                "type": "object",
+                "properties": {"approved": {"type": "boolean"}},
+                "required": ["approved"],
+            },
+        }},
+        {"kind": "agent", "payload": {"id": "followup", "agent_hash": agent_hash}},
+    ],
+    "edges": [
+        {"from": "research", "to": "approve"},
+        {"from": "approve", "to": "followup"},
+    ],
+}
+with open("/tmp/salvor-bridge-e2e-graph.json", "w") as f:
+    json.dump(doc, f)
+PYEOF
+python3 /tmp/salvor-bridge-e2e-graph-build.py "$DEMO_AGENT"
+curl -s -X POST "${API}/v1/graphs" -H 'Content-Type: application/json' \
+  --data-binary @/tmp/salvor-bridge-e2e-graph.json > /tmp/salvor-bridge-e2e-graph-submit.json
+GRAPH_HASH=$(python3 -c 'import json;print(json.load(open("/tmp/salvor-bridge-e2e-graph-submit.json"))["graph"])')
+if [ -z "$GRAPH_HASH" ]; then
+  echo "[e2e-serve] FATAL: graph submit failed: $(cat /tmp/salvor-bridge-e2e-graph-submit.json)" >&2
+  exit 1
+fi
+echo "[e2e-serve] graph stored: ${GRAPH_HASH}"
+
+# Polls GET /v1/runs/{run} until status.state == $2, or fails loudly after $3 tries (0.5s each).
+wait_for_run_state() {
+  local run="$1" want="$2" tries="${3:-160}" state=""
+  for _ in $(seq 1 "$tries"); do
+    state=$(curl -s "${API}/v1/runs/${run}" | python3 -c 'import sys,json
+try:
+    print(json.load(sys.stdin)["status"]["state"])
+except Exception:
+    print("")')
+    if [ "$state" = "$want" ]; then return 0; fi
+    sleep 0.5
+  done
+  echo "[e2e-serve] FATAL: run ${run} never reached state '${want}' (last saw '${state}')" >&2
+  curl -s "${API}/v1/runs/${run}" >&2 || true
+  exit 1
+}
+
+echo "[e2e-serve] seed A: graph run driven to completion"
+curl -s -X POST "${API}/v1/graph-runs" -H 'Content-Type: application/json' \
+  -d "{\"graph_hash\":\"${GRAPH_HASH}\",\"input\":${INPUT}}" \
+  > /tmp/salvor-bridge-e2e-gruna.json
+GRUN_A=$(python3 -c 'import json;print(json.load(open("/tmp/salvor-bridge-e2e-gruna.json"))["run"])')
+wait_for_run_state "$GRUN_A" "suspended"
+curl -s -X POST "${API}/v1/runs/${GRUN_A}/resume" -H 'Content-Type: application/json' \
+  -d '{"input":{"approved":true}}' >/dev/null
+wait_for_run_state "$GRUN_A" "completed"
+echo "[e2e-serve] seed A completed: ${GRUN_A}"
+
+echo "[e2e-serve] seed B: a second graph run, parked at the gate on purpose"
+curl -s -X POST "${API}/v1/graph-runs" -H 'Content-Type: application/json' \
+  -d "{\"graph_hash\":\"${GRAPH_HASH}\",\"input\":${INPUT}}" \
+  > /tmp/salvor-bridge-e2e-grunb.json
+GRUN_B=$(python3 -c 'import json;print(json.load(open("/tmp/salvor-bridge-e2e-grunb.json"))["run"])')
+wait_for_run_state "$GRUN_B" "suspended"
+echo "[e2e-serve] seed B parked: ${GRUN_B}"
+
+echo "[e2e-serve] seed C: forking seed A from the 'approve' boundary"
+curl -s -X POST "${API}/v1/runs/${GRUN_A}/fork" -H 'Content-Type: application/json' \
+  -d '{"from_node":"approve","dry_run":true}' \
+  > /tmp/salvor-bridge-e2e-fork-preview.json
+python3 - <<'PYEOF'
+import json
+with open("/tmp/salvor-bridge-e2e-fork-preview.json") as f:
+    preview = json.load(f)
+writes = preview.get("unacknowledged_writes", [])
+with open("/tmp/salvor-bridge-e2e-fork-body.json", "w") as f:
+    json.dump({"from_node": "approve", "acknowledge_writes": writes}, f)
+print(f"[e2e-serve] fork preview: {len(writes)} write hazard(s) to acknowledge: {writes}")
+PYEOF
+curl -s -X POST "${API}/v1/runs/${GRUN_A}/fork" -H 'Content-Type: application/json' \
+  --data-binary @/tmp/salvor-bridge-e2e-fork-body.json \
+  > /tmp/salvor-bridge-e2e-fork-resp.json
+GRUN_C=$(python3 -c 'import json;print(json.load(open("/tmp/salvor-bridge-e2e-fork-resp.json")).get("run",""))')
+if [ -z "$GRUN_C" ]; then
+  echo "[e2e-serve] FATAL: fork failed: $(cat /tmp/salvor-bridge-e2e-fork-resp.json)" >&2
+  exit 1
+fi
+wait_for_run_state "$GRUN_C" "suspended"
+echo "[e2e-serve] seed C forked child parked: ${GRUN_C} (forked from ${GRUN_A} at approve)"
+
+echo "[e2e-serve] verifying the gate graph seeds"
+curl -s "${API}/v1/graphs" > /tmp/salvor-bridge-e2e-graphs-list.json
+python3 - "$GRAPH_HASH" <<'PYEOF'
+import json, sys
+h = sys.argv[1]
+with open("/tmp/salvor-bridge-e2e-graphs-list.json") as f:
+    d = json.load(f)
+found = next((g for g in d["graphs"] if g["graph"] == h), None)
+assert found, f"graph {h} not listed in GET /v1/graphs: {d}"
+assert found["node_count"] == 3, found
+assert found["edge_count"] == 2, found
+assert found["entry_nodes"] == ["research"], found
+assert found["terminal_nodes"] == ["followup"], found
+print("[e2e-serve] GET /v1/graphs lists the gate document:", found)
+PYEOF
+
+for pair in "${GRUN_A}:completed" "${GRUN_B}:suspended" "${GRUN_C}:suspended"; do
+  run="${pair%%:*}"
+  want="${pair##*:}"
+  curl -s "${API}/v1/runs/${run}" > /tmp/salvor-bridge-e2e-run-check.json
+  got=$(python3 -c 'import json;print(json.load(open("/tmp/salvor-bridge-e2e-run-check.json"))["status"]["state"])')
+  if [ "$got" != "$want" ]; then
+    echo "[e2e-serve] FATAL: run ${run} expected state '${want}', got '${got}'" >&2
+    exit 1
+  fi
+done
+echo "[e2e-serve] run states verified: A(completed)=${GRUN_A} B(suspended)=${GRUN_B} C(suspended,forked)=${GRUN_C}"
+
+curl -s "${API}/v1/runs/${GRUN_A}/forks" > /tmp/salvor-bridge-e2e-forks.json
+python3 - "$GRUN_C" <<'PYEOF'
+import json, sys
+child = sys.argv[1]
+with open("/tmp/salvor-bridge-e2e-forks.json") as f:
+    d = json.load(f)
+assert d.get("derived") is True, f"forks index not labeled derived: {d}"
+found = next((fork for fork in d["forks"] if fork["run"] == child), None)
+assert found, f"child {child} missing from the forks index: {d}"
+assert found["from_node"] == "approve", found
+print("[e2e-serve] GET /v1/runs/{origin}/forks lists the child:", found)
+PYEOF
+
+curl -s "${API}/v1/runs/${GRUN_C}/graph" > /tmp/salvor-bridge-e2e-child-graph.json
+python3 - "$GRUN_A" <<'PYEOF'
+import json, sys
+origin = sys.argv[1]
+with open("/tmp/salvor-bridge-e2e-child-graph.json") as f:
+    d = json.load(f)
+fo = d.get("forked_from")
+assert fo, f"child's GET /v1/runs/{{id}}/graph has no forked_from: {d}"
+assert fo["run_id"] == origin, fo
+assert fo["from_node"] == "approve", fo
+print("[e2e-serve] child's GET /v1/runs/{id}/graph shows forked_from:", fo)
+PYEOF
+echo "[e2e-serve] gate graph seeds verified: graph=${GRAPH_HASH} A=${GRUN_A} B=${GRUN_B} C=${GRUN_C}"
 
 # 6. Let them settle (the 24-step demo runs drive the offline model at the pace above).
 sleep 14
