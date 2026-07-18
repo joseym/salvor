@@ -194,6 +194,10 @@
                   </svg>
                 </button>
               </span>
+            } @else if (id.kind === 'graph') {
+              <!-- a folded run with no agent_def_hash is a GRAPH run (GraphRunStarted head); an
+                   honest distinct marker, never the em-dash the 'none' case renders -->
+              <span class="agent-id is-graph" [attr.title]="agentCellTitle(id)">{{ id.text }}</span>
             } @else if (id.kind === 'none') {
               <span class="unavail" [attr.title]="agentCellTitle(id)">{{ id.text }}</span>
             } @else {
@@ -318,11 +322,27 @@
             <dd>
               @if (has(r.agentDefHash)) {
                 {{ hashShort(r.agentDefHash!) }}
+              } @else if (identity(r).kind === 'graph') {
+                <!-- a graph run has no single agent_def_hash — genuinely N/A, not unreadable; the
+                     graph it ran is shown as graph_hash below, from GET /v1/runs/{id}/graph -->
+                <span class="agent-id is-graph">graph run</span>
               } @else {
                 <span class="unavail" tabindex="0" [attr.title]="whyUnreadable" [attr.aria-label]="'Unavailable. ' + whyUnreadable">—</span>
               }
             </dd>
           </div>
+          @if (identity(r).kind === 'graph') {
+            <div>
+              <dt>graph_hash</dt>
+              <dd>
+                @if (graphHashOf(r); as gh) {
+                  <span class="mono" [attr.title]="'graph_hash ' + gh">{{ hashShort(gh) }}</span>
+                } @else {
+                  <span class="loading-note">reading GET /v1/runs/{{ short(r.id) }}…/graph</span>
+                }
+              </dd>
+            </div>
+          }
           <div>
             <dt>usage.input</dt>
             <dd>
@@ -353,6 +373,10 @@
               That is the whole list row — <code>GET /v1/runs</code> returns nothing else. It carries
               <code>usage</code>, <code>step_count</code> and <code>agent_def_hash</code>, folded server-side in the
               same pass as <code>status</code>, so they are values here. The one dash left is <code>cost</code>.
+              @if (identity(r).kind === 'graph') {
+                <code>graph_hash</code> above is the sole exception: the list carries nothing graph-shaped,
+                so it is read separately from <code>GET /v1/runs/{{ short(r.id) }}…/graph</code>.
+              }
             </p>
             <button class="btn ghost" type="button" (click)="openRun(r.id)">Open in inspector</button>
             <span class="endpoint" style="margin-left: 10px">GET /v1/runs/{{ short(r.id) }}…/events</span>

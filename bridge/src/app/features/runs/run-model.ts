@@ -97,20 +97,37 @@ export function isHash(value: string): boolean {
   return /^sha256:/.test(value);
 }
 
-/** Which of the three honest renderings {@link agentIdentity} chose. */
-export type AgentIdentityKind = 'none' | 'label' | 'hash' | 'name';
+/** Which of the honest renderings {@link agentIdentity} chose. */
+export type AgentIdentityKind = 'none' | 'label' | 'hash' | 'name' | 'graph';
+
+/**
+ * A run whose log the server READ and folded: `usage`/`step_count` are present exactly when the
+ * fold succeeded (the list omits every folded field together when `read_log` fails — see
+ * `crates/salvor-server/src/runs.rs`, the zero-vs-absent rule). So the presence of either is the
+ * honest "the log folded" signal, and its absence is the honest "the log could not be read" signal.
+ */
+function foldedLog(r: RunRow): boolean {
+  return r.stepCount !== undefined || r.usage !== undefined;
+}
 
 /**
  * The agent column's one source of truth. The run's log records only
  * `agent_def_hash` — the NAME here, when present, is a separate, honestly-sourced lookup (a
- * registry resolution via {@link AgentRegistryService}), never read off the log. Three renderings,
+ * registry resolution via {@link AgentRegistryService}), never read off the log. The renderings,
  * in the same priority the design's `agentIdentity()` used:
  *
- *   1. no `agent_def_hash` at all → `"none"` (an em dash; genuinely nothing recorded)
- *   2. not hash-shaped → `"label"` (a caller-supplied readable name, shown as-is)
- *   3. hash-shaped, and `names` resolved it → `"name"` (registry-resolved; the hash still rides
+ *   1. no `agent_def_hash`, but the log DID fold → `"graph"` ("graph run"). A folded run with no
+ *      recorded `agent_def_hash` is a graph run by construction: its log's head is
+ *      `GraphRunStarted`, not the `RunStarted` every agent run records first (server runs.rs), so
+ *      it never had a single agent hash to carry. `GET /v1/runs` carries nothing else graph-shaped
+ *      for a graph run — the graph_hash lives behind `GET /v1/runs/{id}/graph` — so "graph run" is
+ *      the honest, distinct vocabulary entry here, not a fabricated hash.
+ *   2. no `agent_def_hash` AND the log did not fold → `"none"` (an em dash; the endpoint declined
+ *      to answer, so genuinely nothing is recorded to show).
+ *   3. not hash-shaped → `"label"` (a caller-supplied readable name, shown as-is)
+ *   4. hash-shaped, and `names` resolved it → `"name"` (registry-resolved; the hash still rides
  *      along on `.hash` for a title)
- *   4. hash-shaped, unresolved (unregistered, or not yet looked up) → `"hash"` (the hash itself,
+ *   5. hash-shaped, unresolved (unregistered, or not yet looked up) → `"hash"` (the hash itself,
  *      truncated + copyable at render time — an absent name is not an error, see
  *      {@link AgentRegistryService})
  *
@@ -127,7 +144,7 @@ export function agentIdentity(
   names: ReadonlyMap<string, string> = EMPTY_NAMES,
 ): AgentIdentity {
   const h = r.agentDefHash;
-  if (!h) return { text: '—', kind: 'none' };
+  if (!h) return foldedLog(r) ? { text: 'graph run', kind: 'graph' } : { text: '—', kind: 'none' };
   if (!isHash(h)) return { text: h, kind: 'label', hash: h };
   const name = names.get(h);
   if (name) return { text: name, kind: 'name', hash: h };

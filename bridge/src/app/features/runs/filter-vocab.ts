@@ -44,7 +44,7 @@ export const FILTER_VOCAB: readonly VocabEntry[] = [
      note). cost / steps / tokens stay OUT on purpose — the list carries usage/step_count but does
      not offer them as filters, and it does not carry cost at all; the parser still refuses them. */
   { key: 'agent', op: ':', enumerable: false, offered: true,
-    desc: 'the agent that ran it — a registered name, a caller label, or a hash' },
+    desc: 'the agent that ran it — a registered name, a caller label, a hash, or “graph run”' },
   { key: 'build', op: ':', enumerable: false, offered: true,
     desc: 'the build_id a run was tagged with at creation — AARG groups its agents by it' },
   { key: 'text', op: ':', enumerable: false, offered: false,

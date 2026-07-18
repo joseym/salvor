@@ -6,6 +6,11 @@ import type { RunSummary } from '@salvor/client';
 function row(agentDefHash: string | undefined): RunRow {
   return { id: 'r1', status: 'completed', eventCount: 1, agentDefHash };
 }
+/** A run whose log the server folded (usage/step_count present) — the "graph run" signal when it
+ * also carries no agent_def_hash. */
+function foldedRow(agentDefHash: string | undefined): RunRow {
+  return { id: 'r1', status: 'completed', eventCount: 1, stepCount: 3, agentDefHash };
+}
 
 describe('isHash', () => {
   it('a sha256: value is hash-shaped', () => {
@@ -16,10 +21,25 @@ describe('isHash', () => {
   });
 });
 
-describe('agentIdentity — the three honest renderings', () => {
-  it('no agent_def_hash at all: kind "none", an em dash, no hash to show in a title', () => {
+describe('agentIdentity — the honest renderings', () => {
+  it('no agent_def_hash AND an unfolded log: kind "none", an em dash (nothing recorded to show)', () => {
     const id = agentIdentity(row(undefined));
     expect(id).toEqual({ text: '—', kind: 'none' });
+  });
+
+  it('no agent_def_hash but the log DID fold: kind "graph", "graph run" (a GraphRunStarted head)', () => {
+    const id = agentIdentity(foldedRow(undefined));
+    expect(id).toEqual({ text: 'graph run', kind: 'graph' });
+  });
+
+  it('the graph rendering carries no hash — GET /v1/runs carries nothing graph-shaped on the row', () => {
+    const id = agentIdentity(foldedRow(undefined));
+    expect(id.hash).toBeUndefined();
+  });
+
+  it('a folded run WITH an agent_def_hash is still an agent run, never "graph"', () => {
+    const id = agentIdentity(foldedRow('sha256:e8a1d362'));
+    expect(id.kind).toBe('hash');
   });
 
   it('a caller-supplied readable label (not hash-shaped): shown as-is, kind "label"', () => {

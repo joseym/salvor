@@ -10,7 +10,12 @@ import {
   signal,
 } from '@angular/core';
 
-import { AgentRegistryService, RunsService, createConnectionStateMachine } from '../../core/api';
+import {
+  AgentRegistryService,
+  GraphRunService,
+  RunsService,
+  createConnectionStateMachine,
+} from '../../core/api';
 import { ViewService } from '../../core/view';
 import { focusWhenRendered } from '../../core/focus';
 import {
@@ -97,6 +102,13 @@ export class Runs {
   private readonly runsService = inject(RunsService);
   private readonly viewService = inject(ViewService);
   private readonly agentRegistry = inject(AgentRegistryService);
+  private readonly graphRuns = inject(GraphRunService);
+
+  /** run_id → graph_hash, populated lazily when a GRAPH run is selected in the detail panel (its
+   * hash lives behind GET /v1/runs/{id}/graph, never on the list row — see agentIdentity's 'graph'
+   * rendering). A run already fetched stays cached; a failed fetch simply leaves the panel showing
+   * the plain "graph run" marker, no fabricated hash. */
+  private readonly graphHashes = signal<ReadonlyMap<string, string>>(new Map());
 
   /** The Runs list is a REST snapshot — the pill's honest state here is Snapshot, driven by the
    * connection machine (no public setter; toSnapshot is called on each fetch). */
@@ -234,6 +246,22 @@ export class Runs {
         ),
       ];
       if (hashes.length) this.agentRegistry.resolve(hashes);
+    });
+
+    // GRAPH RUN panel enrichment: a graph run carries no agent_def_hash on the list row, so when
+    // one is selected in the detail panel we read its graph_hash from GET /v1/runs/{id}/graph (the
+    // one endpoint that carries it) and cache it. Fire-and-forget, cached per run, and silent on
+    // failure — the panel keeps its honest "graph run" marker with no hash rather than inventing one.
+    effect(() => {
+      const r = this.selectedRow();
+      if (!r || agentIdentity(r).kind !== 'graph' || this.graphHashes().has(r.id)) return;
+      const id = r.id;
+      this.graphRuns
+        .loadProjection(id)
+        .then((p) => this.graphHashes.update((m) => new Map(m).set(id, p.graphHash)))
+        .catch(() => {
+          /* projection unavailable: the panel keeps the plain "graph run" marker, no fake hash */
+        });
     });
 
     // a filter applied from another view (Spend's hour bucket) — Runs is mounted once for the
@@ -600,8 +628,14 @@ export class Runs {
   }
   agentCellTitle(id: AgentIdentity): string {
     if (id.kind === 'none') return 'No agent recorded on this run';
+    if (id.kind === 'graph')
+      return 'A graph run — its log has no single agent_def_hash; expand the row for its graph_hash';
     if (id.kind === 'name') return `${id.hash} — resolved via GET /v1/agents/{hash}`;
     return id.text;
+  }
+  /** The graph_hash of a selected GRAPH run once its projection has loaded (see the panel effect). */
+  graphHashOf(r: RunRow): string | undefined {
+    return this.graphHashes().get(r.id);
   }
 
   // ── GROUPING (item 15b) ──
