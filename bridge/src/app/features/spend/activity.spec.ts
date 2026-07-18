@@ -43,6 +43,33 @@ describe('bucketEvents', () => {
   });
 });
 
+describe('a very wide window does not overflow the call stack', () => {
+  // A single stray 1970 timestamp beside real 2026 events (exactly what the owner's store held:
+  // some events recorded_at = 0) stretches the window to ~495k hourly buckets. Spreading that many
+  // buckets into `Math.max(...)` — as the render/desc/extent code once did — throws `RangeError:
+  // Maximum call stack size exceeded`. These fold the whole pipeline over that window and must
+  // simply return, iteratively.
+  const wide = bucketEvents([
+    [ev('ModelCallCompleted', '1970-01-01T00:00:00Z'), ev('ModelCallCompleted', '2026-07-12T18:00:00Z')],
+  ])!;
+
+  it('bucketEvents spans the full range without spreading its stamps', () => {
+    expect(wide).toBeDefined();
+    expect(wide.nBuckets).toBeGreaterThan(400_000);
+  });
+
+  it('renderActivityHtml renders both real bars over that window', () => {
+    const html = renderActivityHtml(wide, () => 1, undefined);
+    // two non-empty hours (1970 and 2026); every other bucket is empty and draws nothing
+    expect((html.match(/class="hbucket/g) ?? []).length).toBe(2);
+  });
+
+  it('activityDescText reports the window without spreading its buckets', () => {
+    const text = activityDescText(wide, () => 1);
+    expect(text).toMatch(/Peak 1 events? in one hour/);
+  });
+});
+
 describe('hourTermOf', () => {
   it('matches run-model’s own hourKey shape (no "hour:" prefix)', () => {
     const lo = Date.parse('2026-07-17T09:00:00Z');

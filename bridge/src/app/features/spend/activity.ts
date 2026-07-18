@@ -41,8 +41,17 @@ export function bucketEvents(allEvents: readonly (readonly SalvorEvent[])[]): Ac
   }
   if (stamps.length === 0) return undefined;
 
-  const lo = Math.floor(Math.min(...stamps.map((s) => s.t)) / HOUR_MS) * HOUR_MS;
-  const hi = Math.floor(Math.max(...stamps.map((s) => s.t)) / HOUR_MS) * HOUR_MS;
+  // Iterate for the extent rather than `Math.min(...stamps.map(...))`: a run with a hundred
+  // thousand events would spread that many arguments into `Math.min`/`Math.max` and overflow
+  // the call stack. A loop is bounded by nothing but the array's own length.
+  let minT = Infinity;
+  let maxT = -Infinity;
+  for (const s of stamps) {
+    if (s.t < minT) minT = s.t;
+    if (s.t > maxT) maxT = s.t;
+  }
+  const lo = Math.floor(minT / HOUR_MS) * HOUR_MS;
+  const hi = Math.floor(maxT / HOUR_MS) * HOUR_MS;
   const nBuckets = Math.round((hi - lo) / HOUR_MS) + 1;
   const buckets: HourBucket[] = Array.from({ length: nBuckets }, () => ({
     model: 0,
@@ -76,6 +85,22 @@ const MAX_H = 78;
 const PAD_L = 22;
 
 /**
+ * The tallest stacked bar's event count, floored at 1 (the histogram's y-axis top). Iterated on
+ * purpose: a window whose events span a very wide time range has one hourly bucket PER HOUR of the
+ * range — hundreds of thousands of them for a stray 1970 timestamp beside a 2026 one — and
+ * `Math.max(...buckets.map(...))` would spread that whole array into `Math.max`, overflowing the
+ * call stack. A loop has no such ceiling and returns the identical number for any window.
+ */
+function peakTotal(buckets: readonly HourBucket[]): number {
+  let max = 1;
+  for (const b of buckets) {
+    const total = b.model + b.tool + b.other;
+    if (total > max) max = total;
+  }
+  return max;
+}
+
+/**
  * Render the histogram's `<svg>` inner markup: a stacked bar per non-empty hour (`.hbucket`, a
  * real `role="button"` when the run list can name any run for it, drawn-but-inert otherwise), the
  * hour ticks, the axis and its end labels. `lastActiveCount(hourTerm)` answers, per hour, how many
@@ -88,7 +113,7 @@ export function renderActivityHtml(
   selectedHourTerm: string | undefined,
 ): string {
   const { lo, nBuckets, buckets } = win;
-  const max = Math.max(...buckets.map((b) => b.model + b.tool + b.other), 1);
+  const max = peakTotal(buckets);
   const step = (W - PAD_L - 6) / nBuckets;
   const bw = Math.max(3, step - 2);
 
@@ -156,7 +181,7 @@ export function renderActivityHtml(
 /** The `#activity-desc` `.sr` text: the chart's content, said in words for anyone not reading bars. */
 export function activityDescText(win: ActivityWindow, lastActiveCount: (hourTerm: string) => number): string {
   const { nBuckets, buckets, lo } = win;
-  const max = Math.max(...buckets.map((b) => b.model + b.tool + b.other), 1);
+  const max = peakTotal(buckets);
   let pickable = 0;
   for (let i = 0; i < nBuckets; i++) {
     const b = buckets[i];
