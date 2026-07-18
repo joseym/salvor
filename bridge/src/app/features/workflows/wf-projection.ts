@@ -25,6 +25,12 @@ export interface WfNodeProjection {
   readonly map?: unknown;
 }
 
+/** Was this node genuinely entered — reached and possibly moved on from — as opposed to skipped or
+ * never reached? The predicate an edge's ink and a branch's ghosted arm both turn on. */
+export function reachedState(state: WfNodeRunState | undefined): boolean {
+  return state === 'reached' || state === 'exited' || state === 'current';
+}
+
 function stateOf(p: NodeProgress, currentNode: string | undefined): WfNodeRunState {
   if (p.node === currentNode) return 'current';
   if (p.state === 'exited') return 'exited';

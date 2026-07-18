@@ -55,7 +55,16 @@
       <div class="wf-stage" id="wf-stage" #wfStage [style.transform]="stageTransform()">
         <svg class="wf-edges" id="wf-edges" aria-hidden="true">
           @for (e of edges(); track $index) {
-            <path class="wf-edge" [class.is-walked]="e.walked" [attr.d]="e.d" fill="none" />
+            <!-- an orthogonal trace, a single fine arrowhead, and the paper knocked out behind any
+                 case label. In Run mode the recorded route inks and the road not taken ghosts. -->
+            <path class="wf-edge" [class.is-case]="e.isCase" [class.is-inked]="e.walked"
+                  [class.is-ghost]="e.ghost" [attr.d]="e.d" fill="none" />
+            <path class="wf-arrow" [class.is-inked]="e.walked" [class.is-ghost]="e.ghost"
+                  [attr.d]="e.arrow" />
+            @if (e.label; as lbl) {
+              <text class="wf-elabel" [class.is-inked]="e.walked" [class.is-ghost]="e.ghost"
+                    [attr.x]="e.lx" [attr.y]="e.ly">{{ lbl }}</text>
+            }
           }
         </svg>
         <!-- Tab walks the nodes (each is a real button); focus alone never selects — Enter/Space,
@@ -73,19 +82,30 @@
               [style.top.px]="n.y"
               (click)="nodeActivate(n.id)"
             >
-              <span class="wf-node-head">
-                <span class="wf-kind" [attr.data-kind]="n.kind">{{ n.kind }}</span>
-                <!-- a span with button semantics, never a nested <button> — invalid HTML would let
-                     the browser re-parent it and orphan the menu affordance -->
-                <span class="wf-more" role="button" tabindex="0" [attr.data-more]="n.id"
-                      [attr.aria-label]="'Actions for ' + n.name"
-                      (click)="openMenu($event, n.id)" (keydown)="onMoreKeydown($event, n.id)">⋯</span>
-              </span>
+              <span class="wf-kind" [attr.data-kind]="n.kind">{{ n.kind }}</span>
               <span class="wf-name">{{ n.name }}</span>
               <span class="wf-does">{{ n.does }}</span>
-              @if (n.run && mode() === 'run') {
-                <span class="wf-run-state" [attr.data-state]="n.run.state">{{ n.run.state }}</span>
+              <!-- the mono field strip: the keys this node reads, the way a form shows its fields.
+                   In Run mode the node's recorded status rides the END of the strip. -->
+              <span class="wf-fields">
+                @if (n.fields.length) {
+                  @for (f of n.fields; track $index) { <span>{{ f }}</span> }
+                } @else {
+                  <span class="none">no inputs</span>
+                }
+                @if (n.run && mode() === 'run') {
+                  <span class="wf-st">{{ runLabel(n.run.state) }}</span>
+                }
+              </span>
+              @if (n.eff; as eff) {
+                <span class="wf-eff" [attr.data-eff]="eff">{{ eff }}</span>
               }
+              @if (n.bad) { <span class="wf-badge" aria-hidden="true">!</span> }
+              <!-- a span with button semantics, never a nested <button> — invalid HTML would let
+                   the browser re-parent it and orphan the menu affordance -->
+              <span class="wf-more" role="button" tabindex="0" [attr.data-more]="n.id"
+                    [attr.aria-label]="'Actions for ' + n.name"
+                    (click)="openMenu($event, n.id)" (keydown)="onMoreKeydown($event, n.id)">⋯</span>
             </button>
           }
         </div>
@@ -113,7 +133,7 @@
           <button class="wf-seg-b" type="button" id="wf-mode-run" [attr.aria-pressed]="mode() === 'run'" (click)="setMode('run')">Run</button>
         </div>
         <label class="sr" for="wf-run">Run to project</label>
-        <select class="wf-runpick" id="wf-run" [hidden]="mode() !== 'run'" [value]="runId() ?? ''" (change)="onPickRun($event)">
+        <select class="wf-runpick" id="wf-run" [hidden]="mode() !== 'run' || graphRunOptions().length === 0" [value]="runId() ?? ''" (change)="onPickRun($event)">
           @for (r of graphRunOptions(); track r.id) {
             <option [value]="r.id">{{ r.label }} · {{ r.status }}</option>
           }

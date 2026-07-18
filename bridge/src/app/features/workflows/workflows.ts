@@ -31,8 +31,9 @@ import {
   NODE_H,
   NODE_W,
   type WfView,
-  layeredLayout,
+  layoutFor,
   wfFit,
+  wfPath,
   wfReset,
   wfTopo,
   wfZoom,
@@ -53,6 +54,7 @@ import {
   edgeWalked,
   projectNodeStates,
   projectionUsable,
+  reachedState,
 } from './wf-projection';
 import { type WfError, applyFix, validateGraph, verdictOf } from './wf-validate';
 
@@ -70,6 +72,10 @@ interface PositionedNode extends WfNode {
   readonly y: number;
   readonly does: string;
   readonly bad: boolean;
+  /** The mono field strip — the input keys this node reads, the way a form shows its fields. */
+  readonly fields: readonly string[];
+  /** The effect class shown on a tool/map's face (read | write | idempotent), when it has one. */
+  readonly eff?: string;
   readonly run?: WfNodeProjection;
 }
 
@@ -77,8 +83,18 @@ interface PositionedEdge {
   readonly from: string;
   readonly to: string;
   readonly label?: string;
+  /** The orthogonal trace, out of the source's right port into the target's left, elbowed. */
   readonly d: string;
+  /** The single fine arrowhead at the target port, as its own filled triangle path. */
+  readonly arrow: string;
+  /** Where the case label sits — ON the straight run, or riding the vertical of an elbow. */
+  readonly lx: number;
+  readonly ly: number;
+  /** An edge out of a branch is a case; it draws in the firmer case ink. */
+  readonly isCase: boolean;
+  /** Run mode: the recorded route inks; the road not taken ghosts; everything else is quiet. */
   readonly walked: boolean;
+  readonly ghost: boolean;
 }
 
 interface ListFrom {
@@ -227,7 +243,7 @@ export class Workflows implements AfterViewInit {
 
   private readonly layout = computed(() => {
     const g = this.currentGraph();
-    return g ? layeredLayout(g) : {};
+    return g ? layoutFor(g) : {};
   });
 
   /** The run's projection, when Run mode is on a run of the shown graph. */
@@ -254,11 +270,14 @@ export class Workflows implements AfterViewInit {
     const dupSeen: Record<string, number> = {};
     return g.nodes.map((n) => {
       const seen = (dupSeen[n.id] = (dupSeen[n.id] ?? 0) + 1) - 1;
+      const eff = n.effect ?? n.body?.effect;
       return {
         ...n,
         x: (layout[n.id]?.x ?? 0) + seen * 16,
         y: (layout[n.id]?.y ?? 0) + seen * 16,
         does: nodeDoes(n),
+        fields: nodeFields(n),
+        ...(eff !== undefined ? { eff } : {}),
         bad: bad.has(n.id),
         run: states[n.id],
       };
@@ -275,18 +294,26 @@ export class Workflows implements AfterViewInit {
     return g.edges
       .filter((e) => layout[e.from] !== undefined && layout[e.to] !== undefined)
       .map((e) => {
-        const a = layout[e.from];
-        const b = layout[e.to];
-        const x1 = a.x + NODE_W;
-        const y1 = a.y + NODE_H / 2;
-        const x2 = b.x;
-        const y2 = b.y + NODE_H / 2;
-        const mid = (x1 + x2) / 2;
-        const d = `M ${x1} ${y1} C ${mid} ${y1}, ${mid} ${y2}, ${x2} ${y2}`;
-        const walked = inRun && edgeWalked(e.from, e.to, e.label, branchSources.has(e.from), states);
-        return e.label !== undefined
-          ? { from: e.from, to: e.to, label: e.label, d, walked }
-          : { from: e.from, to: e.to, d, walked };
+        const isBranch = branchSources.has(e.from);
+        const path = wfPath(layout[e.from], layout[e.to]);
+        const walked = inRun && edgeWalked(e.from, e.to, e.label, isBranch, states);
+        // The road not taken: a decided branch's OTHER arm. Ghosted, never deleted — "we did not
+        // go that way" is information the canvas keeps rather than a route it quietly drops.
+        const s = states[e.from];
+        const decided = isBranch && !!s && s.branchCase !== undefined;
+        const ghost = inRun && decided && !walked && e.label !== s?.branchCase && reachedState(s?.state);
+        const base = {
+          from: e.from,
+          to: e.to,
+          d: path.d,
+          arrow: path.arrow,
+          lx: path.lx,
+          ly: path.ly,
+          isCase: e.label !== undefined,
+          walked,
+          ghost,
+        };
+        return e.label !== undefined ? { ...base, label: e.label } : base;
       });
   });
 
@@ -332,22 +359,27 @@ export class Workflows implements AfterViewInit {
     }`;
   });
 
-  /** The graph runs the run picker offers (agentIdentity 'graph' rows), newest first. */
-  readonly graphRunOptions = computed(() =>
-    this.runsService
-      .runs()
-      .map(toRunRow)
-      .filter((r) => agentIdentity(r).kind === 'graph')
-      .map((r) => ({ id: r.id, label: r.id.slice(0, 8), status: r.status })),
-  );
-
-  /** The runs of the CURRENTLY shown graph — a graph run whose projection names this graph. */
+  /** The runs of the CURRENTLY shown graph — a graph run whose projection names this graph. A
+   * hashless draft has none, so its picker is empty and Run mode has nothing to ink (honest). */
   private readonly runsOfGraph = computed<string[]>(() => {
     const g = this.currentGraph();
     if (!g?.hash) return [];
     const out: string[] = [];
     for (const [id, proj] of this.projections()) if (proj.graphHash === g.hash) out.push(id);
     return out;
+  });
+
+  /** The run picker's options — the runs OF THE SHOWN GRAPH only, each with its derived status,
+   * newest-first as the projection cache holds them. Ported from the prototype's `renderWfRuns`,
+   * which lists `runsOfGraph(wfHash)`, NOT every graph run in the system: a run of a DIFFERENT
+   * graph could never project onto this one, so offering it is the "Run does nothing" defect. */
+  readonly graphRunOptions = computed(() => {
+    const byId = new Map(this.runsService.runs().map(toRunRow).map((r) => [r.id, r] as const));
+    return this.runsOfGraph().map((id) => ({
+      id,
+      label: id.slice(0, 8),
+      status: byId.get(id)?.status ?? '—',
+    }));
   });
 
   readonly stageTransform = computed(() => {
@@ -417,7 +449,31 @@ export class Workflows implements AfterViewInit {
     // data is loaded on first genuine need — entering the view, or a fork intent — so every other
     // view's page load is not taxed with graph documents and run projections it never shows.
     effect(() => {
-      if (this.viewService.view() === 'workflows') untracked(() => this.ensureLoaded());
+      if (this.viewService.view() !== 'workflows') return;
+      untracked(() => {
+        this.ensureLoaded();
+        // The canvas fills the viewport, and only the runtime knows how much chrome sits above it
+        // (the topbar wraps), so its height is measured after the view is on screen — then fit.
+        requestAnimationFrame(() => {
+          this.sizeCanvas();
+          this.fit();
+        });
+      });
+    });
+    // THE RULED GROUND is drawn BY the canvas, so it must be told the pan and the zoom. Reactive
+    // on the view: the grid moves with the pan (background-position) and scales with the zoom
+    // (background-size), fading out as you zoom out rather than turning into a grey fog. Ported
+    // from `wfGround`. Written to :root so the pure-CSS `.wf-canvas` background reads it.
+    effect(() => {
+      const v = this.view();
+      const fade = Math.max(0, Math.min(1, (v.k - 0.35) / 0.45));
+      const s = document.documentElement.style;
+      s.setProperty('--wf-minor', `${24 * v.k}px`);
+      s.setProperty('--wf-major', `${120 * v.k}px`);
+      s.setProperty('--wf-ox', `${v.x}px`);
+      s.setProperty('--wf-oy', `${v.y}px`);
+      s.setProperty('--wf-rule-1', `color-mix(in oklab, var(--fg), transparent ${100 - 6 * fade}%)`);
+      s.setProperty('--wf-rule-5', `color-mix(in oklab, var(--fg), transparent ${100 - 14 * fade}%)`);
     });
     // Fork requests from the Inspector or the Runs panel land whenever their view fires them;
     // consuming is untracked so acting on one never re-runs under its own signal writes.
@@ -446,6 +502,23 @@ export class Workflows implements AfterViewInit {
       ro.observe(canvas);
       this.destroyRef.onDestroy(() => ro.disconnect());
     }
+    // The fill height is a function of the window, not of the canvas box, so a window resize
+    // (which the ResizeObserver above does not see until AFTER the reflow) re-measures it. Keep
+    // the current zoom — a resize is not a request to refit — exactly as the prototype's listener.
+    const onResize = (): void => this.sizeCanvas();
+    window.addEventListener('resize', onResize);
+    this.destroyRef.onDestroy(() => window.removeEventListener('resize', onResize));
+  }
+
+  /** Fill the canvas to the bottom of the viewport. Only the runtime knows how much chrome sits
+   * above it (the topbar wraps), so this is measured, not a CSS constant. Ported from
+   * `wfSizeCanvas`; a no-op below the breakpoint, where the canvas is display:none. */
+  private sizeCanvas(): void {
+    const canvas = this.canvasEl();
+    if (!canvas || getComputedStyle(canvas).display === 'none') return;
+    const top = canvas.getBoundingClientRect().top;
+    const h = Math.max(360, Math.round(window.innerHeight - top - 24));
+    document.documentElement.style.setProperty('--wf-h', `${h}px`);
   }
 
   private async load(): Promise<void> {
@@ -514,9 +587,15 @@ export class Workflows implements AfterViewInit {
     // A banner belongs to the moment it was made; changing graphs changes what you look at.
     this.forked.set('');
     this.published.set('');
-    // A run only projects onto the graph it ran; leaving Run mode on a graph switch keeps the
-    // canvas honest rather than inking a mismatched run.
-    if (this.mode() === 'run' && this.runsOfGraph().length === 0) this.setMode('build');
+    // A run only projects onto the graph it ran. Leaving Run mode on a graph with no runs keeps
+    // the canvas honest; on a graph that HAS runs, re-anchor to one of ITS runs rather than
+    // inking the previous graph's — the exact `if (!runs.includes(wfRunId)) wfRunId = runs[0]`
+    // the prototype's renderWfRuns does, so the picker can never point at a foreign run.
+    if (this.mode() === 'run') {
+      const runs = this.runsOfGraph();
+      if (runs.length === 0) this.setMode('build');
+      else if (!runs.includes(this.runId() ?? '')) this.runId.set(runs[0]);
+    }
     queueMicrotask(() => this.fit());
   }
 
@@ -528,9 +607,12 @@ export class Workflows implements AfterViewInit {
   setMode(mode: WfMode): void {
     this.mode.set(mode);
     this.menu.set(undefined);
-    if (mode === 'run' && !this.runId()) {
-      const first = this.runsOfGraph()[0] ?? this.graphRunOptions()[0]?.id;
-      if (first) this.runId.set(first);
+    // Run mode projects a run OF THIS GRAPH. Anchor to one of its own runs (the newest), never a
+    // run left selected from another graph — the source of the "Run does nothing" report, where
+    // the picker offered a foreign run whose projection could never match this graph.
+    if (mode === 'run') {
+      const runs = this.runsOfGraph();
+      if (!this.runId() || !runs.includes(this.runId() as string)) this.runId.set(runs[0]);
     }
   }
   setTool(tool: WfTool): void {
@@ -622,7 +704,10 @@ export class Workflows implements AfterViewInit {
   onCanvasPointerdown(event: PointerEvent): void {
     const target = event.target as HTMLElement;
     if (target.closest(Workflows.PAN_BLOCK)) return; // a control: never pan
-    if (this.tool() !== 'pan') return;
+    // Dragging the empty paper pans in BOTH tools — the prototype's pan handler never consults
+    // the tool. Select is a cursor affordance (the arrow says "click to select" where Pan's grab
+    // says "drag the ground"); it does not disable the pan gesture. Gating pan on the tool was the
+    // build's own divergence, and the "Select does nothing" the operator felt from it.
     this.panning.set(true);
     const v = this.view();
     this.panStart = { px: event.clientX, py: event.clientY, vx: v.x, vy: v.y };
@@ -941,6 +1026,10 @@ export class Workflows implements AfterViewInit {
   kindBlurb(kind: string): string {
     return KIND_BLURB[kind] ?? '';
   }
+  /** A run-state class rendered as its label: `not-reached` reads as `not reached`. */
+  runLabel(state: string): string {
+    return state.replace(/-/g, ' ');
+  }
   errWhere(er: WfError): string {
     const g = this.currentGraph();
     if (er.node !== undefined) return `node ${er.node}`;
@@ -1049,6 +1138,25 @@ export class Workflows implements AfterViewInit {
   }
   capabilityFork(): boolean {
     return this.capability().fork;
+  }
+}
+
+/** The mono field strip a node card carries — the keys it actually reads, the way a form shows its
+ * fields. Ported from the prototype's per-kind `fields` derivation; an agent has none inline. */
+function nodeFields(n: WfNode): string[] {
+  switch (n.kind) {
+    case 'tool':
+      return Object.keys((n.input as Record<string, unknown> | undefined) ?? {});
+    case 'gate': {
+      const schema = n.inputSchema as { properties?: Record<string, unknown> } | undefined;
+      return Object.keys(schema?.properties ?? {});
+    }
+    case 'branch':
+      return [...(n.cases ?? [])];
+    case 'map':
+      return [String(n.over ?? '').replace(/[${}]/g, '')];
+    default:
+      return [];
   }
 }
 

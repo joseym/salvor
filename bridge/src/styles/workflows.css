@@ -51,16 +51,65 @@
 .wf-main {
   min-width: 0;
 }
+
+/* FULL-BLEED CANVAS. The workflows canvas is the product's headline surface; it should own the
+   screen rather than sit in a fixed letterbox with a page of dead space below it. The view becomes
+   a flex column that breaks the centered well, and the canvas fills to the bottom of the viewport —
+   the exact height is set from JS (--wf-h) because only the runtime knows how much chrome sits
+   above it (the topbar wraps). Ported from the prototype's #view-workflows full-bleed rules. */
+#view-workflows.is-active {
+  display: flex;
+  flex-direction: column;
+  max-width: none;
+  margin-inline: 0;
+  /* the shared .view's 72px bottom padding would fight the measured fill height — trade it for the
+     prototype's tighter frame so the canvas bottom lands where --wf-h expects it. */
+  padding: var(--space-4) var(--space-6) var(--space-5);
+}
+#view-workflows .wf-work {
+  flex: 1 1 auto;
+  min-height: 0;
+  align-items: stretch;
+}
+@media (min-width: 1101px) {
+  #view-workflows .cpanel {
+    position: static;
+    max-height: none;
+    height: var(--wf-h, 560px);
+  }
+}
+
+/* THE RULED GROUND. Engineering paper, not a dot matrix: a faint squared rule in warm ink with a
+   heavier line every fifth. It is drawn BY the canvas, so JS tells it the pan (--wf-ox/oy) and the
+   zoom (--wf-minor/major), and fades the alpha (--wf-rule-1/5) as you zoom out so the rule never
+   becomes a grey fog. */
+:root {
+  --wf-rule-1: color-mix(in oklab, var(--fg), transparent 94%);
+  --wf-rule-5: color-mix(in oklab, var(--fg), transparent 86%);
+  --wf-minor: 24px;
+  --wf-major: 120px;
+  --wf-ox: 0px;
+  --wf-oy: 0px;
+}
 .wf-canvas {
   position: relative;
-  min-height: 520px;
-  height: 560px;
+  height: var(--wf-h, 560px);
+  min-height: 360px;
   /* `clip`, NOT `hidden`. Both clip; only `hidden` makes this a SCROLL CONTAINER, and the browser
      scrolls a scroll container to reveal a focused descendant — Tab must PAN instead. */
   overflow: clip;
-  border: 1px solid var(--faint);
-  border-radius: var(--radius-lg);
-  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(to right, var(--wf-rule-5) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--wf-rule-5) 1px, transparent 1px),
+    linear-gradient(to right, var(--wf-rule-1) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--wf-rule-1) 1px, transparent 1px);
+  background-size:
+    var(--wf-major) var(--wf-major), var(--wf-major) var(--wf-major),
+    var(--wf-minor) var(--wf-minor), var(--wf-minor) var(--wf-minor);
+  background-position: var(--wf-ox) var(--wf-oy);
   touch-action: none;
   cursor: grab;
 }
@@ -91,13 +140,56 @@
   overflow: visible;
   pointer-events: none;
 }
+/* EDGES. Orthogonal elbows the way a wiring diagram runs a trace, one fine arrowhead, and the paper
+   knocked out behind every case label so the rule never strikes through the text. */
 .wf-edge {
-  stroke: var(--faint);
-  stroke-width: 2;
+  fill: none;
+  stroke: var(--border);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
 }
-.wf-edge.is-walked {
+.wf-edge.is-case {
+  stroke: var(--fg-2);
+}
+.wf-arrow {
+  fill: var(--fg-2);
+}
+.wf-elabel {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  fill: var(--muted);
+  /* the paper is knocked out BEHIND the glyphs, so the rule never strikes through the text */
+  paint-order: stroke;
+  stroke: var(--bg);
+  stroke-width: 5px;
+  stroke-linejoin: round;
+  text-anchor: middle;
+  dominant-baseline: central;
+}
+/* THE EXECUTED PATH — derived from the log, never chosen by a designer. */
+.wf-edge.is-inked {
   stroke: var(--accent);
-  stroke-width: 3;
+  stroke-width: 2.5;
+}
+.wf-arrow.is-inked {
+  fill: var(--accent);
+}
+.wf-elabel.is-inked {
+  fill: var(--accent);
+  font-weight: 600;
+}
+/* the road not taken. Not absent — we did not go that way, and that is information. */
+.wf-edge.is-ghost {
+  stroke: var(--border-soft);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+.wf-arrow.is-ghost {
+  fill: var(--border-soft);
+}
+.wf-elabel.is-ghost {
+  fill: var(--faint);
 }
 
 .wf-nodes {
@@ -105,21 +197,50 @@
   top: 0;
   left: 0;
 }
+/* NODE CARDS with real anatomy: a 2px rail keyed to the kind, a mono kind eyebrow, a serif display
+   title, one line of plain prose saying what it does, and a mono strip of the field keys it reads.
+   A ruled card, never a pill. Ported from the prototype. */
 .wf-node {
   position: absolute;
   width: 208px;
-  min-height: 88px;
+  min-height: 104px;
   box-sizing: border-box;
-  padding: 10px 12px;
-  border: 1px solid var(--faint);
-  border-radius: var(--radius-md);
-  background: var(--surface);
-  color: var(--fg);
-  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  padding: var(--space-2) var(--space-3) 0;
   /* a real <button>: reset the UA voice so the card reads as a card */
   font: inherit;
   text-align: left;
-  display: block;
+  color: var(--fg);
+  cursor: pointer;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--wf-rail, var(--border));
+  border-radius: var(--radius-sm);
+  box-shadow: var(--elev-ring);
+  transition:
+    border-color var(--motion-fast) var(--ease-standard),
+    box-shadow var(--motion-fast) var(--ease-standard);
+}
+.wf-node[data-kind='agent'] {
+  --wf-rail: var(--accent);
+}
+.wf-node[data-kind='tool'] {
+  --wf-rail: var(--fg-2);
+}
+.wf-node[data-kind='gate'] {
+  --wf-rail: var(--warn);
+}
+.wf-node[data-kind='branch'] {
+  --wf-rail: var(--muted);
+}
+.wf-node[data-kind='map'] {
+  --wf-rail: var(--success);
+}
+.wf-node:hover {
+  border-color: var(--fg-2);
 }
 .wf-node:focus-visible {
   outline: 2px solid var(--accent);
@@ -127,65 +248,151 @@
 }
 .wf-node[aria-pressed='true'] {
   border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent);
+  box-shadow: var(--elev-raised), inset 3px 0 0 0 var(--accent);
 }
 .wf-node.is-bad {
   border-color: var(--danger);
 }
+
+.wf-kind {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.wf-name {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fg);
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+.wf-does {
+  font-size: 11.5px;
+  color: var(--muted);
+  line-height: 1.35;
+}
+/* the field strip bleeds to the card edges and rules off from the prose above it */
+.wf-fields {
+  margin: auto calc(-1 * var(--space-3)) 0;
+  padding: 5px var(--space-3);
+  border-top: 1px solid var(--border-soft);
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--faint);
+}
+.wf-fields .none {
+  font-style: italic;
+}
+.wf-eff {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  padding: 1px 5px;
+  border-radius: var(--radius-pill);
+  color: var(--muted);
+  background: color-mix(in oklab, var(--fg), var(--bg) 92%);
+}
+.wf-eff[data-eff='write'] {
+  color: var(--danger);
+  background: color-mix(in oklab, var(--danger), var(--bg) 90%);
+  border: 1px solid color-mix(in oklab, var(--danger), var(--bg) 74%);
+}
+.wf-eff[data-eff='idempotent'] {
+  color: var(--success);
+  background: color-mix(in oklab, var(--success), var(--bg) 90%);
+}
+.wf-badge {
+  position: absolute;
+  top: var(--space-2);
+  right: 30px;
+  width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--danger);
+  background: color-mix(in oklab, var(--danger), var(--bg) 88%);
+  border-radius: 50%;
+}
+/* the run status rides the END of the field strip, never on top of it */
+.wf-st {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  white-space: nowrap;
+}
+/* the per-node action menu affordance — always hit-testable (never hover-gated to zero, which
+   would make it flaky to reach), a touch stronger on hover/focus. */
+.wf-more {
+  position: absolute;
+  top: 26px;
+  right: 4px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  cursor: pointer;
+  opacity: 0.55;
+}
+.wf-node:hover .wf-more,
+.wf-node:focus-within .wf-more {
+  opacity: 1;
+}
+.wf-more:hover {
+  border-color: var(--border);
+  background: var(--bg);
+  color: var(--fg);
+}
+.wf-more:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--accent);
+}
+
+/* RUN-MODE NODE STATUS. The two kinds of "nothing" are NOT the same: not-reached is dimmed (the run
+   may still get here); skipped is struck through and hatched (the branch went the other way — it
+   never will). The build's projection vocabulary, styled to the prototype's treatment. */
 .wf-node.is-current {
   border-color: var(--accent);
 }
-.wf-node.is-exited {
-  border-color: var(--success);
+.wf-node.is-not-reached {
+  opacity: 0.5;
 }
 .wf-node.is-skipped {
-  opacity: 0.55;
-}
-.wf-node.is-not-reached {
+  opacity: 0.5;
   border-style: dashed;
+  background: repeating-linear-gradient(
+    135deg,
+    transparent 0 6px,
+    color-mix(in oklab, var(--fg), transparent 94%) 6px 7px
+  );
 }
-.wf-node-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+.wf-node.is-skipped .wf-name {
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
 }
-.wf-kind {
-  font-size: var(--text-xs);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--muted);
-}
-.wf-more {
-  border: none;
-  background: transparent;
-  color: var(--muted);
-  font-size: var(--text-lg);
-  line-height: 1;
-  cursor: pointer;
-  padding: 0 4px;
-  border-radius: var(--radius-sm);
-}
-.wf-more:hover {
-  color: var(--fg);
-}
-.wf-name {
-  display: block;
-  margin: 6px 0 0;
-  font-size: 15px;
-  font-family: Georgia, 'Times New Roman', serif;
-}
-.wf-does {
-  display: block;
-  margin-top: 2px;
-  font-size: var(--text-xs);
-  color: var(--muted);
-}
-.wf-run-state {
-  display: inline-block;
-  margin-top: 6px;
-  font-size: var(--text-xs);
-  color: var(--muted);
+.wf-node.is-current .wf-st {
+  color: var(--accent);
 }
 
 .wf-chips {
@@ -202,76 +409,103 @@
   top: 12px;
   right: 12px;
 }
+/* hairline chips, paper, never a dark pill */
 .wf-chip {
-  font: inherit;
-  font-size: var(--text-sm);
-  padding: 3px 9px;
-  border: 1px solid var(--faint);
+  min-height: 26px;
+  padding: 3px var(--space-2);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--surface);
-  color: var(--fg);
+  color: var(--muted);
   cursor: pointer;
 }
+.wf-chip:hover:not(:disabled):not(.is-read) {
+  color: var(--accent);
+  border-color: var(--accent);
+}
 .wf-chip:disabled {
-  opacity: 0.5;
+  opacity: 0.4;
   cursor: default;
 }
 .wf-chip.is-read {
   cursor: default;
-  min-width: 3.5em;
+  color: var(--fg);
+  min-width: 46px;
   text-align: center;
 }
 
+/* the mode + tools bar: hairline and paper, not a dark pill */
 .wf-bar {
   position: absolute;
-  bottom: 12px;
+  bottom: var(--space-3);
   left: 50%;
   transform: translateX(-50%);
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 5px 8px;
-  border: 1px solid var(--faint);
-  border-radius: var(--radius-pill);
+  gap: var(--space-3);
+  max-width: calc(100% - 32px);
+  padding: 5px var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
   background: var(--surface);
+  box-shadow: var(--elev-raised);
   z-index: 3;
 }
 .wf-seg {
-  display: inline-flex;
-  border: 1px solid var(--faint);
+  display: flex;
+  flex: none;
+  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   overflow: hidden;
 }
 .wf-seg-b {
-  font: inherit;
-  font-size: var(--text-sm);
-  padding: 3px 10px;
+  min-height: 24px;
+  padding: 3px var(--space-3);
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 11px;
   border: none;
+  border-right: 1px solid var(--border);
   background: transparent;
   color: var(--muted);
   cursor: pointer;
 }
+.wf-seg-b:last-child {
+  border-right: 0;
+}
 .wf-seg-b[aria-pressed='true'] {
-  background: var(--accent);
-  color: var(--bg);
+  background: color-mix(in oklab, var(--accent), var(--bg) 86%);
+  color: var(--accent);
 }
 .wf-bar-sep {
   width: 1px;
   height: 18px;
-  background: var(--faint);
+  background: var(--border);
 }
 .wf-runpick {
-  font: inherit;
-  font-size: var(--text-sm);
-  padding: 2px 6px;
-  border: 1px solid var(--faint);
+  height: 26px;
+  max-width: 240px;
+  padding: 0 var(--space-2);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  background: var(--bg);
-  color: var(--fg);
+  background: var(--surface);
+  color: var(--fg-2);
 }
 .wf-legend {
-  font-size: var(--text-xs);
-  color: var(--muted);
+  font-size: 10px;
+  color: var(--faint);
+  letter-spacing: 0.06em;
+  min-width: 0;
+  /* the legend is furniture: never let it crush into a vertical column of single words when the
+     run picker crowds the bar — it clips at the edge instead, and the controls keep their room. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 0 1 auto;
 }
 /* On a narrow canvas (the panel column takes 340px of the work area) the legend would push the
    floating bar under the minimap and swallow its right-hand controls — the exact captured-control
