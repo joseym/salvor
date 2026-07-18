@@ -66,10 +66,42 @@ export function wfTopo(g: WfGraph): string[] {
 export type WfLayout = Record<string, { readonly x: number; readonly y: number }>;
 
 /**
+ * THE SIDECAR, ported from the prototype. Coordinates live here, keyed by the graph's own key —
+ * NEVER inside the hashed document, so moving a node can never change a graph's identity. The
+ * prototype hand-authored a layout for each fixture graph; the one graph this build ships with a
+ * known key is the seeded `refund-sweep` draft, so its positions are ported verbatim. A published
+ * SERVER graph arrives from the control plane with no sidecar, so {@link layeredLayout} draws it.
+ *
+ * The clean left-to-right spine is exactly what a computed longest-path layout could NOT produce
+ * for this graph: its dangling edge and its cycle scramble the topological columns (the fetch node
+ * lands five columns out, past every node it feeds), which is the overlap the operator reported.
+ * The two `n_charge` nodes share an id on purpose — the duplicate-id defect — so they share this
+ * one entry and the renderer nudges the second into view.
+ */
+export const LAYOUTS: Record<string, WfLayout> = {
+  'draft:refund-sweep': {
+    n_start: { x: 0, y: 180 },
+    n_fetch: { x: 300, y: 180 },
+    n_charge: { x: 600, y: 180 },
+    n_pick: { x: 900, y: 180 },
+    n_fan: { x: 1200, y: 30 },
+    n_notify: { x: 1200, y: 330 },
+  },
+};
+
+/**
+ * The layout a graph is DRAWN with: its hand-authored sidecar when one exists (the ported drafts),
+ * else the computed {@link layeredLayout}. Ported from the prototype's `wfLayout()` fallthrough.
+ */
+export function layoutFor(g: WfGraph): WfLayout {
+  return LAYOUTS[g.key] ?? layeredLayout(g);
+}
+
+/**
  * A layered left-to-right layout derived from the topological order: a node's COLUMN is the longest
  * path from any entry to it (so an edge always points rightward), and rows within a column stack
- * downward. This is the honest stand-in for the prototype's hand-authored `LAYOUTS` sidecar, which
- * only its two fixture graphs had — a real server graph has no sidecar, so its drawing is computed.
+ * downward. Distinct ids never share a (column, row), so a computed graph is collision-free by
+ * construction — the honest stand-in for a hand-authored sidecar, which only the fixture graphs had.
  */
 export function layeredLayout(g: WfGraph): WfLayout {
   const order = wfTopo(g);
@@ -93,6 +125,54 @@ export function layeredLayout(g: WfGraph): WfLayout {
     layout[id] = { x: col * PITCH_X, y: row * PITCH_Y };
   });
   return layout;
+}
+
+export interface WfEdgePath {
+  /** The `d` of the trace itself. */
+  readonly d: string;
+  /** The `d` of the single fine arrowhead at the target port. */
+  readonly arrow: string;
+  /** Where a case label sits so the paper-knockout clears the rule, never strikes through it. */
+  readonly lx: number;
+  readonly ly: number;
+}
+
+/**
+ * An ORTHOGONAL trace, the way a wiring diagram runs one: out of the source's right port, along to
+ * the halfway column, down or up with a small corner radius, then into the target's left port.
+ * Cubics look organic; a graph of machine steps is not, so it elbows. A same-rank edge is a
+ * straight rule. Ported verbatim from the prototype's `wfPath`, arrowhead included.
+ */
+export function wfPath(
+  a: { readonly x: number; readonly y: number },
+  b: { readonly x: number; readonly y: number },
+): WfEdgePath {
+  const x1 = a.x + NODE_W;
+  const y1 = a.y + NODE_H / 2;
+  const x2 = b.x;
+  const y2 = b.y + NODE_H / 2;
+  const mx = (x1 + x2) / 2;
+  const r = Math.min(10, Math.abs(y2 - y1) / 2, Math.abs(mx - x1));
+  let d: string;
+  let lx: number;
+  let ly: number;
+  if (Math.abs(y2 - y1) < 1) {
+    d = `M ${x1} ${y1} L ${x2} ${y2}`; // same rank: a straight rule, label ON the line
+    lx = mx;
+    ly = y1;
+  } else {
+    const dir = y2 > y1 ? 1 : -1;
+    d =
+      `M ${x1} ${y1} L ${mx - r} ${y1}` +
+      ` Q ${mx} ${y1} ${mx} ${y1 + r * dir}` +
+      ` L ${mx} ${y2 - r * dir}` +
+      ` Q ${mx} ${y2} ${mx + r} ${y2}` +
+      ` L ${x2} ${y2}`;
+    lx = mx;
+    ly = (y1 + y2) / 2; // the label rides the vertical run
+  }
+  const arrow = `M ${x2 - 7} ${y2 - 4} L ${x2} ${y2} L ${x2 - 7} ${y2 + 4} Z`;
+  return { d, arrow, lx, ly };
 }
 
 /** The bounding box of a laid-out graph, in graph coordinates. */

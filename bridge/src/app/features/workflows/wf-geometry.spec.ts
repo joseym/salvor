@@ -1,17 +1,38 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  LAYOUTS,
   NODE_H,
   NODE_W,
   WF_MIN_K,
+  type WfLayout,
   layeredLayout,
   layoutBounds,
+  layoutFor,
   wfFit,
+  wfPath,
   wfTopo,
   wfZoom,
   zoomPercent,
 } from './wf-geometry';
+import { REFUND_SWEEP_DRAFT } from './wf-draft';
 import type { WfGraph } from './wf-model';
+
+/** True iff no two DISTINCT laid-out node boxes intersect. A duplicate id shares one layout entry,
+ * so this is the honest non-overlap invariant: distinct nodes never collide. */
+function noDistinctBoxesOverlap(layout: WfLayout): boolean {
+  const ids = Object.keys(layout);
+  for (let i = 0; i < ids.length; i++) {
+    for (let j = i + 1; j < ids.length; j++) {
+      const a = layout[ids[i]];
+      const b = layout[ids[j]];
+      if (a.x < b.x + NODE_W && a.x + NODE_W > b.x && a.y < b.y + NODE_H && a.y + NODE_H > b.y) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
 
 /** A simple chain a -> b -> c, plus a branch d off b. */
 const chain: WfGraph = {
@@ -61,6 +82,59 @@ describe('layeredLayout — columns follow the edges, rightward', () => {
     const layout = layeredLayout(chain);
     expect(layout['c'].x).toBe(layout['d'].x);
     expect(layout['c'].y).not.toBe(layout['d'].y);
+  });
+});
+
+describe('layoutFor — hand-authored sidecar vs computed, and non-overlap', () => {
+  it('returns the ported sidecar for the refund-sweep draft, verbatim', () => {
+    expect(layoutFor(REFUND_SWEEP_DRAFT)).toBe(LAYOUTS['draft:refund-sweep']);
+    // the clean left-to-right spine the operator should see
+    const L = layoutFor(REFUND_SWEEP_DRAFT);
+    expect(L['n_start'].x).toBeLessThan(L['n_fetch'].x);
+    expect(L['n_fetch'].x).toBeLessThan(L['n_charge'].x);
+    expect(L['n_charge'].x).toBeLessThan(L['n_pick'].x);
+  });
+
+  it('falls back to the computed layout for a graph with no sidecar', () => {
+    // chain has no LAYOUTS entry, so layoutFor must equal the computed layeredLayout.
+    expect(layoutFor(chain)).toEqual(layeredLayout(chain));
+  });
+
+  it('THE OVERLAP DEFECT: the computed layout scrambles the draft, the sidecar fixes it', () => {
+    // The draft's cycle (n_fan -> n_fetch) and dangling edge push n_fetch PAST the nodes it
+    // feeds under the computed longest-path layout — the scrambled drawing the operator reported.
+    const computed = layeredLayout(REFUND_SWEEP_DRAFT);
+    expect(computed['n_fetch'].x).toBeGreaterThan(computed['n_charge'].x);
+    // the ported sidecar restores the honest spine: fetch sits BEFORE charge.
+    const sidecar = layoutFor(REFUND_SWEEP_DRAFT);
+    expect(sidecar['n_fetch'].x).toBeLessThan(sidecar['n_charge'].x);
+  });
+
+  it('a laid-out graph never overlaps two DISTINCT nodes — draft and computed alike', () => {
+    expect(noDistinctBoxesOverlap(layoutFor(REFUND_SWEEP_DRAFT))).toBe(true);
+    expect(noDistinctBoxesOverlap(layeredLayout(chain))).toBe(true);
+  });
+});
+
+describe('wfPath — orthogonal elbows with one fine arrowhead', () => {
+  it('draws a same-rank edge as a straight rule (no cubic, no elbow)', () => {
+    const path = wfPath({ x: 0, y: 0 }, { x: 300, y: 0 });
+    expect(path.d).toMatch(/^M .* L [^Q]*$/);
+    expect(path.d).not.toContain('C'); // never a cubic
+    expect(path.d).not.toContain('Q'); // straight rank needs no corner
+  });
+
+  it('elbows a rank change with rounded corners (quadratic joints), never a cubic', () => {
+    const path = wfPath({ x: 0, y: 0 }, { x: 300, y: 160 });
+    expect(path.d).toContain('Q'); // corner radii
+    expect(path.d).not.toContain('C');
+  });
+
+  it('lands the arrowhead at the target left port, as a closed triangle', () => {
+    const path = wfPath({ x: 0, y: 0 }, { x: 300, y: 0 });
+    // target left port is at x = 300, y = NODE_H/2
+    expect(path.arrow).toContain(`L 300 ${NODE_H / 2}`);
+    expect(path.arrow.trim().endsWith('Z')).toBe(true);
   });
 });
 
