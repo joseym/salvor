@@ -54,11 +54,23 @@ export class ViewService {
   private pendingLegacyHash: string | null =
     typeof location !== 'undefined' ? location.hash : null;
 
+  /** False until the router's first NavigationEnd. A mounted-at-boot view (Runs) can call
+   * {@link setQuery} while this is still false — before the initial navigation has committed — when
+   * the router's current route is still the default `/`, not the deep link being resolved. See
+   * {@link setQuery} for how the reflection is aimed at the real path until this flips true. */
+  private _navigationSettled = false;
+
   constructor() {
     this.readUrl();
     const sub = this.router.events
       .pipe(filter((e): e is NavigationEnd => e instanceof NavigationEnd))
       .subscribe(() => {
+        // The router has now committed its initial navigation, so a deep link's own URL is in
+        // place — only from here may the app reflect the Runs filter back into the URL. Reflecting
+        // it any earlier (a mounted-at-boot Runs writing `?q=` before this fires) issues a
+        // navigate([]) against the pre-navigation `/`, which clobbers the very deep link the router
+        // is mid-way to resolving. See {@link setQuery}.
+        this._navigationSettled = true;
         if (this.pendingLegacyHash !== null) {
           const hash = this.pendingLegacyHash;
           this.pendingLegacyHash = null;
@@ -101,10 +113,20 @@ export class ViewService {
     void this.router.navigate(['/runs'], { queryParams: { q } });
   }
 
-  /** Reflect the Runs filter into `?q=` without adding a history entry. */
+  /** Reflect the Runs filter into `?q=` without adding a history entry.
+   *
+   * A mounted-at-boot Runs reflects its (empty) query at construction — BEFORE the router has
+   * committed its initial navigation, so `navigate([])` there resolves against the pre-navigation
+   * default `/` and, with `replaceUrl`, overwrites the very deep link the router is still resolving
+   * (`/inspector/<id>` cold-loads bounced to `/runs`). Until the first NavigationEnd, target the
+   * ACTUAL browser path instead of the router's stale current route, so the reflection lands the
+   * query on the real deep-link URL rather than clobbering it back to `/`. Once settled, `[]` (the
+   * committed current route) is canonical. */
   setQuery(q: string): void {
     this._query.set(q);
-    void this.router.navigate([], {
+    const commands =
+      this._navigationSettled || typeof location === 'undefined' ? [] : [location.pathname];
+    void this.router.navigate(commands, {
       queryParams: { q: q || null },
       queryParamsHandling: 'merge',
       replaceUrl: true,
