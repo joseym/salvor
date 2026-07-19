@@ -11,7 +11,7 @@ import {
 } from '@angular/core';
 import type { SalvorEvent } from '@salvor/client';
 
-import { RunEventsService, type RunEventsChannel } from '../../core/api';
+import { GraphRunService, RunEventsService, type RunEventsChannel } from '../../core/api';
 import { ForkIntentService } from '../../core/fork-intent';
 import { PillService } from '../../core/pill';
 import { RunsService } from '../../core/api';
@@ -66,6 +66,7 @@ function info(why: string): string {
 export class Inspector implements AfterViewInit {
   private readonly runEvents = inject(RunEventsService);
   private readonly runsService = inject(RunsService);
+  private readonly graphRuns = inject(GraphRunService);
   private readonly fold = inject(FoldService);
   private readonly viewService = inject(ViewService);
   private readonly pill = inject(PillService);
@@ -103,6 +104,11 @@ export class Inspector implements AfterViewInit {
   readonly allOpen = signal(false);
   readonly panelOpen = signal(true);
 
+  /** A graph run's `graph_hash`, fetched from GET /v1/runs/{id}/graph (it is never on the log or
+   * the list row). Undefined until the projection loads — the AGENT card shows the honest "graph
+   * run" identity with no fabricated hash until then. */
+  private readonly graphHash = signal<string | undefined>(undefined);
+
   /** The seq of the event that JUST arrived, for the arrive/wash motion. A plain field, not a
    *  signal: it is read at render time and cleared after, never a render trigger of its own. */
   private arrivedSeq: number | null = null;
@@ -121,6 +127,20 @@ export class Inspector implements AfterViewInit {
     if (!this.foldReady() || this.events().length === 0) return null;
     const st = this.foldSafe(this.events().length);
     return st ? groupOf(statusStateOf(st.status)) : null;
+  });
+
+  /** A graph run by construction: its log opens with `GraphRunStarted`, not the `RunStarted` every
+   * agent run records first, so it never carried a single `agent_def_hash`. Same classification the
+   * Runs table's `agentIdentity` makes, read here from the log the Inspector already holds. */
+  readonly isGraphRun = computed(() => this.events()[0]?.kind === 'GraphRunStarted');
+
+  /** The run's TRUE resting state slug, folded from the whole log — what the run actually IS
+   * (`suspended`, `completed`, `budget_exceeded`, …), not what the transport did. The pill and the
+   * live ticker read this so a caught-up stream over a parked run is never labeled as ended. */
+  readonly restingState = computed<string | null>(() => {
+    if (!this.foldReady() || this.events().length === 0) return null;
+    const st = this.foldSafe(this.events().length);
+    return st ? statusStateOf(st.status) : null;
   });
 
   readonly logCountLabel = computed(() => {
@@ -168,21 +188,39 @@ export class Inspector implements AfterViewInit {
       const ch = this.channelSig();
       const asOf = this.runsService.lastLoadedAt();
       if (active && ch && this.events().length > 0) {
-        this.pill.set(ch.state(), ch.runId);
+        this.pill.set(ch.state(), ch.runId, this.restingState() ?? undefined);
       } else {
         this.pill.toSnapshot(asOf);
       }
     });
 
-    // (4) full body render (header, timeline, strip) when the log or fold-readiness changes
+    // (4) full body render (header, timeline, strip) when the log, fold-readiness, or the graph
+    // run's loaded graph_hash changes (the AGENT card names the graph_hash once the projection lands)
     effect(() => {
       this.events();
       this.foldReady();
+      this.graphHash();
       if (!this.hasRun()) return;
       this.renderHeader();
       this.renderTimeline();
       this.renderStrip();
       this.renderScrubber();
+    });
+
+    // (4b) a graph run carries no agent_def_hash; its graph_hash lives only behind
+    // GET /v1/runs/{id}/graph. Fetch it once per graph run so the AGENT card can name it — silent
+    // on failure (the card keeps the plain "graph run" identity, never a fabricated hash).
+    effect(() => {
+      const id = this.viewService.runId();
+      if (!id || !this.isGraphRun() || this.graphHash() !== undefined) return;
+      this.graphRuns
+        .loadProjection(id)
+        .then((p) => {
+          if (this.viewService.runId() === id) this.graphHash.set(p.graphHash);
+        })
+        .catch(() => {
+          /* projection unavailable: the AGENT card keeps the plain "graph run" identity, no fake hash */
+        });
     });
 
     // (5) scrub-only render (derived panel, dim/cut, playhead, ticks, fork offer). Also re-runs
@@ -232,6 +270,7 @@ export class Inspector implements AfterViewInit {
     this.nodeFilter.set(null);
     this.arrivedSeq = null;
     this.prevLen = 0;
+    this.graphHash.set(undefined); // a new run: forget the previous run's graph_hash
 
     if (!id) {
       this.channelSig.set(undefined);
@@ -281,8 +320,6 @@ export class Inspector implements AfterViewInit {
     const secs = Math.round((Date.parse(last) - Date.parse(first)) / 1000);
     const dur = secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m ${secs % 60}s`;
     const cost = costOfPrefix(evs, evs.length);
-    const agent = agentOf(evs) ?? '';
-    const agentKind: 'hash' | 'label' = isHash(agent) ? 'hash' : 'label';
 
     // The ceiling: crossed (read from this run's own BudgetExceeded) or unknown — this build has
     // no GET /v1/agents registry, so a declared-but-uncrossed ceiling cannot be fetched. Honest.
@@ -296,13 +333,7 @@ export class Inspector implements AfterViewInit {
     el.innerHTML = `
       <div class="stat hero"><dt>Status</dt>
         <dd>${statusHtml(state)}<span class="sub">${evs.length} events · ${steps} model turn${steps === 1 ? '' : 's'}</span></dd></div>
-      <div class="stat"><dt>Agent</dt>
-        <dd style="font-size:15px">${this.runRefHtml(agent, agentKind)}
-          <span class="sub">${
-            agentKind === 'hash'
-              ? 'agent_def_hash — the log records no human name for an agent'
-              : 'a label the driver recorded, not a hash — shown in full'
-          }</span></dd></div>
+      ${this.agentStatHtml(evs)}
       <div class="stat"><dt>Cost</dt>
         <dd class="figure">${cost.complete ? usd(cost.usd ?? 0) : '<span class="tokens-only">tokens only</span>'}
           <span class="sub">${cost.complete ? ceiling : `${esc((cost.unpriced as string[]).join(', '))} is not in the price table`}</span></dd></div>
@@ -314,6 +345,32 @@ export class Inspector implements AfterViewInit {
 
     if (this.bandEl) this.bandEl.nativeElement.innerHTML = this.bandHtml(st, state);
     if (this.lineageEl) this.lineageEl.nativeElement.innerHTML = ''; // no fork lineage in real logs
+  }
+
+  /** The AGENT hero card. A graph run records no `agent_def_hash`, so the card renders the same
+   * honest "graph run" identity the Runs table uses, naming its `graph_hash` once the
+   * projection has loaded rather than a blank value. An agent run renders its recorded hash/label. */
+  private agentStatHtml(evs: SalvorEvent[]): string {
+    if (evs[0]?.kind === 'GraphRunStarted') {
+      const gh = this.graphHash();
+      const value = gh
+        ? `graph run · ${this.runRefHtml(gh, 'hash')}`
+        : 'graph run';
+      const sub = gh
+        ? 'graph_hash — a graph run has no single agent_def_hash; this is the graph it ran'
+        : 'a graph run — its log has no single agent_def_hash; its graph_hash is loading';
+      return `<div class="stat"><dt>Agent</dt>
+        <dd style="font-size:15px">${value}<span class="sub">${sub}</span></dd></div>`;
+    }
+    const agent = agentOf(evs) ?? '';
+    const agentKind: 'hash' | 'label' = isHash(agent) ? 'hash' : 'label';
+    return `<div class="stat"><dt>Agent</dt>
+      <dd style="font-size:15px">${this.runRefHtml(agent, agentKind)}
+        <span class="sub">${
+          agentKind === 'hash'
+            ? 'agent_def_hash — the log records no human name for an agent'
+            : 'a label the driver recorded, not a hash — shown in full'
+        }</span></dd></div>`;
   }
 
   private runRefHtml(value: string, kind: 'hash' | 'label'): string {
@@ -515,7 +572,11 @@ export class Inspector implements AfterViewInit {
     this.liveMode = mode;
 
     if (mode === 'done') {
-      el.innerHTML = `<span class="live-tag done${enter}">Run complete · ${evs.length} events</span>`;
+      // The stream is at its terminal frame with the playhead at the head — but "at rest" is not
+      // "complete". State the run's TRUE resting state (a suspended run is parked, not finished).
+      const rest = this.restingState();
+      const restText = rest === 'completed' || rest === null ? 'Run complete' : labelOf(rest);
+      el.innerHTML = `<span class="live-tag done${enter}">${esc(restText)} · ${evs.length} events</span>`;
       return;
     }
     if (mode === 'live') {

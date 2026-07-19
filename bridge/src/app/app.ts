@@ -322,6 +322,18 @@ export class App implements AfterViewInit {
   readonly connLabel: Signal<string> = computed(() => {
     const s = this.pill.state();
     if (s.kind === 'idle') return `Snapshot · as of ${this.hms.format(new Date(s.asOf))}Z`;
+    // A caught-up stream is `ended` at the transport level, but the RUN it streamed may be parked,
+    // not finished. When the run's folded resting state is known, state THAT here (the connection
+    // dot's data-state still carries the honest transport level), so a suspended run never reads as
+    // "Ended". Falls back to the transport label when no run state was folded.
+    if (s.kind === 'ended') {
+      const rs = this.pill.runState();
+      if (rs) {
+        const label = labelOf(rs); // the runs-model vocabulary is lowercase; the pill register is Title-case
+        return label.charAt(0).toUpperCase() + label.slice(1);
+      }
+      return s.label;
+    }
     return s.label;
   });
 

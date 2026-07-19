@@ -20,20 +20,29 @@ export class PillService {
     asOf: new Date().toISOString(),
   });
   private readonly _runId = signal<string | undefined>(undefined);
+  private readonly _runState = signal<string | undefined>(undefined);
 
   readonly state: Signal<ConnectionState> = this._state.asReadonly();
   readonly runId: Signal<string | undefined> = this._runId.asReadonly();
+  /** The bound run's TRUE resting state slug (folded by the Inspector — `suspended`, `completed`,
+   * `budget_exceeded`, …). The transport `state` above says whether the STREAM is live or ended;
+   * this says what the RUN itself is resting at, so a caught-up stream over a parked run is not
+   * mislabeled as an ended run. Undefined when no run is bound (a plain Snapshot). */
+  readonly runState: Signal<string | undefined> = this._runState.asReadonly();
   readonly kind = computed(() => this._state().kind);
 
-  /** Mirror a stream's live state (called by the Inspector from its channel). */
-  set(state: ConnectionState, runId?: string): void {
+  /** Mirror a stream's live state (called by the Inspector from its channel), together with the
+   * folded resting state of the run it is streaming. */
+  set(state: ConnectionState, runId?: string, runState?: string): void {
     this._state.set(state);
     this._runId.set(runId);
+    this._runState.set(runState);
   }
 
   /** Fall back to a static snapshot (no stream open) as of `asOf` (default: now). */
   toSnapshot(asOf?: string): void {
     this._state.set({ kind: 'idle', label: 'Snapshot', asOf: asOf ?? new Date().toISOString() });
     this._runId.set(undefined);
+    this._runState.set(undefined);
   }
 }
