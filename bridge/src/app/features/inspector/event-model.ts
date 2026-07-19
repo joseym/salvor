@@ -71,6 +71,22 @@ function costLabel(c: { complete: boolean; usd: number | null }): string {
   return c.complete ? usd(c.usd ?? 0) : 'tokens only';
 }
 
+/** A budget figure formatted by its kind — dollars for a cost ceiling, a counted noun for tokens
+ *  or steps, the bare count otherwise. An em dash when the amount is absent, never `NaN`. */
+function budgetAmount(kind: string, n: unknown): string {
+  if (typeof n !== 'number' || Number.isNaN(n)) return '—';
+  switch (kind) {
+    case 'cost_usd':
+      return usd(n);
+    case 'tokens':
+      return `${int(n)} tokens`;
+    case 'steps':
+      return `${int(n)} step${n === 1 ? '' : 's'}`;
+    default:
+      return int(n); // wall_time and any future kind: the bare count, with the kind tag beside it
+  }
+}
+
 /**
  * A fork's inherited prefix marker, if any — the first `ForkedFrom` in the log. Real runs from
  * this build's server carry none (there is no fork runtime yet), so this returns null and nothing
@@ -132,27 +148,36 @@ export function rowOf(e: SalvorEvent, events: readonly SalvorEvent[], arrivedSeq
            which is why replay reproduces it exactly.</p>`;
       break;
     }
-    case 'ModelCallRequested':
-      detail = `<b>${esc(String(p['model']))}</b> · ${esc(String(p['request_hash'] ?? ''))}`;
+    case 'ModelCallRequested': {
+      // The event carries a request_hash but no discrete model id — the same absent-model-id
+      // truth that leaves cost unpriceable. Name it honestly rather than printing String(undefined).
+      const reqModel = p['model'] !== undefined ? `<b>${esc(String(p['model']))}</b>` : `<span class="tokens-only">no model id recorded</span>`;
+      const reqHash = String(p['request_hash'] ?? '');
+      detail = reqHash ? `${reqModel} · ${esc(reqHash)}` : reqModel;
       body = p['request_body']
         ? pane('request body (recorded)', p['request_body'])
         : `<p class="ev-honest">Prompt not recorded (recording is opt-in). The intent carries
              <span class="mono">request_hash</span> only; this run did not set <span class="mono">record_prompts</span>.</p>`;
       break;
+    }
     case 'ModelCallCompleted': {
-      const model = String(p['model']);
+      const modelId = p['model'] !== undefined ? String(p['model']) : null;
       const usage = (p['usage'] ?? {}) as Record<string, unknown>;
       const inTok = Number(usage['input_tokens'] ?? 0);
       const outTok = Number(usage['output_tokens'] ?? 0);
       const upto = costOfPrefix(events, e.seq + 1);
-      const c = callCost(model, inTok, outTok);
+      const c = modelId !== null ? callCost(modelId, inTok, outTok) : null;
       const call = c !== null ? usd(c) : `<span class="tokens-only">unpriced model</span>`;
       detail = `<b class="fig">${int(inTok)}</b> in · <b class="fig">${int(outTok)}</b> out ·
                 ${call} · run total <b>${costLabel(upto)}</b>`;
       body = pane('response + usage', p);
       if (c === null)
-        body += `<p class="ev-honest"><span class="mono">${esc(model)}</span> is not in the price table,
-        so every dollar figure for this run degrades to tokens-only rather than omitting this call's spend.</p>`;
+        body +=
+          modelId !== null
+            ? `<p class="ev-honest"><span class="mono">${esc(modelId)}</span> is not in the price table,
+        so every dollar figure for this run degrades to tokens-only rather than omitting this call's spend.</p>`
+            : `<p class="ev-honest">This call records token counts but no model id, so its dollar cost cannot be
+        priced — every dollar figure for this run degrades to tokens-only rather than being guessed.</p>`;
       break;
     }
     case 'ToolCallRequested': {
@@ -169,10 +194,16 @@ export function rowOf(e: SalvorEvent, events: readonly SalvorEvent[], arrivedSeq
     }
     case 'ToolCallCompleted': {
       const output = p['output'] as Record<string, unknown> | undefined;
+      // The completion does not repeat the tool name; it references its ToolCallRequested by
+      // payload.seq. Read the name from that paired intent — recorded structure, not a guess — and
+      // fall back to a nameless honest phrase if the pair is not in the loaded prefix.
+      const paired = p['seq'] !== undefined ? events.find((x) => x.seq === p['seq']) : undefined;
+      const toolName = (paired?.payload['tool'] ?? p['tool']) as string | undefined;
+      const toolRef = toolName !== undefined ? `<b>${esc(String(toolName))}</b>` : 'A tool call';
       detail =
         output && output['ok'] === false
-          ? `<b>${esc(String(p['tool']))}</b> returned a failure — recorded, not thrown`
-          : `<b>${esc(String(p['tool']))}</b> returned`;
+          ? `${toolRef} returned a failure — recorded, not thrown`
+          : `${toolRef} returned`;
       body = pane('output', p['output']);
       break;
     }
@@ -186,12 +217,19 @@ export function rowOf(e: SalvorEvent, events: readonly SalvorEvent[], arrivedSeq
       body = `<p class="ev-honest">The event carries the input only — no actor. There is no user model
                 (single tenant), so there is no actor to record.</p>${pane('input', p['input'])}`;
       break;
-    case 'BudgetExceeded':
-      detail = `<b>${esc(String(p['limit']))}</b> · limit ${usd(Number(p['limit_usd']))} · observed <b>${usd(Number(p['observed_usd']))}</b>`;
+    case 'BudgetExceeded': {
+      // The event records the ceiling as { budget: { kind, limit }, observed } — a budget can be
+      // measured in dollars, tokens, steps or wall time, so format by kind rather than assuming USD.
+      const budget = (p['budget'] ?? {}) as { kind?: string; limit?: unknown };
+      const kind = budget.kind ?? '';
+      detail = `limit <b>${budgetAmount(kind, budget.limit)}</b> · observed <b>${budgetAmount(kind, p['observed'])}</b>${
+        kind ? ` <span style="color:var(--faint)">· ${esc(kind)}</span>` : ''
+      }`;
       cls = 'attn';
       body = `<p class="ev-note">This is the only event that puts a declared ceiling in the log.
                 Every other run's ceiling lives in the agent definition.</p>${pane('payload', p)}`;
       break;
+    }
     case 'RunCompleted':
       detail = `terminal · <b>completed</b>`;
       body = pane('output', p['output']);
