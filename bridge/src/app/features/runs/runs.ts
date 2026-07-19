@@ -743,6 +743,28 @@ export class Runs {
   goInbox(): void {
     this.viewService.go('inbox');
   }
+
+  /** Whether this run is waiting on a human — the panel shows the inbox signpost only for these. */
+  waiting(r: RunRow): boolean {
+    return isWaiting(r.status);
+  }
+  /** The signpost's label, matching the Inspector amber-banner precedent per waiting state. The
+   * Inbox stays the single action surface; this button only routes to the run's card there. */
+  inboxAction(state: string): string {
+    switch (state) {
+      case 'needs_reconciliation':
+        return 'Resolve in inbox';
+      case 'suspended':
+        return 'Approve in inbox';
+      case 'budget_exceeded':
+        return 'Raise limit in inbox';
+      default:
+        return 'Open in inbox';
+    }
+  }
+  openInInbox(id: string): void {
+    this.viewService.openInboxCard(id);
+  }
   toggleDotKey(): void {
     this.dotKeyOpen.update((v) => !v);
   }

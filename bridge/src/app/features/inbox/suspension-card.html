@@ -2,6 +2,7 @@
   class="acard"
   [class.committed]="receipt()"
   [attr.id]="'card-' + ns()"
+  tabindex="-1"
   [attr.data-resume]="row().run"
   (submit)="$event.preventDefault(); submit()"
 >

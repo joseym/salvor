@@ -379,6 +379,10 @@
               }
             </p>
             <button class="btn ghost" type="button" (click)="openRun(r.id)">Open in inspector</button>
+            @if (waiting(r)) {
+              <!-- a waiting run's action lives in the Inbox; this is the signpost to its card, not a second action surface -->
+              <button class="btn ghost" type="button" [attr.data-inbox-run]="r.id" (click)="openInInbox(r.id)">{{ inboxAction(r.status) }}</button>
+            }
             @if (forkOffered(r)) {
               <!-- a list row names no node, so this lands the canvas in its node-picking state -->
               <button class="btn ghost" type="button" [attr.data-fork-run]="r.id" (click)="forkRun(r.id)">Fork this run…</button>

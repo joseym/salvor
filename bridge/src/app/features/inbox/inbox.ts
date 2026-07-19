@@ -3,6 +3,7 @@ import type { RunState, RunSummary } from '@salvor/client';
 
 import { RunsService, SALVOR_CLIENT, errorMessage } from '../../core/api';
 import { focusWhenRendered } from '../../core/focus';
+import { ViewService } from '../../core/view';
 import { labelOf } from '../runs/run-model';
 import { BudgetCard } from './budget-card';
 import { shortId } from './inbox-model';
@@ -67,6 +68,7 @@ export interface InboxCardVM {
 })
 export class Inbox {
   private readonly runsService = inject(RunsService);
+  private readonly viewService = inject(ViewService);
 
   readonly loading = this.runsService.loading;
   /** STICKY on purpose — `lastLoadedAt` alone, never `!loading()`. A post-commit refresh flips
@@ -106,6 +108,15 @@ export class Inbox {
       }
       if (additions.size === 0) return;
       this.shownCards.update((prev) => new Map([...prev, ...additions]));
+    });
+
+    // A signpost from the Runs side panel: land focus on the named run's action card. Each card
+    // carries the DOM id `card-<first8>` (see the card templates); focusWhenRendered waits out the
+    // zoneless render + view switch, then focuses it.
+    effect(() => {
+      const focus = this.viewService.inboxFocus();
+      if (!focus) return;
+      focusWhenRendered('#card-' + shortId(focus.runId));
     });
   }
 

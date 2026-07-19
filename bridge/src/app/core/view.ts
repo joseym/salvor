@@ -37,6 +37,9 @@ export class ViewService {
   private readonly _externalFilter = signal<{ readonly q: string; readonly nonce: number } | undefined>(
     undefined,
   );
+  private readonly _inboxFocus = signal<{ readonly runId: string; readonly nonce: number } | undefined>(
+    undefined,
+  );
 
   readonly view: Signal<ViewName> = this._view.asReadonly();
   readonly runId: Signal<string | undefined> = this._runId.asReadonly();
@@ -47,6 +50,11 @@ export class ViewService {
    * life and a later `?q=` change is otherwise never re-read. This is the one other channel: a
    * fresh object every call (the `nonce`), so clicking the same hour twice still re-applies it. */
   readonly externalFilter = this._externalFilter.asReadonly();
+  /** A request from another view (the Runs side panel) to open the Inbox landed on a specific run's
+   * action card. A fresh object every call (the `nonce`), so re-clicking the same run re-focuses it
+   * even though the Inbox stays mounted. The Inbox is the single action surface; this is a signpost
+   * to the right card, not a second place to act. */
+  readonly inboxFocus = this._inboxFocus.asReadonly();
   readonly title = computed(() => TITLES[this._view()]);
 
   /** A legacy hash captured at boot, redirected on the FIRST NavigationEnd so it wins the race
@@ -99,6 +107,13 @@ export class ViewService {
 
   openRun(runId: string): void {
     void this.router.navigate(['/inspector', runId]);
+  }
+
+  /** Open the Inbox landed on a run's action card. Navigates to `/inbox` (the single action
+   * surface) and flags which run's card to focus — the Runs side panel's signpost for a waiting run. */
+  openInboxCard(runId: string): void {
+    this._inboxFocus.set({ runId, nonce: Date.now() });
+    void this.router.navigate(['/inbox']);
   }
 
   /** Open the canvas on a stored graph — the same `/workflows/<hashPrefix>` door a fork lands on. */
