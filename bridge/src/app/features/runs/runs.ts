@@ -301,6 +301,18 @@ export class Runs {
     this.openRun(r.id);
   }
 
+  /** The row's keyboard path to the Inspector (the pointer affordance is the row body). Only fires
+   * when the ROW itself holds focus — a child control (the filter pill, the copy button, the panel
+   * toggle) handles its own Enter/Space and must not also open the run. Space is prevented from
+   * scrolling the page, matching the row's button-like activation. */
+  onRowKeydown(e: KeyboardEvent, r: RunRow): void {
+    if (e.target !== e.currentTarget) return;
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      this.openRun(r.id);
+    }
+  }
+
   // ── query plumbing ──
   getQuery(): string {
     return [...this.qTok(), this.pendingText().trim()].filter(Boolean).join(' ');

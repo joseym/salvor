@@ -16,6 +16,11 @@
 <!-- The populated body. `.inspector` sets display:grid, which beats the UA's [hidden]{display:none};
      inspector.css says `.inspector[hidden]{display:none}` so hiding it genuinely removes it. -->
 <div class="inspector" id="inspector-body" data-panel-dock data-panel="open" [hidden]="!hasRun()">
+  <!-- KEYBOARD SKIP PATH: the scrubber (slider + Fork) is the last column in DOM order, after the
+       whole event timeline and its per-tick strip. This visually-hidden-until-focus link is the
+       first focusable in the body, so a keyboard user reaches the slider without tabbing through
+       every event row first. Same `.skip` treatment as the shell's "Skip to content". -->
+  <a class="skip" href="#prefix" data-skip="scrubber" (click)="skipToScrubber($event)">Skip to the scrubber</a>
   <div>
     <dl #statsEl class="stats" id="run-stats" data-od-id="run-header" [attr.data-group]="headGroup()"></dl>
     <div #lineageEl id="run-lineage"></div>

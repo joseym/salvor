@@ -134,7 +134,14 @@
          <thead>/<tbody> sidesteps any HTML table-content-model surprise entirely — the reference
          variable #rowTpl is still reachable from *ngTemplateOutlet anywhere in this template. -->
     <ng-template #rowTpl let-r let-i="i">
-      <tr [ngClass]="rowClasses(r, i)" [attr.data-id]="r.id" (click)="onRowClick($event, r)">
+      <tr
+        [ngClass]="rowClasses(r, i)"
+        [attr.data-id]="r.id"
+        tabindex="0"
+        [attr.aria-label]="'Open run ' + short(r.id) + ' in the inspector'"
+        (click)="onRowClick($event, r)"
+        (keydown)="onRowKeydown($event, r)"
+      >
         <td class="c-caret">
           <button
             class="iact panel-open"

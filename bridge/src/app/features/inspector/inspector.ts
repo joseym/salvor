@@ -20,6 +20,7 @@ import { groupOf, labelOf } from '../runs/run-model';
 import { SERVER_CAPABILITIES, forkOffered } from './capability';
 import { KINDS, clock, renderStripHtml, renderTimelineHtml, zoneOf } from './event-model';
 import { esc } from '../../shared/json-hi';
+import { focusWhenRendered } from '../../core/focus';
 import { type CostTotal, int, usd } from './pricing';
 import {
   agentOf,
@@ -747,6 +748,15 @@ export class Inspector implements AfterViewInit {
     const open = !this.allOpen();
     this.allOpen.set(open);
     this.setAllOpen(open);
+  }
+
+  /** The keyboard skip path (see the `.skip` link in the template): jump focus straight to the
+   * scrubber slider, opening the panel first if it was collapsed. Frees a keyboard user from
+   * tabbing past every event row and strip tick to reach the slider and the Fork control after it. */
+  skipToScrubber(e: Event): void {
+    e.preventDefault();
+    this.panelOpen.set(true);
+    focusWhenRendered('#prefix');
   }
 
   // ── the scrubber panel dock ───────────────────────────────────────────────
