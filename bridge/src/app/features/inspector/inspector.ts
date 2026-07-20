@@ -11,7 +11,13 @@ import {
 } from '@angular/core';
 import type { SalvorEvent } from '@salvor/client';
 
-import { GraphRunService, RunEventsService, type RunEventsChannel } from '../../core/api';
+import {
+  GraphRunService,
+  RunEventsService,
+  type ForkListEntry,
+  type ForkOrigin,
+  type RunEventsChannel,
+} from '../../core/api';
 import { ForkIntentService } from '../../core/fork-intent';
 import { PillService } from '../../core/pill';
 import { RunsService } from '../../core/api';
@@ -109,6 +115,14 @@ export class Inspector implements AfterViewInit {
    * the list row). Undefined until the projection loads — the AGENT card shows the honest "graph
    * run" identity with no fabricated hash until then. */
   private readonly graphHash = signal<string | undefined>(undefined);
+
+  /** Fork LINEAGE, both directions, read from the server's derived surfaces (never the log):
+   *  - `forkedFrom` — this run's own projection carries it when it IS a forked child (the header
+   *    chip links back to the parent).
+   *  - `forks` — GET /v1/runs/{id}/forks, the derived index of children forked FROM this run.
+   * Both are honestly labelled derived where shown; both undefined until fetched, and reset per run. */
+  private readonly forkedFrom = signal<ForkOrigin | undefined>(undefined);
+  private readonly forks = signal<readonly ForkListEntry[] | undefined>(undefined);
 
   /** The seq of the event that JUST arrived, for the arrive/wash motion. A plain field, not a
    *  signal: it is read at render time and cleared after, never a render trigger of its own. */
@@ -217,11 +231,38 @@ export class Inspector implements AfterViewInit {
       this.graphRuns
         .loadProjection(id)
         .then((p) => {
-          if (this.viewService.runId() === id) this.graphHash.set(p.graphHash);
+          if (this.viewService.runId() === id) {
+            this.graphHash.set(p.graphHash);
+            // A forked child's projection names its origin; the header chip links back to it.
+            this.forkedFrom.set(p.forkedFrom);
+          }
         })
         .catch(() => {
           /* projection unavailable: the AGENT card keeps the plain "graph run" identity, no fake hash */
         });
+    });
+
+    // (4c) The forks OF this run — the server's derived index (GET /v1/runs/{id}/forks). Graph runs
+    // only (the fork API is graph-run shaped; asking about a plain agent run would 404 and the
+    // browser logs that to the console). Fetched once per run, silent on failure.
+    effect(() => {
+      const id = this.viewService.runId();
+      if (!id || !this.isGraphRun() || this.forks() !== undefined) return;
+      this.graphRuns
+        .listForks(id)
+        .then((idx) => {
+          if (this.viewService.runId() === id) this.forks.set(idx.forks);
+        })
+        .catch(() => {
+          /* forks index unreachable: the lineage panel simply does not render */
+        });
+    });
+
+    // (4d) render the fork lineage (the forked-from chip and the forks-of-this-run panel)
+    effect(() => {
+      this.forkedFrom();
+      this.forks();
+      this.renderLineage();
     });
 
     // (5) scrub-only render (derived panel, dim/cut, playhead, ticks, fork offer). Also re-runs
@@ -272,6 +313,8 @@ export class Inspector implements AfterViewInit {
     this.arrivedSeq = null;
     this.prevLen = 0;
     this.graphHash.set(undefined); // a new run: forget the previous run's graph_hash
+    this.forkedFrom.set(undefined);
+    this.forks.set(undefined);
 
     if (!id) {
       this.channelSig.set(undefined);
@@ -345,7 +388,42 @@ export class Inspector implements AfterViewInit {
         <dd class="figure">${dur}<span class="sub">${clock(first)} → ${clock(last)}</span></dd></div>`;
 
     if (this.bandEl) this.bandEl.nativeElement.innerHTML = this.bandHtml(st, state);
-    if (this.lineageEl) this.lineageEl.nativeElement.innerHTML = ''; // no fork lineage in real logs
+  }
+
+  /** The fork lineage rail (`#run-lineage`), both directions, from the server's derived surfaces:
+   * a "forked from <run> at <node>" chip when this run IS a fork, and a "Forks of this run" panel
+   * listing the children forked from it. Both honestly labelled derived. Empty when neither holds. */
+  private renderLineage(): void {
+    const el = this.lineageEl?.nativeElement;
+    if (!el) return;
+    const parent = this.forkedFrom();
+    const children = this.forks() ?? [];
+    let html = '';
+    if (parent) {
+      html += `<div class="lineage-chip" data-forked-from>
+        <span class="k">forked from</span>
+        <button class="lineage-link" type="button" data-goto-run="${esc(parent.runId)}">
+          <span class="runid">${esc(parent.runId.slice(0, 8))}</span> at <span class="mono">${esc(parent.fromNode)}</span>
+        </button>
+        <span class="lineage-derived" title="Recorded on the fork, not on the origin's log">derived</span>
+      </div>`;
+    }
+    if (children.length) {
+      const rows = children
+        .map(
+          (f) => `<li><button class="lineage-link" type="button" data-goto-run="${esc(f.run)}">
+            <span class="runid">${esc(f.run.slice(0, 8))}</span></button>
+            <span class="lineage-at">at <span class="mono">${esc(f.fromNode)}</span></span></li>`,
+        )
+        .join('');
+      html += `<div class="forks-panel" data-forks-panel>
+        <div class="forks-head">Forks of this run
+          <span class="lineage-derived" title="A derived index; not a fact this run recorded">derived</span></div>
+        <ul class="forks-list">${rows}</ul>
+        <p class="gloss">The server's derived index (<span class="mono">GET /v1/runs/${esc((this.viewService.runId() ?? '').slice(0, 8))}…/forks</span>) — not a fact the origin's log recorded.</p>
+      </div>`;
+    }
+    el.innerHTML = html;
   }
 
   /** The AGENT hero card. A graph run records no `agent_def_hash`, so the card renders the same
@@ -747,6 +825,12 @@ export class Inspector implements AfterViewInit {
     // the time-travel preview banner's "Jump to live" — folds back to the head of the log
     this.derivedEl?.nativeElement.addEventListener('click', (e) => {
       if ((e.target as HTMLElement).closest('[data-to-live]')) this.foldAll();
+    });
+    // the fork lineage: open a linked parent or child run in the Inspector
+    this.lineageEl?.nativeElement.addEventListener('click', (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLElement>('[data-goto-run]');
+      const runId = b?.getAttribute('data-goto-run');
+      if (runId) this.viewService.openRun(runId);
     });
   }
 

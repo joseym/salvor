@@ -435,6 +435,15 @@
   opacity: 1;
   outline: 2px solid var(--accent);
 }
+/* FORK DISCOVERABILITY (review fix 2a): in Run mode the ⋯ IS the fork door, and a fork can only
+   start from a node the run entered. So on a reached / current / exited node the affordance stays
+   fully visible, not the dim 0.55 hover cue — the operator can see where a fork can begin. */
+.wf-node.is-reached .wf-more,
+.wf-node.is-current .wf-more,
+.wf-node.is-exited .wf-more {
+  opacity: 1;
+  color: var(--fg);
+}
 
 /* RUN-MODE NODE STATUS. The two kinds of "nothing" are NOT the same: not-reached is dimmed (the run
    may still get here); skipped is struck through and hatched (the branch went the other way — it

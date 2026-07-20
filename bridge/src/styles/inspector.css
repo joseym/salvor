@@ -776,6 +776,40 @@
   letter-spacing: 0;
 }
 
+/* ── FORK LINEAGE (#run-lineage): the forked-from chip and the forks-of-this-run panel, both fed
+   from the server's derived surfaces and labelled so. ── */
+#run-lineage:empty { display: none; }
+.lineage-chip {
+  display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap;
+  margin-top: var(--space-3); padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--wash); font-size: 12px;
+}
+.lineage-chip .k { color: var(--muted); text-transform: uppercase; font-size: 10px; letter-spacing: 0.08em; }
+.lineage-link {
+  appearance: none; -webkit-appearance: none; padding: 0; background: none; border: 0;
+  font: inherit; color: var(--accent); cursor: pointer; letter-spacing: 0;
+}
+.lineage-link:hover { color: var(--accent-hover); text-decoration: underline; }
+.lineage-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.lineage-link .runid { font-family: var(--font-mono); }
+.lineage-derived {
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.04em; color: var(--muted);
+  padding: 1px 6px; border: 1px dashed var(--border); border-radius: var(--radius-pill);
+}
+.forks-panel {
+  margin-top: var(--space-3); padding: var(--space-3);
+  border: 1px solid var(--border-soft); border-radius: var(--radius-sm);
+}
+.forks-head {
+  display: flex; align-items: center; gap: var(--space-2);
+  font-size: 12px; font-weight: 600; color: var(--fg); margin-bottom: var(--space-2);
+}
+.forks-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+.forks-list li { display: flex; align-items: baseline; gap: var(--space-2); font-size: 12px; }
+.forks-list .lineage-at { color: var(--muted); }
+.forks-panel .gloss { margin-top: var(--space-2); }
+
 /* ── TIME-TRAVEL PREVIEW ──
    While the playhead HOLDS before the log's end, the derived rail is a re-derived PAST state, not
    live truth. It carries a tint + a diagonal hatch so it reads as a preview at a glance, a pinned
