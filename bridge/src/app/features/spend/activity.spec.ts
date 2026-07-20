@@ -142,6 +142,60 @@ describe('disclose and exclude: implausible recorded_at stamps', () => {
   });
 });
 
+describe('.hhit click-target geometry partitions the axis', () => {
+  // The real defect: at real density (the owner's store — 167 hourly buckets, step ≈ 2.59px) the
+  // old hit rect was built `bw+2` wide where `bw = Math.max(3, step-2)` — once step dropped under
+  // the 3px bar floor, `bw+2` (5px) stayed wider than `step` itself, so adjacent hit rects
+  // overlapped by up to ~48% of a bucket and a center-click on one bucket could resolve to its
+  // NEIGHBOR (elementFromPoint proven against the real store). The fix ties the hit geometry to
+  // `step` alone, so it tiles the axis exactly regardless of density. Swept across nBuckets 1..400
+  // — sparse windows included — because the fix must not trade a dense-window bug for a sparse-
+  // window regression.
+  const HOUR = 3600_000;
+
+  function hitRects(n: number): { x: number; w: number }[] {
+    const start = Date.parse('2026-07-17T00:00:00Z');
+    const events = Array.from({ length: n }, (_, i) => ev('ModelCallCompleted', new Date(start + i * HOUR).toISOString()));
+    const win = bucketEvents([events])!;
+    expect(win.nBuckets).toBe(n);
+    const html = renderActivityHtml(win, () => 1, undefined);
+    const rects = [...html.matchAll(/<rect class="hhit" x="(-?[\d.]+)" y="0" width="([\d.]+)"/g)].map((m) => ({
+      x: parseFloat(m[1]),
+      w: parseFloat(m[2]),
+    }));
+    expect(rects.length).toBe(n); // every bucket here has exactly one event — every bar renders
+    return rects;
+  }
+
+  it('adjacent hit rects never overlap and jointly cover the axis, for nBuckets 1..400', () => {
+    for (let n = 1; n <= 400; n++) {
+      const rects = hitRects(n);
+      for (let i = 0; i < rects.length - 1; i++) {
+        const rightEdge = rects[i].x + rects[i].w;
+        const nextLeft = rects[i + 1].x;
+        // a partition touches its neighbor edge-to-edge: no overlap (rightEdge > nextLeft) and no
+        // gap (rightEdge < nextLeft), up to floating-point noise
+        expect(rightEdge, `nBuckets=${n} bucket ${i}: hit rects must not overlap`).toBeLessThanOrEqual(
+          nextLeft + 1e-6,
+        );
+        expect(rightEdge, `nBuckets=${n} bucket ${i}: hit rects must not gap`).toBeGreaterThanOrEqual(
+          nextLeft - 1e-6,
+        );
+      }
+    }
+  });
+
+  it('at real density (167 hourly buckets) a center-click on bucket i lands only inside rect i', () => {
+    const rects = hitRects(167);
+    for (let i = 0; i < rects.length; i++) {
+      const center = rects[i].x + rects[i].w / 2;
+      const containing = rects.filter((r) => center > r.x && center < r.x + r.w);
+      expect(containing, `bucket ${i}'s own center must resolve to exactly one hit rect`).toHaveLength(1);
+      expect(containing[0]).toBe(rects[i]);
+    }
+  });
+});
+
 describe('hourTermOf', () => {
   it('matches run-model’s own hourKey shape (no "hour:" prefix)', () => {
     const lo = Date.parse('2026-07-17T09:00:00Z');

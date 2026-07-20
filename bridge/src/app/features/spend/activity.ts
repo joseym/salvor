@@ -165,6 +165,15 @@ export function renderActivityHtml(
         : b.park
           ? `<text class="h-park" x="${x + bw / 2}" y="${BASE - h - 5}" text-anchor="middle" font-size="11">▲</text>`
           : '';
+      // The hit rect is a PARTITION of the axis, not a padded copy of the visible bar: exactly
+      // `step` wide, edge to edge with its neighbors, zero overlap and zero gap. The visible bar
+      // (`bw`, above) is clamped to a 3px floor so a thin bucket still paints something, but a
+      // click target built the same way overlaps its neighbors once buckets get denser than that
+      // floor — a dense real window (hundreds of hourly buckets, step under 3px) had `bw+2`-wide
+      // hit rects overlapping by nearly half a bucket, so a center-click could resolve to the
+      // WRONG neighbor (`elementFromPoint` picks whichever overlapping rect is later in paint
+      // order). Tiling the hit geometry on `step` alone removes the overlap at any density while
+      // leaving the bar's own width untouched.
       const hr = hourTermOf(lo, i);
       const n = lastActiveCount(hr);
       const label =
@@ -185,7 +194,7 @@ export function renderActivityHtml(
         .join(' ');
       return `<g class="${cls}" ${n ? 'role="button" tabindex="0"' : ''} data-hour="${esc(hr)}" ${n ? `aria-label="${esc(label)}"` : ''}>
         <title>${esc(label)}</title>
-        <rect class="hhit" x="${x - 1}" y="0" width="${bw + 2}" height="${BASE + 9}"></rect>
+        <rect class="hhit" x="${x}" y="0" width="${step}" height="${BASE + 9}"></rect>
         <rect class="h-model" x="${x}" y="${BASE - h}" width="${bw}" height="${hm}"></rect>
         <rect class="h-tool" x="${x}" y="${BASE - h + hm}" width="${bw}" height="${ht}"></rect>
         <rect class="empty-bar" x="${x}" y="${BASE - h + hm + ht}" width="${bw}" height="${ho}"></rect>
