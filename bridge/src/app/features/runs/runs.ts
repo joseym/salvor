@@ -775,6 +775,12 @@ export class Runs {
     }
   }
   openInInbox(id: string): void {
+    // Deselect the run first: the signpost lives in this run-detail panel, and once we route to the
+    // Inbox the whole Runs section goes `[hidden]` — a still-selected panel would leave the very
+    // same `[data-inbox-run]` button sitting in the hidden DOM, a duplicate of the action the
+    // operator just took. Clearing the selection removes it, so the Inbox card is the single
+    // action affordance the arrival lands on.
+    this.runSel.set(undefined);
     this.viewService.openInboxCard(id);
   }
   toggleDotKey(): void {
