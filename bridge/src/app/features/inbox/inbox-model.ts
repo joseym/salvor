@@ -242,3 +242,117 @@ export async function buildReceipt(
 export function shortId(id: string): string {
   return id.slice(0, 8);
 }
+
+// ── gate decision evidence ─────────────────────────────────────────────────────────────────────
+// A suspension card asks true/false; these read the run's RECENT SUBSTANCE off its own log so the
+// decision is made against evidence, not a bare form. Everything here is recorded fact, bounded.
+
+/**
+ * Collect a run's recorded log by streaming from `fromSeq`, stopping once `expected` events are in
+ * hand or a short budget elapses. A suspended run's event stream stays OPEN after its backfill
+ * (it is live), so a bounded collect is the honest one-shot read — the same release discipline
+ * {@link fetchAppendedEvent} uses, never a live connection left holding.
+ */
+export async function collectLog(
+  client: SalvorClient,
+  runId: string,
+  fromSeq: number,
+  expected: number,
+  budgetMs = 2500,
+): Promise<SalvorEvent[]> {
+  const stream = client.streamEvents(runId, { fromSeq });
+  const iterator = stream[Symbol.asyncIterator]();
+  const out: SalvorEvent[] = [];
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), budgetMs);
+  });
+  try {
+    while (out.length < expected) {
+      const res = await Promise.race([iterator.next(), timeout]);
+      if (res === 'timeout') break;
+      if (res.done) break;
+      out.push(res.value);
+    }
+  } finally {
+    clearTimeout(timer);
+    await iterator.return?.().catch(() => undefined);
+  }
+  return out;
+}
+
+/** The last assistant text block the model produced, with the seq it was recorded at — the "what
+ * the run last said" excerpt. Reads `response.content[]` (the Anthropic message shape the log
+ * records), joining any text blocks; ignores tool-use blocks. Undefined when the tail has none. */
+export function lastAssistantText(
+  events: readonly SalvorEvent[],
+): { readonly text: string; readonly seq: number } | undefined {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.kind !== 'ModelCallCompleted') continue;
+    const response = e.payload['response'] as Record<string, unknown> | undefined;
+    const content = response?.['content'];
+    if (!Array.isArray(content)) continue;
+    const text = content
+      .filter(
+        (b): b is Record<string, unknown> =>
+          !!b && typeof b === 'object' && (b as Record<string, unknown>)['type'] === 'text',
+      )
+      .map((b) => String(b['text'] ?? ''))
+      .join('\n')
+      .trim();
+    if (text) return { text, seq: e.seq };
+  }
+  return undefined;
+}
+
+/** The last tool result recorded, with the tool name (read from its paired ToolCallRequested by
+ * `payload.seq`, recorded structure not a guess) and the seq — "what the run last did". */
+export function lastToolResult(
+  events: readonly SalvorEvent[],
+): { readonly tool: string; readonly output: unknown; readonly seq: number } | undefined {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.kind !== 'ToolCallCompleted') continue;
+    const pairedSeq = e.payload['seq'];
+    const paired = pairedSeq !== undefined ? events.find((x) => x.seq === pairedSeq) : undefined;
+    const tool = String(paired?.payload['tool'] ?? e.payload['tool'] ?? 'tool');
+    return { tool, output: e.payload['output'], seq: e.seq };
+  }
+  return undefined;
+}
+
+/** One node a resume would continue into. */
+export interface NextNode {
+  readonly id: string;
+  readonly name: string;
+  readonly kind: string;
+}
+
+/** The nodes an edge leaves `currentNode` for, named — "resuming continues into: Follow up (agent)".
+ * Read straight off the stored graph document's own nodes and edges, so it is recorded topology,
+ * never a guess. Empty when the gate is terminal (nothing downstream). */
+export function nextNodesAfter(
+  document: { nodes?: unknown; edges?: unknown } | undefined,
+  currentNode: string,
+): NextNode[] {
+  const nodes = (document?.nodes as Array<Record<string, unknown>>) ?? [];
+  const edges = (document?.edges as Array<Record<string, unknown>>) ?? [];
+  const byId = new Map<string, { name: string; kind: string }>();
+  for (const n of nodes) {
+    const payload = (n['payload'] as Record<string, unknown>) ?? {};
+    const id = String(payload['id'] ?? '');
+    byId.set(id, { name: String(payload['name'] ?? id), kind: String(n['kind'] ?? '') });
+  }
+  const seen = new Set<string>();
+  const out: NextNode[] = [];
+  for (const e of edges) {
+    if (String(e['from'] ?? '') !== currentNode) continue;
+    const to = String(e['to'] ?? '');
+    if (!to || seen.has(to)) continue;
+    seen.add(to);
+    const meta = byId.get(to) ?? { name: to, kind: '' };
+    out.push({ id: to, name: meta.name, kind: meta.kind });
+  }
+  return out;
+}

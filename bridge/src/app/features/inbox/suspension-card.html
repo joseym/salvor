@@ -47,6 +47,54 @@
     </div>
     <p class="reason">{{ reason() }}</p>
 
+    <!-- GATE DECISION EVIDENCE: the run's recent substance at the decision point — the last thing it
+         said and did, and what resuming continues into — so a true/false is made against evidence,
+         not a bare form. Bounded excerpts, each with an honest "from seq N" provenance, expandable. -->
+    @if (evidenceLoaded() && (hasEvidence() || continuesInto()?.length)) {
+      <section class="gate-evidence" data-gate-evidence aria-label="What this run recently did">
+        <h5 class="gate-ev-title">Before you decide</h5>
+
+        @if (lastText(); as t) {
+          <div class="gate-ev-item" data-gate-ev="assistant">
+            <div class="gate-ev-head">
+              <span class="gate-ev-k">last assistant text</span>
+              <span class="gate-ev-prov">from seq {{ t.seq }}</span>
+            </div>
+            @if (isLong(t.text)) {
+              <details class="gate-ev-detail">
+                <summary class="gate-ev-body">{{ excerpt(t.text) }}</summary>
+                <p class="gate-ev-full">{{ t.text }}</p>
+              </details>
+            } @else {
+              <p class="gate-ev-body">{{ t.text }}</p>
+            }
+          </div>
+        }
+
+        @if (lastTool(); as tr) {
+          <div class="gate-ev-item" data-gate-ev="tool">
+            <div class="gate-ev-head">
+              <span class="gate-ev-k">last tool result · <span class="mono">{{ tr.tool }}</span></span>
+              <span class="gate-ev-prov">from seq {{ tr.seq }}</span>
+            </div>
+            <details class="gate-ev-detail">
+              <summary class="gate-ev-body">expand <span class="mono">{{ tr.tool }}</span> output</summary>
+              <pre class="gate-ev-json" [innerHTML]="jsonHiCompact(tr.output)"></pre>
+            </details>
+          </div>
+        }
+
+        @if (continuesInto()?.length) {
+          <p class="gate-ev-next" data-gate-ev="next">
+            <span class="gate-ev-k">resuming continues into</span>
+            @for (n of continuesInto(); track n.id) {
+              <span class="gate-next-node">{{ nextNodeLabel(n) }}</span>
+            }
+          </p>
+        }
+      </section>
+    }
+
     @if (showProvenance()) {
       <p class="provenance">
         Prefilled values were <b>proposed by this run</b>, carried on its recorded

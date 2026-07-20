@@ -1,10 +1,19 @@
-import { Component, computed, inject, input, output, signal } from '@angular/core';
+import { Component, computed, effect, inject, input, output, signal } from '@angular/core';
 import type { RunSummary } from '@salvor/client';
 
-import { RunDetailService, SALVOR_CLIENT, errorMessage } from '../../core/api';
+import { GraphRunService, GraphsService, RunDetailService, SALVOR_CLIENT, errorMessage } from '../../core/api';
 import { ViewService } from '../../core/view';
 import { jsonHi } from '../../shared/json-hi';
-import { type ReceiptVM, buildReceipt, shortId } from './inbox-model';
+import {
+  type NextNode,
+  type ReceiptVM,
+  buildReceipt,
+  collectLog,
+  lastAssistantText,
+  lastToolResult,
+  nextNodesAfter,
+  shortId,
+} from './inbox-model';
 import { RunRef } from './run-ref';
 import {
   type JsonSchemaObject,
@@ -31,6 +40,8 @@ export class SuspensionCard {
   private readonly client = inject(SALVOR_CLIENT);
   private readonly runDetail = inject(RunDetailService);
   private readonly viewService = inject(ViewService);
+  private readonly graphRuns = inject(GraphRunService);
+  private readonly graphsService = inject(GraphsService);
 
   readonly row = input.required<RunSummary>();
   /** Whether this card's Evidence is the one open in the parent's panel (drives aria-pressed). */
@@ -64,6 +75,66 @@ export class SuspensionCard {
   readonly receipt = signal<ReceiptVM | undefined>(undefined);
 
   readonly endpoint = computed(() => `POST /v1/runs/${this.ns()}…/resume`);
+
+  // ── GATE DECISION EVIDENCE ──
+  // A gate asks true/false; these carry the run's recent substance to the decision point, read off
+  // its own log (bounded excerpts, with an honest "from seq N" provenance), plus what a resume
+  // continues into (the graph projection's next nodes). Undefined until loaded; absent honestly for
+  // an agent run (no projection) — which gets the last-events excerpt alone, per the brief.
+  readonly lastText = signal<{ readonly text: string; readonly seq: number } | undefined>(undefined);
+  readonly lastTool = signal<{ readonly tool: string; readonly output: unknown; readonly seq: number } | undefined>(undefined);
+  readonly continuesInto = signal<readonly NextNode[] | undefined>(undefined);
+  readonly evidenceLoaded = signal(false);
+  readonly hasEvidence = computed(() => !!this.lastText() || !!this.lastTool());
+
+  constructor() {
+    // Earn the cost when the Inbox is actually looked at. Every view is mounted from boot, so
+    // loading evidence in a constructor/ngOnInit would stream a log per suspended run on every page
+    // load, for a view nobody may open — the same "gate the fold on the active view" rule Spend
+    // states. Once loaded it never re-fetches (evidenceLoaded latches).
+    effect(() => {
+      if (this.viewService.view() !== 'inbox' || this.evidenceLoaded()) return;
+      void this.loadEvidence();
+    });
+  }
+
+  /** Read the run's recent substance off its own log, and — for a graph run parked at a gate — what
+   * resuming continues into. Evidence is a courtesy at the decision point; every failure is
+   * swallowed so the form still works without it (an agent run simply gets the excerpt, no next
+   * nodes). Bounded: {@link collectLog} stops at the recorded head, never holding the live stream. */
+  private async loadEvidence(): Promise<void> {
+    try {
+      const row = this.row();
+      const events = await collectLog(this.client, row.run, 0, row.eventCount);
+      this.lastText.set(lastAssistantText(events));
+      this.lastTool.set(lastToolResult(events));
+      // A graph run's log opens with GraphRunStarted; only then is there a projection to ask what
+      // the resume continues into. An agent run gets the excerpt alone.
+      if (events[0]?.kind === 'GraphRunStarted') {
+        const proj = await this.graphRuns.loadProjection(row.run);
+        if (proj.currentNode && proj.graphHash) {
+          const rec = await this.graphsService.get(proj.graphHash);
+          this.continuesInto.set(nextNodesAfter(rec.document, proj.currentNode));
+        }
+      }
+    } catch {
+      /* evidence is a courtesy — the form works without it */
+    } finally {
+      this.evidenceLoaded.set(true);
+    }
+  }
+
+  /** A bounded excerpt for the evidence card — the full text stays available on expand. */
+  excerpt(text: string, max = 240): string {
+    const t = text.trim();
+    return t.length > max ? t.slice(0, max).trimEnd() + '…' : t;
+  }
+  isLong(text: string, max = 240): boolean {
+    return text.trim().length > max;
+  }
+  nextNodeLabel(n: NextNode): string {
+    return n.kind ? `${n.name} (${n.kind})` : n.name;
+  }
 
   /** The control's current value: what was typed/chosen, or the schema's own proposed default. */
   valueOf(f: SchemaField): string {

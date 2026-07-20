@@ -128,6 +128,37 @@
 .copy-call { flex: none; white-space: nowrap; }
 .offramp-why { margin: var(--space-2) 0 0; font-size: 12px; color: var(--muted); text-wrap: pretty; letter-spacing: 0.08px; }
 
+/* ── GATE DECISION EVIDENCE: the run's recent substance carried to the decision point. Reads as
+   evidence, not a data dump — a bounded excerpt each, an honest provenance line, expandable. ── */
+.gate-evidence {
+  margin: 0 0 var(--space-4); padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border-soft); border-left: 3px solid var(--edge-strong);
+  border-radius: var(--radius-sm); background: var(--wash);
+}
+.gate-ev-title {
+  margin: 0 0 var(--space-2); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--muted); font-weight: 600;
+}
+.gate-ev-item { margin-bottom: var(--space-3); }
+.gate-ev-item:last-of-type { margin-bottom: 0; }
+.gate-ev-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); margin-bottom: 3px; }
+.gate-ev-k { font-size: 11px; color: var(--fg-2); font-weight: 600; letter-spacing: 0.08px; }
+.gate-ev-prov { font-family: var(--font-mono); font-size: 10px; color: var(--muted); flex: none; }
+.gate-ev-body { margin: 0; font-size: 13px; color: var(--fg); line-height: 1.5; text-wrap: pretty; }
+summary.gate-ev-body { cursor: pointer; }
+summary.gate-ev-body:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.gate-ev-full { margin: var(--space-2) 0 0; font-size: 13px; color: var(--fg); line-height: 1.5; white-space: pre-wrap; }
+.gate-ev-json {
+  margin: var(--space-2) 0 0; padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-soft); border-radius: var(--radius-sm);
+  background: var(--surface); font-size: 12px; overflow-x: auto; white-space: pre;
+}
+.gate-ev-next { margin: 0; font-size: 13px; color: var(--fg-2); display: flex; align-items: baseline; gap: var(--space-2); flex-wrap: wrap; }
+.gate-next-node {
+  font-family: var(--font-mono); font-size: 12px; color: var(--fg);
+  padding: 1px 8px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--surface);
+}
+
 .confirm { display: flex; align-items: flex-start; gap: var(--space-2); margin-top: var(--space-4); font-size: 13px; color: var(--fg-2); letter-spacing: 0.08px; }
 .confirm input { accent-color: var(--accent); margin-top: 2px; }
 

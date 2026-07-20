@@ -7,6 +7,9 @@ import {
   extendKey,
   fetchAppendedEvent,
   formatBudgetValue,
+  lastAssistantText,
+  lastToolResult,
+  nextNodesAfter,
   parseBudgetInfo,
   reconcileIntentFrom,
   shortId,
@@ -152,5 +155,49 @@ describe('fetchAppendedEvent', () => {
 
     expect(event?.seq).toBe(5);
     expect(event?.kind).toBe('Resumed');
+  });
+});
+
+describe('gate decision evidence (fix 9 helpers)', () => {
+  const ev = (seq: number, kind: string, payload: Record<string, unknown>) =>
+    ({ seq, kind, recordedAt: '2026-07-16T00:00:00Z', payload }) as any;
+
+  it('lastAssistantText reads the LAST text block off response.content, with its seq', () => {
+    const events = [
+      ev(4, 'ModelCallCompleted', { response: { content: [{ type: 'text', text: 'first pass' }] } }),
+      ev(8, 'ToolCallRequested', { tool: 'save', input: {} }),
+      ev(9, 'ModelCallCompleted', {
+        response: { content: [{ type: 'tool_use', id: 't1' }, { type: 'text', text: 'Research complete: 9 findings saved.' }] },
+      }),
+    ];
+    expect(lastAssistantText(events)).toEqual({ text: 'Research complete: 9 findings saved.', seq: 9 });
+  });
+
+  it('lastAssistantText is undefined when no completion carries a text block', () => {
+    const events = [ev(9, 'ModelCallCompleted', { response: { content: [{ type: 'tool_use', id: 't1' }] } })];
+    expect(lastAssistantText(events)).toBeUndefined();
+  });
+
+  it('lastToolResult names the tool from its paired ToolCallRequested (by payload.seq)', () => {
+    const events = [
+      ev(10, 'ToolCallRequested', { tool: 'get_finding_count', input: {} }),
+      ev(11, 'ToolCallCompleted', { seq: 10, output: { count: 9 } }),
+    ];
+    expect(lastToolResult(events)).toEqual({ tool: 'get_finding_count', output: { count: 9 }, seq: 11 });
+  });
+
+  it('nextNodesAfter reads the next node off the stored document, named with its kind', () => {
+    const document = {
+      nodes: [
+        { kind: 'gate', payload: { id: 'approve', name: 'Approve the draft' } },
+        { kind: 'agent', payload: { id: 'followup', name: 'Follow up' } },
+      ],
+      edges: [
+        { from: 'research', to: 'approve' },
+        { from: 'approve', to: 'followup' },
+      ],
+    };
+    expect(nextNodesAfter(document, 'approve')).toEqual([{ id: 'followup', name: 'Follow up', kind: 'agent' }]);
+    expect(nextNodesAfter(document, 'followup'), 'a terminal node continues into nothing').toEqual([]);
   });
 });
