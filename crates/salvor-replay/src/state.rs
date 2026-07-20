@@ -23,7 +23,7 @@
 use serde_json::Value;
 
 use crate::effect::Effect;
-use crate::event::{Budget, Event, EventEnvelope};
+use crate::event::{Budget, Event, EventEnvelope, UnresolvedWrite};
 use crate::id::SequenceNumber;
 
 /// Token usage accumulated across every completed model call in a log.
@@ -113,6 +113,19 @@ pub enum RunStatus {
     Failed {
         /// The recorded failure description.
         error: String,
+    },
+    /// The run was abandoned by an operator: a terminal resting state in its
+    /// own right, distinct from [`RunStatus::Failed`]. Abandonment is a
+    /// deliberate retirement, not a failure, so it reads as its own muted
+    /// terminal everywhere downstream rather than borrowing the failure ink.
+    Abandoned {
+        /// The operator's optional note for why the run was abandoned.
+        reason: Option<String>,
+        /// The write intent left unsettled when a needs-reconciliation run was
+        /// abandoned, when there was one. Present only for a run abandoned from
+        /// [`RunStatus::NeedsReconciliation`]; the abandonment records it so the
+        /// terminal state never claims the write question was answered.
+        unresolved_write: Option<UnresolvedWrite>,
     },
 }
 
@@ -229,6 +242,22 @@ pub fn derive_state(log: &[EventEnvelope]) -> RunState {
             Event::RunFailed { error } => {
                 state.status = RunStatus::Failed {
                     error: error.clone(),
+                };
+            }
+            // An operator-appended terminal. Abandonment gets its own resting
+            // status, never `Failed`: the two are different facts and read
+            // differently downstream. The `pending_call` is left as the log's
+            // last dangling intent implied (kept through terminal events, like
+            // `Failed`), so an abandoned needs-reconciliation run still surfaces
+            // the write; `unresolved_write` is the durable, recorded copy of
+            // that evidence carried on the status itself.
+            Event::RunAbandoned {
+                reason,
+                unresolved_write,
+            } => {
+                state.status = RunStatus::Abandoned {
+                    reason: reason.clone(),
+                    unresolved_write: unresolved_write.clone(),
                 };
             }
             // A graph run's head. It stands where an agent run's `RunStarted`
@@ -514,6 +543,69 @@ mod tests {
                 error: "provider timeout".into(),
             }
         );
+    }
+
+    /// An abandonment derives to the abandoned terminal, carrying its recorded
+    /// reason. A bare abandonment (no dangling write) carries no
+    /// unresolved-write evidence.
+    #[test]
+    fn abandonment_derives_abandoned() {
+        let state = derive_state(&log(vec![
+            started(),
+            Event::RunAbandoned {
+                reason: Some("husk is dead forever".into()),
+                unresolved_write: None,
+            },
+        ]));
+        assert_eq!(
+            state.status,
+            RunStatus::Abandoned {
+                reason: Some("husk is dead forever".into()),
+                unresolved_write: None,
+            }
+        );
+    }
+
+    /// Abandoning a needs-reconciliation run derives to the abandoned terminal
+    /// carrying the unresolved-write evidence, and the dangling write is still
+    /// surfaced through `pending_call` (kept through the terminal event), so the
+    /// abandoned state never claims the write question was answered.
+    #[test]
+    fn abandonment_of_needs_reconciliation_records_unresolved_write() {
+        let state = derive_state(&log(vec![
+            started(),
+            Event::ToolCallRequested {
+                seq: SequenceNumber::new(1),
+                tool: "create_ticket".into(),
+                input: serde_json::json!({"title": "bug"}),
+                effect: Effect::Write,
+                idempotency_key: None,
+            },
+            Event::RunAbandoned {
+                reason: None,
+                unresolved_write: Some(UnresolvedWrite {
+                    seq: SequenceNumber::new(1),
+                    tool: "create_ticket".into(),
+                }),
+            },
+        ]));
+        assert_eq!(
+            state.status,
+            RunStatus::Abandoned {
+                reason: None,
+                unresolved_write: Some(UnresolvedWrite {
+                    seq: SequenceNumber::new(1),
+                    tool: "create_ticket".into(),
+                }),
+            }
+        );
+        assert!(matches!(
+            state.pending_call,
+            Some(PendingCall::Tool {
+                effect: Effect::Write,
+                ..
+            })
+        ));
     }
 
     /// Context observations leave the status untouched.

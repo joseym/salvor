@@ -185,6 +185,7 @@ fn is_resting(status: &RunStatus) -> bool {
         status,
         RunStatus::Completed { .. }
             | RunStatus::Failed { .. }
+            | RunStatus::Abandoned { .. }
             | RunStatus::Suspended { .. }
             | RunStatus::BudgetExceeded { .. }
             | RunStatus::NeedsReconciliation

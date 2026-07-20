@@ -9,7 +9,8 @@
 //!   recovers with no input;
 //! - a run that **needs reconciliation** is refused, and its recorded write
 //!   intent is the evidence a human resolves it with;
-//! - a **finished** run (completed or failed) is reported and left alone;
+//! - a **finished** run (completed, failed, or operator-abandoned) is reported
+//!   and left alone;
 //! - an **empty** log is not a run at all.
 //!
 //! This module holds only the decision, not the effect: it does no IO, drives
@@ -17,7 +18,7 @@
 //! way its surface calls for (an exit code and a report for the CLI, an HTTP
 //! status and a JSON body for the server).
 
-use salvor_core::{PendingCall, RunState, RunStatus};
+use salvor_core::{PendingCall, RunState, RunStatus, UnresolvedWrite};
 
 /// Whether a resume should validate and expect an input, or run with none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +45,15 @@ pub enum Disposition {
     Completed(serde_json::Value),
     /// The run already failed with this error.
     Failed(String),
+    /// The run was abandoned by an operator. A terminal resting state, reported
+    /// and left alone exactly as completed or failed is, distinct from failure.
+    Abandoned {
+        /// The operator's optional note.
+        reason: Option<String>,
+        /// The write intent left unsettled when a needs-reconciliation run was
+        /// abandoned, when there was one.
+        unresolved_write: Option<UnresolvedWrite>,
+    },
     /// The log is empty; there is no run to continue.
     NotStarted,
 }
@@ -68,6 +78,13 @@ pub fn classify(state: &RunState) -> Disposition {
         }
         RunStatus::Completed { output } => Disposition::Completed(output.clone()),
         RunStatus::Failed { error } => Disposition::Failed(error.clone()),
+        RunStatus::Abandoned {
+            reason,
+            unresolved_write,
+        } => Disposition::Abandoned {
+            reason: reason.clone(),
+            unresolved_write: unresolved_write.clone(),
+        },
         RunStatus::NotStarted => Disposition::NotStarted,
     }
 }

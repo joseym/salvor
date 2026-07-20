@@ -131,6 +131,30 @@ pub fn resolved_report(run_uuid: &str) -> String {
     )
 }
 
+/// The report `salvor abandon` prints once it has appended the terminal
+/// `RunAbandoned` by hand. `appended_seq` is the position it landed at, and
+/// `unresolved` is the outstanding write (seq, tool) when a needs-reconciliation
+/// run was abandoned, so the receipt states plainly that the write stays
+/// unresolved and is recorded as such. Nothing was edited or re-run.
+#[must_use]
+pub fn abandoned_report(
+    run_uuid: &str,
+    appended_seq: u64,
+    unresolved: Option<(u64, &str)>,
+) -> String {
+    let mut out = format!(
+        "Run {run_uuid}: appended RunAbandoned at seq {appended_seq}. Status now abandoned.\n\
+         Nothing was edited or re-run; the run is retired.\n"
+    );
+    if let Some((seq, tool)) = unresolved {
+        out.push_str(&format!(
+            "The write at seq {seq} ({tool}) stays unresolved and is recorded as such; \
+             its effect remains unknown.\n"
+        ));
+    }
+    out
+}
+
 /// The `list` table: a header plus one row per run. `rows` pairs each summary
 /// with its derived status label (the store does not carry status; it is a
 /// replay-time projection, so the caller folds each log first).
@@ -240,6 +264,7 @@ pub fn status_label(status: &RunStatus) -> &'static str {
         RunStatus::NeedsReconciliation => "needs-reconciliation",
         RunStatus::Completed { .. } => "completed",
         RunStatus::Failed { .. } => "failed",
+        RunStatus::Abandoned { .. } => "abandoned",
     }
 }
 

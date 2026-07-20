@@ -62,6 +62,7 @@ pub fn event_kind(event: &Event) -> &'static str {
         Event::BudgetExceeded { .. } => "BudgetExceeded",
         Event::RunCompleted { .. } => "RunCompleted",
         Event::RunFailed { .. } => "RunFailed",
+        Event::RunAbandoned { .. } => "RunAbandoned",
         Event::GraphRunStarted { .. } => "GraphRunStarted",
         Event::NodeEntered { .. } => "NodeEntered",
         Event::NodeExited { .. } => "NodeExited",
@@ -138,6 +139,22 @@ pub fn event_detail(event: &Event) -> String {
         }
         Event::RunCompleted { output } => format!("output {}", truncate_json(output)),
         Event::RunFailed { error } => format!("error: {}", truncate_str(error)),
+        Event::RunAbandoned {
+            reason,
+            unresolved_write,
+        } => {
+            let why = reason
+                .as_deref()
+                .map_or_else(|| "no reason given".to_owned(), truncate_str);
+            match unresolved_write {
+                Some(write) => format!(
+                    "abandoned: {why} (unresolved write at seq {}, tool {})",
+                    write.seq.get(),
+                    write.tool
+                ),
+                None => format!("abandoned: {why}"),
+            }
+        }
         Event::GraphRunStarted {
             graph_hash, input, ..
         } => format!(

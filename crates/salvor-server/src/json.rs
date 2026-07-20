@@ -19,6 +19,10 @@
 //!    "observed": n }`
 //! - `{ "state": "completed", "output": <json> }`
 //! - `{ "state": "failed", "error": "..." }`
+//! - `{ "state": "abandoned" }`, optionally with `"reason": "..."` and, when a
+//!   needs-reconciliation run was abandoned,
+//!   `"unresolved_write": { "seq": n, "tool": "..." }` — the recorded evidence
+//!   that the abandonment never claimed the dangling write settled.
 //!
 //! # The pending object
 //!
@@ -55,6 +59,27 @@ pub fn status(status: &RunStatus) -> Value {
         RunStatus::NeedsReconciliation => json!({ "state": "needs_reconciliation" }),
         RunStatus::Completed { output } => json!({ "state": "completed", "output": output }),
         RunStatus::Failed { error } => json!({ "state": "failed", "error": error }),
+        RunStatus::Abandoned {
+            reason,
+            unresolved_write,
+        } => {
+            let mut obj = json!({ "state": "abandoned" });
+            let map = obj.as_object_mut().expect("status object");
+            // Omit rather than assert: a reasonless abandonment carries no
+            // `reason` key, and only a needs-reconciliation abandonment carries
+            // `unresolved_write` — the same zero-vs-absent honesty the rest of
+            // the API holds to.
+            if let Some(reason) = reason {
+                map.insert("reason".to_owned(), json!(reason));
+            }
+            if let Some(write) = unresolved_write {
+                map.insert(
+                    "unresolved_write".to_owned(),
+                    json!({ "seq": write.seq.get(), "tool": write.tool }),
+                );
+            }
+            obj
+        }
     }
 }
 

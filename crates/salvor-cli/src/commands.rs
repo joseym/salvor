@@ -54,8 +54,8 @@ use uuid::Uuid;
 use crate::agent_config::{self, AgentConfig};
 use crate::checkout;
 use crate::cli::{
-    BuildArgs, ForkArgs, GraphRunArgs, GraphValidateArgs, HistoryArgs, ReplayArgs, ResolveArgs,
-    ResumeArgs, RunArgs, ServeArgs,
+    AbandonArgs, BuildArgs, ForkArgs, GraphRunArgs, GraphValidateArgs, HistoryArgs, ReplayArgs,
+    ResolveArgs, ResumeArgs, RunArgs, ServeArgs,
 };
 use crate::dev_server::DevServer;
 use crate::render;
@@ -138,6 +138,24 @@ pub async fn resume(store_path: &Path, args: ResumeArgs) -> Result<u8> {
         }
         Disposition::Failed(error) => {
             println!("run {uuid} already failed: {error}");
+            return Ok(0);
+        }
+        Disposition::Abandoned {
+            reason,
+            unresolved_write,
+        } => {
+            match reason {
+                Some(reason) => println!("run {uuid} was abandoned: {reason}"),
+                None => println!("run {uuid} was abandoned"),
+            }
+            if let Some(write) = unresolved_write {
+                println!(
+                    "  the write at seq {} ({}) was left unresolved and is recorded as such; \
+                     its effect stays unknown",
+                    write.seq.get(),
+                    write.tool
+                );
+            }
             return Ok(0);
         }
         Disposition::NotStarted => bail!("run {uuid} has no recorded events"),
@@ -338,6 +356,55 @@ pub async fn resolve(store_path: &Path, args: ResolveArgs) -> Result<u8> {
         Err(RuntimeError::NotReconcilable { status, .. }) => {
             eprintln!(
                 "run {uuid} does not need reconciliation (status: {status}); there is no dangling write to resolve"
+            );
+            Ok(1)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// `salvor abandon`: retire a run by hand, appending a terminal `RunAbandoned`.
+///
+/// The operator's "we do not care about this run anymore" path, for a run that
+/// is dead forever or no longer worth carrying. A deliberate sibling of
+/// [`resolve`]: it needs no agent and drives nothing, appending exactly one
+/// terminal event. It is allowed for any non-terminal run; a run parked at a
+/// dangling write is abandoned with the outstanding write recorded as
+/// `unresolved_write`, so the receipt states plainly that the write stays
+/// unresolved. Refuses (exit 1) a run that is already terminal.
+pub async fn abandon(store_path: &Path, args: AbandonArgs) -> Result<u8> {
+    let run_id = parse_run_id(&args.run_id)?;
+    let uuid = run_id.as_uuid().to_string();
+    let store = open_store(store_path)?;
+    if store.read_log(run_id).await?.is_empty() {
+        bail!("no run {uuid} in this store");
+    }
+
+    let runtime = Runtime::new(store.clone());
+    match runtime.abandon(run_id, args.reason).await {
+        Ok(_) => {
+            // Re-read to report the appended position and the recorded
+            // unresolved-write evidence, straight off the terminal event.
+            let log = store.read_log(run_id).await?;
+            let appended_seq = log.last().map_or(0, |env| env.seq.get());
+            let unresolved = match log.last().map(|env| &env.event) {
+                Some(Event::RunAbandoned {
+                    unresolved_write: Some(write),
+                    ..
+                }) => Some((write.seq.get(), write.tool.as_str())),
+                _ => None,
+            };
+            print!(
+                "{}",
+                render::abandoned_report(&uuid, appended_seq, unresolved)
+            );
+            Ok(0)
+        }
+        // Refusing an already-terminal run is a deliberate refusal, not an
+        // internal error: exit 1 with an explanation.
+        Err(RuntimeError::AlreadyTerminal { status, .. }) => {
+            eprintln!(
+                "run {uuid} is already terminal (status: {status}); there is nothing left to abandon"
             );
             Ok(1)
         }

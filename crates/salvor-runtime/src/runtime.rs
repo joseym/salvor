@@ -30,7 +30,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use salvor_core::{Budget, Event, EventEnvelope, PendingCall, RunId, RunStatus, derive_state};
+use salvor_core::{
+    Budget, Event, EventEnvelope, PendingCall, RunId, RunStatus, UnresolvedWrite, derive_state,
+};
 use salvor_store::EventStore;
 use serde_json::Value;
 
@@ -288,6 +290,70 @@ impl Runtime {
         Ok(run_id)
     }
 
+    /// Abandons a run: appends a terminal [`Event::RunAbandoned`] by hand,
+    /// retiring a run deliberately without finishing or failing it.
+    ///
+    /// An operator action, not a driver action. It executes nothing, drives
+    /// nothing, and needs no lease: abandonment is the sanctioned "we do not
+    /// care about this run anymore" path, appended straight to the log the way
+    /// [`resolve`](Self::resolve) appends its one completion. It is allowed for
+    /// any non-terminal run, whatever state it parked or crashed in.
+    ///
+    /// When the run is parked at a dangling write (status
+    /// [`RunStatus::NeedsReconciliation`]), the outstanding intent's position
+    /// and tool ride on the event as
+    /// [`unresolved_write`](Event::RunAbandoned::unresolved_write). The
+    /// abandonment never claims the write question was answered: it records
+    /// exactly which write was left unsettled, so the honesty the reconciliation
+    /// refusal carried is preserved in the terminal record rather than erased.
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeError::UnknownRun`] when the id has no history;
+    /// [`RuntimeError::AlreadyTerminal`] when the run already reached a terminal
+    /// event (completed, failed, or previously abandoned), so there is nothing
+    /// left to retire; [`RuntimeError::Store`] when the append fails.
+    pub async fn abandon(
+        &self,
+        run_id: RunId,
+        reason: Option<String>,
+    ) -> Result<RunId, RuntimeError> {
+        let log = self.read_existing(run_id).await?;
+        let state = derive_state(&log);
+        // Refuse a run that already reached a terminal event: there is nothing
+        // left to abandon. Every non-terminal state is fair game.
+        if matches!(
+            state.status,
+            RunStatus::Completed { .. } | RunStatus::Failed { .. } | RunStatus::Abandoned { .. }
+        ) {
+            return Err(RuntimeError::AlreadyTerminal {
+                run_id,
+                status: status_name(&state.status).to_owned(),
+            });
+        }
+        // A run parked at a dangling write carries the outstanding intent
+        // forward as recorded honesty: name the write whose effect stays
+        // unknown rather than pretend it settled. Every other state abandons
+        // with no unresolved-write evidence.
+        let unresolved_write = match (&state.status, &state.pending_call) {
+            (RunStatus::NeedsReconciliation, Some(PendingCall::Tool { seq, tool, .. })) => {
+                Some(UnresolvedWrite {
+                    seq: *seq,
+                    tool: tool.clone(),
+                })
+            }
+            _ => None,
+        };
+        let event = Event::RunAbandoned {
+            reason,
+            unresolved_write,
+        };
+        let envelope = EventEnvelope::new(run_id, state.next_seq, (self.clock)(), event);
+        self.store.append(&envelope).await?;
+        crate::progress::emit_step(run_id, envelope.seq, &envelope.event);
+        Ok(run_id)
+    }
+
     /// Reads a run's log, insisting it exists.
     async fn read_existing(&self, run_id: RunId) -> Result<Vec<EventEnvelope>, RuntimeError> {
         let log = self.store.read_log(run_id).await?;
@@ -335,5 +401,6 @@ fn status_name(status: &RunStatus) -> &'static str {
         RunStatus::NeedsReconciliation => "needs reconciliation",
         RunStatus::Completed { .. } => "completed",
         RunStatus::Failed { .. } => "failed",
+        RunStatus::Abandoned { .. } => "abandoned",
     }
 }

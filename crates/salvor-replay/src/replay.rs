@@ -358,7 +358,7 @@ impl ReplayCursor {
             }
             if matches!(
                 prev.event,
-                Event::RunCompleted { .. } | Event::RunFailed { .. }
+                Event::RunCompleted { .. } | Event::RunFailed { .. } | Event::RunAbandoned { .. }
             ) {
                 return Err(ReplayError::MalformedLog {
                     position: next.seq,
@@ -1490,6 +1490,7 @@ fn kind_name(event: &Event) -> &'static str {
         Event::BudgetExceeded { .. } => "BudgetExceeded",
         Event::RunCompleted { .. } => "RunCompleted",
         Event::RunFailed { .. } => "RunFailed",
+        Event::RunAbandoned { .. } => "RunAbandoned",
         Event::GraphRunStarted { .. } => "GraphRunStarted",
         Event::NodeEntered { .. } => "NodeEntered",
         Event::NodeExited { .. } => "NodeExited",

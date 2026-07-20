@@ -47,6 +47,9 @@ pub enum Command {
     Fork(ForkArgs),
     /// Record the completion of a dangling write by hand, after verifying it.
     Resolve(ResolveArgs),
+    /// Abandon a run: retire it by hand without finishing or failing it, for a
+    /// run that is dead forever or no longer worth carrying.
+    Abandon(AbandonArgs),
     /// List every run in the store.
     List,
     /// Print a run's event log.
@@ -192,6 +195,18 @@ pub struct ResolveArgs {
     /// write.
     #[arg(long, value_name = "JSON|@FILE")]
     pub output: String,
+}
+
+/// Arguments to `abandon`.
+#[derive(Debug, Args)]
+pub struct AbandonArgs {
+    /// The run id (a UUID) to abandon.
+    #[arg(value_name = "RUN_ID")]
+    pub run_id: String,
+    /// An optional note for why the run is being abandoned, recorded on the
+    /// terminal event. Omit it to abandon with no reason.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
 }
 
 /// Arguments to `history`.

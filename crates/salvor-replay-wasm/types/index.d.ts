@@ -50,7 +50,22 @@ export type RunStatusJson =
   | { kind: "BudgetExceeded"; budget: Budget; observed: number }
   | { kind: "NeedsReconciliation" }
   | { kind: "Completed"; output: unknown }
-  | { kind: "Failed"; error: string };
+  | { kind: "Failed"; error: string }
+  | {
+      kind: "Abandoned";
+      /** The operator's note, absent when none was given. */
+      reason?: string;
+      /** The write intent left unsettled, present only when a
+       *  needs-reconciliation run was abandoned. */
+      unresolved_write?: UnresolvedWrite;
+    };
+
+/** The write intent an abandonment left unsettled: a pointer (`seq`, `tool`)
+ *  to the recorded intent whose effect stays unknown. */
+export interface UnresolvedWrite {
+  seq: number;
+  tool: string;
+}
 
 /** The dangling call intent, when one exists, `kind`-tagged. */
 export type PendingCallJson =

@@ -25,6 +25,10 @@ export interface RunStatus {
   error?: string;
   reason?: string;
   inputSchema?: unknown;
+  /** Present only on an `abandoned` run that was parked at a dangling write:
+   * the outstanding intent (`seq`, `tool`) the abandonment recorded rather than
+   * claiming settled. Absent for every other abandonment and every other state. */
+  unresolvedWrite?: { seq: number; tool: string };
   raw: Record<string, unknown>;
 }
 
@@ -121,6 +125,30 @@ export interface ResumeResult {
 }
 
 /**
+ * The receipt from abandoning a run: the position the terminal `RunAbandoned`
+ * landed at and the run's re-derived status (always `abandoned`, carrying the
+ * operator reason and any recorded `unresolvedWrite`). Nothing was executed.
+ */
+export interface AbandonResult {
+  run: string;
+  appendedSeq?: number;
+  status: RunStatus;
+  raw: Record<string, unknown>;
+}
+
+export function parseAbandonResult(obj: Json): AbandonResult {
+  return {
+    run: obj.run as string,
+    appendedSeq:
+      obj.appended_seq === undefined || obj.appended_seq === null
+        ? undefined
+        : Number(obj.appended_seq),
+    status: parseStatus(obj.status),
+    raw: obj,
+  };
+}
+
+/**
  * One recorded event, decoded from the pinned envelope wire JSON. The same
  * bytes arrive as a stream frame's `data` and as a log row, so one decoder
  * serves both. `kind` names what happened; `payload` holds its fields.
@@ -161,12 +189,19 @@ export function parseUsage(obj: unknown): Usage | undefined {
 
 export function parseStatus(obj: unknown): RunStatus {
   const o = (obj ?? {}) as Json;
+  const uw = o.unresolved_write as
+    | { seq?: unknown; tool?: unknown }
+    | undefined;
   return {
     state: (o.state as string) ?? "unknown",
     output: o.output,
     error: o.error as string | undefined,
     reason: o.reason as string | undefined,
     inputSchema: o.input_schema,
+    unresolvedWrite:
+      uw && typeof uw === "object"
+        ? { seq: Number(uw.seq ?? 0), tool: String(uw.tool ?? "") }
+        : undefined,
     raw: o,
   };
 }

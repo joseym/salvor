@@ -15,6 +15,7 @@ import {
 import { SalvorApiError, SalvorStreamError, errorFrom } from "./errors.js";
 import { readSseFrames } from "./sse.js";
 import {
+  type AbandonResult,
   type EndFrame,
   type Labels,
   type ReplayState,
@@ -22,6 +23,7 @@ import {
   type RunState,
   type RunSummary,
   type SalvorEvent,
+  parseAbandonResult,
   parseEndFrame,
   parseEvent,
   parseReplayState,
@@ -194,6 +196,29 @@ export class SalvorClient {
       status: obj.status ?? {},
       event_count: obj.event_count ?? 0,
     });
+  }
+
+  /**
+   * Abandon a run: retire it by hand, appending a terminal `RunAbandoned`. The
+   * operator's "we do not care about this run anymore" path, for a run that is
+   * dead forever or no longer worth carrying. Executes nothing and drives
+   * nothing; it needs no drive token, and works for any non-terminal run
+   * whatever drove it.
+   *
+   * When the run is parked at a dangling write, the outstanding intent is
+   * recorded on the terminal event and surfaced as
+   * {@link RunStatus.unresolvedWrite}: the abandonment never claims the write
+   * settled. A run that is already terminal is refused with a `409`.
+   */
+  async abandon(runId: string, reason?: string): Promise<AbandonResult> {
+    const body =
+      reason === undefined ? "{}" : JSON.stringify({ reason });
+    return parseAbandonResult(
+      await this.request("POST", `/v1/runs/${runId}/abandon`, {
+        body,
+        contentType: "application/json",
+      }),
+    );
   }
 
   // -- client-driven runs ---------------------------------------------------

@@ -60,6 +60,7 @@ pub fn event_kinds(log: &[EventEnvelope]) -> Vec<&'static str> {
             Event::BudgetExceeded { .. } => "BudgetExceeded",
             Event::RunCompleted { .. } => "RunCompleted",
             Event::RunFailed { .. } => "RunFailed",
+            Event::RunAbandoned { .. } => "RunAbandoned",
             Event::GraphRunStarted { .. } => "GraphRunStarted",
             Event::NodeEntered { .. } => "NodeEntered",
             Event::NodeExited { .. } => "NodeExited",

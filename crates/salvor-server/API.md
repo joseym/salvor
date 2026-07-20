@@ -82,6 +82,7 @@ codes:
 | GET | `/v1/runs/{id}/events` | Stream a run's events (server-sent events) |
 | POST | `/v1/runs/{id}/resume` | Continue a run (resume a parked one, recover a crashed one); works on a graph run unchanged |
 | POST | `/v1/runs/{id}/resolve` | Record a dangling write's completion by hand |
+| POST | `/v1/runs/{id}/abandon` | Retire a run by hand, appending a terminal `RunAbandoned` |
 | GET | `/v1/runs/{id}/graph` | A graph run's per-node projection (for the canvas) |
 | POST | `/v1/runs/{id}/fork` | Fork a graph run from a node boundary into a new run (refuse-then-record) |
 | GET | `/v1/runs/{id}/forks` | The forks of a run, as a derived index |
@@ -307,6 +308,7 @@ Always `{ "state": "<name>", ... }`:
 | `budget_exceeded` | `budget` (`{kind, limit}`), `observed` |
 | `completed` | `output` |
 | `failed` | `error` |
+| `abandoned` | `reason` (when given), `unresolved_write` (`{seq, tool}`, only when a needs-reconciliation run was abandoned) |
 
 #### The pending object
 
@@ -464,6 +466,54 @@ drives nothing.
 
 - `409 wrong_state` when the run does not need reconciliation (there is no
   dangling write to resolve).
+- `404 unknown_run` when the id has no history.
+
+### POST /v1/runs/{id}/abandon
+
+Retire a run by hand. A deliberate sibling of `resolve`: the operator's "we do
+not care about this run anymore" path, for a run that is dead forever or no
+longer worth carrying in the inbox. It validates the run is non-terminal,
+appends one terminal `RunAbandoned` event server-stamped through the append
+guard, and returns the receipt: the appended seq and the re-derived status.
+Abandonment is **not** failure: `RunFailed` is untouched, and the run derives to
+its own terminal `abandoned` status, treated as terminal (never attention)
+everywhere downstream.
+
+**Why no lease.** Abandon is an operator action over the store, not a step in
+driving the run, so it presents no drive token and needs no lease, unlike a
+client-driven append. It works for any run in the store whatever drove it (a
+server task, a client SDK, or nothing at all anymore); the very case it exists
+for is a run no driver is coming back to. The append guard's terminal rule is
+the only concurrency protection it needs: a run that reached a terminal first
+refuses the abandonment.
+
+- Request (optional body; an empty body abandons with no reason):
+
+```json
+{ "reason": "husk is dead forever" }
+```
+
+- Response `200`:
+
+```json
+{ "run": "6f...", "abandoned": true, "appended_seq": 7,
+  "status": { "state": "abandoned", "reason": "husk is dead forever" } }
+```
+
+- **Needs reconciliation is allowed, not refused.** Abandoning a run parked at a
+  dangling write is the case abandonment most needs to serve. The endpoint
+  computes the outstanding write from the log's dangling intent and records it on
+  the event, so the terminal status carries an `unresolved_write` and never
+  claims the write question was answered:
+
+```json
+{ "run": "6f...", "abandoned": true, "appended_seq": 5,
+  "status": { "state": "abandoned",
+    "unresolved_write": { "seq": 4, "tool": "charge" } } }
+```
+
+- `409 wrong_state` when the run is already terminal (completed, failed, or
+  previously abandoned); there is nothing left to abandon.
 - `404 unknown_run` when the id has no history.
 
 ## Graphs and graph runs

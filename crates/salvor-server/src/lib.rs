@@ -83,6 +83,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/runs/{id}/events", get(sse::stream))
         .route("/v1/runs/{id}/resume", post(runs::resume))
         .route("/v1/runs/{id}/resolve", post(runs::resolve))
+        .route("/v1/runs/{id}/abandon", post(runs::abandon))
         .route("/v1/runs/{id}/graph", get(graph::projection))
         .route("/v1/runs/{id}/fork", post(graph::fork))
         .route("/v1/runs/{id}/forks", get(graph::forks))

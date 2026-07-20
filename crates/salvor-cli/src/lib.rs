@@ -78,6 +78,7 @@ pub async fn dispatch(cli: Cli) -> Result<u8> {
         Command::Resume(args) => commands::resume(store, args).await,
         Command::Fork(args) => commands::fork(store, args).await,
         Command::Resolve(args) => commands::resolve(store, args).await,
+        Command::Abandon(args) => commands::abandon(store, args).await,
         Command::List => commands::list(store).await,
         Command::History(args) => commands::history(store, args).await,
         Command::Replay(args) => commands::replay(store, args).await,

@@ -43,6 +43,7 @@ export {
   type RunSummary,
   type ReplayState,
   type ResumeResult,
+  type AbandonResult,
   type PendingCall,
   type Usage,
   type Labels,

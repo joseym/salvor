@@ -98,4 +98,18 @@ pub enum RuntimeError {
         /// A short description of the status the run was actually in.
         status: String,
     },
+
+    /// `abandon` was called on a run that already reached a terminal event
+    /// (completed, failed, or previously abandoned). A terminal run is already
+    /// at rest; there is nothing left to retire, so the operator action is
+    /// refused rather than appending a second terminal.
+    #[error(
+        "run {run_id:?} is already terminal (status: {status}); there is nothing left to abandon"
+    )]
+    AlreadyTerminal {
+        /// The run that had already finished.
+        run_id: RunId,
+        /// A short description of the terminal status the run was in.
+        status: String,
+    },
 }

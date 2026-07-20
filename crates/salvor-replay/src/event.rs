@@ -296,6 +296,51 @@ pub enum Event {
         /// A description of the failure.
         error: String,
     },
+    /// The run was abandoned by an operator: deliberately retired without ever
+    /// finishing or failing. A terminal event, appended by hand through the
+    /// server's abandon endpoint, never emitted by orchestration.
+    ///
+    /// # Abandonment is not failure
+    ///
+    /// This is a separate terminal from [`Event::RunFailed`] on purpose. A
+    /// failure says the run tried to continue and could not; an abandonment
+    /// says a human decided it should stop mattering (a husk that is dead
+    /// forever, or a run whose noise is no longer worth carrying in the
+    /// inbox). The two read differently everywhere downstream — the fold gives
+    /// abandonment its own status, and the surfaces treat it as a muted
+    /// resting state, never the failure ink. Keeping [`Event::RunFailed`]
+    /// untouched is the point: its recorded meaning must not shift.
+    ///
+    /// # Wire compatibility
+    ///
+    /// Added the same read-compatible way the deterministic-context and graph
+    /// events were: a new variant, so a log written before it contains none of
+    /// the kind and every event in it parses to the identical value under the
+    /// new build. [`SCHEMA_VERSION`] stays 1; the constant's docs carry the
+    /// full argument. Both fields are additive-optional under the identical
+    /// `#[serde(default, skip_serializing_if = "Option::is_none")]` contract
+    /// the other optional payloads hold to, so a bare abandonment (no reason,
+    /// no dangling write) serializes with an empty payload object:
+    /// `{"kind":"RunAbandoned","payload":{}}`.
+    RunAbandoned {
+        /// The operator's optional note for why the run was abandoned.
+        /// Absent by default: an abandonment with no reason omits the key.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        /// Set only when the abandoned run was parked at a dangling write
+        /// (status `NeedsReconciliation`): the outstanding write intent's
+        /// position and tool, recorded as evidence.
+        ///
+        /// The abandonment never claims the write question was answered.
+        /// Abandoning a needs-reconciliation run is allowed precisely because
+        /// this field carries the honesty forward: the write may or may not
+        /// have taken effect, and the record says so by naming the intent that
+        /// was left unsettled rather than pretending a completion. Absent for
+        /// any run abandoned from a state with no dangling write, under the
+        /// same additive-optional contract as `reason`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        unresolved_write: Option<UnresolvedWrite>,
+    },
     /// A graph run began. The head of a run that executes a graph document
     /// rather than a single agent loop.
     ///
@@ -435,6 +480,28 @@ pub struct ForkOrigin {
     /// empty vector means the fork boundary sat before any write intent, so
     /// nothing needed acknowledging.
     pub acknowledged_writes: Vec<u64>,
+}
+
+/// The outstanding write an abandonment left unsettled.
+///
+/// Rides on [`Event::RunAbandoned::unresolved_write`] when a run parked at a
+/// dangling [`Effect::Write`] intent is abandoned. It names the intent's log
+/// position and the tool it called, mirroring the evidence the reconciliation
+/// refusal (`409 needs_reconciliation`) surfaces, so the abandonment record
+/// points at exactly the write whose effect stays unknown.
+///
+/// Deliberately minimal: `seq` and `tool` are the evidence, not the whole
+/// recorded intent. The full intent (input, effect, idempotency key) is still
+/// in the log at `seq` for anyone who wants it; this struct is the pointer to
+/// it, not a copy. Carries no floats, so it derives [`Eq`].
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct UnresolvedWrite {
+    /// The log position of the write intent that was left unresolved. A genuine
+    /// log position, so it rides as a [`SequenceNumber`], exactly as the
+    /// correlation seqs on the call events do.
+    pub seq: SequenceNumber,
+    /// The name of the tool the unresolved write called.
+    pub tool: String,
 }
 
 /// Token counts reported for a model call.
@@ -603,6 +670,17 @@ mod tests {
         assert_round_trips(Event::RunFailed {
             error: "provider timeout".into(),
         });
+        assert_round_trips(Event::RunAbandoned {
+            reason: None,
+            unresolved_write: None,
+        });
+        assert_round_trips(Event::RunAbandoned {
+            reason: Some("husk is dead forever".into()),
+            unresolved_write: Some(UnresolvedWrite {
+                seq: SequenceNumber::new(5),
+                tool: "create_ticket".into(),
+            }),
+        });
         assert_round_trips(Event::GraphRunStarted {
             graph_hash: "sha256:graph".into(),
             input: serde_json::json!({"topic": "otters"}),
@@ -744,6 +822,47 @@ mod tests {
         assert_eq!(
             json,
             r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"RunStarted","payload":{"agent_def_hash":"sha256:abc","input":{"topic":"otters"},"labels":{"build":"42","env":"prod"}}}}"#
+        );
+    }
+
+    /// Pins a bare `RunAbandoned`: both optional fields absent, so the payload
+    /// is an empty object and neither key appears. This is the additive-optional
+    /// contract the [`SCHEMA_VERSION`] docs promise for the new terminal,
+    /// checked directly.
+    #[test]
+    fn run_abandoned_bare_serializes_to_pinned_json() {
+        let env = envelope(Event::RunAbandoned {
+            reason: None,
+            unresolved_write: None,
+        });
+        let json = serde_json::to_string(&env).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"RunAbandoned","payload":{}}}"#
+        );
+        assert!(
+            !json.contains("reason") && !json.contains("unresolved_write"),
+            "a bare abandonment must omit both keys: {json}"
+        );
+    }
+
+    /// Pins a `RunAbandoned` carrying both a reason and an unresolved write:
+    /// the reason rides first, then the `unresolved_write` object with its
+    /// `seq` and `tool`. This is the honesty record an abandoned
+    /// needs-reconciliation run leaves behind.
+    #[test]
+    fn run_abandoned_with_unresolved_write_serializes_to_pinned_json() {
+        let env = envelope(Event::RunAbandoned {
+            reason: Some("husk is dead forever".into()),
+            unresolved_write: Some(UnresolvedWrite {
+                seq: SequenceNumber::new(5),
+                tool: "create_ticket".into(),
+            }),
+        });
+        let json = serde_json::to_string(&env).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"RunAbandoned","payload":{"reason":"husk is dead forever","unresolved_write":{"seq":5,"tool":"create_ticket"}}}}"#
         );
     }
 

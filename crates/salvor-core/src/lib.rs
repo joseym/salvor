@@ -28,5 +28,5 @@ pub use salvor_replay::{
     GraphBeginPermit, LogValidator, LoggedStep, ModelCallPermit, ModelReply, NowPermit, Outcome,
     Parked, PendingCall, RandomPermit, ReplayCursor, ReplayError, RequestedStep, RunId, RunState,
     RunStatus, SCHEMA_VERSION, SequenceNumber, TokenTotals, TokenUsage, ToolCallPermit,
-    ValidationError, derive_state, validate_next,
+    UnresolvedWrite, ValidationError, derive_state, validate_next,
 };

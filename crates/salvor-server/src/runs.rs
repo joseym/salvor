@@ -87,6 +87,16 @@ struct ResolveRequest {
     output: Value,
 }
 
+/// The body of `POST /v1/runs/{id}/abandon`. Both fields are optional, so the
+/// endpoint accepts an empty body (`{}` or none): a bare abandonment records no
+/// reason.
+#[derive(Debug, Default, Deserialize)]
+struct AbandonRequest {
+    /// The operator's optional note for why the run is being abandoned.
+    #[serde(default)]
+    reason: Option<String>,
+}
+
 /// Which verb a driver task runs.
 enum DriveVerb {
     Start(Value, Option<BTreeMap<String, String>>),
@@ -343,6 +353,15 @@ pub async fn resume(
             "status": { "state": "failed", "error": error },
         }))
         .into_response()),
+        Disposition::Abandoned { .. } => Ok(Json(json!({
+            "run": run_id.as_uuid().to_string(),
+            "outcome": "abandoned",
+            // The status object is the canonical `json::status` shape (state,
+            // reason, and any unresolved-write honesty), re-derived here so the
+            // report matches every other surface that renders an abandoned run.
+            "status": json::status(&derived.status),
+        }))
+        .into_response()),
         Disposition::NotStarted => Err(unknown_run(run_id)),
         Disposition::Reconcile(pending) => Err(ApiError::NeedsReconciliation {
             message: format!(
@@ -441,6 +460,65 @@ pub async fn resolve(
     }
 }
 
+/// `POST /v1/runs/{id}/abandon`: retire a run by hand, appending a terminal
+/// `RunAbandoned`.
+///
+/// A deliberate sibling of [`resolve`]: an operator action, not a driver
+/// action. It validates the run is non-terminal, appends the abandonment
+/// server-stamped through the runtime (which computes and records the
+/// outstanding write from the log's dangling intent when the run needs
+/// reconciliation), and returns the receipt shape — the appended seq and the
+/// re-derived status — exactly as resolve does.
+///
+/// # Why no lease
+///
+/// Abandonment is an operator action over the store, not a step in driving the
+/// run, so it takes no drive token and needs no lease. It works for any run in
+/// the store whatever drove it (a server task, a client SDK, or nothing at all
+/// anymore): the very case it exists for is a run no driver is coming back to.
+/// The append-guard's terminal rule is the only concurrency protection it
+/// needs — a run that reached a terminal first refuses the abandonment.
+///
+/// # Refusals
+///
+/// `404 unknown_run` for an id with no history; `409 wrong_state` for a run that
+/// is already terminal (completed, failed, or previously abandoned), mirroring
+/// the resolve conventions. A needs-reconciliation run is NOT refused: it is the
+/// case abandonment most needs to serve, and the recorded `unresolved_write`
+/// keeps the honesty that the write's effect stays unknown.
+pub async fn abandon(
+    State(state): State<AppState>,
+    Path(run_id_text): Path<String>,
+    body: Bytes,
+) -> Result<impl IntoResponse, ApiError> {
+    let run_id = parse_run_id(&run_id_text)?;
+    let request: AbandonRequest = parse_body_or_default(&body)?;
+
+    // abandon appends exactly one terminal event and drives nothing, so it runs
+    // inline rather than in a task, exactly like resolve.
+    match state.runtime().abandon(run_id, request.reason).await {
+        Ok(_) => {
+            let log = state.store().read_log(run_id).await.map_err(store_error)?;
+            let derived = derive_state(&log);
+            // The abandonment is terminal, so it is the log's last event; its
+            // position is the receipt's appended seq.
+            let appended_seq = log.last().map(|env| env.seq.get());
+            Ok(Json(json!({
+                "run": run_id.as_uuid().to_string(),
+                "abandoned": true,
+                "appended_seq": appended_seq,
+                "status": json::status(&derived.status),
+            })))
+        }
+        Err(RuntimeError::UnknownRun { .. }) => Err(unknown_run(run_id)),
+        Err(RuntimeError::AlreadyTerminal { status, .. }) => Err(ApiError::WrongState(format!(
+            "run {} is already terminal (status: {status}); there is nothing left to abandon",
+            run_id.as_uuid()
+        ))),
+        Err(error) => Err(ApiError::Internal(error.to_string())),
+    }
+}
+
 /// Spawns the task that drives a run to its next resting point, then closes its
 /// MCP sessions. Marks the run active before spawning so a concurrent stream
 /// cannot miss it.
@@ -517,16 +595,16 @@ async fn rebuild_agent(state: &AppState, log: &[EventEnvelope]) -> Result<BuiltA
 ///
 /// # Zero-vs-absent: a terminal run carries no driver field at all
 ///
-/// A `completed` or `failed` run is done; asking whether a driver is attached
-/// to it is not a meaningful question, so the field is omitted entirely (this
-/// returns `None`), never `"driver": "none"`. That mirrors the house rule the
+/// A `completed`, `failed`, or `abandoned` run is done; asking whether a driver
+/// is attached to it is not a meaningful question, so the field is omitted
+/// entirely (this returns `None`), never `"driver": "none"`. That mirrors the house rule the
 /// enriched list already follows for `usage`/`step_count`/`labels`: report a
 /// fact when there is one, omit rather than assert a placeholder when there is
 /// not. Every non-terminal run reports a real `"attached"` or `"none"`.
 fn driver_evidence(state: &AppState, run_id: RunId, status: &RunStatus) -> Option<&'static str> {
     if matches!(
         status,
-        RunStatus::Completed { .. } | RunStatus::Failed { .. }
+        RunStatus::Completed { .. } | RunStatus::Failed { .. } | RunStatus::Abandoned { .. }
     ) {
         return None;
     }

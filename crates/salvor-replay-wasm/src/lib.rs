@@ -64,11 +64,36 @@ enum RunStatusDto {
     Running,
     AwaitingModel,
     AwaitingTool,
-    Suspended { reason: String, input_schema: Value },
-    BudgetExceeded { budget: Budget, observed: f64 },
+    Suspended {
+        reason: String,
+        input_schema: Value,
+    },
+    BudgetExceeded {
+        budget: Budget,
+        observed: f64,
+    },
     NeedsReconciliation,
-    Completed { output: Value },
-    Failed { error: String },
+    Completed {
+        output: Value,
+    },
+    Failed {
+        error: String,
+    },
+    Abandoned {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        unresolved_write: Option<UnresolvedWriteDto>,
+    },
+}
+
+/// The write intent an abandonment left unsettled, in the dashboard's shape.
+/// Mirrors `salvor_replay::UnresolvedWrite`; present on an `Abandoned` status
+/// only when the abandoned run was parked at a dangling write.
+#[derive(Serialize)]
+struct UnresolvedWriteDto {
+    seq: u64,
+    tool: String,
 }
 
 /// Accumulated token usage across the run.
@@ -134,6 +159,16 @@ impl From<&RunStatus> for RunStatusDto {
             },
             RunStatus::Failed { error } => RunStatusDto::Failed {
                 error: error.clone(),
+            },
+            RunStatus::Abandoned {
+                reason,
+                unresolved_write,
+            } => RunStatusDto::Abandoned {
+                reason: reason.clone(),
+                unresolved_write: unresolved_write.as_ref().map(|write| UnresolvedWriteDto {
+                    seq: write.seq.get(),
+                    tool: write.tool.clone(),
+                }),
             },
         }
     }
@@ -332,6 +367,45 @@ mod tests {
         assert_eq!(
             out,
             r#"{"status":{"kind":"BudgetExceeded","budget":{"kind":"cost_usd","limit":2.5},"observed":2.500001},"next_seq":2,"usage":{"input_tokens":0,"output_tokens":0}}"#
+        );
+    }
+
+    /// A bare abandonment pins the abandoned status with neither optional key:
+    /// `reason` and `unresolved_write` are skipped when absent, so the status is
+    /// just its `kind`.
+    #[test]
+    fn surface_pin_abandoned_bare() {
+        let log = wire_log(&[
+            started(0),
+            env(1, r#"{"kind":"RunAbandoned","payload":{}}"#),
+        ]);
+        let out = fold_prefix_to_json(&log, 2).unwrap();
+        assert_eq!(
+            out,
+            r#"{"status":{"kind":"Abandoned"},"next_seq":2,"usage":{"input_tokens":0,"output_tokens":0}}"#
+        );
+    }
+
+    /// Abandoning a needs-reconciliation run pins the honesty node: the status
+    /// carries the operator reason AND the `unresolved_write` (`seq`, `tool`),
+    /// and the dangling write is still surfaced through `pending_call`.
+    #[test]
+    fn surface_pin_abandoned_with_unresolved_write() {
+        let log = wire_log(&[
+            started(0),
+            env(
+                1,
+                r#"{"kind":"ToolCallRequested","payload":{"seq":1,"tool":"create_ticket","input":{"title":"bug"},"effect":"write","idempotency_key":null}}"#,
+            ),
+            env(
+                2,
+                r#"{"kind":"RunAbandoned","payload":{"reason":"husk is dead forever","unresolved_write":{"seq":1,"tool":"create_ticket"}}}"#,
+            ),
+        ]);
+        let out = fold_prefix_to_json(&log, 3).unwrap();
+        assert_eq!(
+            out,
+            r#"{"status":{"kind":"Abandoned","reason":"husk is dead forever","unresolved_write":{"seq":1,"tool":"create_ticket"}},"next_seq":3,"usage":{"input_tokens":0,"output_tokens":0},"pending_call":{"kind":"Tool","seq":1,"tool":"create_ticket","input":{"title":"bug"},"effect":"write"}}"#
         );
     }
 

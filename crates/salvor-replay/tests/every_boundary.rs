@@ -284,6 +284,17 @@ fn expected_status(prefix: &[EventEnvelope]) -> RunStatus {
         Event::RunFailed { error } => RunStatus::Failed {
             error: error.clone(),
         },
+        // Operator-appended terminal. This agent-run property script never
+        // emits it, but the match stays exhaustive so a new event kind cannot
+        // slip past it; the fold derives the abandoned terminal carrying its
+        // recorded reason and any unresolved-write evidence.
+        Event::RunAbandoned {
+            reason,
+            unresolved_write,
+        } => RunStatus::Abandoned {
+            reason: reason.clone(),
+            unresolved_write: unresolved_write.clone(),
+        },
     }
 }
 

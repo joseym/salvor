@@ -197,10 +197,12 @@ pub fn validate_next(
         return Err(ValidationError::DuplicateRunStarted);
     }
 
-    // Nothing may follow a terminal event.
+    // Nothing may follow a terminal event. `RunAbandoned` joins the terminal
+    // family here: once an operator abandons a run, its log is closed exactly
+    // as a completed or failed run's is.
     if matches!(
         last.event,
-        Event::RunCompleted { .. } | Event::RunFailed { .. }
+        Event::RunCompleted { .. } | Event::RunFailed { .. } | Event::RunAbandoned { .. }
     ) {
         return Err(ValidationError::AfterTerminal {
             terminal: kind_name(&last.event),
@@ -345,6 +347,7 @@ fn kind_name(event: &Event) -> &'static str {
         Event::BudgetExceeded { .. } => "BudgetExceeded",
         Event::RunCompleted { .. } => "RunCompleted",
         Event::RunFailed { .. } => "RunFailed",
+        Event::RunAbandoned { .. } => "RunAbandoned",
         Event::GraphRunStarted { .. } => "GraphRunStarted",
         Event::NodeEntered { .. } => "NodeEntered",
         Event::NodeExited { .. } => "NodeExited",
@@ -684,6 +687,30 @@ mod tests {
             err,
             ValidationError::AfterTerminal {
                 terminal: "RunCompleted"
+            }
+        );
+    }
+
+    /// No event may follow the abandoned terminal, exactly as none may follow
+    /// completed or failed: `RunAbandoned` is a full member of the terminal
+    /// family the guard closes the log on.
+    #[test]
+    fn event_after_abandoned_is_rejected() {
+        let log = vec![
+            env(0, started()),
+            env(
+                1,
+                Event::RunAbandoned {
+                    reason: Some("husk is dead forever".into()),
+                    unresolved_write: None,
+                },
+            ),
+        ];
+        let err = validate_next(&log, &env(2, Event::NowObserved { now: ts() })).unwrap_err();
+        assert_eq!(
+            err,
+            ValidationError::AfterTerminal {
+                terminal: "RunAbandoned"
             }
         );
     }

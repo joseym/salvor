@@ -79,7 +79,10 @@ mod state;
 mod validate;
 
 pub use effect::Effect;
-pub use event::{Budget, BudgetKind, Event, EventEnvelope, ForkOrigin, SCHEMA_VERSION, TokenUsage};
+pub use event::{
+    Budget, BudgetKind, Event, EventEnvelope, ForkOrigin, SCHEMA_VERSION, TokenUsage,
+    UnresolvedWrite,
+};
 pub use graph_state::{
     GraphProjection, MapIteration, MapProgress, NodeProgress, NodeState, derive_graph_projection,
 };
