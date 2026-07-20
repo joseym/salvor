@@ -86,6 +86,27 @@ function writeGroupMode(mode: GroupMode): void {
   }
 }
 
+/** The minute-one teaching strip is shown until the reader dismisses it; the dismissal persists so
+ * a returning operator is not lectured every visit. A read failure (private browsing, a locked-down
+ * embed) is never a reason to crash the view, and it defaults to SHOWN — the teaching is the safe
+ * fallback, not the suppression. */
+const INTRO_KEY = 'salvor.introDismissed';
+function readIntroDismissed(): boolean {
+  try {
+    return localStorage.getItem(INTRO_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+function writeIntroDismissed(dismissed: boolean): void {
+  try {
+    if (dismissed) localStorage.setItem(INTRO_KEY, '1');
+    else localStorage.removeItem(INTRO_KEY);
+  } catch {
+    /* persistence is a nicety; the in-memory signal still governs this session */
+  }
+}
+
 /**
  * The Runs ledger, complete: the 6-column table with the state rail / zebra / attention wash /
  * outline-selection channels, attention-first sort, the token filter field (pills, `@` combobox,
@@ -140,6 +161,9 @@ export class Runs {
   readonly runSel = signal<string | undefined>(undefined);
   readonly panelOpen = signal<boolean>(true);
   readonly dotKeyOpen = signal<boolean>(false);
+
+  /** The minute-one teaching strip above the table: open until dismissed, dismissal persisted. */
+  readonly introOpen = signal<boolean>(!readIntroDismissed());
   private seeded = false;
 
   // ── GROUPING: a persisted mode, default Grouped. Collapse state is
@@ -804,6 +828,20 @@ export class Runs {
   }
   toggleDotKey(): void {
     this.dotKeyOpen.update((v) => !v);
+  }
+
+  /** Dismiss the minute-one strip and remember it. The reopen affordance stays, so this is a
+   * fold-away, never a one-way door. */
+  dismissIntro(): void {
+    this.introOpen.set(false);
+    writeIntroDismissed(true);
+    focusWhenRendered('#intro-reopen');
+  }
+  /** Bring the strip back — the honest re-entry path from the "i" affordance. */
+  reopenIntro(): void {
+    this.introOpen.set(true);
+    writeIntroDismissed(false);
+    focusWhenRendered('#intro-dismiss');
   }
 
   async copy(value: string, ev: Event): Promise<void> {

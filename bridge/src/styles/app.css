@@ -147,6 +147,54 @@
   padding: 0 var(--space-1); border: 1px solid var(--border); border-radius: 3px; color: var(--muted);
 }
 
+/* ── MINUTE-ONE STRIP ──────────────────────────────────────────
+   The teaching band above the table. A calm accent-tinted card, not a marketing banner: it reads at
+   body size (the one place teaching outranks chrome), carries a dismiss, and folds down to a quiet
+   "i" reopen affordance. A subtle amber tie on the word "yellow" links the sentence to the waiting
+   rows it describes without shouting. */
+/* both carry their own display, so the UA's [hidden]{display:none} must be restored explicitly —
+   the same trap the Inspector body's `.inspector[hidden]` rule guards against. */
+.intro-strip[hidden], .intro-reopen[hidden] { display: none; }
+.intro-strip {
+  display: flex; align-items: flex-start; gap: var(--space-3);
+  margin: 0 0 var(--space-4); padding: var(--space-3) var(--space-4);
+  border: 1px solid color-mix(in oklab, var(--accent), var(--bg) 80%);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-md);
+  background: color-mix(in oklab, var(--accent), var(--bg) 94%);
+}
+.intro-copy {
+  margin: 0; flex: 1 1 auto;
+  font-size: var(--text-sm); line-height: 1.55; color: var(--fg);
+  text-wrap: pretty; max-width: 82ch;
+}
+.intro-copy b { font-weight: 600; }
+.intro-amber {
+  font-weight: 600; color: var(--amber-ink);
+  padding: 0 3px; border-radius: 3px;
+  background: color-mix(in oklab, var(--warn), var(--bg) 78%);
+}
+.intro-x {
+  flex: none; appearance: none; border: 0; background: none; cursor: pointer;
+  min-width: 28px; min-height: 28px; padding: 0; border-radius: var(--radius-sm);
+  color: var(--muted); font-size: 18px; line-height: 1;
+}
+.intro-x:hover { color: var(--fg); background: color-mix(in oklab, var(--accent), var(--bg) 84%); }
+.intro-x:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.intro-reopen {
+  display: inline-flex; align-items: center; gap: var(--space-2);
+  margin: 0 0 var(--space-3); padding: var(--space-1) var(--space-2);
+  appearance: none; border: 0; background: none; cursor: pointer;
+  color: var(--muted); font-family: inherit; font-size: var(--text-xs); letter-spacing: 0.08px;
+}
+.intro-reopen:hover { color: var(--accent); }
+.intro-reopen:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-sm); }
+.intro-i {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; border-radius: 50%;
+  border: 1px solid var(--muted); font-family: var(--font-mono); font-size: 10px; font-style: italic;
+}
+
 /* ── RUN HEALTH ────────────────────────────────────────────── */
 .health {
   display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--space-3);
@@ -329,6 +377,7 @@
 }
 .grp-name { font-weight: 600; letter-spacing: -0.01em; }
 .grp-head:not(.g-waiting):not(.g-failed) .grp-name { font-family: var(--font-mono); font-size: 12.5px; font-weight: 500; }
+.grp-gloss { font-size: var(--text-xs); color: var(--faint); font-weight: 400; letter-spacing: 0.04px; }
 .grp-meta { margin-left: auto; font-size: var(--text-xs); color: var(--muted); letter-spacing: 0.08px; }
 .grp-wait { color: var(--amber-ink); font-weight: 600; }
 .grp-agg { color: var(--muted); }

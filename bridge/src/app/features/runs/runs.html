@@ -1,3 +1,22 @@
+<!-- THE MINUTE-ONE STRIP — the three facts a newcomer needs before any wire detail: what a run is,
+     that every screen is reading one append-only log, and what a yellow row means. Dismissible, and
+     the dismissal persists (localStorage). When folded away it leaves an honest "i" reopen path, so
+     it is a fold-away and never a one-way door. Teaching in mechanism voice, not chrome. -->
+@if (introOpen()) {
+  <aside class="intro-strip" id="intro-strip" data-od-id="run-intro" aria-label="What you are looking at">
+    <p class="intro-copy">
+      <b>A run is one execution of an agent.</b> Everything it did is recorded as a numbered log —
+      every screen here just reads that log. A <span class="intro-amber">yellow</span> row is waiting
+      on a person: open it and the Inbox shows the one action that unblocks it.
+    </p>
+    <button class="intro-x" type="button" id="intro-dismiss" aria-label="Dismiss this and remember it" (click)="dismissIntro()">×</button>
+  </aside>
+} @else {
+  <button class="intro-reopen" type="button" id="intro-reopen" aria-label="What am I looking at?" (click)="reopenIntro()">
+    <span class="intro-i" aria-hidden="true">i</span> What am I looking at?
+  </button>
+}
+
 <!-- RUN HEALTH — counted from the same list projection the table and chips read. NOT live: the
      connection pill says Snapshot, and this carries an as-of, because Runs reads a page it already
      fetched. Each figure is a real filter term. -->
@@ -132,8 +151,7 @@
 <div class="view-work" data-panel-dock [attr.data-panel]="panelOpen() ? 'open' : 'closed'">
   <div>
     <p class="qhint" id="runs-lede">
-      Runs waiting on you sort to the top — start there. Open any row to read its log: the list is a
-      snapshot from <code>GET /v1/runs</code>, and the log is where a run is actually read.
+      Runs waiting on you sort to the top — start there. Open any row to read its log.
     </p>
     <!-- ONE row template, used by both the flat list and every group's runs — grouped and flat
          modes cannot drift apart because there is only one place a row is written (item 15b). Kept
@@ -300,6 +318,11 @@
                       <span class="grp-kind">{{ groupKindTag(g) }}</span>
                     }
                     <span class="grp-name">{{ g.name }}</span>
+                    @if (g.kind === 'unlabelled') {
+                      <!-- point-of-use gloss for the one bucket name that is jargon: it is defined
+                           here, where it appears, following the idempotency-key precedent -->
+                      <span class="grp-gloss">— tagged with no build and no agent, so grouped by nothing but itself</span>
+                    }
                     <span class="grp-meta"
                       >{{ g.runs.length }} run{{ g.runs.length === 1 ? '' : 's' }} ·
                       <span [class.grp-wait]="g.waiting > 0" [class.grp-agg]="g.waiting === 0">{{ groupAggregate(g) }}</span></span
@@ -427,4 +450,5 @@
   <code>GET /v1/runs</code> returns <code>usage</code>, <code>step_count</code> and <code>agent_def_hash</code> in the
   same server-side pass as <code>status</code>, so expand any row to read them. <code>cost</code> is the one that did
   not come back — the row carries the tokens but not the model each call used, and the price table is keyed by model.
+  The list itself is a snapshot from <code>GET /v1/runs</code>, not a stream; a run is actually read from its log.
 </p>
