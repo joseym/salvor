@@ -152,7 +152,12 @@ export class Runs {
   readonly loadError = this.runsService.error;
   readonly listLoaded = computed(() => !this.loading() && this.runsService.lastLoadedAt() !== undefined);
 
-  readonly rows: Signal<RunRow[]> = computed(() => this.runsService.runs().map(toRunRow));
+  // One `now` per fold so every row's stalled derivation reads the same clock
+  // edge (and so `.map` never leaks the array index in as `now`).
+  readonly rows: Signal<RunRow[]> = computed(() => {
+    const now = Date.now();
+    return this.runsService.runs().map((s) => toRunRow(s, now));
+  });
 
   /** hash → resolved name, fed by {@link AgentRegistryService}. */
   readonly agentNames = this.agentRegistry.names;
@@ -779,6 +784,11 @@ export class Runs {
         return 'Approve in inbox';
       case 'budget_exceeded':
         return 'Raise limit in inbox';
+      case 'stalled':
+        // A stalled run has no in-app action — its driver is an external host
+        // process. The signpost routes to the Inbox card's guidance, never a
+        // fake fix button.
+        return 'See in inbox';
       default:
         return 'Open in inbox';
     }

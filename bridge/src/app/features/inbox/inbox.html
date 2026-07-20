@@ -8,7 +8,8 @@
            boxed note fused with the apparatus that belongs at the foot. -->
       <p class="lede">
         Every run at <code>suspended</code>, <code>budget_exceeded</code>, or
-        <code>needs_reconciliation</code>, with the one action that unblocks it.
+        <code>needs_reconciliation</code>, with the one action that unblocks it — plus any run gone
+        <code>stalled</code>: running, but with no driver attached.
       </p>
 
       <p class="sr" role="status" aria-live="polite">{{ liveMessage() }}</p>
@@ -16,7 +17,7 @@
       <div id="inbox-cards" aria-busy="false">
         @if (!listLoaded()) {
           <p class="stub-note">Loading the waiting-run list…</p>
-        } @else if (!parked().length) {
+        } @else if (!hasCards()) {
           <div class="state all-clear">
             <span class="mark" aria-hidden="true">
               <svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -29,9 +30,9 @@
             </span>
             <h4>All clear</h4>
             <p>
-              No run is suspended, over budget, or awaiting reconciliation. This is the state a
-              healthy control plane sits in — runs that need a person arrive here with the one
-              action that unblocks them.
+              No run is suspended, over budget, awaiting reconciliation, or stalled with no driver.
+              This is the state a healthy control plane sits in — runs that need a person arrive here
+              with the one action that unblocks them.
             </p>
           </div>
         } @else {
@@ -66,6 +67,17 @@
               }
             }
           }
+          <!-- STALLED cards, live-derived (see inbox.ts): a running run with no driver attached. No
+               commit, so no receipt and no permanence — the card drops out the moment a driver
+               reattaches. Its action is external (restart a host process), so it carries guidance
+               and a link to the run, never a fix button. -->
+          @for (r of stalled(); track r.run) {
+            <bridge-stalled-card
+              [row]="r"
+              [evidencePressed]="evidenceSel() === r.run"
+              (evidence)="onEvidence(r.run)"
+            />
+          }
         }
       </div>
     </div>
@@ -94,6 +106,14 @@
             <span class="k">status</span>
             <div class="v">{{ evidenceStatusLabel(st) }}</div>
           </div>
+          @if (st.driver) {
+            <!-- Liveness evidence, verbatim: for a stalled run this reads `none` beside a `running`
+                 status — the whole basis of the stall, shown as recorded fact. -->
+            <div class="ev-field">
+              <span class="k">driver</span>
+              <div class="v">{{ st.driver }}</div>
+            </div>
+          }
           @switch (st.status.state) {
             @case ('needs_reconciliation') {
               <div class="ev-field">

@@ -14,6 +14,7 @@ import type { SalvorEvent } from '@salvor/client';
 import {
   GraphRunService,
   RunEventsService,
+  SALVOR_CLIENT,
   type ForkListEntry,
   type ForkOrigin,
   type RunEventsChannel,
@@ -22,7 +23,7 @@ import { ForkIntentService } from '../../core/fork-intent';
 import { PillService } from '../../core/pill';
 import { RunsService } from '../../core/api';
 import { ViewService } from '../../core/view';
-import { groupOf, labelOf } from '../runs/run-model';
+import { age, derivedStatus, groupOf, labelOf } from '../runs/run-model';
 import { SERVER_CAPABILITIES, forkOffered } from './capability';
 import { KINDS, clock, renderStripHtml, renderTimelineHtml, zoneOf } from './event-model';
 import { esc } from '../../shared/json-hi';
@@ -73,6 +74,7 @@ function info(why: string): string {
 export class Inspector implements AfterViewInit {
   private readonly runEvents = inject(RunEventsService);
   private readonly runsService = inject(RunsService);
+  private readonly client = inject(SALVOR_CLIENT);
   private readonly graphRuns = inject(GraphRunService);
   private readonly fold = inject(FoldService);
   private readonly viewService = inject(ViewService);
@@ -115,6 +117,25 @@ export class Inspector implements AfterViewInit {
    * the list row). Undefined until the projection loads — the AGENT card shows the honest "graph
    * run" identity with no fabricated hash until then. */
   private readonly graphHash = signal<string | undefined>(undefined);
+
+  /** The run's LIVENESS evidence from GET /v1/runs/{id}: the server's `driver` field and the newest
+   * event's `last_recorded_at`. The log fold tells us a run IS `running`; only this tells us whether
+   * anyone is DRIVING it. Fetched once per run (reset in `loadRun`); undefined until it lands, so
+   * the stalled treatment appears only once there is genuine evidence for it — never a guess. */
+  private readonly runLiveness = signal<{ driver?: string; last?: string } | undefined>(undefined);
+
+  /** The stalled verdict for the open run: its log folds to `running`, yet the server reports no
+   * driver and its last event has gone stale (see `run-model.ts#derivedStatus`). This is the one
+   * place the Inspector reads the same derivation the ledger and Inbox do. */
+  readonly stalled = computed<boolean>(() => {
+    const rest = this.restingState();
+    const live = this.runLiveness();
+    if (rest !== 'running' || !live) return false;
+    return derivedStatus('running', live.driver, live.last) === 'stalled';
+  });
+
+  /** The relative age of the last recorded event, for the "last event 10m ago" phrasing. */
+  readonly lastEventAge = computed<string>(() => age(this.runLiveness()?.last));
 
   /** Fork LINEAGE, both directions, read from the server's derived surfaces (never the log):
    *  - `forkedFrom` — this run's own projection carries it when it IS a forked child (the header
@@ -215,11 +236,32 @@ export class Inspector implements AfterViewInit {
       this.events();
       this.foldReady();
       this.graphHash();
+      this.runLiveness();
       if (!this.hasRun()) return;
       this.renderHeader();
       this.renderTimeline();
       this.renderStrip();
       this.renderScrubber();
+    });
+
+    // (4a) The run's liveness evidence (GET /v1/runs/{id}: `driver` + `last_recorded_at`). The log
+    // fold says whether the run IS running; this says whether anyone is driving it, the two facts a
+    // stall is derived from. Fetched once per run, silent on failure (no stalled treatment without
+    // evidence — honesty over a guess), and guarded so a late response for a since-closed run is
+    // dropped rather than shown against the wrong run.
+    effect(() => {
+      const id = this.viewService.runId();
+      if (!id || this.runLiveness() !== undefined) return;
+      this.client
+        .getRun(id)
+        .then((state) => {
+          if (this.viewService.runId() === id) {
+            this.runLiveness.set({ driver: state.driver, last: state.lastRecordedAt });
+          }
+        })
+        .catch(() => {
+          /* liveness unreadable: the header simply carries no stalled treatment, never a fake one */
+        });
     });
 
     // (4b) a graph run carries no agent_def_hash; its graph_hash lives only behind
@@ -315,6 +357,7 @@ export class Inspector implements AfterViewInit {
     this.graphHash.set(undefined); // a new run: forget the previous run's graph_hash
     this.forkedFrom.set(undefined);
     this.forks.set(undefined);
+    this.runLiveness.set(undefined); // and its liveness evidence, re-fetched below
 
     if (!id) {
       this.channelSig.set(undefined);
@@ -374,9 +417,13 @@ export class Inspector implements AfterViewInit {
       ceiling = `ceiling unknown${info('The agent’s declared ceiling is not fetched in this build (no GET /v1/agents registry wired). A ceiling only enters the log when it is crossed.')}`;
     }
 
+    // The hero pill reflects the DERIVED state: a run whose log folds to `running` but that the
+    // server reports no driver for, gone stale, reads `stalled` here — the same verdict the ledger
+    // pill makes, so the Inspector never asserts "running" for a run going nowhere.
+    const displayState = this.stalled() ? 'stalled' : state;
     el.innerHTML = `
       <div class="stat hero"><dt>Status</dt>
-        <dd>${statusHtml(state)}<span class="sub">${evs.length} events · ${steps} model turn${steps === 1 ? '' : 's'}</span></dd></div>
+        <dd>${statusHtml(displayState)}<span class="sub">${evs.length} events · ${steps} model turn${steps === 1 ? '' : 's'}</span></dd></div>
       ${this.agentStatHtml(evs)}
       <div class="stat"><dt>Cost</dt>
         <dd class="figure">${cost.complete ? usd(cost.usd ?? 0) : '<span class="tokens-only">tokens only</span>'}
@@ -464,6 +511,15 @@ export class Inspector implements AfterViewInit {
       const err = st.status.kind === 'Failed' ? st.status.error : '';
       return `<div class="band is-fail">${FAIL_ICO}
         <span><b>Failed.</b>${err ? ` ${esc(err)}` : ''} This run is terminal; its log is closed.</span></div>`;
+    }
+    // STALLED — the expert's exact phrasing: "running — last event 10m ago, no driver attached."
+    // A `running` fold with the server reporting no driver and a stale last event. Attention family
+    // (amber), never the fail band's danger red. Its "action" is a signpost to the Inbox card, whose
+    // guidance is external (restart the host driver) — there is no fix button, here or there.
+    if (this.stalled()) {
+      return `<div class="band is-stalled">${WARN_ICO}
+        <span><b>Stalled.</b> <span class="mono">running</span> — last event ${esc(this.lastEventAge())} ago, no driver attached. No task is driving this run and no client lease is current; restart the driver that owns it, or resolve/abandon.</span>
+        <button class="link-btn" type="button" data-goto="inbox">See in inbox</button></div>`;
     }
     if (!isWaitingState(state)) return '';
     const action: Record<string, [string, string]> = {

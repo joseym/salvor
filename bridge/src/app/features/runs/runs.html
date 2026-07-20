@@ -335,6 +335,9 @@
           <div><dt>event_count</dt><dd>{{ r.eventCount }}</dd></div>
           <div><dt>first_recorded_at</dt><dd>{{ r.first ?? '—' }}</dd></div>
           <div><dt>last_recorded_at</dt><dd>{{ r.last ?? '—' }}</dd></div>
+          <!-- Liveness evidence, verbatim from GET /v1/runs. Absent (—) for a terminal run: the
+               server omits it, and this shows the absence honestly rather than inventing "none". -->
+          <div><dt>driver</dt><dd>{{ r.driver ?? '—' }}</dd></div>
           <div>
             <dt>agent_def_hash</dt>
             <dd>

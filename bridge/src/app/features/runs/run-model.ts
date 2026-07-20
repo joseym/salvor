@@ -12,7 +12,13 @@ import type { RunSummary } from '@salvor/client';
  */
 export type Group = 'progress' | 'waiting' | 'terminal';
 
-/** state → group, keyed on the server's snake_case `status.state`. */
+/**
+ * state → group, keyed on the server's snake_case `status.state` — plus one
+ * DERIVED state the server never sends: `stalled` (see {@link derivedStatus}).
+ * A stalled run is waiting on a PERSON — someone must restart its driver or
+ * resolve/abandon it — so it groups with `waiting`, not `progress`: it is not
+ * motion, and the health strip must not count it as such.
+ */
 export const GROUP: Readonly<Record<string, Group>> = {
   running: 'progress',
   awaiting_model: 'progress',
@@ -21,6 +27,7 @@ export const GROUP: Readonly<Record<string, Group>> = {
   suspended: 'waiting',
   budget_exceeded: 'waiting',
   needs_reconciliation: 'waiting',
+  stalled: 'waiting',
   completed: 'terminal',
   failed: 'terminal',
 };
@@ -34,9 +41,50 @@ export const LABEL: Readonly<Record<string, string>> = {
   suspended: 'suspended',
   budget_exceeded: 'budget exceeded',
   needs_reconciliation: 'needs reconciliation',
+  stalled: 'stalled',
   completed: 'completed',
   failed: 'failed',
 };
+
+/**
+ * How long a `running` run may report `driver: "none"` before the dashboard
+ * calls it STALLED. This graces the momentary gap between one driver task
+ * ending and the next re-driving it, and the just-opened case, so a run is
+ * never flagged the instant it appears driverless — only once it has genuinely
+ * gone quiet. The server's own lease TTL and task tracking already make
+ * `driver: "none"` mean "no driver right now"; this is the client-side quiet
+ * period on top, the "+stale" half of the rule.
+ */
+export const STALL_GRACE_MS = 10_000;
+
+/**
+ * THE STALLED DERIVATION, in one place both the ledger row and the Inbox read.
+ *
+ * A run is `stalled` when ALL THREE hold — running, driverless, and stale:
+ *   1. its folded status is `running` (mid-flight and drivable — not a resting
+ *      `suspended`/`budget_exceeded`/`needs_reconciliation`, which are their own
+ *      honest waits, nor a terminal state),
+ *   2. the server's liveness evidence says `driver: "none"` — no task drives it
+ *      and no client lease is current. STRICT: an ABSENT driver field (an older
+ *      server, or a terminal run) is not evidence of a stall, so it is never
+ *      derived as one — honesty over a guess, and
+ *   3. its last event is older than {@link STALL_GRACE_MS}.
+ *
+ * Returns the effective status: `stalled` when the rule fires, otherwise the
+ * server's own `state` unchanged. This is the client's verdict over the
+ * server's evidence, the same division of labor `status` itself has.
+ */
+export function derivedStatus(
+  state: string,
+  driver: string | undefined,
+  last: string | undefined,
+  now: number = Date.now(),
+): string {
+  if (state !== 'running' || driver !== 'none') return state;
+  const lastMs = last ? Date.parse(last) : Number.NaN;
+  const ageMs = Number.isNaN(lastMs) ? Number.POSITIVE_INFINITY : now - lastMs;
+  return ageMs >= STALL_GRACE_MS ? 'stalled' : state;
+}
 
 /** The group a state belongs to, defaulting unknown states to `progress` (never silently dropped). */
 export function groupOf(state: string): Group {
@@ -64,23 +112,33 @@ export interface RunUsage {
  */
 export interface RunRow {
   readonly id: string;
+  /** The EFFECTIVE status: the server's folded `state`, or the client-derived
+   * `stalled` when {@link derivedStatus} fires. Every downstream consumer (the
+   * pill, the group split, the sort, the status filter) reads this one field, so
+   * the stalled verdict is made once and never drifts between surfaces. */
   readonly status: string;
   readonly eventCount: number;
   readonly first?: string;
   readonly last?: string;
+  /** The server's liveness evidence, verbatim: `attached`/`none`, or absent for
+   * a terminal run (and an older server). Kept so a surface can show WHY a run
+   * is stalled ("no driver attached") straight from the evidence. */
+  readonly driver?: 'attached' | 'none';
   readonly usage?: RunUsage;
   readonly stepCount?: number;
   readonly agentDefHash?: string;
   readonly labels?: Readonly<Record<string, string>>;
 }
 
-export function toRunRow(s: RunSummary): RunRow {
+export function toRunRow(s: RunSummary, now: number = Date.now()): RunRow {
+  const driver = s.driver === 'attached' || s.driver === 'none' ? s.driver : undefined;
   return {
     id: s.run,
-    status: s.status.state,
+    status: derivedStatus(s.status.state, driver, s.lastRecordedAt, now),
     eventCount: s.eventCount,
     first: s.firstRecordedAt,
     last: s.lastRecordedAt,
+    driver,
     usage: s.usage ? { inputTokens: s.usage.inputTokens, outputTokens: s.usage.outputTokens } : undefined,
     stepCount: s.stepCount,
     agentDefHash: s.agentDefHash,

@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest';
 
-import { agentIdentity, isHash, toRunRow, type RunRow } from './run-model';
+import {
+  STALL_GRACE_MS,
+  agentIdentity,
+  derivedStatus,
+  groupOf,
+  isHash,
+  isWaiting,
+  labelOf,
+  toRunRow,
+  type RunRow,
+} from './run-model';
 import type { RunSummary } from '@salvor/client';
 
 function row(agentDefHash: string | undefined): RunRow {
@@ -63,6 +73,67 @@ describe('agentIdentity — the honest renderings', () => {
     const id = agentIdentity(row('sha256:e8a1d362'), names);
     expect(id.kind).toBe('hash');
     expect(id.text).toBe('sha256:e8a1d362');
+  });
+});
+
+describe('derivedStatus — running + driverless + stale ⟹ stalled (the one derivation rule)', () => {
+  const NOW = 1_000_000_000_000;
+  const stale = new Date(NOW - STALL_GRACE_MS - 1).toISOString();
+  const fresh = new Date(NOW - 1_000).toISOString();
+
+  it('fires only when ALL THREE hold: running, driver none, and last event stale', () => {
+    expect(derivedStatus('running', 'none', stale, NOW)).toBe('stalled');
+  });
+
+  it('an ATTACHED driver is never stalled, however old the last event', () => {
+    expect(derivedStatus('running', 'attached', stale, NOW)).toBe('running');
+  });
+
+  it('within the grace period a driverless running run is NOT yet stalled (the just-opened case)', () => {
+    expect(derivedStatus('running', 'none', fresh, NOW)).toBe('running');
+  });
+
+  it('an ABSENT driver field is not evidence of a stall — never derived as one (honesty over a guess)', () => {
+    expect(derivedStatus('running', undefined, stale, NOW)).toBe('running');
+  });
+
+  it('only a RUNNING fold can stall — a resting wait or terminal state passes through unchanged', () => {
+    for (const s of ['suspended', 'budget_exceeded', 'needs_reconciliation', 'awaiting_tool', 'completed', 'failed']) {
+      expect(derivedStatus(s, 'none', stale, NOW)).toBe(s);
+    }
+  });
+
+  it('a running run with no last event at all reads as infinitely stale, so driverless ⟹ stalled', () => {
+    expect(derivedStatus('running', 'none', undefined, NOW)).toBe('stalled');
+  });
+
+  it('stalled is in the WAITING group and labelled "stalled" — it sorts with waiting-on-you', () => {
+    expect(groupOf('stalled')).toBe('waiting');
+    expect(isWaiting('stalled')).toBe(true);
+    expect(labelOf('stalled')).toBe('stalled');
+  });
+});
+
+describe('toRunRow — bakes the derived status and carries driver evidence', () => {
+  const NOW = 1_000_000_000_000;
+  const stale = new Date(NOW - STALL_GRACE_MS - 1).toISOString();
+
+  it('a running run the server reports driverless-and-stale becomes stalled on the row', () => {
+    const r = toRunRow(
+      { run: 'r1', status: { state: 'running', raw: {} }, eventCount: 4, lastRecordedAt: stale, driver: 'none', raw: {} },
+      NOW,
+    );
+    expect(r.status).toBe('stalled');
+    expect(r.driver).toBe('none');
+  });
+
+  it('the same run WITH an attached driver stays running', () => {
+    const r = toRunRow(
+      { run: 'r1', status: { state: 'running', raw: {} }, eventCount: 4, lastRecordedAt: stale, driver: 'attached', raw: {} },
+      NOW,
+    );
+    expect(r.status).toBe('running');
+    expect(r.driver).toBe('attached');
   });
 });
 

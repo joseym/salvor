@@ -163,6 +163,13 @@
   background: var(--red-wash);
   color: color-mix(in oklab, var(--danger), var(--fg) 45%);
 }
+/* STALLED band — the amber attention family (base .band), marked DISTINCT from the fresh-decision
+   waiting bands by a dashed left rule that reads as "interrupted / stopped", never danger red. */
+.band.is-stalled {
+  border-left-width: 3px;
+  border-left-style: dashed;
+  border-left-color: var(--warn);
+}
 .band.is-fail .mono {
   color: color-mix(in oklab, var(--danger), var(--fg) 45%);
 }

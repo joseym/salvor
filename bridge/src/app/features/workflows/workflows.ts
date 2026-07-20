@@ -418,7 +418,7 @@ export class Workflows implements AfterViewInit {
    * which lists `runsOfGraph(wfHash)`, NOT every graph run in the system: a run of a DIFFERENT
    * graph could never project onto this one, so offering it is the "Run does nothing" defect. */
   readonly graphRunOptions = computed(() => {
-    const byId = new Map(this.runsService.runs().map(toRunRow).map((r) => [r.id, r] as const));
+    const byId = new Map(this.runsService.runs().map((s) => toRunRow(s)).map((r) => [r.id, r] as const));
     return this.runsOfGraph().map((id) => ({
       id,
       label: id.slice(0, 8),
@@ -600,7 +600,7 @@ export class Workflows implements AfterViewInit {
     try {
       const runs = await this.runsService.refresh();
       const graphRuns = runs
-        .map(toRunRow)
+        .map((s) => toRunRow(s))
         .filter((r) => agentIdentity(r).kind === 'graph')
         .map((r) => r.id);
       const map = new Map<string, GraphProjection>();

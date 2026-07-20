@@ -4,11 +4,12 @@ import type { RunState, RunSummary } from '@salvor/client';
 import { RunsService, SALVOR_CLIENT, errorMessage } from '../../core/api';
 import { focusWhenRendered } from '../../core/focus';
 import { ViewService } from '../../core/view';
-import { labelOf } from '../runs/run-model';
+import { derivedStatus, labelOf } from '../runs/run-model';
 import { BudgetCard } from './budget-card';
 import { shortId } from './inbox-model';
 import { jsonHi } from '../../shared/json-hi';
 import { ReconcileCard } from './reconcile-card';
+import { StalledCard } from './stalled-card';
 import { SuspensionCard } from './suspension-card';
 
 /**
@@ -63,7 +64,7 @@ export interface InboxCardVM {
 
 @Component({
   selector: 'bridge-inbox',
-  imports: [SuspensionCard, BudgetCard, ReconcileCard],
+  imports: [SuspensionCard, BudgetCard, ReconcileCard, StalledCard],
   templateUrl: './inbox.html',
 })
 export class Inbox {
@@ -92,6 +93,25 @@ export class Inbox {
     }
     return cards;
   });
+
+  /**
+   * The STALLED cards, derived LIVE from each list load — never sticky. A stalled run has no commit
+   * and so no receipt to pin in place (see {@link StalledCard}): if its driver reattaches and it
+   * resumes moving, {@link derivedStatus} stops returning `stalled` for it on the next refresh and
+   * its card simply drops out. That is the opposite of {@link shownCards}, which grows and never
+   * shrinks precisely to protect a written receipt. Kept apart from `parked` for exactly that
+   * reason — the two obey opposite permanence rules.
+   */
+  readonly stalled = computed<RunSummary[]>(() => {
+    const now = Date.now();
+    return this.runsService
+      .runs()
+      .filter((r) => derivedStatus(r.status.state, r.driver, r.lastRecordedAt, now) === 'stalled');
+  });
+
+  /** Whether the Inbox has anything to show — a commit card or a stalled card. Drives the empty
+   * "All clear" state, which must not claim calm while a run sits driverless. */
+  readonly hasCards = computed(() => this.parked().length > 0 || this.stalled().length > 0);
 
   /** Announced to `role="status" aria-live="polite"` — every commit, and nothing else, so the
    * region does not chatter on every unrelated re-render. */

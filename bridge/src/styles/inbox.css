@@ -34,6 +34,10 @@
   background: var(--surface);
 }
 .acard.committed { border-color: var(--edge-strong); border-left-color: var(--success); background: var(--surface); }
+/* STALLED card — attention family (the amber left rule the base .acard already carries), marked
+   DISTINCT by a dashed left rule: this run is not asking for a decision, it has quietly stopped
+   moving. Never danger red — that is reserved for real errors. */
+.acard.is-stalled { border-left-style: dashed; }
 .acard.committed .evidence dd { color: var(--fg); }
 .acard-head { display: flex; align-items: baseline; gap: var(--space-3); flex-wrap: wrap; margin-bottom: var(--space-1); }
 .acard-head h4 { font-size: var(--text-lg); }

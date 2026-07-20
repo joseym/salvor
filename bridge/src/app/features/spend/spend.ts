@@ -89,7 +89,7 @@ export class Spend implements AfterViewInit {
   @ViewChild('activityEl') private activityEl?: ElementRef<SVGSVGElement>;
 
   readonly listLoaded = computed(() => this.runsService.lastLoadedAt() !== undefined);
-  readonly rows = computed<RunRow[]>(() => this.runsService.runs().map(toRunRow));
+  readonly rows = computed<RunRow[]>(() => this.runsService.runs().map((s) => toRunRow(s)));
 
   private readonly folded = signal<ReadonlyMap<string, FoldedRun>>(new Map());
   readonly folding = signal(true);

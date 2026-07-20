@@ -384,6 +384,13 @@
 .status.s-failed::before { content: "✕"; color: var(--danger); }
 .status.s-awaiting_model::before, .status.s-awaiting_tool::before { background: transparent; box-shadow: inset 0 0 0 2px var(--fg-2); }
 .status.s-not_started::before { background: transparent; box-shadow: inset 0 0 0 1px var(--faint); }
+/* STALLED — a `running` run with no driver attached, gone stale (a DERIVED state; the server never
+   sends it, the dashboard folds it from driver + last_event). It sits in the WAITING group, so it
+   inherits the amber attention text/background above — never danger red, which is reserved for real
+   errors. The DISTINCTION from the other waiting states (suspended/budget/reconcile, each a solid
+   amber dot for a fresh human decision) is a HOLLOW amber ring: this run is not asking for a
+   decision, it has quietly stopped moving and someone must restart or retire it. */
+.status.s-stalled::before { background: transparent; box-shadow: inset 0 0 0 2px var(--warn); }
 
 /* skeleton rows during the GET /v1/runs latency */
 .skel-row td { padding: var(--space-3); }
