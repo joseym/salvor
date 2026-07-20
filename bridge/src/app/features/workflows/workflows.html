@@ -144,7 +144,7 @@
       <div class="wf-bar" role="toolbar" aria-label="Canvas mode">
         <div class="wf-seg" role="group" aria-label="Mode">
           <button class="wf-seg-b" type="button" id="wf-mode-build" [attr.aria-pressed]="mode() === 'build'" (click)="setMode('build')">Builder</button>
-          <button class="wf-seg-b" type="button" id="wf-mode-run" [attr.aria-pressed]="mode() === 'run'" (click)="setMode('run')">Run</button>
+          <button class="wf-seg-b" type="button" id="wf-mode-run" [attr.aria-pressed]="mode() === 'run'" (click)="setMode('run')">Project a run</button>
         </div>
         <label class="sr" for="wf-run">Run to project</label>
         <select class="wf-runpick" id="wf-run" [hidden]="mode() !== 'run' || graphRunOptions().length === 0" [value]="runId() ?? ''" (change)="onPickRun($event)">

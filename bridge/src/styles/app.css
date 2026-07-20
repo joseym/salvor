@@ -239,6 +239,13 @@
 /* the dot-key disclosure */
 .dot-key { margin: 0 0 var(--space-4); }
 .dot-key[hidden] { display: none; }
+/* the three groups named beside their own dots (the same inks the table's status dots paint) */
+.dot-legend { display: flex; flex-direction: column; gap: var(--space-1); margin-top: var(--space-2); }
+.dot-item { display: flex; align-items: baseline; gap: var(--space-2); font-size: var(--text-xs); }
+.dot-legend .dot { width: 7px; height: 7px; border-radius: var(--radius-pill); flex: none; align-self: center; }
+.dot-legend .d-waiting { background: var(--warn); }
+.dot-legend .d-progress { background: var(--fg-2); }
+.dot-legend .d-terminal { background: var(--muted); }
 .key-row { display: flex; align-items: baseline; gap: var(--space-2); margin-top: var(--space-2); }
 
 /* ── the ledger ────────────────────────────────────────────── */

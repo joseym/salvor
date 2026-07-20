@@ -85,6 +85,11 @@
       @if (dotKeyOpen()) {
         <p class="caption dot-key" id="dot-key-note">
           <b>Reading the dots.</b> A run is in one of three groups, and the dot says which.
+          <span class="dot-legend">
+            <span class="dot-item"><span class="dot d-waiting" aria-hidden="true"></span> <b>waiting on you</b> — suspended, over budget, or awaiting reconciliation</span>
+            <span class="dot-item"><span class="dot d-progress" aria-hidden="true"></span> <b>in progress</b> — running, or awaiting the model or a tool</span>
+            <span class="dot-item"><span class="dot d-terminal" aria-hidden="true"></span> <b>terminal</b> — completed or failed, its log closed</span>
+          </span>
         </p>
       }
       <bridge-runs />
