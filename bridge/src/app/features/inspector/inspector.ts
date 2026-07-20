@@ -47,6 +47,8 @@ type KindKey = 'all' | 'model' | 'tool' | 'context' | 'lifecycle';
 const COPY_ICO = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 3.5v-1h-8v8h1"/></svg>`;
 const WARN_ICO = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M8 1.9 15.1 14H0.9z"/><path d="M8 6.2v3.4M8 11.4v.7"/></svg>`;
 const FAIL_ICO = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="8" cy="8" r="6.4"/><path d="M5.6 5.6l4.8 4.8M10.4 5.6l-4.8 4.8"/></svg>`;
+// A hollow-slash mark (matching the muted `⊘` on the abandoned pill): a terminal, non-error close.
+const ABANDON_ICO = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="8" cy="8" r="6.4"/><path d="M3.6 3.6l8.8 8.8"/></svg>`;
 
 function info(why: string): string {
   return `<button class="info" type="button" title="${esc(why)}" aria-label="${esc(why)}">i</button>`;
@@ -513,6 +515,21 @@ export class Inspector implements AfterViewInit {
       const err = st.status.kind === 'Failed' ? st.status.error : '';
       return `<div class="band is-fail">${FAIL_ICO}
         <span><b>Failed.</b>${err ? ` ${esc(err)}` : ''} This run is terminal; its log is closed.</span></div>`;
+    }
+    // ABANDONED — a terminal, operator-retired run. Muted, never the fail band's danger red:
+    // abandonment is a deliberate retirement, not an error (state-not-status ink). States the
+    // reason when one was recorded, and — when the run was abandoned while parked at a dangling
+    // write — the unresolved-write honesty line: the abandonment recorded the outstanding write
+    // rather than claiming it settled.
+    if (state === 'abandoned') {
+      const reason = st.status.kind === 'Abandoned' ? st.status.reason : undefined;
+      const uw = st.status.kind === 'Abandoned' ? st.status.unresolved_write : undefined;
+      const reasonText = reason ? ` ${esc(reason)}` : '';
+      const honesty = uw
+        ? ` The write at seq ${uw.seq} (<span class="mono">${esc(uw.tool)}</span>) was left unresolved and is recorded as such; its effect remains unknown.`
+        : '';
+      return `<div class="band is-abandoned">${ABANDON_ICO}
+        <span><b>Abandoned.</b>${reasonText} This run was retired by an operator; it is terminal and its log is closed.${honesty}</span></div>`;
     }
     // STALLED — the expert's exact phrasing family: "<resting state> — last event 10m ago, no
     // driver attached." The resting state named is the run's ACTUAL fold (e.g. `awaiting_model`

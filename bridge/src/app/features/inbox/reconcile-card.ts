@@ -12,6 +12,7 @@ import type { RunSummary } from '@salvor/client';
 
 import { RunDetailService, SALVOR_CLIENT, errorMessage } from '../../core/api';
 import { ViewService } from '../../core/view';
+import { AbandonAction } from './abandon-action';
 import {
   type ReceiptVM,
   type ReconcileIntent,
@@ -47,7 +48,7 @@ export type ReconcileOutcome = 'reached' | 'not_reached' | undefined;
  */
 @Component({
   selector: 'bridge-reconcile-card',
-  imports: [RunRef],
+  imports: [RunRef, AbandonAction],
   templateUrl: './reconcile-card.html',
 })
 export class ReconcileCard implements OnInit {

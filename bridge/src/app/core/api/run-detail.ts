@@ -1,5 +1,5 @@
 import { Injectable, type Signal, inject, signal } from '@angular/core';
-import type { ResumeResult, RunState } from '@salvor/client';
+import type { AbandonResult, ResumeResult, RunState } from '@salvor/client';
 
 import { SALVOR_CLIENT } from './client';
 import { errorMessage } from './errors';

@@ -155,6 +155,18 @@
         <span class="endpoint">{{ endpoint() }}</span>
       </details>
     </div>
+
+    <!-- The SUBORDINATE off-ramp: resolving is the primary path, but a run you no longer care about
+         can be abandoned instead. On this card the confirm copy states plainly that the write stays
+         unresolved and is recorded as such — abandoning does not answer whether it took effect. -->
+    <p class="offramp-why">Or, if this run no longer matters, retire it without resolving:</p>
+    <bridge-abandon-action
+      [row]="row()"
+      variant="secondary"
+      [reconcile]="true"
+      (announce)="announce.emit($event)"
+      (committed)="committed.emit()"
+    />
   } @else if (loadError()) {
     <div class="acard-head">
       <h4>Reconcile a recorded write intent</h4>

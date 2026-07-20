@@ -36,6 +36,8 @@ export function statusStateOf(status: RunStatusJson): string {
       return 'completed';
     case 'Failed':
       return 'failed';
+    case 'Abandoned':
+      return 'abandoned';
   }
 }
 

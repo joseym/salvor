@@ -30,6 +30,10 @@ export const GROUP: Readonly<Record<string, Group>> = {
   stalled: 'waiting',
   completed: 'terminal',
   failed: 'terminal',
+  // Operator-abandoned: a terminal resting state, never attention. It groups
+  // with completed/failed so the health strip counts it as terminal and the
+  // status filter reaches it through the same enumerable path (see json.rs).
+  abandoned: 'terminal',
 };
 
 /** state → human label. */
@@ -44,6 +48,7 @@ export const LABEL: Readonly<Record<string, string>> = {
   stalled: 'stalled',
   completed: 'completed',
   failed: 'failed',
+  abandoned: 'abandoned',
 };
 
 /**

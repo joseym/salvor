@@ -14,6 +14,7 @@ import {
   nextNodesAfter,
   shortId,
 } from './inbox-model';
+import { AbandonAction } from './abandon-action';
 import { RunRef } from './run-ref';
 import {
   type JsonSchemaObject,
@@ -33,7 +34,7 @@ import {
  */
 @Component({
   selector: 'bridge-suspension-card',
-  imports: [RunRef],
+  imports: [RunRef, AbandonAction],
   templateUrl: './suspension-card.html',
 })
 export class SuspensionCard {

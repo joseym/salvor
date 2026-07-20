@@ -31,16 +31,17 @@
   <p class="reason">
     <b>No driver is attached to this run.</b> A run that folds to <span class="mono">{{ restingLabel() }}</span>
     is asserting motion, but the server sees no one driving it: it was resolved and never re-driven,
-    its driver crashed, or its client abandoned it. Restart the driver that owns it, or resolve /
-    abandon the run.
+    its driver crashed, or its client abandoned it. Restart the driver that owns it — or, if this run
+    is dead forever, abandon it below.
   </p>
 
-  <!-- NO FIX BUTTON, on purpose: the driver is a host process outside this browser, so there is no
-       call this dashboard can make to unstall the run. This is guidance plus a link, never theater. -->
+  <!-- NO RESTART BUTTON, on purpose: the driver is a host process outside this browser, so there is
+       no call this dashboard can make to UN-STALL the run. Abandon is the one thing it can honestly
+       do — a retirement, not a fix (see stalled-card.ts). -->
   <p class="offramp-why">
     A run's driver is the process that started it (a server task, or an SDK / browser tab holding
-    the drive-token lease) — it lives in a host, never here in the dashboard. The one thing this view
-    can do is take you to the run's evidence.
+    the drive-token lease) — it lives in a host, never here in the dashboard. This view cannot
+    restart it; it can take you to the run's evidence, or retire the run for good.
   </p>
 
   <div class="actions">
@@ -49,4 +50,12 @@
     </button>
     <span class="endpoint">GET /v1/runs/{{ ns() }}…</span>
   </div>
+
+  <!-- The stalled card's PRIMARY (and only) in-app action: retire the run. -->
+  <bridge-abandon-action
+    [row]="row()"
+    variant="primary"
+    (announce)="announce.emit($event)"
+    (committed)="committed.emit()"
+  />
 </div>

@@ -173,6 +173,17 @@
 .band.is-fail .mono {
   color: color-mix(in oklab, var(--danger), var(--fg) 45%);
 }
+/* ABANDONED band — a TERMINAL, operator-retired run: muted and neutral, never the amber attention of
+   the base .band nor the danger red of .is-fail. Abandonment is a deliberate retirement, not an
+   error, so it takes muted ink (state-not-status). */
+.band.is-abandoned {
+  border-color: color-mix(in oklab, var(--muted), var(--fg) 12%);
+  background: var(--surface);
+  color: var(--fg-2);
+}
+.band.is-abandoned .mono {
+  color: var(--fg-2);
+}
 
 /* ── log toolbar + head ── */
 .lbar {

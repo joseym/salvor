@@ -170,6 +170,18 @@ summary.gate-ev-body:focus-visible { outline: 2px solid var(--accent); outline-o
 .btn.serious { background: var(--surface); color: var(--fg); border-color: var(--fg); box-shadow: none; }
 .btn.serious:hover:not(:disabled) { background: var(--border-soft); }
 
+/* ── abandon: the "we do not care anymore" action ──────────────────────────
+   The SECONDARY trigger (on the reconcile / budget / suspension cards) is deliberately subordinate
+   to that card's own primary unblock: quieter than a plain .btn.serious, a muted hairline the eye
+   reaches only after the primary action. On the Stalled card it is the PRIMARY action and takes the
+   full .btn.serious weight with no override. The trigger sits apart from the .actions row so a card
+   with its own primary action shows abandon as a separate, lesser line below it. */
+.abandon-secondary { border-color: var(--border-soft); color: var(--muted); }
+.abandon-secondary:hover:not(:disabled) { border-color: var(--fg-2); color: var(--fg-2); background: transparent; }
+.acard .abandon-confirm { margin-top: var(--space-4); }
+.acard .abandon-receipt { margin-top: var(--space-3); }
+.acard .abandon-receipt .reason { margin-bottom: var(--space-2); }
+
 /* ── the effect badge (reconciliation card's evidence row) ────────────── */
 .badge {
   display: inline-block; padding: 1px var(--space-2);

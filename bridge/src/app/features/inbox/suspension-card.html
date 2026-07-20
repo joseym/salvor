@@ -240,5 +240,15 @@
         <span class="endpoint">{{ endpoint() }}</span>
       </details>
     </div>
+
+    <!-- SUBORDINATE off-ramp: resuming is the primary path; a run you no longer care about can be
+         abandoned instead. -->
+    <p class="offramp-why">Or, if this run no longer matters, retire it instead of resuming:</p>
+    <bridge-abandon-action
+      [row]="row()"
+      variant="secondary"
+      (announce)="announce.emit($event)"
+      (committed)="committed.emit()"
+    />
   }
 </form>

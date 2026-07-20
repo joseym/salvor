@@ -196,3 +196,27 @@ describe('toRunRow — labels pass through honestly (absent, never a fabricated 
     );
   });
 });
+
+describe('abandoned — the operator-retired terminal (state-not-status vocabulary)', () => {
+  it('groups with the TERMINAL family, never waiting: the health strip counts it terminal, never attention', () => {
+    expect(groupOf('abandoned')).toBe('terminal');
+  });
+
+  it('is not a waiting state, so it never floats to the top of the attention sort', () => {
+    expect(isWaiting('abandoned')).toBe(false);
+  });
+
+  it('has its own human label, distinct from failed', () => {
+    expect(labelOf('abandoned')).toBe('abandoned');
+    expect(labelOf('abandoned')).not.toBe(labelOf('failed'));
+  });
+
+  it('carries its server state through toRunRow unchanged (never re-derived to stalled or failed)', () => {
+    const r = toRunRow({
+      run: 'r1',
+      status: { state: 'abandoned', raw: { state: 'abandoned' } },
+      eventCount: 3,
+    } as unknown as RunSummary);
+    expect(r.status).toBe('abandoned');
+  });
+});

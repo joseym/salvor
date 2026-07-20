@@ -75,6 +75,8 @@
             <bridge-stalled-card
               [row]="r"
               [evidencePressed]="evidenceSel() === r.run"
+              (announce)="onAnnounce($event)"
+              (committed)="onCommitted()"
               (evidence)="onEvidence(r.run)"
             />
           }

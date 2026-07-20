@@ -36,7 +36,12 @@ export type RunStatusJson =
   | { kind: 'BudgetExceeded'; budget: Budget; observed: number }
   | { kind: 'NeedsReconciliation' }
   | { kind: 'Completed'; output: unknown }
-  | { kind: 'Failed'; error: string };
+  | { kind: 'Failed'; error: string }
+  | {
+      kind: 'Abandoned';
+      reason?: string;
+      unresolved_write?: { seq: number; tool: string };
+    };
 
 export type PendingCallJson =
   | { kind: 'Model'; seq: number; request_hash: string }

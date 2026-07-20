@@ -89,6 +89,16 @@
         <span class="endpoint">{{ endpoint() }}</span>
       </details>
     </div>
+
+    <!-- SUBORDINATE off-ramp: raising the limit is the primary path; a run you no longer care about
+         can be abandoned instead of resumed. -->
+    <p class="offramp-why">Or, if this run no longer matters, retire it instead of raising the limit:</p>
+    <bridge-abandon-action
+      [row]="row()"
+      variant="secondary"
+      (announce)="announce.emit($event)"
+      (committed)="committed.emit()"
+    />
   } @else {
     <p class="reason">
       This run's <span class="mono">budget_exceeded</span> status did not carry a readable budget

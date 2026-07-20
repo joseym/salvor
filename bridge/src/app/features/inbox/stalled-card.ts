@@ -3,6 +3,7 @@ import type { RunSummary } from '@salvor/client';
 
 import { ViewService } from '../../core/view';
 import { age, labelOf } from '../runs/run-model';
+import { AbandonAction } from './abandon-action';
 import { shortId } from './inbox-model';
 import { RunRef } from './run-ref';
 
@@ -26,10 +27,19 @@ import { RunRef } from './run-ref';
  * driver reattaches and the run resumes moving, its card simply stops being derived and disappears —
  * the opposite of the commit cards, which persist in place to carry their receipt. A stall has no
  * receipt to protect, so there is nothing to pin.
+ *
+ * ONE in-app action, added deliberately: ABANDON. Everything above about the driver being an
+ * external host process still holds — this card still renders no fake resume/restart button, because
+ * there is no call this dashboard can make to un-stall a run. But abandonment is different: it is not
+ * a fix, it is a RETIREMENT — "we do not care about this run anymore" — and it IS a call the
+ * dashboard can honestly make (`POST /v1/runs/{id}/abandon`, an operator action over the store,
+ * needing no driver). So the stalled card carries the abandon affordance as its PRIMARY action,
+ * alongside the same honest guidance about the external driver. Once abandoned the run leaves the
+ * stalled family and its card drops on the next refresh, exactly as a reattach would drop it.
  */
 @Component({
   selector: 'bridge-stalled-card',
-  imports: [RunRef],
+  imports: [RunRef, AbandonAction],
   templateUrl: './stalled-card.html',
 })
 export class StalledCard {
@@ -40,6 +50,10 @@ export class StalledCard {
   readonly evidencePressed = input(false);
   /** READ, never act: asks the parent to show this run's recorded evidence in the side panel. */
   readonly evidence = output<void>();
+  /** Forwarded from the embedded abandon action, so the parent announces the retire and refreshes
+   * the list (dropping this now-terminal run from the stalled set). */
+  readonly announce = output<string>();
+  readonly committed = output<void>();
 
   readonly ns = computed(() => shortId(this.row().run));
   /** "10m", "2h" — the relative age of the last recorded event, the "gone quiet" evidence. */
