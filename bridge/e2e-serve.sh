@@ -97,9 +97,13 @@ until curl -s -o /dev/null -X POST "http://127.0.0.1:${MODEL_PORT}/v1/messages" 
 
 # 3. Control plane over the disposable store.
 echo "[e2e-serve] starting salvor serve on ${SERVE_ADDR} (store ${STORE})"
+# SALVOR_CLIENT_LEASE_TTL_SECS shortens the client-driven-run lease so the seeded STALLED run
+# (step 5.4) reports no attached driver within seconds of its last append, rather than the 60s
+# default. It affects only client-run leases; no other seed here opens a client-driven run.
 SALVOR_DEMO_BASE_URL="http://127.0.0.1:${MODEL_PORT}" \
 SALVOR_DEMO_FINDINGS="$FINDINGS" \
 SALVOR_RECORD_PROMPTS=1 \
+SALVOR_CLIENT_LEASE_TTL_SECS=2 \
 RUST_LOG=warn \
 target/debug/salvor --store "$STORE" serve --bind "$SERVE_ADDR" \
   >/tmp/salvor-bridge-e2e-serve.log 2>&1 &
@@ -148,6 +152,44 @@ curl -s -X POST "${API}/v1/runs" -H 'Content-Type: application/json' \
   -d "{\"agent\":\"${DEMO_AGENT}\",\"input\":${INPUT},\"labels\":{\"build_id\":\"bld_e2e_alpha\"}}" >/dev/null
 curl -s -X POST "${API}/v1/runs" -H 'Content-Type: application/json' \
   -d "{\"agent\":\"${TINY_AGENT}\",\"input\":${INPUT}}" >/dev/null
+
+# 5.4. LIVENESS addition (additive only): one genuinely STALLED run. A client-driven run is opened,
+#      a single RunStarted is appended (so its log folds to `running` — mid-flight and drivable),
+#      and then its drive-token lease is left to lapse: nothing drives it again. With
+#      SALVOR_CLIENT_LEASE_TTL_SECS=2 (set on serve, step 3), the lease lapses within seconds and is
+#      never refreshed, so GET /v1/runs reports this run as `running` with `driver: "none"` — the
+#      exact evidence the dashboard folds into a `stalled` verdict (running + driverless + stale).
+#      Seeded EARLY, before the slow reconciliation and graph seeds below, so its last event is
+#      comfortably older than the client-side stall grace by the time the suite runs.
+#
+#      Its `agent_def_hash` is a READABLE LABEL (`stalled_demo_v1`), not a `sha256:` hash, so the
+#      Agent column renders it as-is and never issues a GET /v1/agents/{hash} — a hash there would
+#      404 (this run is registered under no agent) and trip the suite's zero-console-errors gate.
+echo "[e2e-serve] seeding a STALLED client-driven run (opened, RunStarted appended, lease left to lapse)"
+STALL_OPEN=$(curl -s -X POST "${API}/v1/client-runs" -H 'Content-Type: application/json' -d '{}')
+STALL_RUN=$(echo "$STALL_OPEN" | python3 -c 'import sys,json;print(json.load(sys.stdin)["run"])')
+STALL_TOKEN=$(echo "$STALL_OPEN" | python3 -c 'import sys,json;print(json.load(sys.stdin)["drive_token"])')
+python3 - "$STALL_RUN" <<'PYEOF'
+import json, sys
+run = sys.argv[1]
+events = [{
+    "run_id": run, "seq": 0, "schema_version": 1, "recorded_at": "1970-01-01T00:00:00Z",
+    "event": {"kind": "RunStarted", "payload": {
+        "agent_def_hash": "stalled_demo_v1",
+        "input": {"topic": "durable execution for AI agents"},
+    }},
+}]
+json.dump({"events": events}, open("/tmp/salvor-bridge-e2e-stall-events.json", "w"))
+PYEOF
+curl -s -X POST "${API}/v1/client-runs/${STALL_RUN}/events" \
+  -H 'Content-Type: application/json' -H "x-drive-token: ${STALL_TOKEN}" \
+  --data-binary @/tmp/salvor-bridge-e2e-stall-events.json > /tmp/salvor-bridge-e2e-stall-append.json
+STALL_STATE=$(curl -s "${API}/v1/runs/${STALL_RUN}" | python3 -c 'import sys,json;print(json.load(sys.stdin)["status"]["state"])')
+if [ "$STALL_STATE" != "running" ]; then
+  echo "[e2e-serve] FATAL: stalled seed did not fold to running (got '${STALL_STATE}'): $(cat /tmp/salvor-bridge-e2e-stall-append.json)" >&2
+  exit 1
+fi
+echo "[e2e-serve] stalled run seeded: ${STALL_RUN} (folds to running; lease lapses in ~2s and is never refreshed)"
 
 # 5.5. Inbox addition: one needs_reconciliation run, via the CLI directly against $STORE (additive —
 #      the four runs above are untouched). Mirrors examples/reconciliation/run.sh's own stages 1-2
