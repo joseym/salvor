@@ -2,6 +2,31 @@
   <div class="spend-grid">
     <div>
       <h3 class="section">Burn-down against declared budgets</h3>
+
+      <!-- THE UNPRICED LEDE: when EVERY run is unpriced, the empty dollar column is one page-wide
+           fact, stated once and prominently, with the exact token burn lifted to the lede — not a
+           footnote repeated on every row. When any run is priced this does not render (a real
+           $0.00 is a figure, not an absence). -->
+      @if (allUnpriced()) {
+        <div class="spend-lede" id="spend-lede" data-spend-lede>
+          <p class="spend-lede-burn">
+            <b>{{ int(totalTokens()) }}</b> tokens folded across {{ pricedRunCount() }}
+            run{{ pricedRunCount() === 1 ? '' : 's' }} · exact from the fold
+          </p>
+          <p class="spend-lede-why">
+            <b>Every run here is unpriced.</b> Tokens are exact; dollars need a maintained price
+            table keyed by model id, and
+            @if (unpricedModels().length) {
+              <span class="mono">{{ unpricedModels().join(', ') }}</span>
+              {{ unpricedModels().length === 1 ? 'is' : 'are' }} not in it.
+            } @else {
+              no model on the page is in it.
+            }
+            No figure is guessed; the column stays honest rather than quoting a silent zero.
+          </p>
+        </div>
+      }
+
       <div id="meters">
         @if (!listLoaded() || folding()) {
           <p class="stub-note">Folding every run's log…</p>
@@ -68,13 +93,16 @@
           table keyed by the model id on each completion — a run whose model is not in the table
           degrades to <b>tokens only</b> rather than quoting a number that silently omits spend.
         </p>
-        <p>
-          <b>A forked run's total would include usage it never incurred.</b> A fork's log is seeded
-          with a copy of its origin's events, and those events carry the origin's real
-          <code>ModelCallCompleted</code> usage — so folding the fork's whole log counts that spend a
+        <!-- Demoted to SECONDARY: a real but second-order caveat that must not crowd the
+             tokens-vs-dollars point the lede now leads with. It stays in the apparatus (an apparatus
+             groups several points), read quieter — a leading label and muted body. -->
+        <p class="fork-note">
+          <b class="fork-note-k">Aside — forks would double-count.</b> A fork's log is seeded with a
+          copy of its origin's events, and those events carry the origin's real
+          <code>ModelCallCompleted</code> usage, so folding the fork's whole log counts that spend a
           second time. The fold itself is right; it sums events genuinely in the log. What would be
-          missing is a control plane that de-duplicates by origin when totals are added together —
-          not a concern this build hits yet, since forking has no runtime behind it here.
+          missing is a control plane that de-duplicates by origin when totals are added together, not
+          a concern this build hits yet, since forking has no runtime behind it here.
         </p>
       </div>
     </div>

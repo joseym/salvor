@@ -34,6 +34,49 @@
 #meters {
   max-width: 780px;
 }
+
+/* ── THE UNPRICED LEDE: the page-wide "every run is unpriced" fact, stated once, with the exact
+   token burn lifted to the front. Not an alarm (unpriced is honest, not broken) — a firm, quiet
+   banner in the tokens-only vocabulary. ── */
+.spend-lede {
+  max-width: 780px;
+  margin: 0 0 var(--space-5);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--edge-strong);
+  border-radius: var(--radius-sm);
+  background: var(--wash);
+}
+.spend-lede-burn {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--fg);
+}
+.spend-lede-burn b {
+  font-size: var(--text-xl);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  margin-right: 4px;
+}
+.spend-lede-why {
+  margin: var(--space-2) 0 0;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+  text-wrap: pretty;
+}
+.spend-lede-why b {
+  color: var(--fg-2);
+}
+/* the fork double-count caveat, demoted to a quieter secondary note within the apparatus */
+.notes p.fork-note {
+  font-size: 12px;
+  color: var(--muted);
+}
+.fork-note .fork-note-k {
+  color: var(--fg-2);
+  font-weight: 600;
+}
 .hist {
   display: block;
   width: 100%;

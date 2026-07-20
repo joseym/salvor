@@ -114,6 +114,34 @@ export class Spend implements AfterViewInit {
     });
   });
 
+  /** THE PAGE-WIDE UNPRICED LEDE. When every readable run's model is absent from the price table,
+   * the dollar column is uniformly empty and the reason is one page-wide fact, not a per-row
+   * footnote to repeat. Stated once, prominently, only when it is genuinely true: at least one
+   * readable run, and NONE of them priced. When any run IS priced, this is false and no banner
+   * shows (zero-vs-absent — a real $0.00 is a figure, not an absence). */
+  readonly allUnpriced = computed<boolean>(() => {
+    const readable = [...this.folded().values()].filter((f) => f.readable);
+    return readable.length > 0 && readable.every((f) => !f.cost.complete);
+  });
+  /** Total tokens folded across every readable run — the exact figure the unpriced lede leads with,
+   * since it is the one number that is not degraded when the models are unpriced. */
+  readonly totalTokens = computed<number>(() => {
+    let t = 0;
+    for (const f of this.folded().values()) t += f.usage.inputTokens + f.usage.outputTokens;
+    return t;
+  });
+  /** The distinct unpriced model ids across the page, for the lede to name what a price table needs. */
+  readonly unpricedModels = computed<string[]>(() => {
+    const s = new Set<string>();
+    // A completion can record no model id at all (the demo model does not stamp one) — an empty id
+    // is not a nameable model, so it is dropped and the lede falls back to naming none by name.
+    for (const f of this.folded().values()) for (const m of f.cost.unpriced) if (m) s.add(m);
+    return [...s].sort();
+  });
+  readonly pricedRunCount = computed<number>(
+    () => [...this.folded().values()].filter((f) => f.readable).length,
+  );
+
   readonly selectedFolded = computed<FoldedRun | undefined>(() => {
     const id = this.spendSel();
     return id ? this.folded().get(id) : undefined;
