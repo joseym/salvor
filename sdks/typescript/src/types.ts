@@ -41,6 +41,16 @@ export interface PendingCall {
   raw: Record<string, unknown>;
 }
 
+/**
+ * A run's liveness evidence: `"attached"` when a driver is currently running it
+ * (a live server task, or a current client-driven lease), `"none"` when none is.
+ * Absent (undefined) for a terminal run — a finished run needs no driver — and
+ * absent from an older server that predates the field. It is server-reported
+ * evidence, not a verdict: a client derives a `stalled` state from a `running`
+ * run whose driver is `"none"` and whose last event has gone stale.
+ */
+export type Driver = "attached" | "none";
+
 /** The derived state of one run, from `GET /v1/runs/{id}`. */
 export interface RunState {
   run: string;
@@ -50,6 +60,7 @@ export interface RunState {
   pending?: PendingCall;
   firstRecordedAt?: string;
   lastRecordedAt?: string;
+  driver?: Driver;
   raw: Record<string, unknown>;
 }
 
@@ -81,6 +92,14 @@ export interface RunSummary {
   stepCount?: number;
   agentDefHash?: string;
   labels?: Labels;
+  /**
+   * Liveness evidence: `"attached"` / `"none"` for a non-terminal run, absent
+   * for a terminal one (and absent from an older server). See {@link Driver}.
+   * `lastRecordedAt` above is the companion "when did anything last happen"
+   * evidence: a stalled run is a `running` run with `driver: "none"` whose
+   * `lastRecordedAt` has gone stale.
+   */
+  driver?: Driver;
   raw: Record<string, unknown>;
 }
 
@@ -174,8 +193,15 @@ export function parseRunState(obj: Json): RunState {
     pending: parsePending(obj.pending),
     firstRecordedAt: obj.first_recorded_at as string | undefined,
     lastRecordedAt: obj.last_recorded_at as string | undefined,
+    driver: parseDriver(obj.driver),
     raw: obj,
   };
+}
+
+/** `"attached"`/`"none"`, or undefined for anything else (a terminal run omits
+ * it, and an older server never sends it) — never a fabricated default. */
+function parseDriver(value: unknown): Driver | undefined {
+  return value === "attached" || value === "none" ? value : undefined;
 }
 
 export function parseRunSummary(obj: Json): RunSummary {
@@ -190,6 +216,7 @@ export function parseRunSummary(obj: Json): RunSummary {
       obj.step_count === undefined ? undefined : Number(obj.step_count),
     agentDefHash: obj.agent_def_hash as string | undefined,
     labels: obj.labels as Labels | undefined,
+    driver: parseDriver(obj.driver),
     raw: obj,
   };
 }

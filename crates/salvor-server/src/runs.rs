@@ -141,12 +141,22 @@ pub async fn start(
 }
 
 /// `GET /v1/runs`: one entry per run with its folded status, plus per-run
-/// `usage` totals, `step_count`, `agent_def_hash`, and `labels` — additive
-/// fields folded from the SAME log read and the SAME [`derive_state`] call
-/// this handler has always run for `status`. No second read of the log and no
-/// second fold pass: `usage` comes straight off the already-derived
+/// `usage` totals, `step_count`, `agent_def_hash`, `labels`, and `driver` —
+/// additive fields folded from the SAME log read and the SAME [`derive_state`]
+/// call this handler has always run for `status`. No second read of the log and
+/// no second fold pass: `usage` comes straight off the already-derived
 /// [`RunState`](salvor_core::RunState), and `step_count`/`agent_def_hash`/
 /// `labels` are read off the same in-memory `log` slice already in hand.
+///
+/// `driver` is the run's liveness evidence — `"attached"` when a driver is
+/// currently running it (a live server task or a current client lease),
+/// `"none"` when none is, and omitted entirely for a terminal run — see
+/// [`driver_evidence`]. It reads no log: it consults only the process's own
+/// driving-run set and client-run leases, the truth the server already holds.
+/// The newest envelope's `last_recorded_at` (already carried, unchanged) is the
+/// companion "when did anything last happen" evidence; the dashboard reads the
+/// two together to derive a `stalled` verdict for a `running` run with no
+/// driver that has gone quiet.
 ///
 /// `run`, `status`, `event_count`, `first_recorded_at`, and
 /// `last_recorded_at` keep their exact pre-existing shape and values; every
@@ -206,18 +216,18 @@ pub async fn list(State(state): State<AppState>) -> Result<impl IntoResponse, Ap
         });
         match store.read_log(summary.run_id).await {
             Ok(log) => {
-                let state = derive_state(&log);
+                let derived = derive_state(&log);
                 let step_count = log
                     .iter()
                     .filter(|envelope| matches!(envelope.event, Event::ModelCallRequested { .. }))
                     .count();
                 let map = entry.as_object_mut().expect("entry is a JSON object");
-                map.insert("status".to_owned(), json::status(&state.status));
+                map.insert("status".to_owned(), json::status(&derived.status));
                 map.insert(
                     "usage".to_owned(),
                     json!({
-                        "input_tokens": state.usage.input_tokens,
-                        "output_tokens": state.usage.output_tokens,
+                        "input_tokens": derived.usage.input_tokens,
+                        "output_tokens": derived.usage.output_tokens,
                     }),
                 );
                 map.insert("step_count".to_owned(), json!(step_count));
@@ -226,6 +236,9 @@ pub async fn list(State(state): State<AppState>) -> Result<impl IntoResponse, Ap
                 }
                 if let Some(labels) = recorded_labels(&log) {
                     map.insert("labels".to_owned(), json!(labels));
+                }
+                if let Some(driver) = driver_evidence(&state, summary.run_id, &derived.status) {
+                    map.insert("driver".to_owned(), json!(driver));
                 }
             }
             Err(error) => {
@@ -261,12 +274,15 @@ pub async fn get(
                 "event_count": 0,
                 "usage": { "input_tokens": 0, "output_tokens": 0 },
                 "pending": Value::Null,
+                // A driver task is running this run in this process, by the very
+                // condition of this branch; report that evidence.
+                "driver": "attached",
             })));
         }
         return Err(unknown_run(run_id));
     }
     let derived = derive_state(&log);
-    Ok(Json(json!({
+    let mut body = json!({
         "run": run_id.as_uuid().to_string(),
         "status": json::status(&derived.status),
         "event_count": log.len(),
@@ -277,7 +293,11 @@ pub async fn get(
         "pending": json::pending(derived.pending_call.as_ref()),
         "first_recorded_at": rfc3339(log[0].recorded_at),
         "last_recorded_at": rfc3339(log[log.len() - 1].recorded_at),
-    })))
+    });
+    if let Some(driver) = driver_evidence(&state, run_id, &derived.status) {
+        body["driver"] = json!(driver);
+    }
+    Ok(Json(body))
 }
 
 /// `GET /v1/runs/{id}/replay`: the dry-run replay projection, executing
@@ -475,6 +495,46 @@ async fn rebuild_agent(state: &AppState, log: &[EventEnvelope]) -> Result<BuiltA
         .build_agent(registered.definition)
         .await
         .map_err(ApiError::BadRequest)
+}
+
+/// The liveness evidence for a run: whether a driver is currently attached to
+/// it, or none is. The server reports this evidence; the dashboard derives the
+/// `stalled` verdict from it (a `running` run with no driver, gone stale) — the
+/// same division of labor `status` itself has, where the server folds the log
+/// and the client reads the fold.
+///
+/// # What "attached" means, from evidence the server already holds
+///
+/// - A **server-driven** run is attached exactly when a driver task is still
+///   running it in this process ([`AppState::is_run_active`]) — the same fact
+///   the event stream's `detached` end-frame already reports (see `sse.rs`).
+///   The task is removed the instant it ends (completes, parks, or errors), so
+///   `is_run_active` is exact, not a heuristic.
+/// - A **client-driven** run is attached exactly when this process holds a
+///   current lease for it ([`AppState::client_run_driver_live`]): the driver
+///   presented its drive token within the lease TTL. A lapsed lease (the tab
+///   closed, the SDK exited) is not attached.
+///
+/// # Zero-vs-absent: a terminal run carries no driver field at all
+///
+/// A `completed` or `failed` run is done; asking whether a driver is attached
+/// to it is not a meaningful question, so the field is omitted entirely (this
+/// returns `None`), never `"driver": "none"`. That mirrors the house rule the
+/// enriched list already follows for `usage`/`step_count`/`labels`: report a
+/// fact when there is one, omit rather than assert a placeholder when there is
+/// not. Every non-terminal run reports a real `"attached"` or `"none"`.
+fn driver_evidence(state: &AppState, run_id: RunId, status: &RunStatus) -> Option<&'static str> {
+    if matches!(
+        status,
+        RunStatus::Completed { .. } | RunStatus::Failed { .. }
+    ) {
+        return None;
+    }
+    if state.is_run_active(run_id) || state.client_run_driver_live(run_id) {
+        Some("attached")
+    } else {
+        Some("none")
+    }
 }
 
 /// The `agent_def_hash` recorded in a run's `RunStarted` event.

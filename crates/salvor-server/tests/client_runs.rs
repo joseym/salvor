@@ -10,7 +10,9 @@ use common::{
 };
 use reqwest::StatusCode;
 use salvor_core::{Effect, Event, EventEnvelope, ReplayCursor, RunId, SequenceNumber};
+use salvor_server::AppState;
 use serde_json::{Value, json};
+use std::time::Duration;
 use time::macros::datetime;
 use uuid::Uuid;
 
@@ -662,5 +664,83 @@ async fn retry_with_a_different_claimed_recorded_at_is_still_idempotent() {
         log["log"].as_array().unwrap().len(),
         1,
         "no duplicate row from the retry"
+    );
+}
+
+/// A client-driven run reports an ATTACHED driver while its lease is current,
+/// and NONE once the lease lapses — the client-driven half of the liveness
+/// evidence `GET /v1/runs` carries. This is the honest addition the design
+/// needed: the pre-existing lease had no expiry, so a driverless client run
+/// (the tab closed, the SDK exited) was indistinguishable from a live one.
+///
+/// A real clock and a short TTL are used deliberately: the lease's freshness is
+/// a wall-clock property, so this test lets real time pass rather than driving a
+/// fixed hook. Its logs are never compared against a control run, so it forgoes
+/// the deterministic clock the other tests here rely on.
+#[tokio::test]
+async fn client_run_driver_is_attached_while_leased_and_none_once_it_lapses() {
+    let model = ScriptedModel::mount(vec![]).await;
+    let factory = agent_factory(
+        model.uri(),
+        "record",
+        Effect::Read,
+        CountBehavior::Record,
+        counter(),
+    );
+    Box::leak(Box::new(model));
+    // Real clock (no fixed hooks) and a short lease TTL, so the lease genuinely
+    // lapses in bounded test time.
+    let state = AppState::new(memory_store(), factory)
+        .with_poll_interval(Duration::from_millis(10))
+        .with_client_lease_ttl(Duration::from_millis(150));
+    let server = TestServer::spawn(state).await;
+    let client = reqwest::Client::new();
+
+    let (run, token) = open_run(&client, &server.base).await;
+
+    // Append a RunStarted so the run's log folds to `running` — the exact state a
+    // stall hides in. The append presents the drive token, refreshing the lease.
+    let (status, _) = append(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        vec![env_value(&run, 0, run_started())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Right away: the lease is current, so the run reports an attached driver.
+    let (_, body) = get_json(&client, &format!("{}/v1/runs/{run}", server.base), None).await;
+    assert_eq!(body["status"]["state"], "running", "the run is mid-flight");
+    assert_eq!(
+        body["driver"], "attached",
+        "a current lease is an attached driver"
+    );
+
+    // Let the lease lapse: no further guarded operation refreshes it.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let (_, body) = get_json(&client, &format!("{}/v1/runs/{run}", server.base), None).await;
+    assert_eq!(
+        body["status"]["state"], "running",
+        "the fold is unchanged — the run still LOOKS running"
+    );
+    assert_eq!(
+        body["driver"], "none",
+        "but the lease lapsed, so no driver is attached — the stall the dashboard derives"
+    );
+
+    // The list surface reports the same evidence for the same run.
+    let (_, list) = get_json(&client, &format!("{}/v1/runs", server.base), None).await;
+    let entry = list["runs"]
+        .as_array()
+        .expect("runs array")
+        .iter()
+        .find(|r| r["run"] == run)
+        .expect("the client-driven run is enumerated once it has events");
+    assert_eq!(
+        entry["driver"], "none",
+        "list agrees with the single-run read"
     );
 }

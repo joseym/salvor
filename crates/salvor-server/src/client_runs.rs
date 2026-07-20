@@ -1117,7 +1117,14 @@ fn authorize_drive(
             "the presented drive token is not the current lease for run {}",
             run_id.as_uuid()
         ))),
-        Some(_) => Ok(lease),
+        Some(_) => {
+            // The driver presented its current token: it is alive. Refresh the
+            // lease's `last_seen` so the liveness evidence on GET /v1/runs reads
+            // "attached". This is the whole heartbeat — it rides on the real
+            // guarded operation, never a separate ping.
+            state.touch_client_run(run_id);
+            Ok(lease)
+        }
     }
 }
 

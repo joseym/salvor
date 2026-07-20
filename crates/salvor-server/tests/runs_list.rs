@@ -336,3 +336,123 @@ async fn start_rejects_labels_over_the_bounds() {
         "a rejected start creates no run at all"
     );
 }
+
+/// Polls `GET /v1/runs/{id}` until the run reports `want` as its status state,
+/// or panics after a bounded wait. Used to await a mid-step resting point a
+/// hanging tool produces, without a fixed sleep.
+async fn wait_for_status(client: &reqwest::Client, server: &TestServer, run: &str, want: &str) {
+    for _ in 0..200 {
+        let (_, body) = get_json(client, &format!("{}/v1/runs/{run}", server.base), None).await;
+        if body["status"]["state"] == want {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("run {run} never reached status {want}");
+}
+
+/// A server-driven run reports an ATTACHED driver while a task is driving it,
+/// and NONE once that task is gone — the same `is_run_active` truth the event
+/// stream's `detached` end-frame already reports, now surfaced on the run list
+/// so the dashboard can derive a stalled verdict. The status fold is identical
+/// before and after the abort (the log does not change); only the liveness
+/// evidence flips, which is exactly the point: a `running`/mid-step run that
+/// LOOKS alive but has no driver is the stall this makes visible.
+#[tokio::test]
+async fn list_reports_driver_attached_while_driving_and_none_after_the_task_is_gone() {
+    // Turn 1 calls a Read tool that hangs, so the run rests at a dangling read
+    // intent (awaiting_tool) with its driver task still alive on the hang.
+    let model = ScriptedModel::mount(vec![(
+        1,
+        tool_use_response("record", "record", json!({ "line": "otters" }), 40, 4),
+        None,
+    )])
+    .await;
+    let factory = agent_factory(
+        model.uri(),
+        "record",
+        Effect::Read,
+        CountBehavior::Hang,
+        counter(),
+    );
+    let server = TestServer::spawn(app_state(memory_store(), factory)).await;
+    let client = reqwest::Client::new();
+    let agent = register_agent(&client, &server.base, sample_toml(), None).await;
+
+    let (status, body) = post_json(
+        &client,
+        &format!("{}/v1/runs", server.base),
+        json!({ "agent": agent, "input": "research otters" }),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "start: {body}");
+    let run = body["run"].as_str().expect("run id").to_owned();
+
+    // The tool is now hanging: the run is mid-step and its task is alive.
+    wait_for_status(&client, &server, &run, "awaiting_tool").await;
+
+    let (_, list) = get_json(&client, &format!("{}/v1/runs", server.base), None).await;
+    let entry = list["runs"][0].clone();
+    assert_eq!(entry["run"], run);
+    assert_eq!(entry["status"]["state"], "awaiting_tool", "mid-step");
+    assert_eq!(
+        entry["driver"], "attached",
+        "a live driver task is an attached driver"
+    );
+
+    // Kill every driver task, as a server shutdown or a `kill -9` would. Nothing
+    // is written; the log still ends at the dangling read intent.
+    server.state.abort_all();
+
+    let (_, list) = get_json(&client, &format!("{}/v1/runs", server.base), None).await;
+    let entry = list["runs"][0].clone();
+    assert_eq!(
+        entry["status"]["state"], "awaiting_tool",
+        "the fold is unchanged — the run still LOOKS mid-step"
+    );
+    assert_eq!(
+        entry["driver"], "none",
+        "the task is gone, so no driver is attached — the stall the dashboard derives"
+    );
+
+    // The single-run read agrees with the list.
+    let (_, one) = get_json(&client, &format!("{}/v1/runs/{run}", server.base), None).await;
+    assert_eq!(one["driver"], "none");
+}
+
+/// A terminal run omits `driver` entirely — asking whether a driver is attached
+/// to a finished run is not a meaningful question, so the field is absent, never
+/// `"driver": "none"`. Same zero-vs-absent house rule the folded fields follow.
+#[tokio::test]
+async fn list_omits_driver_for_a_terminal_run() {
+    let model = ScriptedModel::mount(vec![(1, text_response("done", 10, 2), None)]).await;
+    let factory = agent_factory(
+        model.uri(),
+        "record",
+        Effect::Read,
+        CountBehavior::Record,
+        counter(),
+    );
+    let server = TestServer::spawn(app_state(memory_store(), factory)).await;
+    let client = reqwest::Client::new();
+    let agent = register_agent(&client, &server.base, sample_toml(), None).await;
+    let run = run_to_completion(&client, &server, &agent).await;
+
+    let (_, list) = get_json(&client, &format!("{}/v1/runs", server.base), None).await;
+    let entry = list["runs"][0].clone();
+    assert_eq!(entry["status"]["state"], "completed");
+    assert_eq!(
+        entry.get("driver"),
+        None,
+        "a completed run carries no driver"
+    );
+    assert!(
+        !entry.to_string().contains("\"driver\""),
+        "absence is a missing key, never a null placeholder"
+    );
+
+    // The single-run read omits it too.
+    let (_, one) = get_json(&client, &format!("{}/v1/runs/{run}", server.base), None).await;
+    assert_eq!(one.get("driver"), None);
+}

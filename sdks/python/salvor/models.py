@@ -13,6 +13,13 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 
+def _parse_driver(value: Any) -> Optional[str]:
+    """``"attached"``/``"none"`` verbatim, else ``None`` -- a terminal run omits
+    the field and an older server never sends it, and neither is fabricated into
+    a default."""
+    return value if value in ("attached", "none") else None
+
+
 @dataclass
 class Usage:
     """Token counts folded from a run's model calls."""
@@ -123,6 +130,7 @@ class RunState:
     pending: Optional[PendingCall] = None
     first_recorded_at: Optional[str] = None
     last_recorded_at: Optional[str] = None
+    driver: Optional[str] = None
     raw: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -135,6 +143,7 @@ class RunState:
             pending=PendingCall.from_json(obj.get("pending")),
             first_recorded_at=obj.get("first_recorded_at"),
             last_recorded_at=obj.get("last_recorded_at"),
+            driver=_parse_driver(obj.get("driver")),
             raw=obj,
         )
 
@@ -152,6 +161,13 @@ class RunSummary:
     empty set -- the server never sends ``labels: {}``. ``raw`` always
     carries whatever the server actually sent, so a server-side field this
     SDK has not been taught yet is never lost.
+
+    ``driver`` is liveness evidence: ``"attached"`` when a driver is currently
+    running the run (a live server task, or a current client-driven lease),
+    ``"none"`` when none is, and ``None`` for a terminal run (and from an older
+    server). Paired with ``last_recorded_at``, it is how a client derives a
+    stalled run -- one that folds to ``running`` yet has no driver and has gone
+    quiet.
     """
 
     run: str
@@ -163,6 +179,7 @@ class RunSummary:
     step_count: Optional[int] = None
     agent_def_hash: Optional[str] = None
     labels: Optional[dict[str, str]] = None
+    driver: Optional[str] = None
     raw: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -178,6 +195,7 @@ class RunSummary:
             step_count=int(step_count) if step_count is not None else None,
             agent_def_hash=obj.get("agent_def_hash"),
             labels=obj.get("labels"),
+            driver=_parse_driver(obj.get("driver")),
             raw=obj,
         )
 

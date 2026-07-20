@@ -150,6 +150,13 @@ struct Inner {
     // is a single-writer lease with a process lifetime:
     // re-opening a run mints a fresh lease.
     client_runs: Mutex<HashMap<RunId, ClientRunLease>>,
+    // How long a client-driven run's lease stays "current" without the driver
+    // presenting its token again. Past this, the run reports no attached driver
+    // on GET /v1/runs (the client-driven half of the liveness evidence): the tab
+    // closed, the SDK exited, the driver crashed. Generous by default so a single
+    // long model call between drive operations never reads as a false stall; a
+    // test shortens it (see `with_client_lease_ttl`) to prove the lapse.
+    client_lease_ttl: Duration,
 }
 
 /// The per-run lease state for a client-driven run.
@@ -162,6 +169,14 @@ pub struct ClientRunLease {
     /// implemented, and carries no effect on the generic append this surface
     /// serves.
     pub record_prompts: bool,
+    /// When the driver last proved it was alive: stamped at open and refreshed
+    /// on every guarded operation (append, model-step, tool-step, resolve), each
+    /// of which presents the drive token. That token is the driver's own proof
+    /// of life, so its arrival IS the heartbeat — there is no separate mechanism.
+    /// Read against the lease TTL to decide whether a driver is still attached to
+    /// a client-driven run (see
+    /// [`client_run_driver_live`](AppState::client_run_driver_live)).
+    pub last_seen: OffsetDateTime,
 }
 
 impl AppState {
@@ -184,8 +199,23 @@ impl AppState {
                 active: Mutex::new(HashSet::new()),
                 handles: Mutex::new(HashMap::new()),
                 client_runs: Mutex::new(HashMap::new()),
+                client_lease_ttl: Duration::from_secs(60),
             }),
         }
+    }
+
+    /// Sets how long a client-driven run's lease stays current without the
+    /// driver presenting its token again (default 60s). Past this, the run
+    /// reports no attached driver. Additive and off-default; a test or a seed
+    /// shortens it to make a driverless client run observable quickly, exactly
+    /// as [`with_poll_interval`](Self::with_poll_interval) shortens the stream
+    /// poll. `salvor serve` reads it from `SALVOR_CLIENT_LEASE_TTL_SECS`.
+    #[must_use]
+    pub fn with_client_lease_ttl(mut self, ttl: Duration) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("with_client_lease_ttl is called before the state is shared")
+            .client_lease_ttl = ttl;
+        self
     }
 
     /// Requires `Authorization: Bearer <token>` on every request. Without this,
@@ -473,9 +503,41 @@ impl AppState {
                 ClientRunLease {
                     drive_token: drive_token.clone(),
                     record_prompts,
+                    last_seen: self.now(),
                 },
             );
         drive_token
+    }
+
+    /// Refreshes a client-driven run's `last_seen` to now, the driver's proof of
+    /// life. Called by the lease gate on every guarded operation (the driver
+    /// presented its token, so it is alive); a no-op for a run this process holds
+    /// no lease for.
+    pub fn touch_client_run(&self, run_id: RunId) {
+        let now = self.now();
+        if let Some(lease) = self
+            .inner
+            .client_runs
+            .lock()
+            .expect("client runs lock")
+            .get_mut(&run_id)
+        {
+            lease.last_seen = now;
+        }
+    }
+
+    /// Whether a live driver is currently attached to a client-driven run: this
+    /// process holds a lease for it AND the driver presented its token within the
+    /// lease TTL. A lapsed lease (the tab closed, the SDK exited) reports `false`
+    /// — the client-driven half of the liveness evidence `GET /v1/runs` carries.
+    #[must_use]
+    pub fn client_run_driver_live(&self, run_id: RunId) -> bool {
+        let now = self.now();
+        let leases = self.inner.client_runs.lock().expect("client runs lock");
+        match leases.get(&run_id) {
+            Some(lease) => (now - lease.last_seen).unsigned_abs() < self.inner.client_lease_ttl,
+            None => false,
+        }
     }
 
     /// The lease for a client-driven run, if this process opened one under

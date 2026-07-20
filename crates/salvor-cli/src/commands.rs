@@ -485,6 +485,21 @@ pub async fn serve(store_path: &Path, args: ServeArgs) -> Result<u8> {
     let mut state = AppState::new(store, factory)
         .with_model_executor(Arc::new(LlmModelExecutor::new(model_client)))
         .with_tool_registry(Arc::new(ToolRegistry::new()));
+    // The client-driven-run lease TTL: how long a client run reports an attached
+    // driver after its last guarded operation. Default 60s (set in AppState);
+    // `SALVOR_CLIENT_LEASE_TTL_SECS`, when a positive integer, shortens it so a
+    // driverless client run becomes observable quickly (the stalled-run seed uses
+    // this). A missing, empty, zero, or unparseable value leaves the default.
+    if let Ok(raw) = std::env::var("SALVOR_CLIENT_LEASE_TTL_SECS")
+        && let Ok(secs) = raw.parse::<u64>()
+        && secs > 0
+    {
+        state = state.with_client_lease_ttl(std::time::Duration::from_secs(secs));
+        tracing::info!(
+            secs,
+            "client-driven run lease TTL set from SALVOR_CLIENT_LEASE_TTL_SECS"
+        );
+    }
     if let Some(env_name) = &args.auth_token {
         match std::env::var(env_name) {
             Ok(token) if !token.is_empty() => {

@@ -197,12 +197,13 @@ send `{}` unless an explicit empty set is genuinely what is meant.
 
 ```json
 { "runs": [
-  { "run": "6f...", "status": { "state": "completed", "output": ... },
+  { "run": "6f...", "status": { "state": "running" },
     "event_count": 10, "first_recorded_at": "2026-...", "last_recorded_at": "2026-...",
     "usage": { "input_tokens": 250, "output_tokens": 50 },
     "step_count": 2,
     "agent_def_hash": "sha256:34e0...",
-    "labels": { "build": "42", "env": "prod" } }
+    "labels": { "build": "42", "env": "prod" },
+    "driver": "attached" }
 ] }
 ```
 
@@ -240,6 +241,36 @@ emits `"labels": {}`, because an empty map is not a fact worth asserting any
 more than an unknown count is. A run that recorded at least one label reports
 exactly what was recorded.
 
+**Liveness evidence: `driver`.** `driver` reports whether a driver is currently
+running the run: `"attached"` or `"none"`. It reads no log. It consults only
+the process's own driving-run set and client-run leases, the truth the server
+already holds:
+
+- A **server-driven** run is `"attached"` exactly when a driver task is still
+  running it in this process, the same fact the event stream's `detached`
+  end-frame reports (see [`GET /v1/runs/{id}/events`](#get-v1runsidevents)). The
+  task is dropped the instant it ends (completes, parks, or errors), so this is
+  exact, not a heuristic.
+- A **client-driven** run is `"attached"` exactly when this process holds a
+  current lease for it: the driver presented its drive token within the lease
+  TTL (default 60s; `salvor serve` reads `SALVOR_CLIENT_LEASE_TTL_SECS`). A
+  lapsed lease (the tab closed, the SDK exited) is `"none"`.
+
+`driver` follows the same zero-vs-absent rule as the folded fields, one way: it
+is **omitted entirely for a terminal run** (`completed` or `failed`), because
+whether a driver is attached to a finished run is not a meaningful question, and
+`"driver": "none"` would assert a placeholder where there is no fact. Every
+non-terminal run reports a real `"attached"` or `"none"`; a run whose log could
+not be read omits it along with `status` (there is no folded status to gate it).
+
+`driver` is **evidence, not a verdict.** Paired with `last_recorded_at` (the
+newest envelope's timestamp, the "when did anything last happen" fact), it is
+what a dashboard reads to derive a *stalled* state: a run that folds to
+`running` yet reports `"driver": "none"` and whose `last_recorded_at` has gone
+stale is going nowhere: resolved but never re-driven, its driver crashed, or
+its client abandoned. The server reports the two facts; the client derives the
+stalled verdict, the same division of labor `status` itself has.
+
 ### GET /v1/runs/{id}
 
 The run's derived state:
@@ -253,11 +284,17 @@ The run's derived state:
   "pending": { "kind": "tool", "seq": 5, "tool": "record", "input": ...,
                "effect": "write", "idempotency_key": null },
   "first_recorded_at": "2026-...",
-  "last_recorded_at": "2026-..."
+  "last_recorded_at": "2026-...",
+  "driver": "attached"
 }
 ```
 
 `404 unknown_run` when the id has no history and no run is being driven under it.
+
+`driver` is the same liveness evidence [`GET /v1/runs`](#get-v1runs) carries,
+under the same rules: `"attached"` / `"none"` for a non-terminal run, omitted
+for a terminal one. A run with no history yet but a driver task already spawned
+reports `"driver": "attached"` alongside its `running` status.
 
 #### The status object
 
