@@ -201,6 +201,15 @@ export class Runs {
 
   readonly waitingActionable = computed(() => this.counts().waiting);
 
+  /** The strip's honest gestalt. A run that is over budget or awaiting reconciliation is trouble,
+   * not calm — it sits in the waiting group, so a soothing "0 failed" beside it must never let the
+   * strip read all-clear. `attention` whenever any run is waiting on a person OR has failed;
+   * `clear` only when the census is genuinely quiet; `empty` before any run exists. */
+  readonly healthState = computed<'attention' | 'clear' | 'empty'>(() => {
+    if (!this.totalCount()) return 'empty';
+    return this.counts().waiting > 0 || this.failedCount() > 0 ? 'attention' : 'clear';
+  });
+
   constructor() {
     // read a filter carried in ?q= on entry
     const initial = this.viewService.query();

@@ -1,15 +1,23 @@
 <!-- RUN HEALTH — counted from the same list projection the table and chips read. NOT live: the
      connection pill says Snapshot, and this carries an as-of, because Runs reads a page it already
      fetched. Each figure is a real filter term. -->
-<div class="health" id="run-health" data-od-id="run-health">
+<div class="health" id="run-health" data-od-id="run-health" [attr.data-health]="healthState()">
   <span class="health-k">Run health</span>
+  <!-- THE GESTALT, stated: a run over budget or awaiting reconciliation is trouble, not calm, so
+       the strip must never read all-clear while any run is waiting on a person or has failed. A
+       soothing "0 failed" no longer speaks for the whole census. -->
+  @if (healthState() === 'attention') {
+    <span class="health-state is-attn" id="health-state"><span class="hs-mark" aria-hidden="true">▲</span> Needs attention</span>
+  } @else if (healthState() === 'clear') {
+    <span class="health-state is-clear" id="health-state">All clear</span>
+  }
   <button class="health-n" type="button" data-term="status:running" [attr.aria-pressed]="chipPressed('status:running')" (click)="toggleTerm('status:running')">
     <b>{{ runningCount() }}</b> running
   </button>
   <button class="health-n is-attn" type="button" data-term="group:waiting" [attr.aria-pressed]="chipPressed('group:waiting')" (click)="toggleTerm('group:waiting')">
     <b>{{ counts().waiting }}</b> waiting on you
   </button>
-  <button class="health-n is-fail" type="button" data-term="status:failed" [attr.aria-pressed]="chipPressed('status:failed')" (click)="toggleTerm('status:failed')">
+  <button class="health-n is-fail" type="button" [class.is-zero]="failedCount() === 0" data-term="status:failed" [attr.aria-pressed]="chipPressed('status:failed')" (click)="toggleTerm('status:failed')">
     <b>{{ failedCount() }}</b> failed
   </button>
   <span class="health-as"

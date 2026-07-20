@@ -160,6 +160,18 @@
 .health-n:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
 .health-n.is-attn b { color: var(--amber-ink); }
 .health-n.is-fail b { color: var(--danger); }
+/* a zero count carries no alarm colour — the gestalt marker speaks for the census, not a soothing 0 */
+.health-n.is-zero b { color: var(--muted); }
+/* THE GESTALT MARKER: the strip's honest one-word state, in the status-pill vocabulary (amber wash
+   for attention, success wash for all-clear). It must never say all-clear while attention is due. */
+.health-state {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-body); font-size: var(--text-xs); font-weight: 600; letter-spacing: 0.16px;
+  padding: 2px 9px; border-radius: var(--radius-pill);
+}
+.health-state.is-attn { color: var(--amber-ink); background: color-mix(in oklab, var(--warn), var(--bg) 86%); border: 1px solid color-mix(in oklab, var(--warn), var(--bg) 62%); }
+.health-state.is-clear { color: var(--success); background: color-mix(in oklab, var(--success), var(--bg) 90%); border: 1px solid color-mix(in oklab, var(--success), var(--bg) 72%); }
+.health-state .hs-mark { font-size: 10px; }
 .health-as { margin-left: auto; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.04em; color: var(--faint); }
 
 /* ── THE FILTER FIELD ──────────────────────────────────────── */
