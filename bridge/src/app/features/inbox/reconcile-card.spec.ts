@@ -130,6 +130,33 @@ describe('ReconcileCard — the [hidden]-trap lesson: branch visibility by state
     expect(reached.hidden, 'the output branch must be gone once "not_reached" is chosen').toBe(true);
   });
 
+  it('the "not_reached" off-ramp offers the exact call to copy and says where a tool runs — without weakening the refusal', async () => {
+    const fixture = await mountCard();
+    const el = fixture.nativeElement as HTMLElement;
+    (el.querySelector('input[type="radio"][value="not_reached"]') as HTMLInputElement).click();
+    fixture.detectChanges();
+
+    const offramp = el.querySelector('[data-offramp="not_reached"]') as HTMLElement;
+    expect(offramp).toBeTruthy();
+    expect(offramp.hidden).toBe(false);
+    // the copyable invocation carries the tool AND its exact recorded input
+    const call = offramp.querySelector('.call') as HTMLElement;
+    expect(call.textContent).toContain('charge');
+    expect(call.textContent).toContain('amount');
+    expect(offramp.querySelector('.copy-call')).toBeTruthy();
+    // one truthful mechanism sentence on where such a tool executes
+    expect(offramp.textContent).toContain('the host that registered it');
+    // the refusal itself is untouched — resolve still cannot record an absence
+    expect(el.querySelector('.readonly')!.textContent).toContain('Resolve cannot record');
+
+    // Copy lifts the tool + input verbatim, formatted for reuse.
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    (offramp.querySelector('.copy-call') as HTMLButtonElement).click();
+    await flush();
+    expect(writeText).toHaveBeenCalledWith(JSON.stringify({ tool: 'charge', input: { amount: 10 } }, null, 2));
+  });
+
   it('submit stays disabled until "reached" is chosen AND the immutable-history checkbox is confirmed', async () => {
     const fixture = await mountCard();
     const el = fixture.nativeElement as HTMLElement;

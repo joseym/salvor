@@ -118,6 +118,26 @@
       >
     </div>
 
+    <!-- THE OFF-RAMP: the refusal above stands, but it must not strand the operator. The recorded
+         call, copyable for reuse, and one truthful sentence on where such a tool actually runs. -->
+    <div class="offramp" data-offramp="not_reached" [hidden]="outcome() !== 'not_reached'">
+      <div class="offramp-call">
+        <pre class="call mono" [innerHTML]="jsonHiCompact(invocation(i))"></pre>
+        <button
+          class="btn ghost copy-call"
+          type="button"
+          [attr.data-copy-call]="row().run"
+          (click)="copyInvocation(i)"
+        >
+          {{ callCopied() ? 'Copied' : 'Copy call' }}
+        </button>
+      </div>
+      <p class="offramp-why">
+        A tool executes in the host that registered it — the same process that ran this agent —
+        never here in the browser.
+      </p>
+    </div>
+
     <label class="confirm">
       <input
         type="checkbox"

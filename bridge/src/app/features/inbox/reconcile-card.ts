@@ -132,6 +132,23 @@ export class ReconcileCard implements OnInit {
     return jsonHi(value);
   }
 
+  /** The recorded write as a copyable invocation — the tool plus its exact recorded input, so the
+   * operator who must perform the call by hand (the honest off-ramp of the "did not reach" branch)
+   * can lift it verbatim rather than retyping the JSON. */
+  invocation(i: ReconcileIntent): { tool: string; input: unknown } {
+    return { tool: i.tool, input: i.input };
+  }
+  readonly callCopied = signal(false);
+  async copyInvocation(i: ReconcileIntent): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(this.invocation(i), null, 2));
+      this.callCopied.set(true);
+      setTimeout(() => this.callCopied.set(false), 1500);
+    } catch {
+      /* clipboard blocked — no fallback theater, matching the rest of the app's copy() */
+    }
+  }
+
   async submit(): Promise<void> {
     const i = this.intent();
     if (!i || !this.canSubmit()) return;

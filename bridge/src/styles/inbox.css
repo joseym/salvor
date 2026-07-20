@@ -114,6 +114,20 @@
 .readonly[hidden] { display: none; }
 .readonly svg { flex: none; width: 15px; height: 15px; margin-top: 2px; color: var(--muted); }
 
+/* ── the reconciliation off-ramp: the refusal stands, but the operator is handed the exact call to
+   run themselves plus one line on where a tool actually executes. ── */
+.offramp { margin-top: var(--space-3); }
+.offramp[hidden] { display: none; }
+.offramp-call { display: flex; align-items: flex-start; gap: var(--space-2); }
+.offramp .call {
+  flex: 1 1 auto; min-width: 0; margin: 0; padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface); font-size: 12px; line-height: 1.5;
+  overflow-x: auto; white-space: pre;
+}
+.copy-call { flex: none; white-space: nowrap; }
+.offramp-why { margin: var(--space-2) 0 0; font-size: 12px; color: var(--muted); text-wrap: pretty; letter-spacing: 0.08px; }
+
 .confirm { display: flex; align-items: flex-start; gap: var(--space-2); margin-top: var(--space-4); font-size: 13px; color: var(--fg-2); letter-spacing: 0.08px; }
 .confirm input { accent-color: var(--accent); margin-top: 2px; }
 
