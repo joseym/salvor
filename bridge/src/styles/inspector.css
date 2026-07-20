@@ -776,6 +776,57 @@
   letter-spacing: 0;
 }
 
+/* ── TIME-TRAVEL PREVIEW ──
+   While the playhead HOLDS before the log's end, the derived rail is a re-derived PAST state, not
+   live truth. It carries a tint + a diagonal hatch so it reads as a preview at a glance, a pinned
+   banner names the run's TRUE resting state, and the status line gets an outlined "at seq N" pill.
+   Neutral hatch ground + amber ink on the note, the same ink the live bar's own "Held at seq N"
+   already uses — extending the timeline's boundary/dimmed vocabulary rather than a new colour.
+   AA in both themes (text stays --fg / --amber-ink over the wash); no motion introduced, so
+   reduced-motion needs nothing extra. */
+.derived.preview {
+  border-top-color: var(--amber-ink);
+  background-image: repeating-linear-gradient(
+    -45deg,
+    color-mix(in oklab, var(--warn), transparent 92%) 0 6px,
+    transparent 6px 12px
+  );
+  padding-inline: var(--space-2);
+  margin-inline: calc(-1 * var(--space-2));
+}
+.preview-note {
+  display: block;
+  padding: var(--space-2) 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--amber-ink);
+  border-bottom: 1px solid var(--border);
+}
+.preview-note b {
+  color: var(--fg);
+}
+.preview-note .link-btn {
+  color: var(--accent);
+  letter-spacing: 0;
+}
+.at-seq {
+  display: inline-block;
+  margin-right: var(--space-2);
+  padding: 1px 7px;
+  border: 1px solid var(--amber-ink);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--amber-ink);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  vertical-align: middle;
+}
+.derived.preview .status {
+  outline: 1px dashed var(--amber-ink);
+  outline-offset: 2px;
+}
+
 /* ── the live ticker bar ── */
 .live-bar {
   display: flex;

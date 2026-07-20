@@ -454,8 +454,27 @@ export class Inspector implements AfterViewInit {
     if (derived && st) {
       const state = statusStateOf(st.status);
       const cost: CostTotal = costOfPrefix(evs, n);
+      // TIME-TRAVEL PREVIEW: while the playhead HOLDS before the log's end, the whole rail is a
+      // derived PAST state, not live truth. Carry a visibly distinct preview treatment on the rail
+      // (a tint + hatch, the .preview class) and a pinned banner that names the run's TRUE resting
+      // state, so a past `completed`/`running` pill is never mistaken for what the run IS now. The
+      // status pill itself gets an outlined "at seq N" variant. Extends the timeline's own
+      // boundary/dimmed-future vocabulary rather than inventing a new one. At the head (following)
+      // the rail is plain — nothing is being previewed.
+      const held = n < evs.length;
+      derived.classList.toggle('preview', held);
+      let banner = '';
+      if (held) {
+        const rest = this.restingState();
+        const restLabel = rest ? labelOf(rest) : 'at rest';
+        banner = `<div class="preview-note" data-preview-banner>Preview of past state — the run is still <b>${esc(restLabel)}</b>. <button class="link-btn" type="button" data-to-live>Jump to live.</button></div>`;
+      }
+      const statusDd = held
+        ? `<span class="at-seq" data-at-seq>at seq ${n}</span>${statusHtml(state)}`
+        : statusHtml(state);
       derived.innerHTML = `
-        <div class="drow"><dt>status</dt><dd>${statusHtml(state)}</dd></div>
+        ${banner}
+        <div class="drow"><dt>status</dt><dd>${statusDd}</dd></div>
         <div class="drow"><dt>group</dt><dd>${groupOf(state)}</dd></div>
         <div class="drow"><dt>next_seq</dt><dd>${st.next_seq}</dd></div>
         <div class="drow"><dt>usage.input</dt><dd>${int(st.usage.input_tokens)}</dd></div>
@@ -724,6 +743,10 @@ export class Inspector implements AfterViewInit {
     this.bandEl?.nativeElement.addEventListener('click', (e) => {
       const b = (e.target as HTMLElement).closest<HTMLElement>('[data-goto]');
       if (b) this.viewService.go('inbox');
+    });
+    // the time-travel preview banner's "Jump to live" — folds back to the head of the log
+    this.derivedEl?.nativeElement.addEventListener('click', (e) => {
+      if ((e.target as HTMLElement).closest('[data-to-live]')) this.foldAll();
     });
   }
 
