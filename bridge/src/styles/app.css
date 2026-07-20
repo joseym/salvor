@@ -362,6 +362,12 @@
   background: color-mix(in oklab, var(--fg), var(--bg) 95%);
 }
 .status-btn { appearance: none; -webkit-appearance: none; margin: 0; min-height: 24px; font: inherit; letter-spacing: inherit; text-align: left; cursor: pointer; }
+/* the visible filter affordance: a small funnel, always present so the pill reads as a filter
+   distinct from the row's open-the-run click, firming up on hover / focus / when applied */
+.status-btn .st-filter { width: 9px; height: 9px; flex: none; margin-left: -3px; opacity: 0.4; }
+.status-btn:hover .st-filter,
+.status-btn:focus-visible .st-filter,
+.status-btn[aria-pressed="true"] .st-filter { opacity: 1; }
 .status-btn:hover { border-color: currentColor; }
 .status-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .status-btn[aria-pressed="true"] { background: color-mix(in oklab, var(--accent), var(--bg) 86%); border-color: var(--accent); color: var(--accent); font-weight: 500; }

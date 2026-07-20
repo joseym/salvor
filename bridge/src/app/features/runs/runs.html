@@ -168,6 +168,9 @@
           </button>
         </td>
         <td>
+          <!-- The row opens the run; this pill FILTERS the list. A persistent funnel says so at a
+               glance, so the two affordances read apart (the whole row, id cell included, opens the
+               run; only this pill filters). -->
           <button
             class="{{ statusClass(r.status) }}"
             type="button"
@@ -176,7 +179,7 @@
             [attr.aria-pressed]="chipPressed('status:' + r.status)"
             [attr.title]="'Filter the list to ' + label(r.status) + ' runs'"
             (click)="toggleTerm('status:' + r.status); $event.stopPropagation()"
-          >{{ label(r.status) }}</button>
+          >{{ label(r.status) }}<svg class="st-filter" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><path d="M1 2h10l-3.9 4.4V10L4.9 8.6V6.4z"/></svg></button>
         </td>
         <td>
           <span class="runref">
