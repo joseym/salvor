@@ -63,6 +63,12 @@ SERVE_ADDR="${SERVE_ADDR:-127.0.0.1:${APP_PORT}}"
 API="http://${SERVE_ADDR}"
 STORE="/tmp/salvor-bridge-e2e-store.sqlite"
 FINDINGS="/tmp/salvor-bridge-e2e-findings.txt"
+# EXACT-PID TEARDOWN: every background process this script starts records its own $! here, one pid
+# per line, and stop() kills ONLY these recorded pids — never a name/argv pattern. A pattern kill
+# (the old `pkill -f 'salvor .*serve'`) also matches the OWNER'S real server on :8080, whose argv is
+# likewise `salvor … serve …`, and has taken it down as collateral. Exact pids can never match a
+# process this script did not start, so :8080 is structurally safe from this teardown.
+PIDFILE="${PIDFILE:-/tmp/salvor-bridge-e2e.pids}"
 # Inbox addition: the reconciliation walkthrough's own offline model + write server, on ports that
 # do not collide with MODEL_PORT/SERVE_ADDR/APP_PORT above. The report path is NOT overridable
 # from here: examples/reconciliation/agent.toml declares RECON_REPORT_PATH literally in its own
@@ -72,17 +78,45 @@ FINDINGS="/tmp/salvor-bridge-e2e-findings.txt"
 RECON_MODEL_PORT="${RECON_MODEL_PORT:-8892}"
 RECON_REPORT="/tmp/salvor-reconciliation-report.txt"
 
+# Record a background process's pid for exact-pid teardown. Called with $! right after every `… &`.
+record_pid() {
+  echo "$1" >> "$PIDFILE"
+}
+
+# Tear down ONLY the pids this script recorded — never a pattern. For each recorded pid: SIGTERM it,
+# wait briefly for it to exit, then SIGKILL only that same pid if it is still alive. A pid that is
+# already gone (or was never ours) is skipped. Nothing here consults a process name or argv, so it
+# can never reach a process this script did not start — the owner's :8080 server included.
 stop() {
-  echo "[e2e-serve] stopping servers"
-  pkill -f 'salvor-demo-model' 2>/dev/null || true
-  pkill -f 'salvor .*serve' 2>/dev/null || true
-  pkill -f 'examples/reconciliation/model_server.py' 2>/dev/null || true
-  pkill -f 'examples/reconciliation/server.py' 2>/dev/null || true
-  pkill -f 'examples/reconciliation/agent.toml' 2>/dev/null || true
+  echo "[e2e-serve] stopping servers (exact recorded pids only)"
+  [ -f "$PIDFILE" ] || return 0
+  local pids=()
+  while IFS= read -r pid; do
+    [ -n "$pid" ] && pids+=("$pid")
+  done < "$PIDFILE"
+  # First pass: ask each recorded pid to exit.
+  for pid in "${pids[@]}"; do
+    kill "$pid" 2>/dev/null || true
+  done
+  # Bounded wait for them to go, polling only these pids.
+  for _ in $(seq 1 20); do
+    local alive=0
+    for pid in "${pids[@]}"; do
+      if kill -0 "$pid" 2>/dev/null; then alive=1; fi
+    done
+    [ "$alive" -eq 0 ] && break
+    sleep 0.1
+  done
+  # Second pass: SIGKILL only the recorded pids that are still alive.
+  for pid in "${pids[@]}"; do
+    kill -9 "$pid" 2>/dev/null || true
+  done
+  rm -f "$PIDFILE"
 }
 if [ "${1:-}" = "--stop" ]; then stop; exit 0; fi
 
-stop   # clean any prior run first
+stop            # clean any prior run first (only its own recorded pids)
+: > "$PIDFILE"  # start this run with a fresh, empty pid ledger
 rm -f "$STORE" "$STORE"-wal "$STORE"-shm "$FINDINGS" "$RECON_REPORT"
 
 # 1. Build the CLI + fixture binaries (fixture is a default feature). Cheap if already built.
@@ -99,6 +133,7 @@ echo "[e2e-serve] building the Bridge app"
 echo "[e2e-serve] starting salvor-demo-model on 127.0.0.1:${MODEL_PORT}"
 target/debug/salvor-demo-model --port "$MODEL_PORT" --delay-ms 120 \
   >/tmp/salvor-bridge-e2e-model.log 2>&1 &
+record_pid $!
 until curl -s -o /dev/null -X POST "http://127.0.0.1:${MODEL_PORT}/v1/messages" -d '{"messages":[]}' 2>/dev/null; do sleep 0.2; done
 
 # 3. Control plane over the disposable store.
@@ -113,6 +148,7 @@ SALVOR_CLIENT_LEASE_TTL_SECS=2 \
 RUST_LOG=warn \
 target/debug/salvor --store "$STORE" serve --bind "$SERVE_ADDR" \
   >/tmp/salvor-bridge-e2e-serve.log 2>&1 &
+record_pid $!
 until curl -s -o /dev/null "${API}/v1/runs" 2>/dev/null; do sleep 0.2; done
 
 # 4. Register the demo agent + a one-step-budget variant (parks in the waiting group).
@@ -244,6 +280,44 @@ if [ "$STALL2_STATE" != "awaiting_model" ]; then
 fi
 echo "[e2e-serve] second stalled run seeded: ${STALL2_RUN} (folds to awaiting_model, dangling model intent; lease lapses in ~2s and is never refreshed)"
 
+# 5.4c. ABANDON addition (additive only): one genuinely ABANDONED run, so every abandoned treatment
+#       is demonstrable end to end — the muted `abandoned` pill in the Runs ledger, `status:abandoned`
+#       in the filter, the run counting as TERMINAL (never attention) in the health strip, and the
+#       Inspector's abandoned terminal banner with its recorded reason. It is seeded as a stalled-
+#       shaped run (a client-run with a single RunStarted, folding to `running`) that is then RETIRED
+#       through the real operator endpoint POST /v1/runs/{id}/abandon — exactly the "we do not care
+#       about this run anymore" path the feature exists for. No lease and no drive token: abandon is
+#       an operator action over the store, not a driver step. Kept separate from the two live stalled
+#       seeds above (5.4/5.4b), which must STAY stalled for the Inbox's stalled-card demos — this one
+#       leaves the stalled family the instant it is abandoned, which is the whole point.
+echo "[e2e-serve] seeding an ABANDONED run (opened, RunStarted appended, then retired via POST /abandon)"
+ABANDON_OPEN=$(curl -s -X POST "${API}/v1/client-runs" -H 'Content-Type: application/json' -d '{}')
+ABANDON_RUN=$(echo "$ABANDON_OPEN" | python3 -c 'import sys,json;print(json.load(sys.stdin)["run"])')
+ABANDON_TOKEN=$(echo "$ABANDON_OPEN" | python3 -c 'import sys,json;print(json.load(sys.stdin)["drive_token"])')
+python3 - "$ABANDON_RUN" <<'PYEOF'
+import json, sys
+run = sys.argv[1]
+events = [{
+    "run_id": run, "seq": 0, "schema_version": 1, "recorded_at": "1970-01-01T00:00:00Z",
+    "event": {"kind": "RunStarted", "payload": {
+        "agent_def_hash": "abandoned_demo_v1",
+        "input": {"topic": "durable execution for AI agents"},
+    }},
+}]
+json.dump({"events": events}, open("/tmp/salvor-bridge-e2e-abandon-events.json", "w"))
+PYEOF
+curl -s -X POST "${API}/v1/client-runs/${ABANDON_RUN}/events" \
+  -H 'Content-Type: application/json' -H "x-drive-token: ${ABANDON_TOKEN}" \
+  --data-binary @/tmp/salvor-bridge-e2e-abandon-events.json >/dev/null
+curl -s -X POST "${API}/v1/runs/${ABANDON_RUN}/abandon" -H 'Content-Type: application/json' \
+  -d '{"reason":"husk is dead forever"}' > /tmp/salvor-bridge-e2e-abandon-resp.json
+ABANDON_STATE=$(curl -s "${API}/v1/runs/${ABANDON_RUN}" | python3 -c 'import sys,json;print(json.load(sys.stdin)["status"]["state"])')
+if [ "$ABANDON_STATE" != "abandoned" ]; then
+  echo "[e2e-serve] FATAL: abandon seed did not fold to abandoned (got '${ABANDON_STATE}'): $(cat /tmp/salvor-bridge-e2e-abandon-resp.json)" >&2
+  exit 1
+fi
+echo "[e2e-serve] abandoned run seeded: ${ABANDON_RUN} (retired via /abandon; folds to abandoned, reason recorded)"
+
 # 5.5. Inbox addition: one needs_reconciliation run, via the CLI directly against $STORE (additive —
 #      the four runs above are untouched). Mirrors examples/reconciliation/run.sh's own stages 1-2
 #      (run, kill mid-write) without its later resolve/resume stages: this build's Inbox performs
@@ -263,8 +337,12 @@ curl -s -X POST "${API}/v1/agents" -H 'Content-Type: application/toml' \
   --data-binary @examples/reconciliation/agent.toml >/dev/null
 
 echo "[e2e-serve] starting the reconciliation model+write server on 127.0.0.1:${RECON_MODEL_PORT}"
+# Captured for the exact-pid inline kill below (step end). NOT recorded in $PIDFILE: it is torn down
+# here mid-script by this exact pid, so it is never alive at teardown and its pid must not linger in
+# the ledger where a later stop() could reach a recycled pid.
 RECON_MODEL_PORT="$RECON_MODEL_PORT" python3 examples/reconciliation/model_server.py \
   >/tmp/salvor-bridge-e2e-recon-model.log 2>&1 &
+RECON_MODEL_PID=$!
 until curl -s -o /dev/null "http://127.0.0.1:${RECON_MODEL_PORT}/" 2>/dev/null; do sleep 0.2; done
 
 echo "[e2e-serve] starting the reconciliation run, timed to strand a dangling write"
@@ -301,7 +379,9 @@ else
     cat /tmp/salvor-bridge-e2e-recon-run.err >&2 || true
   fi
 fi
-pkill -f 'examples/reconciliation/model_server.py' 2>/dev/null || true
+# Tear down the reconciliation model server by its EXACT captured pid, never a pattern.
+kill "$RECON_MODEL_PID" 2>/dev/null || true
+wait "$RECON_MODEL_PID" 2>/dev/null || true
 
 # 5.6. Gate-graph addition (additive only): three real graph-engine seeds, agent + gate nodes only.
 #
@@ -501,6 +581,7 @@ cat <<EOF
 Run the suite from the e2e suite directory:
   TARGET_URL=${API}/ ./run.sh 01-boot.spec.js 05-routes-and-deeplinks.spec.js
 
-Tear down:
+Tear down (kills ONLY the exact pids this run recorded in ${PIDFILE} — never a name pattern,
+so the owner's :8080 server is never matched):
   bridge/e2e-serve.sh --stop
 EOF
