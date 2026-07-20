@@ -44,18 +44,23 @@
     restart it; it can take you to the run's evidence, or retire the run for good.
   </p>
 
+  <!-- The stalled card's action row, same anatomy as every sibling card's: primary first (here,
+       abandon — the card's ONE real in-app action, so it wears the same .btn.serious weight the
+       other cards' abandon-off-ramp already uses for a destructive confirm), the subordinate link
+       beside it, and the endpoint tucked behind "show API" rather than floating loose. -->
   <div class="actions">
+    <bridge-abandon-action
+      [row]="row()"
+      variant="primary"
+      (announce)="announce.emit($event)"
+      (committed)="committed.emit()"
+    />
     <button class="btn ghost" type="button" [attr.data-open-run]="row().run" (click)="openTimeline()">
       Open in inspector
     </button>
-    <span class="endpoint">GET /v1/runs/{{ ns() }}…</span>
+    <details class="api">
+      <summary>show API</summary>
+      <span class="endpoint">GET /v1/runs/{{ ns() }}…</span>
+    </details>
   </div>
-
-  <!-- The stalled card's PRIMARY (and only) in-app action: retire the run. -->
-  <bridge-abandon-action
-    [row]="row()"
-    variant="primary"
-    (announce)="announce.emit($event)"
-    (committed)="committed.emit()"
-  />
 </div>
