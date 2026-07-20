@@ -23,7 +23,13 @@ import {
   hourTermOf,
   renderActivityHtml,
 } from './activity';
-import { type Ceiling, type FoldedRun, CostFoldService, ceilingFor } from './cost-fold';
+import {
+  type Ceiling,
+  type FoldedRun,
+  CostFoldService,
+  allUnpriced as allUnpricedOf,
+  ceilingFor,
+} from './cost-fold';
 
 /** One burn-down row: a run paired with its fold, once folding has reached it. */
 interface MeterRow {
@@ -35,6 +41,10 @@ interface MeterRow {
   readonly over: boolean;
   readonly pct: number;
   readonly pctText: string;
+  /** How many model calls this run's log completed — 0 for a run that died before any call
+   *  landed (a stalled run). The row reads honestly as "no model calls yet" rather than a
+   *  fabricated `$0.0000`, matching the page-wide {@link allUnpriced} exclusion (see cost-fold.ts). */
+  readonly calls: number;
 }
 
 interface AgentRow {
@@ -110,19 +120,23 @@ export class Spend implements AfterViewInit {
       const pct = known && spent !== null ? Math.min(100, (spent / (ceiling.usd as number)) * 100) : 0;
       const pctText =
         known && spent !== null ? (pct < 1 && spent > 0 ? '<1%' : Math.round(pct) + '%') : '—';
-      return { row, folded, ceiling, spent, known, over, pct, pctText };
+      return { row, folded, ceiling, spent, known, over, pct, pctText, calls: folded?.calls ?? 0 };
     });
   });
 
-  /** THE PAGE-WIDE UNPRICED LEDE. When every readable run's model is absent from the price table,
-   * the dollar column is uniformly empty and the reason is one page-wide fact, not a per-row
-   * footnote to repeat. Stated once, prominently, only when it is genuinely true: at least one
-   * readable run, and NONE of them priced. When any run IS priced, this is false and no banner
-   * shows (zero-vs-absent — a real $0.00 is a figure, not an absence). */
-  readonly allUnpriced = computed<boolean>(() => {
-    const readable = [...this.folded().values()].filter((f) => f.readable);
-    return readable.length > 0 && readable.every((f) => !f.cost.complete);
-  });
+  /** THE PAGE-WIDE UNPRICED LEDE (defect B fix). When every run that made a model call has that
+   * call's model absent from the price table, the dollar column is uniformly empty and the reason
+   * is one page-wide fact, not a per-row footnote to repeat. Stated once, prominently, only when it
+   * is genuinely true: at least one such run, and NONE of them priced. When any run IS priced, this
+   * is false and no banner shows (zero-vs-absent — a real $0.00 is a figure, not an absence).
+   *
+   * Delegates to the pure {@link allUnpriced} in cost-fold.ts, which — critically — EXCLUDES a run
+   * that made zero model calls (a stalled run that died before any call completed) from the check
+   * either way: on the owner's real instance, 6 driverless non-terminal runs carry no usage at all,
+   * and `CostTotal.complete` reads `true` VACUOUSLY for a zero-call run (no calls means no unpriced
+   * model to report), so without the exclusion a single such run wrongly flipped this to `false`
+   * and the banner never rendered despite the other 29 runs being genuinely, uniformly unpriced. */
+  readonly allUnpriced = computed<boolean>(() => allUnpricedOf([...this.folded().values()]));
   /** Total tokens folded across every readable run — the exact figure the unpriced lede leads with,
    * since it is the one number that is not degraded when the models are unpriced. */
   readonly totalTokens = computed<number>(() => {

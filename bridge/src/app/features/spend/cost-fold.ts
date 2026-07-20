@@ -2,7 +2,7 @@ import { Injectable, inject } from '@angular/core';
 import type { SalvorEvent } from '@salvor/client';
 
 import { SALVOR_CLIENT } from '../../core/api';
-import { agentOf, costOfPrefix } from '../inspector/state-model';
+import { agentOf, completedCallsOf, costOfPrefix } from '../inspector/state-model';
 import { type CostTotal } from '../inspector/pricing';
 import { FoldService, type RunStateJson, toWireLog } from '../inspector/wasm-fold';
 
@@ -27,8 +27,32 @@ export interface FoldedRun {
   readonly agent: string | null;
   readonly usage: { readonly inputTokens: number; readonly outputTokens: number };
   readonly cost: CostTotal;
+  /** How many `ModelCallCompleted` events this run's log recorded. A run that made ZERO model
+   *  calls (a stalled run that died before any call completed — RunStarted, maybe a dangling
+   *  ModelCallRequested, then abandoned) has nothing to price at all: {@link CostTotal.complete}
+   *  reads `true` for it VACUOUSLY (no calls means no unpriced model to report), which is honest
+   *  as a per-run figure ($0 spent so far) but must not be read as "this run's model IS priced" —
+   *  see {@link allUnpriced}, which excludes zero-call runs from that determination for exactly
+   *  this reason. */
+  readonly calls: number;
   /** The wasm-derived state, when the fold itself succeeded on the events read. */
   readonly state: RunStateJson | undefined;
+}
+
+/**
+ * THE PAGE-WIDE UNPRICED LEDE'S CONDITION, in one place (defect B). Every run that made AT LEAST
+ * ONE model call is unpriced, and at least one such run exists.
+ *
+ * A run with ZERO model calls (a stalled run that died before any call completed) is EXCLUDED from
+ * this check on both sides: it must not count as "priced" (its {@link CostTotal.complete} reads
+ * `true` vacuously — there is no unpriced model to report when there were no calls at all — so
+ * without this exclusion a single such run would wrongly suppress a real all-unpriced banner), and
+ * it must not count as "unpriced" either (there is no unpriced FACT to state about a run that never
+ * called a model). Only `readable` runs are considered — an unreadable log has no honest verdict.
+ */
+export function allUnpriced(runs: readonly FoldedRun[]): boolean {
+  const priced = runs.filter((f) => f.readable && f.calls > 0);
+  return priced.length > 0 && priced.every((f) => !f.cost.complete);
 }
 
 /** Precedence for what a run's ceiling was: the log's own `BudgetExceeded` (authoritative — it is
@@ -75,6 +99,7 @@ export class CostFoldService {
         ? { inputTokens: state.usage.input_tokens, outputTokens: state.usage.output_tokens }
         : { inputTokens: 0, outputTokens: 0 },
       cost: costOfPrefix(events, events.length),
+      calls: completedCallsOf(events).length,
       state,
     };
   }

@@ -58,6 +58,8 @@
                 <span class="figs" [attr.title]="whyFor(m.ceiling)">
                   @if (!m.folded || !m.folded.readable) {
                     <span class="tokens-only">log unreadable</span>
+                  } @else if (m.calls === 0) {
+                    <span class="tokens-only">no model calls yet</span>
                   } @else if (m.spent === null) {
                     <span class="tokens-only"
                       >{{ int(m.folded.usage.inputTokens + m.folded.usage.outputTokens) }} tokens · unpriced
