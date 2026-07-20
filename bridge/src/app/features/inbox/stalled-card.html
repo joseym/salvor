@@ -13,21 +13,23 @@
     </button>
   </div>
 
-  <!-- THE EXPERT'S EXACT PHRASING FAMILY: "running — last event 10m ago, no driver attached." Every
-       clause is recorded fact: the folded status, the newest envelope's age, and the server's own
-       liveness evidence. -->
+  <!-- THE EXPERT'S EXACT PHRASING FAMILY: "<resting state> — last event 10m ago, no driver
+       attached." Every clause is recorded fact: the folded status, the newest envelope's age, and
+       the server's own liveness evidence. The resting state is the run's ACTUAL fold (e.g.
+       "awaiting model" for a run that died mid model-call) — the in-progress family this card
+       covers is wider than literal "running" (see stalled-card.ts). -->
   <p class="question" data-stalled-headline>
-    <span class="mono">running</span> — last event <b>{{ lastAge() }}</b> ago, no driver attached.
+    <span class="mono">{{ restingLabel() }}</span> — last event <b>{{ lastAge() }}</b> ago, no driver attached.
   </p>
 
   <dl class="evidence">
-    <div><dt>folded status</dt><dd><span class="mono">running</span> — mid-flight and drivable</dd></div>
+    <div><dt>folded status</dt><dd><span class="mono">{{ restingLabel() }}</span> — mid-flight and drivable</dd></div>
     <div><dt>last_recorded_at</dt><dd>{{ row().lastRecordedAt ?? '—' }} <span class="null">({{ lastAge() }} ago)</span></dd></div>
     <div><dt>driver</dt><dd class="null">none — no task is running it and no client lease is current</dd></div>
   </dl>
 
   <p class="reason">
-    <b>No driver is attached to this run.</b> A run that folds to <span class="mono">running</span>
+    <b>No driver is attached to this run.</b> A run that folds to <span class="mono">{{ restingLabel() }}</span>
     is asserting motion, but the server sees no one driving it: it was resolved and never re-driven,
     its driver crashed, or its client abandoned it. Restart the driver that owns it, or resolve /
     abandon the run.

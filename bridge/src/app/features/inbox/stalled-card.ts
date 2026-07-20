@@ -2,15 +2,18 @@ import { Component, computed, inject, input, output } from '@angular/core';
 import type { RunSummary } from '@salvor/client';
 
 import { ViewService } from '../../core/view';
-import { age } from '../runs/run-model';
+import { age, labelOf } from '../runs/run-model';
 import { shortId } from './inbox-model';
 import { RunRef } from './run-ref';
 
 /**
- * StalledCard: a run that folds to `running` yet the server reports `driver: "none"` for, and whose
- * last event has gone stale — a DERIVED state (see `run-model.ts#derivedStatus`), never a server
- * status. It is going nowhere: resolved but never re-driven, its driver crashed, or its client
- * abandoned it.
+ * StalledCard: a run that folds to some state in the IN-PROGRESS family (`running`,
+ * `awaiting_model`, `awaiting_tool`, `not_started`) yet the server reports `driver: "none"` for,
+ * and whose last event has gone stale — a DERIVED state (see `run-model.ts#derivedStatus`), never
+ * a server status. It is going nowhere: resolved but never re-driven, its driver crashed, or its
+ * client abandoned it. The headline and evidence below name the run's ACTUAL folded state (e.g.
+ * "awaiting model" for a run that died mid model-call), never a hardcoded "running" — the
+ * in-progress family is wider than that one state.
  *
  * Unlike every other Inbox card, a stalled card carries NO in-app action. The other cards each own
  * the one call that unblocks their run (resume, resolve, raise-the-limit); a stall is unblocked by
@@ -41,6 +44,9 @@ export class StalledCard {
   readonly ns = computed(() => shortId(this.row().run));
   /** "10m", "2h" — the relative age of the last recorded event, the "gone quiet" evidence. */
   readonly lastAge = computed(() => age(this.row().lastRecordedAt));
+  /** The run's ACTUAL folded resting state, human-labelled ("awaiting model", "running", …) — the
+   * headline and evidence name this, never a hardcoded "running" (see the class doc comment). */
+  readonly restingLabel = computed(() => labelOf(this.row().status.state));
 
   openTimeline(): void {
     this.viewService.openRun(this.row().run);

@@ -76,12 +76,12 @@ describe('agentIdentity — the honest renderings', () => {
   });
 });
 
-describe('derivedStatus — running + driverless + stale ⟹ stalled (the one derivation rule)', () => {
+describe('derivedStatus — in-progress + driverless + stale ⟹ stalled (the one derivation rule)', () => {
   const NOW = 1_000_000_000_000;
   const stale = new Date(NOW - STALL_GRACE_MS - 1).toISOString();
   const fresh = new Date(NOW - 1_000).toISOString();
 
-  it('fires only when ALL THREE hold: running, driver none, and last event stale', () => {
+  it('fires only when ALL THREE hold: in-progress fold, driver none, and last event stale', () => {
     expect(derivedStatus('running', 'none', stale, NOW)).toBe('stalled');
   });
 
@@ -97,8 +97,20 @@ describe('derivedStatus — running + driverless + stale ⟹ stalled (the one de
     expect(derivedStatus('running', undefined, stale, NOW)).toBe('running');
   });
 
-  it('only a RUNNING fold can stall — a resting wait or terminal state passes through unchanged', () => {
-    for (const s of ['suspended', 'budget_exceeded', 'needs_reconciliation', 'awaiting_tool', 'completed', 'failed']) {
+  // THE REAL-WORLD SHAPE (defect A): the owner's abandoned client-runs died mid model-call, so
+  // they fold to `awaiting_model`, never literal `running`. The whole IN-PROGRESS family — every
+  // non-terminal resting state where a driver SHOULD be attached — must stall the same way.
+  it('the entire in-progress family stalls the same way: running, awaiting_model, awaiting_tool, not_started', () => {
+    for (const s of ['running', 'awaiting_model', 'awaiting_tool', 'not_started']) {
+      expect(derivedStatus(s, 'none', stale, NOW)).toBe('stalled');
+    }
+  });
+
+  // This is the failing-first proof: against the OLD rule (`state !== 'running'`), every one of
+  // these — except plain `running` — passed straight through unchanged, so the owner's real
+  // `awaiting_model` stalls never fired.
+  it('a human-waiting state or a terminal state never stalls, however driverless and stale — it is a normal, honest wait', () => {
+    for (const s of ['suspended', 'budget_exceeded', 'needs_reconciliation', 'completed', 'failed']) {
       expect(derivedStatus(s, 'none', stale, NOW)).toBe(s);
     }
   });
@@ -134,6 +146,25 @@ describe('toRunRow — bakes the derived status and carries driver evidence', ()
     );
     expect(r.status).toBe('running');
     expect(r.driver).toBe('attached');
+  });
+
+  // THE REAL-WORLD SHAPE (defect A): the owner's 6 abandoned client-runs died mid model-call — a
+  // RunStarted then a ModelCallRequested with no completion — so they fold to `awaiting_model`,
+  // never literal `running`. This must derive to `stalled` exactly like the `running` case above.
+  it('an awaiting_model run the server reports driverless-and-stale becomes stalled too — a run that died mid model-call', () => {
+    const r = toRunRow(
+      {
+        run: 'r1',
+        status: { state: 'awaiting_model', raw: {} },
+        eventCount: 2,
+        lastRecordedAt: stale,
+        driver: 'none',
+        raw: {},
+      },
+      NOW,
+    );
+    expect(r.status).toBe('stalled');
+    expect(r.driver).toBe('none');
   });
 });
 

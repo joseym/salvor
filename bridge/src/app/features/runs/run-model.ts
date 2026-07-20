@@ -58,12 +58,17 @@ export const LABEL: Readonly<Record<string, string>> = {
 export const STALL_GRACE_MS = 10_000;
 
 /**
- * THE STALLED DERIVATION, in one place both the ledger row and the Inbox read.
+ * THE STALLED DERIVATION, in one place both the ledger row, the Inbox, and the Inspector read.
  *
- * A run is `stalled` when ALL THREE hold — running, driverless, and stale:
- *   1. its folded status is `running` (mid-flight and drivable — not a resting
- *      `suspended`/`budget_exceeded`/`needs_reconciliation`, which are their own
- *      honest waits, nor a terminal state),
+ * A run is `stalled` when ALL THREE hold — IN PROGRESS, driverless, and stale:
+ *   1. its folded status is in the IN-PROGRESS family — `groupOf(state) === 'progress'`
+ *      (`running`, `awaiting_model`, `awaiting_tool`, `not_started`: every non-terminal resting
+ *      state where a driver SHOULD be attached to move it forward). This is deliberately wider
+ *      than literal `running`: a real client-driven run that dies mid model-call folds to
+ *      `awaiting_model`, not `running`, and it is exactly as stalled. The HUMAN-WAITING family
+ *      (`suspended`/`budget_exceeded`/`needs_reconciliation`) is excluded on purpose — those are
+ *      their own honest waits on a PERSON, not on a driver, so a driverless one of THOSE is
+ *      normal, not stalled — and so is every terminal state,
  *   2. the server's liveness evidence says `driver: "none"` — no task drives it
  *      and no client lease is current. STRICT: an ABSENT driver field (an older
  *      server, or a terminal run) is not evidence of a stall, so it is never
@@ -80,7 +85,7 @@ export function derivedStatus(
   last: string | undefined,
   now: number = Date.now(),
 ): string {
-  if (state !== 'running' || driver !== 'none') return state;
+  if (groupOf(state) !== 'progress' || driver !== 'none') return state;
   const lastMs = last ? Date.parse(last) : Number.NaN;
   const ageMs = Number.isNaN(lastMs) ? Number.POSITIVE_INFINITY : now - lastMs;
   return ageMs >= STALL_GRACE_MS ? 'stalled' : state;

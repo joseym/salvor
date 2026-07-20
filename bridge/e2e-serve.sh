@@ -33,6 +33,12 @@
 # engine's flat log scan sees), so that seed exercises the genuine refuse-then-record acknowledgement
 # flow rather than a hazard-free fork.
 #
+# DEFECT A ADDITION, on top of everything above, unchanged: a SECOND stalled seed, the real-world
+# shape (an owner's client-run that died mid model-call, not mid-open) — RunStarted, then a
+# ModelCallRequested with no completion, folding to `awaiting_model` rather than `running`. See step
+# 5.4b below, right after the original `running`-shaped stall (5.4). Both shapes must render as
+# stalled; the second is what the derivation's old, narrower rule (`state !== 'running'`) missed.
+#
 # Usage:
 #     bridge/e2e-serve.sh                 # start everything, print TARGET_URL, stay up
 #     bridge/e2e-serve.sh --stop          # tear down the servers this script started
@@ -190,6 +196,53 @@ if [ "$STALL_STATE" != "running" ]; then
   exit 1
 fi
 echo "[e2e-serve] stalled run seeded: ${STALL_RUN} (folds to running; lease lapses in ~2s and is never refreshed)"
+
+# 5.4b. LIVENESS addition, second shape (additive only): the REAL-WORLD stall. The owner's actual
+#       abandoned client-runs did not die between steps (the shape step 5.4 seeds) — they died
+#       MID MODEL-CALL: a RunStarted, then a ModelCallRequested with no completion, so they fold to
+#       `awaiting_model`, never literal `running`. This is exactly the shape defect A's fix widens
+#       the stalled derivation to cover (the in-progress family, not just `running`).
+#
+#       A client-run is opened, RunStarted appended, then one model-step is requested with a
+#       request body that cannot match any scripted turn in demo_script (an empty `messages` array —
+#       the script's shortest scripted turn carries 1 message). The server's write-ahead rule
+#       (client_runs.rs#model_step) durably records the ModelCallRequested intent BEFORE contacting
+#       the provider; the provider then answers with its own scripted 500 ("no scripted response"),
+#       the executor call fails, and model_step returns an error with the intent already on the log
+#       and no completion ever written. No process is killed and nothing is retried, so the intent
+#       is genuinely, permanently dangling — the log folds to `awaiting_model` for good. Its lease
+#       then lapses exactly as step 5.4's does (same SALVOR_CLIENT_LEASE_TTL_SECS=2).
+echo "[e2e-serve] seeding a second STALLED client-driven run, the real-world shape (died mid model-call, folds to awaiting_model)"
+STALL2_OPEN=$(curl -s -X POST "${API}/v1/client-runs" -H 'Content-Type: application/json' -d '{}')
+STALL2_RUN=$(echo "$STALL2_OPEN" | python3 -c 'import sys,json;print(json.load(sys.stdin)["run"])')
+STALL2_TOKEN=$(echo "$STALL2_OPEN" | python3 -c 'import sys,json;print(json.load(sys.stdin)["drive_token"])')
+python3 - "$STALL2_RUN" <<'PYEOF'
+import json, sys
+run = sys.argv[1]
+events = [{
+    "run_id": run, "seq": 0, "schema_version": 1, "recorded_at": "1970-01-01T00:00:00Z",
+    "event": {"kind": "RunStarted", "payload": {
+        "agent_def_hash": "stalled_awaiting_model_v1",
+        "input": {"topic": "durable execution for AI agents"},
+    }},
+}]
+json.dump({"events": events}, open("/tmp/salvor-bridge-e2e-stall2-events.json", "w"))
+PYEOF
+curl -s -X POST "${API}/v1/client-runs/${STALL2_RUN}/events" \
+  -H 'Content-Type: application/json' -H "x-drive-token: ${STALL2_TOKEN}" \
+  --data-binary @/tmp/salvor-bridge-e2e-stall2-events.json > /tmp/salvor-bridge-e2e-stall2-append.json
+# An unscripted model-step: demo-model has no turn scripted for 0 messages, so it answers 500 and
+# the executor call fails — but only AFTER the intent was durably written write-ahead. The step
+# itself is expected to error; only the resulting log state matters below.
+curl -s -X POST "${API}/v1/client-runs/${STALL2_RUN}/model-step" \
+  -H 'Content-Type: application/json' -H "x-drive-token: ${STALL2_TOKEN}" \
+  -d '{"seq":1,"request":{"messages":[]}}' > /tmp/salvor-bridge-e2e-stall2-modelstep.json
+STALL2_STATE=$(curl -s "${API}/v1/runs/${STALL2_RUN}" | python3 -c 'import sys,json;print(json.load(sys.stdin)["status"]["state"])')
+if [ "$STALL2_STATE" != "awaiting_model" ]; then
+  echo "[e2e-serve] FATAL: second stalled seed did not fold to awaiting_model (got '${STALL2_STATE}'): $(cat /tmp/salvor-bridge-e2e-stall2-modelstep.json)" >&2
+  exit 1
+fi
+echo "[e2e-serve] second stalled run seeded: ${STALL2_RUN} (folds to awaiting_model, dangling model intent; lease lapses in ~2s and is never refreshed)"
 
 # 5.5. Inbox addition: one needs_reconciliation run, via the CLI directly against $STORE (additive —
 #      the four runs above are untouched). Mirrors examples/reconciliation/run.sh's own stages 1-2

@@ -124,14 +124,16 @@ export class Inspector implements AfterViewInit {
    * the stalled treatment appears only once there is genuine evidence for it — never a guess. */
   private readonly runLiveness = signal<{ driver?: string; last?: string } | undefined>(undefined);
 
-  /** The stalled verdict for the open run: its log folds to `running`, yet the server reports no
-   * driver and its last event has gone stale (see `run-model.ts#derivedStatus`). This is the one
-   * place the Inspector reads the same derivation the ledger and Inbox do. */
+  /** The stalled verdict for the open run: its log folds to some state in the IN-PROGRESS family
+   * (`running`, `awaiting_model`, `awaiting_tool`, `not_started` — see `run-model.ts#derivedStatus`
+   * for why the family is wider than literal `running`), yet the server reports no driver and its
+   * last event has gone stale. This is the one place the Inspector reads the same derivation the
+   * ledger and Inbox do. */
   readonly stalled = computed<boolean>(() => {
     const rest = this.restingState();
     const live = this.runLiveness();
-    if (rest !== 'running' || !live) return false;
-    return derivedStatus('running', live.driver, live.last) === 'stalled';
+    if (!rest || groupOf(rest) !== 'progress' || !live) return false;
+    return derivedStatus(rest, live.driver, live.last) === 'stalled';
   });
 
   /** The relative age of the last recorded event, for the "last event 10m ago" phrasing. */
@@ -512,13 +514,15 @@ export class Inspector implements AfterViewInit {
       return `<div class="band is-fail">${FAIL_ICO}
         <span><b>Failed.</b>${err ? ` ${esc(err)}` : ''} This run is terminal; its log is closed.</span></div>`;
     }
-    // STALLED — the expert's exact phrasing: "running — last event 10m ago, no driver attached."
-    // A `running` fold with the server reporting no driver and a stale last event. Attention family
-    // (amber), never the fail band's danger red. Its "action" is a signpost to the Inbox card, whose
-    // guidance is external (restart the host driver) — there is no fix button, here or there.
+    // STALLED — the expert's exact phrasing family: "<resting state> — last event 10m ago, no
+    // driver attached." The resting state named is the run's ACTUAL fold (e.g. `awaiting_model`
+    // for a run that died mid model-call), never a hardcoded "running" — the in-progress family is
+    // wider than that one state (see `run-model.ts#derivedStatus`). Attention family (amber), never
+    // the fail band's danger red. Its "action" is a signpost to the Inbox card, whose guidance is
+    // external (restart the host driver) — there is no fix button, here or there.
     if (this.stalled()) {
       return `<div class="band is-stalled">${WARN_ICO}
-        <span><b>Stalled.</b> <span class="mono">running</span> — last event ${esc(this.lastEventAge())} ago, no driver attached. No task is driving this run and no client lease is current; restart the driver that owns it, or resolve/abandon.</span>
+        <span><b>Stalled.</b> <span class="mono">${esc(labelOf(state))}</span> — last event ${esc(this.lastEventAge())} ago, no driver attached. No task is driving this run and no client lease is current; restart the driver that owns it, or resolve/abandon.</span>
         <button class="link-btn" type="button" data-goto="inbox">See in inbox</button></div>`;
     }
     if (!isWaitingState(state)) return '';
