@@ -8,8 +8,9 @@
   </div>
   <p class="mechanism">
     An id resolves against <code>GET /v1/runs/&#123;id&#125;/events</code> first and falls back to
-    <code>GET /v1/client-runs/&#123;id&#125;/log</code>; whichever answers is labelled in the header. Client-driven
-    runs are not enumerated by <code>GET /v1/runs</code>, so opening by id is the only way to reach one.
+    <code>GET /v1/client-runs/&#123;id&#125;/log</code>; whichever answers is labelled in the header. A
+    client-driven run that holds a lease but has recorded nothing yet is not in the run list, so
+    opening it by id is the only way to reach it.
   </p>
 </div>
 

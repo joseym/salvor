@@ -39,7 +39,7 @@ const NAV_LINKS: readonly NavLink[] = [
 ];
 
 const SUBS: Readonly<Record<ViewName, string>> = {
-  runs: 'A snapshot of GET /v1/runs — waiting-first.',
+  runs: 'Waiting-first — the runs that need you sort to the top.',
   inspector: 'One run, read from its log.',
   inbox: 'Runs waiting on a human decision.',
   workflows: 'Author graphs; project and fork real runs.',
