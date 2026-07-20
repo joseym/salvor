@@ -169,7 +169,10 @@
        (per the hero-position rule: fusing kinds is what puts a doorstop where the lede belongs). -->
   <p class="caption">
     Client-driven runs — driven by an SDK straight against the log, never started through
-    <code>POST /v1/runs</code> — are absent because <code>GET /v1/runs</code> does not enumerate them.
+    <code>POST /v1/runs</code> — are enumerated here the moment they record an event:
+    <code>GET /v1/runs</code> lists any run with events in the store, whatever opened it. The one it
+    cannot show is a client-run holding a lease that has appended nothing yet — no event, so nothing
+    to list.
   </p>
   <p class="mechanism">
     Suspension forms are generated from the run's own recorded
