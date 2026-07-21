@@ -98,6 +98,7 @@
       variant="secondary"
       (announce)="announce.emit($event)"
       (committed)="committed.emit()"
+      (receipted)="onAbandonReceipted()"
       (retire)="retire.emit()"
     />
   } @else {

@@ -101,4 +101,66 @@ describe('BudgetCard', () => {
     expect(JSON.parse(init.body as string)).toEqual({ input: { extend: { steps: 2 } } });
     expect(el.querySelector('form.committed')).toBeTruthy();
   });
+
+  it(
+    "THE HUSK'S EXIT: the secondary abandon receipt is PINNED against budget() reclassifying " +
+      'after a simulated post-commit refresh, and only folds once dismissed',
+    async () => {
+      const fixture = TestBed.createComponent(BudgetCard);
+      fixture.componentRef.setInput('row', BUDGET_ROW);
+      fixture.detectChanges();
+      const el = fixture.nativeElement as HTMLElement;
+
+      let retired = 0;
+      fixture.componentInstance.retire.subscribe(() => retired++);
+
+      // open the confirm, check the box
+      (el.querySelector('[data-abandon]') as HTMLButtonElement).click();
+      fixture.detectChanges();
+      (el.querySelector('[data-abandon-understand]') as HTMLInputElement).click();
+      fixture.detectChanges();
+
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({
+          run: BUDGET_ROW.run,
+          abandoned: true,
+          appended_seq: 9,
+          status: { state: 'abandoned' },
+        }),
+      );
+
+      (el.querySelector('[data-abandon-submit]') as HTMLButtonElement).click();
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      fixture.detectChanges();
+
+      expect(el.querySelector('[data-abandon-receipt]'), 'the abandon receipt lands').toBeTruthy();
+
+      // Simulate the parent's `onCommitted` -> `RunsService.refresh()`: the same run id, now
+      // reclassified away from `budget_exceeded` with no readable budget object — exactly the
+      // refresh that used to make `budget()` go undefined and tear the abandon-action (and its
+      // still-unread receipt) out from under the operator, before Done was ever reachable.
+      fixture.componentRef.setInput('row', {
+        ...BUDGET_ROW,
+        status: { state: 'abandoned', raw: { state: 'abandoned' } },
+      });
+      fixture.detectChanges();
+
+      expect(el.querySelector('form[data-raise]'), 'the card survives the reclassifying refresh').toBeTruthy();
+      expect(
+        el.querySelector('[data-abandon-receipt]'),
+        'PINNED: the receipt survives the reclassifying refresh',
+      ).toBeTruthy();
+      expect(el.querySelector('[data-abandon-receipt]')?.textContent).toContain('Appended RunAbandoned at seq 9');
+
+      // "Done": the receipt is untouched, but this card's job is done — it reports retire upward
+      // and leaves the fold-away animation and actual removal to the parent (inbox.ts).
+      const done = el.querySelector('[data-abandon-done]') as HTMLButtonElement;
+      done.click();
+      fixture.detectChanges();
+      expect(retired).toBe(1);
+      expect(el.querySelector('[data-abandon-receipt]'), 'still rendered — Done does not itself remove it').toBeTruthy();
+    },
+  );
 });
