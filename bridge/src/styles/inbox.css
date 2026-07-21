@@ -180,9 +180,30 @@ summary.gate-ev-body:focus-visible { outline: 2px solid var(--accent); outline-o
    to — so it takes the full .btn.serious weight AND joins `.actions` directly, first, exactly where
    every other card's primary sits. `display: contents` unwraps the component host so the trigger
    button (or, once opened, the confirm/receipt block) is a real flex item of that row rather than a
-   nested box fighting its layout. */
-.abandon-secondary { border-color: var(--border-soft); color: var(--muted); }
-.abandon-secondary:hover:not(:disabled) { border-color: var(--fg-2); color: var(--fg-2); background: transparent; }
+   nested box fighting its layout.
+
+   DESTRUCTIVE (owner call, 2026-07-20 — see tokens.css's --anchor-danger comment, the invariant
+   this extends): abandon is the one deliberately destructive action in this app, so every render
+   site of it reads danger at a glance — both trigger weights below, and the confirm step's final
+   button further down. Hooked on the component's own `data-abandon`/`data-abandon-submit`
+   attributes rather than a new class, so plain `.btn.serious` — also worn by reconcile's ordinary,
+   non-destructive "Record outcome" — is untouched. */
+.btn.serious[data-abandon] { color: var(--danger); border-color: var(--danger); }
+.btn.serious[data-abandon]:hover:not(:disabled) { background: var(--red-wash); }
+/* the subordinate trigger: a quieter danger tint (still AA-passing as a component boundary, still
+   unmistakably red), not the full-weight border the Stalled card's primary wears. */
+.btn.serious[data-abandon].abandon-secondary { border-color: color-mix(in oklab, var(--danger), var(--bg) 25%); }
+.btn.serious[data-abandon].abandon-secondary:hover:not(:disabled) { border-color: var(--danger); background: var(--red-wash); }
+
+/* the confirm step's final button, behind the "I understand" gate — the point of no return, so it
+   takes the full filled-danger weight (the same shape as the filled-accent primary further below,
+   danger anchor instead of accent). */
+.btn.serious[data-abandon-submit] {
+  background: var(--danger); color: var(--danger-on); border-color: transparent; box-shadow: var(--elev-raised);
+  transition: background var(--motion-fast) var(--ease-standard);
+}
+.btn.serious[data-abandon-submit]:hover:not(:disabled) { background: var(--danger-hover); }
+.btn.serious[data-abandon-submit]:active:not(:disabled) { background: var(--danger-active); }
 .acard .abandon-confirm { margin-top: var(--space-4); }
 .acard .abandon-receipt { margin-top: var(--space-3); }
 .acard .abandon-receipt .reason { margin-bottom: var(--space-2); }

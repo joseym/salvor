@@ -81,7 +81,7 @@
   --anchor-blue:    #24406b;   /* writing-ink blue, not framework blue */
   --anchor-success: #1f5130;
   --anchor-warn:    #b47607;   /* amber stays the human-attention colour */
-  --anchor-danger:  #9e2b24;   /* red stays the failure colour */
+  --anchor-danger:  #9e2b24;   /* red stays the failure colour — and destructive actions (owner call, 2026-07-20) */
 
   /* --- Light: paper and ink. --- */
   --bg:            var(--anchor-paper);
@@ -114,6 +114,12 @@
   --success: var(--anchor-success);
   --warn:    var(--anchor-warn);
   --danger:  var(--anchor-danger);
+  /* the destructive-action fill (owner call, 2026-07-20): same on-color / hover / active shape as
+     --accent's, mixed from --anchor-danger instead — a filled danger button (abandon's confirm step)
+     needs the same three states a filled accent button does. */
+  --danger-on:      var(--anchor-paper);
+  --danger-hover:   color-mix(in oklab, var(--anchor-danger), var(--anchor-ink) 28%);
+  --danger-active:  color-mix(in oklab, var(--anchor-danger), var(--anchor-ink) 45%);
 
   /* the three parked states */
   --amber:           var(--warn);
@@ -168,6 +174,8 @@
   --dk-success: color-mix(in oklab, var(--anchor-success), var(--anchor-paper) 54%);
   --dk-warn:    color-mix(in oklab, var(--anchor-warn), var(--anchor-paper) 26%);
   --dk-danger:  color-mix(in oklab, var(--anchor-danger), var(--anchor-paper) 50%);
+  --dk-danger-hover:  color-mix(in oklab, var(--anchor-danger), var(--anchor-paper) 54%);
+  --dk-danger-active: color-mix(in oklab, var(--anchor-danger), var(--anchor-paper) 28%);
   --dk-amber-ink:       color-mix(in oklab, var(--dk-warn), var(--anchor-paper) 30%);
   --dk-amber-wash:      color-mix(in oklab, var(--dk-warn), var(--dk-bg) 86%);
   --dk-amber-row:       color-mix(in oklab, var(--dk-warn), var(--dk-bg) 93%);
@@ -217,6 +225,9 @@
   --success: var(--dk-success);
   --warn: var(--dk-warn);
   --danger: var(--dk-danger);
+  --danger-on: var(--dk-bg);
+  --danger-hover: var(--dk-danger-hover);
+  --danger-active: var(--dk-danger-active);
   --amber-ink: var(--dk-amber-ink);
   --amber-wash: var(--dk-amber-wash);
   --amber-row: var(--dk-amber-row);
