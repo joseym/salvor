@@ -23,12 +23,34 @@ describe('Inbox', () => {
     vi.unstubAllGlobals();
   });
 
+  /**
+   * Poll (bounded, real-timer via `vi.waitFor`) until `condition` is true, running change
+   * detection on every attempt. The mocked `fetch()`'s promise chain — fetch resolution, the
+   * real `Response` body read, `JSON.parse`, the signal write, the zoneless render — takes a
+   * number of microtask hops that is NOT a fixed constant: it depends on the Node/undici/Angular
+   * versions in play and, empirically, grows under CPU contention (many worker threads/files
+   * competing for the event loop lengthen exactly the internal stream-buffering hops that decide
+   * how many `.then()`s the chain needs). A fixed `for (let i = 0; i < N; i++) await
+   * Promise.resolve()` loop bakes in a guess at that hop count; under load the guess undercounts
+   * and the assertion below sees stale (pre-fetch) DOM. Waiting on the actual condition — never a
+   * tick count — is the only version of this that is true regardless of how many hops the chain
+   * happens to need on a given run.
+   */
+  async function settle(
+    fixture: { whenStable(): Promise<void>; detectChanges(): void },
+    condition: () => boolean,
+  ): Promise<void> {
+    await fixture.whenStable();
+    await vi.waitFor(() => {
+      fixture.detectChanges();
+      if (!condition()) throw new Error('condition not yet true');
+    });
+  }
+
   async function mount() {
     const fixture = TestBed.createComponent(Inbox);
     fixture.detectChanges();
-    await fixture.whenStable();
-    for (let i = 0; i < 5; i++) await Promise.resolve();
-    fixture.detectChanges();
+    await settle(fixture, () => fixture.componentInstance.listLoaded());
     return fixture;
   }
 
@@ -110,10 +132,7 @@ describe('Inbox', () => {
 
     const form = el.querySelector('form[data-raise]') as HTMLFormElement;
     form.dispatchEvent(new Event('submit', { cancelable: true }));
-    await fixture.whenStable();
-    for (let i = 0; i < 10; i++) await Promise.resolve();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    fixture.detectChanges();
+    await settle(fixture, () => el.querySelector('form.committed') !== null);
 
     // the receipt is still on screen: neither the loading-note swap (listLoaded must be sticky)
     // nor the live re-filter (shownCards pins id+kind) may destroy the committed card
@@ -152,9 +171,7 @@ describe('Inbox', () => {
       }),
     );
     (el.querySelector('[data-evidence]') as HTMLButtonElement).click();
-    await fixture.whenStable();
-    for (let i = 0; i < 5; i++) await Promise.resolve();
-    fixture.detectChanges();
+    await settle(fixture, () => el.querySelector('#inbox-panel pre') !== null);
 
     expect(panel.hidden).toBe(false);
     expect((el.querySelector('[data-evidence]') as HTMLElement).getAttribute('aria-pressed')).toBe('true');

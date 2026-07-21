@@ -35,10 +35,15 @@ export class AgentRegistryService {
   private readonly inFlight = new Map<string, Promise<void>>();
 
   /**
-   * Kick off resolution for every hash not yet attempted. Fire-and-forget: callers read the
-   * result back off {@link names} as it fills in, rather than awaiting this call.
+   * Kick off resolution for every hash not yet attempted. Production callers still treat this as
+   * fire-and-forget — they read the result back off {@link names} as it fills in, never awaiting
+   * this call — but it returns a promise (of just this call's newly-started lookups; an
+   * already-attempted or already-in-flight hash contributes nothing to it) so a caller that DOES
+   * need to know when the work is actually done (a test, principally) has a genuine signal to
+   * await instead of guessing how many microtask ticks the fetch-mock's promise chain needs.
    */
-  resolve(hashes: readonly string[]): void {
+  resolve(hashes: readonly string[]): Promise<void> {
+    const started: Promise<void>[] = [];
     for (const hash of hashes) {
       if (this.attempted.has(hash) || this.inFlight.has(hash)) continue;
       const attempt = this.lookup(hash).finally(() => {
@@ -46,7 +51,9 @@ export class AgentRegistryService {
         this.inFlight.delete(hash);
       });
       this.inFlight.set(hash, attempt);
+      started.push(attempt);
     }
+    return Promise.all(started).then(() => undefined);
   }
 
   private async lookup(hash: string): Promise<void> {

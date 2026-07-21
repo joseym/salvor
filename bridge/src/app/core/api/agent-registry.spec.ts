@@ -26,10 +26,6 @@ describe('AgentRegistryService', () => {
     vi.unstubAllGlobals();
   });
 
-  async function flush(): Promise<void> {
-    for (let i = 0; i < 5; i++) await Promise.resolve();
-  }
-
   it('resolves a JSON-format definition carrying a top-level name', async () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse({
@@ -40,8 +36,7 @@ describe('AgentRegistryService', () => {
     );
     const service = TestBed.inject(AgentRegistryService);
 
-    service.resolve(['sha256:abc123']);
-    await flush();
+    await service.resolve(['sha256:abc123']);
 
     expect(service.names().get('sha256:abc123')).toBe('support-triage');
   });
@@ -56,8 +51,7 @@ describe('AgentRegistryService', () => {
     );
     const service = TestBed.inject(AgentRegistryService);
 
-    service.resolve(['sha256:def456']);
-    await flush();
+    await service.resolve(['sha256:def456']);
 
     expect(service.names().has('sha256:def456')).toBe(false);
   });
@@ -72,8 +66,7 @@ describe('AgentRegistryService', () => {
     );
     const service = TestBed.inject(AgentRegistryService);
 
-    service.resolve(['sha256:aaa111']);
-    await flush();
+    await service.resolve(['sha256:aaa111']);
 
     expect(service.names().has('sha256:aaa111')).toBe(false);
   });
@@ -87,8 +80,11 @@ describe('AgentRegistryService', () => {
     );
     const service = TestBed.inject(AgentRegistryService);
 
-    expect(() => service.resolve(['sha256:zzz999'])).not.toThrow();
-    await flush();
+    let pending!: Promise<void>;
+    expect(() => {
+      pending = service.resolve(['sha256:zzz999']);
+    }).not.toThrow();
+    await pending;
 
     expect(service.names().has('sha256:zzz999')).toBe(false);
   });
@@ -103,12 +99,10 @@ describe('AgentRegistryService', () => {
     );
     const service = TestBed.inject(AgentRegistryService);
 
-    service.resolve(['sha256:cached1']);
-    await flush();
+    await service.resolve(['sha256:cached1']);
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
-    service.resolve(['sha256:cached1']);
-    await flush();
+    await service.resolve(['sha256:cached1']);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(service.names().get('sha256:cached1')).toBe('daily-digest');
   });
@@ -123,8 +117,7 @@ describe('AgentRegistryService', () => {
     });
     const service = TestBed.inject(AgentRegistryService);
 
-    service.resolve(['sha256:one', 'sha256:two', 'sha256:three']);
-    await flush();
+    await service.resolve(['sha256:one', 'sha256:two', 'sha256:three']);
 
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(service.names().get('sha256:one')).toBe('agent-sha256:one');
