@@ -252,6 +252,71 @@ bridge-abandon-action { display: contents; }
 .abandon-slot.is-open { grid-template-rows: 1fr; }
 .abandon-slot > div { overflow: hidden; min-height: 0; }
 
+/* THE CONFIRM'S OWN ENTRANCE (owner ask, 2026-07-21: "on first click of the abandon button we
+   should animate in the secondary actions/confirm" — judged against the reveal above and refined).
+   The track transition above already grows the slot from zero to the content's real height; on its
+   own that read as one flat pop — the text was simply THERE the instant the track had room for it.
+   This gives the content ITS OWN small motion on top, the same fade + 4px rise the app's other
+   entrances use (inspector.css's PANEL MOTION block, off the cpanel/cpanel-tab pair this component's
+   focus hand-off already mirrors — see abandon-action.ts's openConfirm comment), staggered to begin
+   only AFTER the track finishes opening (`transition-delay: var(--motion-base)`) rather than racing
+   it — track opens, THEN its contents settle in, reading as one sequence instead of a single flat
+   pop. `@starting-style` supplies the from-state for the confirm/receipt div, which is a genuinely
+   FRESH node every time (abandon-action.html's `@if`/`@else if` mounts and unmounts it — it is never
+   merely toggled via `[hidden]` the way cpanel is), so this is the same @starting-style mechanism,
+   applied to a newly-inserted node rather than a display-none-to-block one. Reduced motion collapses
+   both this transition and the track's to the same near-zero token, so nothing here needs its own
+   media query. Exit is untouched: cancel or a receipt landing removes this specific div in the same
+   change-detection pass that starts the track's own collapse, so there is nothing left to fade out
+   by the time a frame paints it — the content simply vanishes as the track visibly shrinks around
+   it, the same as before this change. */
+.abandon-slot > div {
+  transition:
+    opacity var(--motion-base) var(--ease-standard) var(--motion-base),
+    translate var(--motion-base) var(--ease-standard) var(--motion-base);
+}
+@starting-style {
+  .abandon-slot > div {
+    opacity: 0;
+    translate: 0 var(--space-1);
+  }
+}
+
+/* THE HUSK'S EXIT (owner ask, 2026-07-21): inbox.html wraps every rendered card — parked and
+   stalled alike — in this element. Inert by default: `grid-template-rows: 1fr`, full opacity, and
+   the SAME `margin-bottom` `.acard` already carries standalone, just moved here so the collapse
+   below can reach a true zero (`.acard`'s own margin is zeroed only INSIDE this wrapper, below — a
+   card mounted standalone, as every component spec in this feature does, is unaffected and keeps
+   its own margin exactly as before). The same padding-vs-margin reasoning `.abandon-slot` documents
+   above applies here at the whole-card scale: a margin left on the collapsing box itself would
+   survive a `0fr` track as a visible sliver.
+   `.is-leaving` (an abandon receipt's own "Done" — see inbox.ts's `onAbandonRetire`) collapses the
+   row height, fades it, and zeroes its own margin, all on the same `--motion-base` transition — the
+   reveal idiom (`.abandon-slot`'s 0fr → 1fr) reversed. `.acard-exit > *`'s `overflow: hidden` is
+   what lets the row's automatic minimum size reach zero, the same requirement `.abandon-slot`
+   documents above — an exact collapse, never a max-height guess. `onAbandonExitDone` (inbox.ts)
+   removes the run id — actually dropping the card — only once this transition's OWN `transitionend`
+   genuinely fires, never a guessed timer. Reduced motion collapses the duration to the same
+   near-zero token as everything else in the app; the event still fires, just effectively instantly,
+   so this needs no separate media query. */
+.acard-exit {
+  display: grid;
+  grid-template-rows: 1fr;
+  margin-bottom: var(--space-4);
+  opacity: 1;
+  transition:
+    grid-template-rows var(--motion-base) var(--ease-standard),
+    opacity var(--motion-base) var(--ease-standard),
+    margin-bottom var(--motion-base) var(--ease-standard);
+}
+.acard-exit > * { overflow: hidden; min-height: 0; }
+.acard-exit .acard { margin-bottom: 0; }
+.acard-exit.is-leaving {
+  grid-template-rows: 0fr;
+  opacity: 0;
+  margin-bottom: 0;
+}
+
 /* ── the effect badge (reconciliation card's evidence row) ────────────── */
 .badge {
   display: inline-block; padding: 1px var(--space-2);

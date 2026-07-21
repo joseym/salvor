@@ -141,6 +141,50 @@ describe('AbandonAction — the retire affordance', () => {
     expect(honesty.textContent).toContain('unresolved');
   });
 
+  it('emits receipted the instant the receipt lands, BEFORE committed — the parent must be able to pin before the commit-triggered refresh lands', async () => {
+    fetchMock.mockResolvedValueOnce(abandonResponse());
+    const fixture = mount('primary');
+    const order: string[] = [];
+    fixture.componentInstance.receipted.subscribe(() => order.push('receipted'));
+    fixture.componentInstance.committed.subscribe(() => order.push('committed'));
+    const el = fixture.nativeElement as HTMLElement;
+    (el.querySelector('[data-abandon]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    (el.querySelector('[data-abandon-understand]') as HTMLInputElement).click();
+    fixture.detectChanges();
+    (el.querySelector('[data-abandon-submit]') as HTMLButtonElement).click();
+    await flush();
+
+    expect(order).toEqual(['receipted', 'committed']);
+  });
+
+  it('the receipt carries an explicit "Done" dismiss, never a timer, which emits retire and nothing else (this component never removes or animates its own card)', async () => {
+    fetchMock.mockResolvedValueOnce(abandonResponse());
+    const fixture = mount('primary');
+    let retired = 0;
+    fixture.componentInstance.retire.subscribe(() => retired++);
+    const el = fixture.nativeElement as HTMLElement;
+    (el.querySelector('[data-abandon]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    (el.querySelector('[data-abandon-understand]') as HTMLInputElement).click();
+    fixture.detectChanges();
+    (el.querySelector('[data-abandon-submit]') as HTMLButtonElement).click();
+    await flush();
+    fixture.detectChanges();
+
+    const done = el.querySelector('[data-abandon-done]') as HTMLButtonElement;
+    expect(done, 'the receipt offers an explicit dismiss').toBeTruthy();
+    expect(done.textContent?.trim()).toBe('Done');
+    // the receipt itself is untouched by dismissing — this component never destroys its own record;
+    // the parent decides whether/how to fold the card away.
+    expect(el.querySelector('[data-abandon-receipt]'), 'the receipt is still rendered after Done').toBeTruthy();
+
+    done.click();
+    fixture.detectChanges();
+    expect(retired).toBe(1);
+    expect(el.querySelector('[data-abandon-receipt]'), 'still not destroyed — that is the parent\'s call').toBeTruthy();
+  });
+
   it('emits announce and committed after a successful abandon', async () => {
     fetchMock.mockResolvedValueOnce(abandonResponse());
     const fixture = mount('primary');

@@ -37,6 +37,11 @@
         </p>
       }
       <div class="actions">
+        <!-- Explicit dismiss, never a timer: nothing else in this app auto-vanishes (see
+             app.css's .intro-strip dismiss for the same idiom), and abandonment is a one-time,
+             sacred receipt — a quiet acknowledgement the operator gives once they've read it. The
+             parent folds the whole card away on this; see stalled-card.ts / inbox.ts. -->
+        <button class="btn ghost" type="button" (click)="dismiss()" data-abandon-done>Done</button>
         <span class="endpoint">{{ endpoint() }}</span>
       </div>
     </div>

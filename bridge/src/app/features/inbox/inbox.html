@@ -37,48 +37,70 @@
           </div>
         } @else {
           @for (c of parked(); track c.row.run) {
-            @switch (c.kind) {
-              @case ('suspension') {
-                <bridge-suspension-card
-                  [row]="c.row"
-                  [evidencePressed]="evidenceSel() === c.row.run"
-                  (announce)="onAnnounce($event)"
-                  (committed)="onCommitted()"
-                  (evidence)="onEvidence(c.row.run)"
-                />
+            <!-- THE HUSK'S EXIT wrapper (see inbox.ts): inert for every card kind except an abandon
+                 that has been dismissed, at which point `.is-leaving` collapses it (grid-rows +
+                 opacity + margin, the reveal idiom reversed) and `onAbandonExitDone` drops the run
+                 id once the collapse genuinely finishes (its own `transitionend`, never a timer). -->
+            <div
+              class="acard-exit"
+              [class.is-leaving]="isAbandonLeaving(c.row.run)"
+              (transitionend)="onAbandonExitDone(c.row.run)"
+            >
+              @switch (c.kind) {
+                @case ('suspension') {
+                  <bridge-suspension-card
+                    [row]="c.row"
+                    [evidencePressed]="evidenceSel() === c.row.run"
+                    (announce)="onAnnounce($event)"
+                    (committed)="onCommitted()"
+                    (evidence)="onEvidence(c.row.run)"
+                    (retire)="onAbandonRetire(c.row.run)"
+                  />
+                }
+                @case ('budget') {
+                  <bridge-budget-card
+                    [row]="c.row"
+                    [evidencePressed]="evidenceSel() === c.row.run"
+                    (announce)="onAnnounce($event)"
+                    (committed)="onCommitted()"
+                    (evidence)="onEvidence(c.row.run)"
+                    (retire)="onAbandonRetire(c.row.run)"
+                  />
+                }
+                @case ('reconcile') {
+                  <bridge-reconcile-card
+                    [row]="c.row"
+                    [evidencePressed]="evidenceSel() === c.row.run"
+                    (announce)="onAnnounce($event)"
+                    (committed)="onCommitted()"
+                    (evidence)="onEvidence(c.row.run)"
+                    (retire)="onAbandonRetire(c.row.run)"
+                  />
+                }
               }
-              @case ('budget') {
-                <bridge-budget-card
-                  [row]="c.row"
-                  [evidencePressed]="evidenceSel() === c.row.run"
-                  (announce)="onAnnounce($event)"
-                  (committed)="onCommitted()"
-                  (evidence)="onEvidence(c.row.run)"
-                />
-              }
-              @case ('reconcile') {
-                <bridge-reconcile-card
-                  [row]="c.row"
-                  [evidencePressed]="evidenceSel() === c.row.run"
-                  (announce)="onAnnounce($event)"
-                  (committed)="onCommitted()"
-                  (evidence)="onEvidence(c.row.run)"
-                />
-              }
-            }
+            </div>
           }
           <!-- STALLED cards, live-derived (see inbox.ts): a running run with no driver attached. No
                commit, so no receipt and no permanence — the card drops out the moment a driver
                reattaches. Its action is external (restart a host process), so it carries guidance
-               and a link to the run, never a fix button. -->
+               and a link to the run, never a fix button. An abandon receipt pins it instead (see
+               `abandonPinned`), until the same fold-away exit above drops it. -->
           @for (r of stalled(); track r.run) {
-            <bridge-stalled-card
-              [row]="r"
-              [evidencePressed]="evidenceSel() === r.run"
-              (announce)="onAnnounce($event)"
-              (committed)="onCommitted()"
-              (evidence)="onEvidence(r.run)"
-            />
+            <div
+              class="acard-exit"
+              [class.is-leaving]="isAbandonLeaving(r.run)"
+              (transitionend)="onAbandonExitDone(r.run)"
+            >
+              <bridge-stalled-card
+                [row]="r"
+                [evidencePressed]="evidenceSel() === r.run"
+                (announce)="onAnnounce($event)"
+                (committed)="onCommitted()"
+                (evidence)="onEvidence(r.run)"
+                (receipted)="onAbandonReceipted(r.run)"
+                (retire)="onAbandonRetire(r.run)"
+              />
+            </div>
           }
         }
       </div>

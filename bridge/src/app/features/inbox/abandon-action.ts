@@ -28,6 +28,15 @@ import { shortId } from './inbox-model';
  * needs-reconciliation run is allowed, but it never claims the write question was answered. The
  * server records the outstanding intent as `unresolved_write` on the terminal event; when the
  * receipt carries it back, the honesty line names it.
+ *
+ * THE HUSK'S EXIT (owner ask, 2026-07-21): landing a receipt and dismissing it are reported upward
+ * as two distinct events — `receipted` (the instant the receipt lands) and `retire` (the operator's
+ * explicit "Done") — because this component has no idea whether its host card is disposable once
+ * abandoned. The Stalled card's whole reason for being is subsumed by the abandon it just committed,
+ * so its parent pins it against `committed`'s own list refresh, then folds the WHOLE card away on
+ * `retire`; the reconcile/budget/suspension cards do the same for consistency, folding away the form
+ * they no longer need once its abandon is acknowledged. This component itself never removes or
+ * animates anything — it only ever renders its own trigger/confirm/receipt, same as before.
  */
 @Component({
   selector: 'bridge-abandon-action',
@@ -46,6 +55,17 @@ export class AbandonAction {
 
   readonly announce = output<string>();
   readonly committed = output<void>();
+  /** Fired the instant the receipt lands (inside `submit()`, the same moment `committed` fires) —
+   * the parent's cue to PIN this card against a live re-derivation a `committed`-triggered refresh
+   * is about to cause (see inbox.ts's `onAbandonReceipted`). A stalled card in particular is
+   * normally derived fresh from every list load with nothing of its own to hold it in place; without
+   * this, the refresh reclassifies the just-abandoned run as terminal and the card is yanked out
+   * from under the receipt the operator is still reading. */
+  readonly receipted = output<void>();
+  /** Fired by the receipt's own "Done" — the operator's explicit acknowledgement that they have read
+   * it (see the class doc's EXIT note below). The parent folds its card away and unpins it; this
+   * component does not animate or remove anything itself; it only reports the operator's request. */
+  readonly retire = output<void>();
 
   readonly ns = computed(() => shortId(this.row().run));
   readonly endpoint = computed(() => `POST /v1/runs/${this.ns()}…/abandon`);
@@ -96,11 +116,23 @@ export class AbandonAction {
       this.announce.emit(
         `Abandoned run ${this.ns()}. Appended RunAbandoned at sequence ${seq}. Status now ${result.status.state}.`,
       );
+      // receipted BEFORE committed: the parent must be pinned before the commit-triggered refresh
+      // that could otherwise reclassify (and yank) this card lands.
+      this.receipted.emit();
       this.committed.emit();
     } catch (ex) {
       this.error.set(errorMessage(ex));
     } finally {
       this.submitting.set(false);
     }
+  }
+
+  /** THE HUSK'S EXIT (owner ask, 2026-07-21): the receipt is sacred and never auto-vanishes — the
+   * operator dismisses it explicitly, once they have read it, exactly the idiom the app's own
+   * dismiss-then-reopen affordance already uses (app.css's `.intro-strip`/`.intro-x`: nothing in
+   * this app quietly disappears on a timer). Just reports the request upward; the parent owns the
+   * fold-away animation and the actual removal from its list. */
+  dismiss(): void {
+    this.retire.emit();
   }
 }

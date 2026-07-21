@@ -141,6 +141,99 @@ describe('Inbox', () => {
     expect(el.querySelector('.state.all-clear')).toBeNull();
   });
 
+  it('THE HUSK\'S EXIT: a stalled card\'s abandon receipt is PINNED against the commit-triggered refresh, then folds away only once dismissed and its exit transition genuinely finishes', async () => {
+    const stalledRun = (state: string) => ({
+      run: 'r-stalled',
+      status: { state },
+      event_count: 1,
+      driver: 'none',
+      last_recorded_at: '2020-01-01T00:00:00Z', // ages out well past the stall grace
+    });
+    // initial load: one stalled run (running + driver:none + stale)
+    fetchMock.mockResolvedValueOnce(jsonResponse({ runs: [stalledRun('running')] }));
+    const fixture = await mount();
+    const el = fixture.nativeElement as HTMLElement;
+    expect(el.querySelector('[data-stalled="r-stalled"]'), 'the stalled card renders').toBeTruthy();
+
+    // open the confirm, check the box, submit
+    (el.querySelector('[data-abandon="r-stalled"]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    (el.querySelector('[data-abandon-understand]') as HTMLInputElement).click();
+    fixture.detectChanges();
+
+    fetchMock
+      // POST /abandon
+      .mockResolvedValueOnce(
+        jsonResponse({ run: 'r-stalled', abandoned: true, appended_seq: 9, status: { state: 'abandoned' } }),
+      )
+      // onCommitted -> RunsService.refresh(): the run is now terminal, no longer derivable as stalled
+      .mockResolvedValueOnce(jsonResponse({ runs: [stalledRun('abandoned')] }));
+
+    (el.querySelector('[data-abandon-submit]') as HTMLButtonElement).click();
+    await settle(fixture, () => el.querySelector('[data-abandon-receipt]') !== null);
+
+    // PINNED: the receipt survived the post-commit refresh that reclassified the run as terminal —
+    // the old bug was exactly this card vanishing the instant that refresh landed.
+    expect(el.querySelector('[data-stalled="r-stalled"]'), 'the card is still present, pinned').toBeTruthy();
+    expect(el.querySelector('[data-abandon-receipt]')?.textContent).toContain('Appended RunAbandoned at seq 9');
+    // the stale "no driver attached" evidence is gone, replaced by the compact receipt-only body
+    expect(el.querySelector('[data-stalled-headline]'), 'the stale headline is hidden once abandoned').toBeNull();
+
+    const wrapper = el.querySelector('[data-stalled="r-stalled"]')!.closest('.acard-exit') as HTMLElement;
+    expect(wrapper, 'the card is wrapped for its fold-away exit').toBeTruthy();
+    expect(wrapper.classList.contains('is-leaving'), 'not leaving until dismissed').toBe(false);
+
+    // dismiss ("Done"): starts the fold-away, but the card is NOT yet removed — only the CSS class
+    // is applied; removal waits for the exit transition's own transitionend.
+    (el.querySelector('[data-abandon-done]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    expect(wrapper.classList.contains('is-leaving'), 'the fold-away starts on Done').toBe(true);
+    expect(el.querySelector('[data-stalled="r-stalled"]'), 'still present mid-exit').toBeTruthy();
+
+    // the exit transition genuinely finishes — never a guessed timer
+    wrapper.dispatchEvent(new Event('transitionend', { bubbles: true }));
+    fixture.detectChanges();
+    expect(el.querySelector('[data-stalled="r-stalled"]'), 'dropped once the exit finishes').toBeNull();
+  });
+
+  it('a PARKED card\'s abandon receipt (secondary variant) folds the whole card away on dismiss, same as the stalled card', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        runs: [
+          { run: 'r-susp', status: { state: 'suspended', reason: 'x', input_schema: { properties: {} } }, event_count: 1 },
+        ],
+      }),
+    );
+    const fixture = await mount();
+    const el = fixture.nativeElement as HTMLElement;
+    expect(el.querySelector('form[data-resume="r-susp"]')).toBeTruthy();
+
+    (el.querySelector('[data-abandon="r-susp"]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    (el.querySelector('[data-abandon-understand]') as HTMLInputElement).click();
+    fixture.detectChanges();
+
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ run: 'r-susp', abandoned: true, appended_seq: 2, status: { state: 'abandoned' } }),
+    );
+    // onCommitted -> RunsService.refresh(): a suspension card is permanent via shownCards regardless,
+    // so no second GET is even required for it to survive — but the refresh still happens.
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ runs: [{ run: 'r-susp', status: { state: 'abandoned' }, event_count: 2 }] }),
+    );
+    (el.querySelector('[data-abandon-submit]') as HTMLButtonElement).click();
+    await settle(fixture, () => el.querySelector('[data-abandon-receipt]') !== null);
+    expect(el.querySelector('form[data-resume="r-susp"]'), 'the card survives the refresh').toBeTruthy();
+
+    const wrapper = el.querySelector('form[data-resume="r-susp"]')!.closest('.acard-exit') as HTMLElement;
+    (el.querySelector('[data-abandon-done]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+    expect(wrapper.classList.contains('is-leaving')).toBe(true);
+    wrapper.dispatchEvent(new Event('transitionend', { bubbles: true }));
+    fixture.detectChanges();
+    expect(el.querySelector('form[data-resume="r-susp"]'), 'the whole parked card folds away too').toBeNull();
+  });
+
   it('the Evidence panel is COLLAPSED on cold load (tab visible), opens on a card Evidence click with a fresh GET, and never disturbs the cards', async () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse({

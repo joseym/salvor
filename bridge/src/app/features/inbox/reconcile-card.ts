@@ -64,6 +64,11 @@ export class ReconcileCard implements OnInit {
   readonly committed = output<void>();
   /** READ, never act: asks the parent to show this run's recorded evidence in the side panel. */
   readonly evidence = output<void>();
+  /** Forwarded from the embedded (secondary) abandon-action's receipt "Done" — an abandon here
+   * retires the run without resolving it, so the parent folds this whole card away, the same
+   * treatment the Stalled card's abandon receipt gets (see stalled-card.ts's EXIT note). The card's
+   * OWN resolve receipt is untouched — it keeps its existing, permanent `.committed` treatment. */
+  readonly retire = output<void>();
 
   readonly ns = computed(() => shortId(this.row().run));
   readonly endpoint = computed(() => `POST /v1/runs/${this.ns()}…/resolve`);

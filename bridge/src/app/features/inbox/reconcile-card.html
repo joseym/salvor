@@ -166,6 +166,7 @@
       [reconcile]="true"
       (announce)="announce.emit($event)"
       (committed)="committed.emit()"
+      (retire)="retire.emit()"
     />
   } @else if (loadError()) {
     <div class="acard-head">

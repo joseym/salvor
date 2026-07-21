@@ -95,18 +95,27 @@ export class Inbox {
   });
 
   /**
-   * The STALLED cards, derived LIVE from each list load — never sticky. A stalled run has no commit
-   * and so no receipt to pin in place (see {@link StalledCard}): if its driver reattaches and it
-   * resumes moving, {@link derivedStatus} stops returning `stalled` for it on the next refresh and
-   * its card simply drops out. That is the opposite of {@link shownCards}, which grows and never
-   * shrinks precisely to protect a written receipt. Kept apart from `parked` for exactly that
-   * reason — the two obey opposite permanence rules.
+   * The STALLED cards, LIVE from each list load, PLUS any run id currently pinned by
+   * {@link abandonPinned} — a stall used to have no commit and so nothing to protect (see
+   * {@link StalledCard}'s history); it now does, once its abandon-action's receipt lands. Without
+   * the pinned union, the moment abandoning it re-derives the list, {@link derivedStatus} stops
+   * returning `stalled` for the now-terminal run and the card carrying the still-unread receipt
+   * would vanish out from under the operator. A driver reattaching (the ORIGINAL reason this stayed
+   * live rather than sticky) still drops the card the instant it happens, exactly as before — that
+   * path never pins anything.
    */
   readonly stalled = computed<RunSummary[]>(() => {
     const now = Date.now();
-    return this.runsService
-      .runs()
-      .filter((r) => derivedStatus(r.status.state, r.driver, r.lastRecordedAt, now) === 'stalled');
+    const rows = this.runsService.runs();
+    const byId = new Map(rows.map((r) => [r.run, r] as const));
+    const live = rows.filter((r) => derivedStatus(r.status.state, r.driver, r.lastRecordedAt, now) === 'stalled');
+    const seen = new Set(live.map((r) => r.run));
+    for (const id of this.abandonPinned()) {
+      if (seen.has(id)) continue;
+      const row = byId.get(id);
+      if (row) live.push(row);
+    }
+    return live;
   });
 
   /** Whether the Inbox has anything to show — a commit card or a stalled card. Drives the empty
@@ -116,6 +125,65 @@ export class Inbox {
   /** Announced to `role="status" aria-live="polite"` — every commit, and nothing else, so the
    * region does not chatter on every unrelated re-render. */
   readonly liveMessage = signal('');
+
+  /**
+   * THE HUSK'S EXIT (owner ask, 2026-07-21). Two signals drive an abandon receipt's own lifecycle,
+   * on top of (and orthogonal to) `shownCards`'s permanence rule:
+   *
+   *   - `abandonPinned`: run ids whose abandon receipt has landed but not yet been dismissed. Only
+   *     a STALLED run needs this to survive at all (see `stalled`'s doc comment above) — a parked
+   *     card is already permanent via `shownCards` — but the set is shared by both families so one
+   *     mechanism drives the fold-away wrapper class for every card kind.
+   *   - `abandonLeaving`: run ids currently PLAYING the fold-away exit (the CSS class is applied in
+   *     inbox.html); removed from view only once the transition genuinely finishes
+   *     (`onAbandonExitDone`, fired by the wrapper's own `transitionend` — never a guessed timer,
+   *     the same discipline the reveal side of this mechanism already follows).
+   */
+  private readonly abandonPinned = signal<ReadonlySet<string>>(new Set());
+  private readonly abandonLeaving = signal<ReadonlySet<string>>(new Set());
+
+  /** True while `runId`'s card is playing its fold-away exit — drives `.is-leaving` on its wrapper. */
+  isAbandonLeaving(runId: string): boolean {
+    return this.abandonLeaving().has(runId);
+  }
+
+  /** The abandon-action's `receipted`: pin this run id so a STALLED card's live re-derivation (about
+   * to be triggered by the `committed` this always fires alongside) cannot yank it out from under
+   * the receipt. Harmless no-op significance for a parked card — already permanent — but pinning it
+   * too keeps one mechanism for both families. */
+  onAbandonReceipted(runId: string): void {
+    this.abandonPinned.update((s) => new Set(s).add(runId));
+  }
+
+  /** The abandon receipt's own "Done": start the fold-away. Actual removal waits for
+   * `onAbandonExitDone`, so the exit is seen, never guessed at with a timer. */
+  onAbandonRetire(runId: string): void {
+    this.abandonLeaving.update((s) => new Set(s).add(runId));
+  }
+
+  /** The wrapper's `transitionend` has fired — the fold-away has genuinely finished. Drop the run id
+   * from every set that was keeping its card around: `shownCards` (for a parked card; a no-op if it
+   * was never there — a stalled run alone), and both of the sets above. `stalled`/`parked` then
+   * exclude it on their own on the next read — no separate "remove the card" call needed. */
+  onAbandonExitDone(runId: string): void {
+    if (!this.abandonLeaving().has(runId)) return; // stray/duplicate transitionend — already handled
+    this.abandonLeaving.update((s) => {
+      const next = new Set(s);
+      next.delete(runId);
+      return next;
+    });
+    this.abandonPinned.update((s) => {
+      const next = new Set(s);
+      next.delete(runId);
+      return next;
+    });
+    this.shownCards.update((m) => {
+      if (!m.has(runId)) return m;
+      const next = new Map(m);
+      next.delete(runId);
+      return next;
+    });
+  }
 
   constructor() {
     void this.load();

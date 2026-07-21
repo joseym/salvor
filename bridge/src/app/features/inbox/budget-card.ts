@@ -42,6 +42,11 @@ export class BudgetCard {
   readonly committed = output<void>();
   /** READ, never act: asks the parent to show this run's recorded evidence in the side panel. */
   readonly evidence = output<void>();
+  /** Forwarded from the embedded (secondary) abandon-action's receipt "Done" — an abandon here
+   * retires the run, so the parent folds this whole card away, the same treatment the Stalled
+   * card's abandon receipt gets (see stalled-card.ts's EXIT note). The card's OWN raise-and-resume
+   * receipt is untouched — it keeps its existing, permanent `.committed` treatment. */
+  readonly retire = output<void>();
 
   readonly ns = computed(() => shortId(this.row().run));
   readonly budget = computed<BudgetInfo | undefined>(() => parseBudgetInfo(this.row().status.raw));
