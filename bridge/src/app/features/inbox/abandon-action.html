@@ -1,77 +1,89 @@
-<!-- The shared "retire this run" affordance. Three states: the receipt (once abandoned), the confirm
-     block (once the trigger is opened), or the trigger itself. Nothing here sets a status by hand —
-     the receipt reads the server's re-derived status straight off the abandon response. -->
-@if (receipt(); as r) {
-  <div class="abandon-receipt" data-abandon-receipt>
-    <p class="reason">
-      <b>Appended RunAbandoned at seq {{ r.appendedSeq ?? '—' }}.</b>
-      Status now <span class="mono">{{ r.status.state }}</span>. Nothing was edited or re-run; the run is retired.
-    </p>
-    @if (unresolved(); as w) {
-      <!-- The needs-reconciliation honesty, carried back on the receipt: the abandonment recorded the
-           outstanding write rather than claiming it settled. -->
-      <p class="reason" data-abandon-unresolved>
-        The write at seq {{ w.seq }} (<span class="mono">{{ w.tool }}</span>) stays unresolved and is
-        recorded as such; its effect remains unknown.
+<!-- The shared "retire this run" affordance. LAYOUT STABILITY (owner report, 2026-07-21: "when I
+     click abandon things shift"): the trigger below is ALWAYS rendered — it never disappears when
+     the confirm opens, it only swaps to a held look (`.is-held` + `aria-expanded`) — so on the
+     Stalled card, where this trigger is embedded directly in `.actions` beside "Open in inspector"
+     and "show API", those neighbors never reflow. The confirm/receipt content lives in a single
+     `.abandon-slot` sibling that a CSS `order` always sorts LAST in that row regardless of DOM
+     position, so it grows a new line BELOW the row instead of splicing into the middle of it — see
+     inbox.css for the mechanism and the grid-rows reveal. -->
+<button
+  class="btn serious"
+  [class.abandon-secondary]="variant() === 'secondary'"
+  [class.is-held]="open() || !!receipt()"
+  type="button"
+  (click)="openConfirm()"
+  [attr.aria-expanded]="open()"
+  [attr.aria-controls]="'abandon-slot-' + ns()"
+  [attr.data-abandon]="row().run"
+>
+  Abandon run
+</button>
+
+<div class="abandon-slot" [id]="'abandon-slot-' + ns()" [class.is-open]="open() || !!receipt()" data-abandon-slot>
+  <!-- Nothing here sets a status by hand — the receipt reads the server's re-derived status
+       straight off the abandon response. -->
+  @if (receipt(); as r) {
+    <div class="abandon-receipt" data-abandon-receipt>
+      <p class="reason">
+        <b>Appended RunAbandoned at seq {{ r.appendedSeq ?? '—' }}.</b>
+        Status now <span class="mono">{{ r.status.state }}</span>. Nothing was edited or re-run; the run is retired.
       </p>
-    }
-    <div class="actions">
-      <span class="endpoint">{{ endpoint() }}</span>
-    </div>
-  </div>
-} @else if (open()) {
-  <div class="abandon-confirm" data-abandon-confirm>
-    <div class="f-field">
-      <label [attr.for]="'abandon-reason-' + ns()">Reason (optional)</label>
-      <input
-        [id]="'abandon-reason-' + ns()"
-        type="text"
-        [ngModel]="reason()"
-        (ngModelChange)="reason.set($event)"
-        placeholder="e.g. husk is dead forever"
-      />
-    </div>
-    <label class="confirm">
-      <input
-        type="checkbox"
-        [checked]="confirmed()"
-        (change)="confirmed.set($any($event.target).checked)"
-        data-abandon-understand
-      />
-      @if (reconcile()) {
-        <span>
-          I understand this run is retired for good. Its dangling write stays
-          <b>unresolved</b> and is recorded as such — abandoning it does not answer whether the write
-          took effect.
-        </span>
-      } @else {
-        <span>I understand this run is retired for good; nothing is executed and the log is closed.</span>
+      @if (unresolved(); as w) {
+        <!-- The needs-reconciliation honesty, carried back on the receipt: the abandonment recorded
+             the outstanding write rather than claiming it settled. -->
+        <p class="reason" data-abandon-unresolved>
+          The write at seq {{ w.seq }} (<span class="mono">{{ w.tool }}</span>) stays unresolved and is
+          recorded as such; its effect remains unknown.
+        </p>
       }
-    </label>
-    @if (error()) {
-      <p class="f-err" role="alert">{{ error() }}</p>
-    }
-    <div class="actions">
-      <button
-        class="btn serious"
-        type="button"
-        [disabled]="!canSubmit()"
-        (click)="submit()"
-        data-abandon-submit
-      >
-        Abandon run
-      </button>
-      <button class="btn ghost" type="button" (click)="cancel()">Cancel</button>
+      <div class="actions">
+        <span class="endpoint">{{ endpoint() }}</span>
+      </div>
     </div>
-  </div>
-} @else {
-  <button
-    class="btn serious"
-    [class.abandon-secondary]="variant() === 'secondary'"
-    type="button"
-    (click)="openConfirm()"
-    [attr.data-abandon]="row().run"
-  >
-    Abandon run
-  </button>
-}
+  } @else if (open()) {
+    <div class="abandon-confirm" data-abandon-confirm>
+      <div class="f-field">
+        <label [attr.for]="'abandon-reason-' + ns()">Reason (optional)</label>
+        <input
+          [id]="'abandon-reason-' + ns()"
+          type="text"
+          [ngModel]="reason()"
+          (ngModelChange)="reason.set($event)"
+          placeholder="e.g. husk is dead forever"
+        />
+      </div>
+      <label class="confirm">
+        <input
+          type="checkbox"
+          [checked]="confirmed()"
+          (change)="confirmed.set($any($event.target).checked)"
+          data-abandon-understand
+        />
+        @if (reconcile()) {
+          <span>
+            I understand this run is retired for good. Its dangling write stays
+            <b>unresolved</b> and is recorded as such — abandoning it does not answer whether the write
+            took effect.
+          </span>
+        } @else {
+          <span>I understand this run is retired for good; nothing is executed and the log is closed.</span>
+        }
+      </label>
+      @if (error()) {
+        <p class="f-err" role="alert">{{ error() }}</p>
+      }
+      <div class="actions">
+        <button
+          class="btn serious"
+          type="button"
+          [disabled]="!canSubmit()"
+          (click)="submit()"
+          data-abandon-submit
+        >
+          Abandon run
+        </button>
+        <button class="btn ghost" type="button" (click)="cancel()">Cancel</button>
+      </div>
+    </div>
+  }
+</div>

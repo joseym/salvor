@@ -179,8 +179,8 @@ summary.gate-ev-body:focus-visible { outline: 2px solid var(--accent); outline-o
    On the Stalled card, abandon IS the primary — there is no other in-app action to be subordinate
    to — so it takes the full .btn.serious weight AND joins `.actions` directly, first, exactly where
    every other card's primary sits. `display: contents` unwraps the component host so the trigger
-   button (or, once opened, the confirm/receipt block) is a real flex item of that row rather than a
-   nested box fighting its layout.
+   button AND the confirm/receipt slot below it (see the STABLE SLOT comment further down) are real
+   flex items of that row rather than a nested box fighting its layout.
 
    DESTRUCTIVE (owner call, 2026-07-20 — see tokens.css's --anchor-danger comment, the invariant
    this extends): abandon is the one deliberately destructive action in this app, so every render
@@ -194,6 +194,11 @@ summary.gate-ev-body:focus-visible { outline: 2px solid var(--accent); outline-o
    unmistakably red), not the full-weight border the Stalled card's primary wears. */
 .btn.serious[data-abandon].abandon-secondary { border-color: color-mix(in oklab, var(--danger), var(--bg) 25%); }
 .btn.serious[data-abandon].abandon-secondary:hover:not(:disabled) { border-color: var(--danger); background: var(--red-wash); }
+/* the HELD look, once the slot below is open (or the receipt landed): still the same red trigger,
+   in the same place, never disabled (a disabled `.btn` would fall into the generic dashed/faint
+   rule further down and lose the destructive red entirely) — just quietly receded so the eye reads
+   "already engaged" without the geometry, weight, or copy moving at all. */
+.btn.serious[data-abandon].is-held { opacity: 0.72; }
 
 /* the confirm step's final button, behind the "I understand" gate — the point of no return, so it
    takes the full filled-danger weight (the same shape as the filled-accent primary further below,
@@ -204,12 +209,48 @@ summary.gate-ev-body:focus-visible { outline: 2px solid var(--accent); outline-o
 }
 .btn.serious[data-abandon-submit]:hover:not(:disabled) { background: var(--danger-hover); }
 .btn.serious[data-abandon-submit]:active:not(:disabled) { background: var(--danger-active); }
-.acard .abandon-confirm { margin-top: var(--space-4); }
-.acard .abandon-receipt { margin-top: var(--space-3); }
+/* padding-top, not margin-top: the 0fr grid-rows collapse below relies on `.abandon-slot`'s child
+   having NO margin of its own (a margin sits outside the item's box and survives a 0-height row
+   track, which would leave a visible sliver even while "closed"; padding is inside the box and
+   collapses along with it — see the comment on `.abandon-slot` below). */
+.acard .abandon-confirm { padding-top: var(--space-4); }
+.acard .abandon-receipt { padding-top: var(--space-3); }
 .acard .abandon-receipt .reason { margin-bottom: var(--space-2); }
-.actions bridge-abandon-action { display: contents; }
-.actions .abandon-confirm,
-.actions .abandon-receipt { flex: 1 1 100%; margin-top: 0; }
+
+/* Always unwraps the host, in every context this component renders in (the Stalled card's `.actions`
+   row AND every other card's standalone placement below its own `.actions`) — so the trigger and
+   the slot below are real flex/block children of whatever actually contains them, never a nested
+   box fighting that parent's layout. */
+bridge-abandon-action { display: contents; }
+
+/* THE STABLE SLOT (owner report, 2026-07-21: "when I click abandon things shift"). Before this, the
+   confirm/receipt block WAS the component's entire conditional root: opening it removed the trigger
+   from `.actions` outright and dropped a `flex: 1 1 100%` item in its place, so "Open in inspector"
+   and "show API" — the row's other two items — lost their neighbor, slid left to fill the gap, then
+   wrapped onto a new line starting at the row's left edge instead of staying where they were.
+   Now the trigger is ALWAYS present (abandon-action.html never removes it; it only grows `.is-held`)
+   and the confirm/receipt content lives in this single sibling, `order: 1` sorting it LAST in the
+   row's flex sequence no matter where it actually sits in the DOM relative to "Open in inspector"/
+   "show API" (both stay at their default `order: 0`, so — tie-broken by source order — the row's
+   visual sequence is always [trigger, Open in inspector, show API, slot]). `flex-basis: 100%` then
+   forces exactly that slot onto its own new line, full width, below every row-1 item, which never
+   moves. Outside `.actions` (every other card, where this sits alone below its own actions row)
+   these flex properties are simply inert — display:grid already makes it block-level there.
+   The reveal itself is a `grid-template-rows: 0fr -> 1fr` transition, not a max-height guess: it
+   shrinks to the CONTENT's real height on the way in in either direction. The trick only collapses
+   to a true zero if the row's child has `overflow: hidden` (that is what lets its automatic minimum
+   size be 0 instead of content's — see the padding-top note above for the other half of it). Timed
+   off `--motion-base`, so it goes instant for free under the reduced-motion token collapse
+   (tokens.css) — no separate media query needed here. */
+.abandon-slot {
+  order: 1;
+  flex: 1 1 100%;
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--motion-base) var(--ease-standard);
+}
+.abandon-slot.is-open { grid-template-rows: 1fr; }
+.abandon-slot > div { overflow: hidden; min-height: 0; }
 
 /* ── the effect badge (reconciliation card's evidence row) ────────────── */
 .badge {

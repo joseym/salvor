@@ -3,6 +3,7 @@ import { FormsModule } from '@angular/forms';
 import type { AbandonResult, RunSummary } from '@salvor/client';
 
 import { SALVOR_CLIENT, errorMessage } from '../../core/api';
+import { focusWhenRendered } from '../../core/focus';
 import { shortId } from './inbox-model';
 
 /**
@@ -66,12 +67,19 @@ export class AbandonAction {
 
   openConfirm(): void {
     this.open.set(true);
+    // Same hand-off shape as the app's other disclosures (see inbox.ts's cpanel open/close pair):
+    // opening moves focus INTO the revealed slot, onto its first real field — the reason input,
+    // never the checkbox first, since a reason is the lower-commitment thing to consider.
+    focusWhenRendered('#abandon-reason-' + this.ns());
   }
 
   cancel(): void {
     this.open.set(false);
     this.confirmed.set(false);
     this.error.set(undefined);
+    // ...and closing returns focus to the control that opened it, so the operator is never
+    // stranded after the slot they were in collapses back to zero height.
+    focusWhenRendered('[data-abandon="' + this.row().run + '"]');
   }
 
   async submit(): Promise<void> {
