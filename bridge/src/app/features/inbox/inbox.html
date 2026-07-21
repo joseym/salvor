@@ -38,13 +38,14 @@
         } @else {
           @for (c of parked(); track c.row.run) {
             <!-- THE HUSK'S EXIT wrapper (see inbox.ts): inert for every card kind except an abandon
-                 that has been dismissed, at which point `.is-leaving` collapses it (grid-rows +
-                 opacity + margin, the reveal idiom reversed) and `onAbandonExitDone` drops the run
-                 id once the collapse genuinely finishes (its own `transitionend`, never a timer). -->
+                 that has been dismissed, at which point `.is-leaving` collapses it in two stages —
+                 content fade, then grid-rows/margin/padding/border, the reveal idiom reversed — and
+                 `onAbandonExitDone` drops the run id once the height stage genuinely finishes (its
+                 own `transitionend`, filtered by property, never a timer). -->
             <div
               class="acard-exit"
               [class.is-leaving]="isAbandonLeaving(c.row.run)"
-              (transitionend)="onAbandonExitDone(c.row.run)"
+              (transitionend)="onAbandonExitDone(c.row.run, $event)"
             >
               @switch (c.kind) {
                 @case ('suspension') {
@@ -89,7 +90,7 @@
             <div
               class="acard-exit"
               [class.is-leaving]="isAbandonLeaving(r.run)"
-              (transitionend)="onAbandonExitDone(r.run)"
+              (transitionend)="onAbandonExitDone(r.run, $event)"
             >
               <bridge-stalled-card
                 [row]="r"

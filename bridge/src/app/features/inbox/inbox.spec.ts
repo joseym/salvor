@@ -190,8 +190,12 @@ describe('Inbox', () => {
     expect(wrapper.classList.contains('is-leaving'), 'the fold-away starts on Done').toBe(true);
     expect(el.querySelector('[data-stalled="r-stalled"]'), 'still present mid-exit').toBeTruthy();
 
-    // the exit transition genuinely finishes — never a guessed timer
-    wrapper.dispatchEvent(new Event('transitionend', { bubbles: true }));
+    // the exit transition genuinely finishes — never a guessed timer. Requirement change (staged
+    // exit, motion polish 2026-07-21): the wrapper's fold-away is now two stages (a quick content
+    // fade, then the real `grid-template-rows` height collapse), so removal is keyed on the HEIGHT
+    // property specifically — a bare `transitionend` (as the fade stage's own event would also be)
+    // must NOT drop the card early.
+    wrapper.dispatchEvent(new TransitionEvent('transitionend', { bubbles: true, propertyName: 'grid-template-rows' }));
     fixture.detectChanges();
     expect(el.querySelector('[data-stalled="r-stalled"]'), 'dropped once the exit finishes').toBeNull();
   });
@@ -229,7 +233,9 @@ describe('Inbox', () => {
     (el.querySelector('[data-abandon-done]') as HTMLButtonElement).click();
     fixture.detectChanges();
     expect(wrapper.classList.contains('is-leaving')).toBe(true);
-    wrapper.dispatchEvent(new Event('transitionend', { bubbles: true }));
+    // same staged-exit requirement change as the stalled-card test above: keyed on the height
+    // property, not a bare transitionend.
+    wrapper.dispatchEvent(new TransitionEvent('transitionend', { bubbles: true, propertyName: 'grid-template-rows' }));
     fixture.detectChanges();
     expect(el.querySelector('form[data-resume="r-susp"]'), 'the whole parked card folds away too').toBeNull();
   });

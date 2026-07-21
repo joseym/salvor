@@ -282,39 +282,82 @@ bridge-abandon-action { display: contents; }
   }
 }
 
-/* THE HUSK'S EXIT (owner ask, 2026-07-21): inbox.html wraps every rendered card — parked and
-   stalled alike — in this element. Inert by default: `grid-template-rows: 1fr`, full opacity, and
-   the SAME `margin-bottom` `.acard` already carries standalone, just moved here so the collapse
-   below can reach a true zero (`.acard`'s own margin is zeroed only INSIDE this wrapper, below — a
-   card mounted standalone, as every component spec in this feature does, is unaffected and keeps
-   its own margin exactly as before). The same padding-vs-margin reasoning `.abandon-slot` documents
+/* THE HUSK'S EXIT (owner ask, 2026-07-21; refined 2026-07-21 on owner feedback: "the collapse is
+   too fast, it feels jagged"). inbox.html wraps every rendered card — parked and stalled alike —
+   in this element. Inert by default: `grid-template-rows: 1fr`, full opacity, and the SAME
+   `margin-bottom` `.acard` already carries standalone, just moved here so the collapse below can
+   reach a true zero (`.acard`'s own margin is zeroed only INSIDE this wrapper, below — a card
+   mounted standalone, as every component spec in this feature does, is unaffected and keeps its
+   own margin exactly as before). The same padding-vs-margin reasoning `.abandon-slot` documents
    above applies here at the whole-card scale: a margin left on the collapsing box itself would
    survive a `0fr` track as a visible sliver.
-   `.is-leaving` (an abandon receipt's own "Done" — see inbox.ts's `onAbandonRetire`) collapses the
-   row height, fades it, and zeroes its own margin, all on the same `--motion-base` transition — the
-   reveal idiom (`.abandon-slot`'s 0fr → 1fr) reversed. `.acard-exit > *`'s `overflow: hidden` is
-   what lets the row's automatic minimum size reach zero, the same requirement `.abandon-slot`
-   documents above — an exact collapse, never a max-height guess. `onAbandonExitDone` (inbox.ts)
-   removes the run id — actually dropping the card — only once this transition's OWN `transitionend`
-   genuinely fires, never a guessed timer. Reduced motion collapses the duration to the same
-   near-zero token as everything else in the app; the event still fires, just effectively instantly,
-   so this needs no separate media query. */
+
+   STAGED, not simultaneous — simultaneous is exactly what read jagged: collapsing grid-rows,
+   opacity, and margin all at once on one short `--motion-base` beat left the card's real content
+   (evidence rows, buttons, prose) visibly squishing/reflowing as the box shrank around it, because
+   that content was still fully laid out and legible while its container raced to zero height. Two
+   stages instead:
+     1. THE CONTENT (`.acard-exit > *`, the whole card) fades and falls `--space-1` on a quick
+        `--motion-fast` beat, no delay — the card is emptied from view first, before anything about
+        its box starts moving.
+     2. Only once stage 1 finishes (stage 2 is delayed by `--motion-fast`, so it starts exactly as
+        the fade ends rather than racing it) does the now-invisible box actually collapse: the
+        wrapper's `grid-template-rows` + `margin-bottom`, AND the card's own vertical padding/border
+        (`.acard-exit .acard`'s `padding-block` / `border-block-width` — never the horizontal
+        padding or the colored left accent rule, both untouched and simply shortened as the box's
+        height is) all animate together on `--motion-large` (tokens.css), a longer sibling of
+        `--motion-base` — a full-height card is a bigger object travelling a bigger distance than
+        the small reveals `--motion-base` was tuned for, so it earns proportionally more time.
+        Collapsing the padding/border WITH the height, in the same stage, is what keeps a stray
+        hairline or a wedge of padding from surviving the shrink as a visible jag right before the
+        box hits zero.
+   `.acard-exit > *`'s `overflow: hidden` is what lets the row's automatic minimum size reach zero,
+   the same requirement `.abandon-slot` documents above — an exact collapse, never a max-height
+   guess.
+   `.is-leaving` (an abandon receipt's own "Done" — see inbox.ts's `onAbandonRetire`) drives both
+   stages off one class. `onAbandonExitDone` (inbox.ts) removes the run id — actually dropping the
+   card — only once stage 2's OWN `transitionend` genuinely fires, and specifically the
+   `grid-template-rows` property: stage 1's opacity/translate finish first (they are the SHORTER,
+   undelayed transition) and would fire their own `transitionend` well before the box has actually
+   collapsed, so inbox.ts filters on `event.propertyName` rather than reacting to the first
+   `transitionend` to arrive — never a guessed timer, and never a guessed stage either. Reduced
+   motion collapses `--motion-fast`/`--motion-large` to the same near-zero token as everything else
+   in the app (tokens.css); every transitionend still fires, just effectively instantly, so removal
+   stays correctly keyed with no separate media query needed here. */
 .acard-exit {
   display: grid;
   grid-template-rows: 1fr;
   margin-bottom: var(--space-4);
-  opacity: 1;
   transition:
-    grid-template-rows var(--motion-base) var(--ease-standard),
-    opacity var(--motion-base) var(--ease-standard),
-    margin-bottom var(--motion-base) var(--ease-standard);
+    grid-template-rows var(--motion-large) var(--ease-standard) var(--motion-fast),
+    margin-bottom var(--motion-large) var(--ease-standard) var(--motion-fast);
 }
-.acard-exit > * { overflow: hidden; min-height: 0; }
-.acard-exit .acard { margin-bottom: 0; }
+.acard-exit > * {
+  overflow: hidden;
+  min-height: 0;
+  opacity: 1;
+  translate: 0 0;
+  transition:
+    opacity var(--motion-fast) var(--ease-standard),
+    translate var(--motion-fast) var(--ease-standard);
+}
+.acard-exit .acard {
+  margin-bottom: 0;
+  transition:
+    padding-block var(--motion-large) var(--ease-standard) var(--motion-fast),
+    border-block-width var(--motion-large) var(--ease-standard) var(--motion-fast);
+}
 .acard-exit.is-leaving {
   grid-template-rows: 0fr;
-  opacity: 0;
   margin-bottom: 0;
+}
+.acard-exit.is-leaving > * {
+  opacity: 0;
+  translate: 0 var(--space-1);
+}
+.acard-exit.is-leaving .acard {
+  padding-block: 0;
+  border-block-width: 0;
 }
 
 /* ── the effect badge (reconciliation card's evidence row) ────────────── */

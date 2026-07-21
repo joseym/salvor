@@ -164,8 +164,15 @@ export class Inbox {
   /** The wrapper's `transitionend` has fired — the fold-away has genuinely finished. Drop the run id
    * from every set that was keeping its card around: `shownCards` (for a parked card; a no-op if it
    * was never there — a stalled run alone), and both of the sets above. `stalled`/`parked` then
-   * exclude it on their own on the next read — no separate "remove the card" call needed. */
-  onAbandonExitDone(runId: string): void {
+   * exclude it on their own on the next read — no separate "remove the card" call needed.
+   *
+   * STAGED EXIT (inbox.css's `.acard-exit`): the wrapper fires more than one `transitionend` now —
+   * a quick, undelayed content fade first, then the actual `grid-template-rows` height collapse,
+   * delayed to start once the fade finishes. Only the height one is the card's REAL exit; reacting
+   * to whichever fires first would drop the DOM out from under a collapse still mid-flight, so this
+   * is keyed on `event.propertyName` rather than on "a transitionend happened". */
+  onAbandonExitDone(runId: string, event: Event): void {
+    if ((event as TransitionEvent).propertyName !== 'grid-template-rows') return; // the fade stage's own transitionend — not the real exit
     if (!this.abandonLeaving().has(runId)) return; // stray/duplicate transitionend — already handled
     this.abandonLeaving.update((s) => {
       const next = new Set(s);

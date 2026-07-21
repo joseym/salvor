@@ -60,6 +60,11 @@
      never via `transition: all` — the build gate fails on that literal. */
   --motion-fast: 150ms;
   --motion-base: 200ms;
+  /* A longer sibling of --motion-base, for a LARGE element's own motion (e.g. a whole card folding
+     away) rather than a small control's reveal — more travel needs proportionally more time, not
+     the same duration stretched thin. Derived from --motion-base (1.6x) rather than a hand-picked
+     literal, so it moves with --motion-base if that ever changes. */
+  --motion-large: 320ms;
   --ease-standard: cubic-bezier(0.2, 0, 0, 1);
 
   /* ─── Layout ─── */
@@ -280,6 +285,7 @@
   :root {
     --motion-fast: 0.01ms;
     --motion-base: 0.01ms;
+    --motion-large: 0.01ms;
   }
   *,
   *::before,
