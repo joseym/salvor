@@ -23,6 +23,15 @@ export interface WfNodeProjection {
   readonly branchCase?: string;
   /** The map fan-out marker the server recorded, verbatim (iteration progress), when present. */
   readonly map?: unknown;
+  /** The fold loop marker the server recorded (per-pass iterations and the convergence), when
+   * present. Shape: `{ iterations: { index, joined }[], converged?: { winner_index, reason } }`. */
+  readonly fold?: WfFoldProgress;
+}
+
+/** A fold node's recorded loop progress, decoded from the projection. */
+export interface WfFoldProgress {
+  readonly iterations: readonly { readonly index: number; readonly joined: boolean }[];
+  readonly converged?: { readonly winner_index: number; readonly reason: string };
 }
 
 /** Was this node genuinely entered — reached and possibly moved on from — as opposed to skipped or
@@ -62,6 +71,7 @@ export function projectNodeStates(
       ...entry,
       ...(p.branchCase !== undefined ? { branchCase: p.branchCase } : {}),
       ...(p.map !== undefined ? { map: p.map } : {}),
+      ...(p.fold !== undefined ? { fold: p.fold as WfFoldProgress } : {}),
     };
   }
   return out;

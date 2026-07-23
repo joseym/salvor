@@ -246,6 +246,9 @@
 .wf-node[data-kind='map'] {
   --wf-rail: var(--success);
 }
+.wf-node[data-kind='fold'] {
+  --wf-rail: color-mix(in oklab, var(--accent), var(--success));
+}
 .wf-node:hover {
   border-color: var(--fg-2);
 }

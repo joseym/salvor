@@ -144,6 +144,7 @@ const KIND_BLURB: Record<string, string> = {
   gate: 'a human approval that suspends the run',
   branch: 'routes on a recorded decision',
   map: 'fans out a sub-run per element of a list',
+  fold: 'iterates a body until it converges, then joins the passes',
 };
 
 /** The minimap's drawing units — its viewBox. The CSS box is 160x100, so the CTM (not the CSS
@@ -1082,6 +1083,17 @@ export class Workflows implements AfterViewInit {
   runLabel(state: string): string {
     return state.replace(/-/g, ' ');
   }
+  /** The run-mode iteration progress a fold node shows from its recorded projection: how many
+   * passes have joined of those started, and — once the loop settled — which pass won. Empty
+   * string when the node is not a fold, or the walk has not reached it. */
+  foldRun(n: PositionedNode): string {
+    const fold = n.run?.fold;
+    if (n.kind !== 'fold' || !fold) return '';
+    if (fold.converged) return `converged on pass ${fold.converged.winner_index + 1}`;
+    const joined = fold.iterations.filter((it) => it.joined).length;
+    const started = fold.iterations.length;
+    return started ? `pass ${joined}/${started}` : 'starting';
+  }
   errWhere(er: WfError): string {
     const g = this.currentGraph();
     if (er.node !== undefined) return `node ${er.node}`;
@@ -1207,6 +1219,8 @@ function nodeFields(n: WfNode): string[] {
       return [...(n.cases ?? [])];
     case 'map':
       return [String(n.over ?? '').replace(/[${}]/g, '')];
+    case 'fold':
+      return [String(n.stopWhen ?? '').replace(/[${}]/g, '')];
     default:
       return [];
   }
@@ -1253,6 +1267,17 @@ function toServerDocument(g: WfGraph): import('@salvor/client').Graph {
             over: n.over ?? '${input}',
             concurrency: n.concurrency ?? 1,
             body: { kind: 'node' as const, value: n.body?.node ?? n.id },
+          },
+        };
+      case 'fold':
+        return {
+          kind: 'fold' as const,
+          payload: {
+            id: n.id,
+            body: { kind: 'node' as const, value: n.body?.node ?? n.id },
+            max_iterations: n.maxIterations ?? 1,
+            stop_when: n.stopWhen ?? 'false',
+            join: { kind: 'last' as const },
           },
         };
     }

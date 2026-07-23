@@ -96,6 +96,9 @@
                 }
                 @if (n.run && mode() === 'run') {
                   <span class="wf-st">{{ runLabel(n.run.state) }}</span>
+                  @if (foldRun(n); as prog) {
+                    <span class="wf-st wf-fold-prog">{{ prog }}</span>
+                  }
                 }
               </span>
               @if (n.eff; as eff) {
@@ -301,6 +304,16 @@
           </div>
           @if (n.body?.tool) {
             <div class="wf-field"><span class="k">body</span><div class="v">{{ n.body?.tool }} · {{ n.body?.effect }}</div></div>
+          }
+        }
+        @if (n.kind === 'fold') {
+          <div class="wf-field"><span class="k">max_iterations</span><div class="v mono">{{ n.maxIterations }}</div>
+            <p class="wf-why">The bound on the refine loop — engine execution of a fold is deferred, so a client-driven run records its passes against this document.</p>
+          </div>
+          <div class="wf-field"><span class="k">stop_when</span><div class="v mono">{{ n.stopWhen }}</div></div>
+          <div class="wf-field"><span class="k">join</span><div class="v">{{ n.join }}</div></div>
+          @if (n.body?.node) {
+            <div class="wf-field"><span class="k">body</span><div class="v mono">{{ n.body?.node }}</div></div>
           }
         }
       } @else {

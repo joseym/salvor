@@ -108,6 +108,32 @@ describe('GraphRunService', () => {
 
       expect(projection.nodes[0]!.branchCase).toBe('yes');
       expect(projection.nodes[0]!.map).toEqual({ fanned_out: 3 });
+      // A fold marker decodes verbatim, alongside the map one, when recorded.
+      const foldResponse = jsonResponse({
+        graph_hash: 'sha256:g1',
+        nodes: [
+          {
+            node: 'refine',
+            state: 'exited',
+            fold: {
+              iterations: [
+                { index: 0, joined: true },
+                { index: 1, joined: true },
+              ],
+              converged: { winner_index: 1, reason: 'score >= threshold' },
+            },
+          },
+        ],
+      });
+      fetchMock.mockResolvedValueOnce(foldResponse);
+      const foldProjection = await service.loadProjection('run-3');
+      expect(foldProjection.nodes[0]!.fold).toEqual({
+        iterations: [
+          { index: 0, joined: true },
+          { index: 1, joined: true },
+        ],
+        converged: { winner_index: 1, reason: 'score >= threshold' },
+      });
       expect(projection.forkedFrom).toEqual({
         runId: 'origin-1',
         throughSeq: 3,

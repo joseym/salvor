@@ -153,6 +153,7 @@ export interface NodeProgress {
   readonly reason?: string;
   readonly branchCase?: string;
   readonly map?: unknown;
+  readonly fold?: unknown;
   readonly raw: Record<string, unknown>;
 }
 
@@ -163,6 +164,7 @@ function parseNodeProgress(obj: Record<string, unknown>): NodeProgress {
     reason?: string;
     branchCase?: string;
     map?: unknown;
+    fold?: unknown;
     raw: Record<string, unknown>;
   } = {
     node: obj['node'] as string,
@@ -172,6 +174,7 @@ function parseNodeProgress(obj: Record<string, unknown>): NodeProgress {
   if (obj['reason'] !== undefined) out.reason = obj['reason'] as string;
   if (obj['branch_case'] !== undefined) out.branchCase = obj['branch_case'] as string;
   if (obj['map'] !== undefined) out.map = obj['map'];
+  if (obj['fold'] !== undefined) out.fold = obj['fold'];
   return out;
 }
 

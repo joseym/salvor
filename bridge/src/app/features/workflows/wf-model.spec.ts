@@ -48,3 +48,35 @@ describe('fromServerGraph — node display name fallback', () => {
     expect(graph.nodes[0].name).toBe('approve');
   });
 });
+
+describe('fromServerGraph — fold node', () => {
+  const foldDoc: Graph = {
+    schema_version: 1,
+    nodes: [
+      { kind: 'agent', payload: { id: 'tailor', agent_hash: `sha256:${'3'.repeat(64)}` } },
+      {
+        kind: 'fold',
+        payload: {
+          id: 'refine',
+          name: 'Refine to threshold',
+          body: { kind: 'node', value: 'tailor' },
+          max_iterations: 3,
+          stop_when: 'score >= 0.85',
+          join: { kind: 'best_by', value: 'score' },
+        },
+      },
+    ],
+    edges: [],
+  };
+
+  it('maps a fold node bound, predicate, join label, and body', () => {
+    const graph = fromServerGraph('sha256:fold', foldDoc);
+    const refine = graph.nodes.find((n) => n.id === 'refine');
+    expect(refine?.kind).toBe('fold');
+    expect(refine?.name).toBe('Refine to threshold');
+    expect(refine?.maxIterations).toBe(3);
+    expect(refine?.stopWhen).toBe('score >= 0.85');
+    expect(refine?.join).toBe('keeps the best by score');
+    expect(refine?.body?.node).toBe('tailor');
+  });
+});

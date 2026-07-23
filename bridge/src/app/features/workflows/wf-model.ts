@@ -10,7 +10,7 @@ import type { GraphSummary } from '../../core/api';
  * hash that IS the version once published), but sourced from the real control plane rather than a
  * canned object.
  */
-export type WfNodeKind = 'agent' | 'tool' | 'gate' | 'branch' | 'map';
+export type WfNodeKind = 'agent' | 'tool' | 'gate' | 'branch' | 'map' | 'fold';
 
 /** A tool node's declared effect class — the field fork safety turns on. */
 export type WfEffect = 'read' | 'write' | 'idempotent';
@@ -37,6 +37,11 @@ export interface WfNode {
   readonly over?: string;
   readonly concurrency?: number;
   readonly body?: { readonly tool?: string; readonly effect?: string; readonly node?: string };
+  // Fold-specific payload: the iteration bound, the stop predicate, and a short
+  // label for the join rule ("best by score", "last", "all").
+  readonly maxIterations?: number;
+  readonly stopWhen?: string;
+  readonly join?: string;
 }
 
 export interface WfEdge {
@@ -76,6 +81,8 @@ export function nodeDoes(n: WfNode): string {
       return `picks one of ${n.cases?.length ?? 0} cases`;
     case 'map':
       return `fans out over a list, ${n.concurrency ?? 0} at a time`;
+    case 'fold':
+      return `iterates up to ${n.maxIterations ?? 0} times, then ${n.join ?? 'joins'}`;
   }
 }
 
@@ -109,6 +116,29 @@ function fromServerNode(n: GraphNode): WfNode {
         concurrency: n.payload.concurrency,
         body: n.payload.body.kind === 'node' ? { node: n.payload.body.value } : {},
       };
+    case 'fold':
+      return {
+        ...base,
+        maxIterations: n.payload.max_iterations,
+        stopWhen: n.payload.stop_when,
+        join: joinLabel(n.payload.join),
+        body: n.payload.body.kind === 'node' ? { node: n.payload.body.value } : {},
+      };
+  }
+}
+
+/** A short prose label for a fold's join rule, for the node's `does` line and
+ * the inspector. */
+function joinLabel(join: { kind: string; value?: string }): string {
+  switch (join.kind) {
+    case 'best_by':
+      return `keeps the best by ${join.value ?? ''}`.trimEnd();
+    case 'last':
+      return 'takes the last pass';
+    case 'all':
+      return 'collects every pass';
+    default:
+      return 'joins the passes';
   }
 }
 
