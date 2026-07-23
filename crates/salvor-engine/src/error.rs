@@ -5,8 +5,10 @@
 //! list ([`EngineError::MapOverNotAList`]) or whose body form is not
 //! executable ([`EngineError::UnsupportedMapBody`]), an agent or tool the resolver
 //! could not supply, a graph whose topology is not a well-formed DAG, a branch
-//! that no case matched or whose model decision named no case, or a tool that
-//! failed. Most are returned **before** recording anything for the node they
+//! that no case matched or whose model decision named no case, a tool that
+//! failed, or a node whose kind is not executable
+//! ([`EngineError::UnsupportedNode`], today a `fold`). Most are returned
+//! **before** recording anything for the node they
 //! name, so the log never carries events past the refusal; the two branch-decision
 //! errors that require running a model first are the documented exception (their
 //! `NodeEntered` and the model's events are already recorded when the mapping
@@ -77,6 +79,22 @@ pub enum EngineError {
         reply: String,
         /// The branch's case names, in author order.
         cases: Vec<String>,
+    },
+
+    /// A node whose kind the engine does not execute was reached on the
+    /// walk. Today the sole such kind is `fold`: its execution semantics are
+    /// not implemented, so the engine refuses it with this typed error rather
+    /// than guessing a loop. Returned **before** the node's `NodeEntered`
+    /// is recorded, so nothing lands in the log past the refusal, and it
+    /// reproduces on replay (the same document re-walks to the same refusal). The
+    /// document layer still validates a fold as a legal graph; only the engine
+    /// declines to run it.
+    #[error("node `{node}`: the engine does not execute `{kind}` nodes yet")]
+    UnsupportedNode {
+        /// The id of the node whose kind is not executable here.
+        node: String,
+        /// The node's kind name (`"fold"`).
+        kind: &'static str,
     },
 
     /// An `agent` node referenced an agent hash the resolver could not supply.

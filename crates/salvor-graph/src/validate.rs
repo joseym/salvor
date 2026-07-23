@@ -14,7 +14,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use crate::document::{BranchCondition, Graph, MapBody, Node, SCHEMA_VERSION};
+use crate::document::{BranchCondition, FoldBody, FoldJoin, Graph, MapBody, Node, SCHEMA_VERSION};
 use crate::expr;
 
 /// The longest an optional node `name` may be, in characters. Mirrors the
@@ -71,6 +71,17 @@ pub enum GraphError {
         suggestion: Option<String>,
     },
 
+    /// A `fold` node's `node` body references a node id that does not exist.
+    #[error("fold node `{id}` folds unknown node id `{missing}`{}", suggest(.suggestion))]
+    DanglingFoldBody {
+        /// The fold node's id.
+        id: String,
+        /// The referenced id that does not exist.
+        missing: String,
+        /// The nearest existing id, when one is close enough to suggest.
+        suggestion: Option<String>,
+    },
+
     /// An `agent` node's hash is not a well-formed `sha256:<64 lowercase hex>`
     /// string.
     #[error("agent node `{id}`: `{hash}` is not a well-formed `sha256:<64 hex>` agent hash")]
@@ -87,6 +98,15 @@ pub enum GraphError {
         /// The map node's id.
         id: String,
         /// The declared cap.
+        found: u32,
+    },
+
+    /// A `fold` node's iteration bound is not positive.
+    #[error("fold node `{id}`: max_iterations must be at least 1, found {found}")]
+    NonPositiveMaxIterations {
+        /// The fold node's id.
+        id: String,
+        /// The declared bound.
         found: u32,
     },
 
@@ -140,6 +160,32 @@ pub enum GraphError {
         node: String,
         /// The name of the model-decision case with no agent.
         case: String,
+    },
+
+    /// A `fold` node's `stop_when` predicate does not parse in the
+    /// [`crate::expr`] condition language. Caught at submit so a bad predicate is
+    /// never a run-time failure, exactly like a branch case's expression.
+    #[error("fold node `{node}`: `stop_when` is not a valid condition expression: {error}")]
+    InvalidFoldStopExpression {
+        /// The fold node's id.
+        node: String,
+        /// The parse error's message.
+        error: String,
+    },
+
+    /// A `fold` node's `best_by` join reference is not a well-formed path in the
+    /// [`crate::expr`] language (a bare literal, or a malformed path). Caught at
+    /// submit, node-precise.
+    #[error(
+        "fold node `{node}`: the `best_by` join reference `{reference}` is not a valid path: {error}"
+    )]
+    InvalidFoldJoinReference {
+        /// The fold node's id.
+        node: String,
+        /// The malformed reference.
+        reference: String,
+        /// The parse error's message.
+        error: String,
     },
 
     /// A node's optional `name` is over [`MAX_NODE_NAME_LEN`] characters.
@@ -204,6 +250,7 @@ pub fn validate(graph: &Graph) -> Result<GraphSummary, Vec<GraphError>> {
     check_node_fields(graph, &mut errors);
     check_node_names(graph, &mut errors);
     check_branch_expressions(graph, &mut errors);
+    check_fold_expressions(graph, &mut errors);
     check_acyclic(graph, &mut errors);
     check_edge_type_compat(graph, &mut errors);
 
@@ -275,6 +322,16 @@ fn check_referential_integrity(graph: &Graph, errors: &mut Vec<GraphError>) {
                 suggestion: nearest(target, &ids),
             });
         }
+        if let Node::Fold(fold) = node
+            && let FoldBody::Node(target) = &fold.body
+            && !ids.contains(target.as_str())
+        {
+            errors.push(GraphError::DanglingFoldBody {
+                id: fold.id.clone(),
+                missing: target.clone(),
+                suggestion: nearest(target, &ids),
+            });
+        }
     }
 }
 
@@ -307,6 +364,14 @@ fn check_node_fields(graph: &Graph, errors: &mut Vec<GraphError>) {
                     });
                 }
             }
+            Node::Fold(fold) => {
+                if fold.max_iterations < 1 {
+                    errors.push(GraphError::NonPositiveMaxIterations {
+                        id: fold.id.clone(),
+                        found: fold.max_iterations,
+                    });
+                }
+            }
             // Tool and branch carry no field rule beyond the strict parse.
             Node::Tool(_) | Node::Branch(_) => {}
         }
@@ -315,7 +380,7 @@ fn check_node_fields(graph: &Graph, errors: &mut Vec<GraphError>) {
 
 /// A node's optional `name`, when set, must not be empty or all whitespace,
 /// and must be at most [`MAX_NODE_NAME_LEN`] characters
-/// (`chars().count()`, not bytes). Applies uniformly across all five node
+/// (`chars().count()`, not bytes). Applies uniformly across all six node
 /// kinds through [`Node::name`], mirroring the agent definition's own name
 /// rule.
 fn check_node_names(graph: &Graph, errors: &mut Vec<GraphError>) {
@@ -388,6 +453,41 @@ fn check_branch_expressions(graph: &Graph, errors: &mut Vec<GraphError>) {
                     }
                 }
             }
+        }
+    }
+}
+
+/// Every `fold` node's expression fields are checked AT SUBMIT, exactly like a
+/// branch's, so a malformed predicate or join reference is a node-precise error
+/// now rather than a run-time failure inside a durable, replayed run:
+///
+/// - the `stop_when` predicate must parse in the [`crate::expr`] condition
+///   language (the same one a branch case's expression uses);
+/// - a [`FoldJoin::BestBy`] reference must parse as an [`crate::expr`] path (a
+///   location in the accumulated value, never a bare literal).
+///
+/// The `last` and `all` join rules carry no expression to check. The iteration
+/// bound is checked in [`check_node_fields`], the body reference in
+/// [`check_referential_integrity`], keeping each rule independent.
+fn check_fold_expressions(graph: &Graph, errors: &mut Vec<GraphError>) {
+    for node in &graph.nodes {
+        let Node::Fold(fold) = node else {
+            continue;
+        };
+        if let Err(error) = expr::parse(&fold.stop_when) {
+            errors.push(GraphError::InvalidFoldStopExpression {
+                node: fold.id.clone(),
+                error: error.to_string(),
+            });
+        }
+        if let FoldJoin::BestBy(reference) = &fold.join
+            && let Err(error) = expr::parse_reference(reference)
+        {
+            errors.push(GraphError::InvalidFoldJoinReference {
+                node: fold.id.clone(),
+                reference: reference.clone(),
+                error: error.to_string(),
+            });
         }
     }
 }
@@ -585,8 +685,8 @@ fn levenshtein(a: &str, b: &str) -> usize {
 mod tests {
     use super::*;
     use crate::document::{
-        AgentNode, BranchCase, BranchCondition, BranchNode, Edge, GateNode, MapBody, MapNode,
-        ToolNode,
+        AgentNode, BranchCase, BranchCondition, BranchNode, Edge, FoldBody, FoldJoin, FoldNode,
+        GateNode, MapBody, MapNode, ToolNode,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -954,6 +1054,127 @@ mod tests {
                 hash: "sha256:not-hex".into(),
             }),
             "names the branch node and its malformed hash: {errors:?}"
+        );
+    }
+
+    /// Builds a fold node over an existing body node, with the given bound,
+    /// stop predicate, and join, for the fold validator tests.
+    fn fold(id: &str, body: &str, max_iterations: u32, stop_when: &str, join: FoldJoin) -> Node {
+        Node::Fold(FoldNode {
+            id: id.into(),
+            name: None,
+            body: FoldBody::Node(body.into()),
+            max_iterations,
+            stop_when: stop_when.into(),
+            join,
+            accumulator_schema: None,
+        })
+    }
+
+    /// A well-formed fold (positive bound, existing body, parseable predicate,
+    /// valid `best_by` path) validates clean.
+    #[test]
+    fn valid_fold_node_passes() {
+        let g = graph(
+            vec![
+                agent("tailor"),
+                fold(
+                    "refine",
+                    "tailor",
+                    3,
+                    "score >= 0.85",
+                    FoldJoin::BestBy("score".into()),
+                ),
+            ],
+            vec![],
+        );
+        assert!(validate(&g).is_ok(), "{:?}", validate(&g));
+    }
+
+    /// The `last` and `all` joins carry no reference to check, so a fold using
+    /// them validates without a `best_by` path.
+    #[test]
+    fn fold_with_unit_joins_passes() {
+        for join in [FoldJoin::Last, FoldJoin::All] {
+            let g = graph(
+                vec![agent("tailor"), fold("refine", "tailor", 2, "done", join)],
+                vec![],
+            );
+            assert!(validate(&g).is_ok());
+        }
+    }
+
+    /// A zero iteration bound on a fold names the node.
+    #[test]
+    fn non_positive_max_iterations_is_reported() {
+        let g = graph(
+            vec![
+                agent("tailor"),
+                fold("refine", "tailor", 0, "done", FoldJoin::Last),
+            ],
+            vec![],
+        );
+        let errors = validate(&g).expect_err("invalid");
+        assert!(errors.contains(&GraphError::NonPositiveMaxIterations {
+            id: "refine".into(),
+            found: 0,
+        }));
+    }
+
+    /// A fold body that names a missing node is reported, distinct from a map
+    /// body.
+    #[test]
+    fn dangling_fold_body_is_reported() {
+        let g = graph(
+            vec![fold("refine", "ghost", 2, "done", FoldJoin::Last)],
+            vec![],
+        );
+        let errors = validate(&g).expect_err("invalid");
+        assert!(errors.contains(&GraphError::DanglingFoldBody {
+            id: "refine".into(),
+            missing: "ghost".into(),
+            suggestion: None,
+        }));
+    }
+
+    /// A fold whose `stop_when` does not parse is a node-precise error.
+    #[test]
+    fn invalid_fold_stop_expression_is_reported() {
+        let g = graph(
+            vec![
+                agent("tailor"),
+                fold("refine", "tailor", 2, "score >", FoldJoin::Last),
+            ],
+            vec![],
+        );
+        let errors = validate(&g).expect_err("invalid");
+        assert!(
+            matches!(
+                errors.as_slice(),
+                [GraphError::InvalidFoldStopExpression { node, .. }] if node == "refine"
+            ),
+            "one node-precise stop-expression error: {errors:?}"
+        );
+    }
+
+    /// A `best_by` join whose reference is a bare literal (not a path) is a
+    /// node-precise error naming the reference.
+    #[test]
+    fn invalid_fold_join_reference_is_reported() {
+        let g = graph(
+            vec![
+                agent("tailor"),
+                fold("refine", "tailor", 2, "done", FoldJoin::BestBy("42".into())),
+            ],
+            vec![],
+        );
+        let errors = validate(&g).expect_err("invalid");
+        assert!(
+            errors.iter().any(
+                |e| matches!(e, GraphError::InvalidFoldJoinReference { node, reference, .. }
+                    if node == "refine" && reference == "42")
+            ),
+            "names the node and the bad reference: {errors:?}"
         );
     }
 

@@ -10,7 +10,7 @@
 //! # What the types buy you
 //!
 //! Each node kind has its own spec type ([`AgentSpec`], [`ToolSpec`],
-//! [`GateSpec`], [`BranchSpec`], [`MapSpec`]) whose constructor demands the
+//! [`GateSpec`], [`BranchSpec`], [`MapSpec`], [`FoldSpec`]) whose constructor demands the
 //! fields that kind cannot do without: an agent needs its hash, a tool needs its
 //! name, a gate needs its approval schema. A field that belongs to one kind is
 //! not reachable on another, so "a gate with an agent_hash" is not a runtime
@@ -79,8 +79,8 @@
 use serde_json::Value;
 
 use crate::document::{
-    AgentNode, BranchCase, BranchCondition, BranchNode, Edge, GateNode, Graph, MapBody, MapNode,
-    Node, SCHEMA_VERSION, ToolNode,
+    AgentNode, BranchCase, BranchCondition, BranchNode, Edge, FoldBody, FoldJoin, FoldNode,
+    GateNode, Graph, MapBody, MapNode, Node, SCHEMA_VERSION, ToolNode,
 };
 
 /// Accumulates nodes and edges, then freezes them into a [`Graph`].
@@ -133,6 +133,13 @@ impl GraphBuilder {
     /// Adds a `map` node from its [`MapSpec`].
     #[must_use]
     pub fn map(mut self, spec: MapSpec) -> Self {
+        self.nodes.push(spec.into_node());
+        self
+    }
+
+    /// Adds a `fold` node from its [`FoldSpec`].
+    #[must_use]
+    pub fn fold(mut self, spec: FoldSpec) -> Self {
         self.nodes.push(spec.into_node());
         self
     }
@@ -497,6 +504,74 @@ impl MapSpec {
     }
 }
 
+/// The spec for a `fold` node: bounded iteration that accumulates across passes.
+#[derive(Clone, Debug)]
+pub struct FoldSpec {
+    id: String,
+    name: Option<String>,
+    body: FoldBody,
+    max_iterations: u32,
+    stop_when: String,
+    join: FoldJoin,
+    accumulator_schema: Option<Value>,
+}
+
+impl FoldSpec {
+    /// Starts a fold spec with its required fields: the node id, the
+    /// [`FoldBody`] each pass runs, the iteration bound, the `stop_when`
+    /// predicate, and the [`FoldJoin`] rule. The bound's positivity, the
+    /// predicate's parse, and a `best_by` reference's shape are checked by
+    /// [`crate::validate`], not here.
+    pub fn new(
+        id: impl Into<String>,
+        body: FoldBody,
+        max_iterations: u32,
+        stop_when: impl Into<String>,
+        join: FoldJoin,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            name: None,
+            body,
+            max_iterations,
+            stop_when: stop_when.into(),
+            join,
+            accumulator_schema: None,
+        }
+    }
+
+    /// Sets a short display label for this node. Bounds (a 64-character cap,
+    /// not empty or all whitespace) are checked by [`crate::validate`], not
+    /// here; see [`crate::document`]'s "The optional node display name"
+    /// section for why this field, unlike an agent's own `name`, is part of
+    /// the graph's content hash.
+    #[must_use]
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// Declares the JSON Schema for the accumulated value the loop carries and
+    /// produces. Data only, like an agent's `output_schema`.
+    #[must_use]
+    pub fn accumulator_schema(mut self, schema: Value) -> Self {
+        self.accumulator_schema = Some(schema);
+        self
+    }
+
+    fn into_node(self) -> Node {
+        Node::Fold(FoldNode {
+            id: self.id,
+            name: self.name,
+            body: self.body,
+            max_iterations: self.max_iterations,
+            stop_when: self.stop_when,
+            join: self.join,
+            accumulator_schema: self.accumulator_schema,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -561,6 +636,58 @@ mod tests {
         );
     }
 
+    /// Builds the exact fold-refine flow the cross-language `fold-refine`
+    /// fixture records, so the Rust, TypeScript, and Python fold builders all
+    /// reduce to one canonical document.
+    fn fold_flow() -> Graph {
+        use crate::document::{FoldBody, FoldJoin};
+
+        let score_schema = json!({
+            "type": "object",
+            "properties": { "score": { "type": "number" } },
+            "required": ["score"]
+        });
+        GraphBuilder::new()
+            .agent(
+                AgentSpec::new("tailor", format!("sha256:{}", "3".repeat(64)))
+                    .output_schema(score_schema.clone()),
+            )
+            .fold(
+                FoldSpec::new(
+                    "refine",
+                    FoldBody::Node("tailor".into()),
+                    3,
+                    "score >= 0.85",
+                    FoldJoin::BestBy("score".into()),
+                )
+                .name("Refine to threshold")
+                .accumulator_schema(score_schema),
+            )
+            .build()
+    }
+
+    /// The builder emits a fold document structurally equal to the shared
+    /// fold-refine fixture that keeps all three language builders honest.
+    #[test]
+    fn builds_the_fold_document() {
+        let built = serde_json::to_value(fold_flow()).expect("serialize built graph");
+        let canonical: Value =
+            serde_json::from_str(include_str!("../../../examples/graphs/fold-refine.json"))
+                .expect("parse fold fixture");
+        assert_eq!(
+            built, canonical,
+            "builder output must match the fold fixture exactly"
+        );
+    }
+
+    /// The built fold flow passes semantic validation.
+    #[test]
+    fn fold_document_validates() {
+        let summary = crate::validate(&fold_flow()).expect("fold flow is valid");
+        assert_eq!(summary.node_count, 2);
+        assert_eq!(summary.edge_count, 0);
+    }
+
     /// The built canonical flow passes semantic validation.
     #[test]
     fn canonical_document_validates() {
@@ -609,6 +736,50 @@ mod tests {
             "unset optional field must stay off the wire: {map_payload}"
         );
         assert_eq!(value["edges"][1]["label"], json!("high"));
+    }
+
+    /// The fold spec builds the shape the model expects: the body, bound, stop
+    /// predicate, and join land in the payload, an unset `accumulator_schema`
+    /// stays off the wire, and the document validates.
+    #[test]
+    fn fold_spec_builds_expected_shape() {
+        use crate::document::{FoldBody, FoldJoin};
+
+        let graph = GraphBuilder::new()
+            .agent(AgentSpec::new(
+                "tailor",
+                format!("sha256:{}", "a".repeat(64)),
+            ))
+            .fold(
+                FoldSpec::new(
+                    "refine",
+                    FoldBody::Node("tailor".into()),
+                    3,
+                    "score >= 0.85",
+                    FoldJoin::BestBy("score".into()),
+                )
+                .name("Refine to threshold"),
+            )
+            .build();
+
+        let summary = crate::validate(&graph).expect("the fold flow is valid");
+        assert_eq!(summary.node_count, 2);
+
+        let value = serde_json::to_value(&graph).expect("serialize");
+        let payload = &value["nodes"][1]["payload"];
+        assert_eq!(value["nodes"][1]["kind"], json!("fold"));
+        assert_eq!(payload["max_iterations"], json!(3));
+        assert_eq!(payload["stop_when"], json!("score >= 0.85"));
+        assert_eq!(
+            payload["join"],
+            json!({"kind": "best_by", "value": "score"})
+        );
+        assert_eq!(payload["body"], json!({"kind": "node", "value": "tailor"}));
+        assert_eq!(payload["name"], json!("Refine to threshold"));
+        assert!(
+            payload.get("accumulator_schema").is_none(),
+            "unset optional field must stay off the wire: {payload}"
+        );
     }
 
     /// `.name(...)` is available on every node kind's spec, puts the name on

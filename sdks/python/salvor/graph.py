@@ -187,8 +187,59 @@ class MapNode:
         return {"kind": "map", "payload": payload}
 
 
-# Any of the five node dataclasses.
-NodeSpec = Union[AgentNode, ToolNode, GateNode, BranchNode, MapNode]
+def fold_node(node_id: str) -> Json:
+    """A fold body: run each pass through an existing node, by id."""
+    return {"kind": "node", "value": node_id}
+
+
+def fold_subgraph(subgraph: "Graph") -> Json:
+    """A fold body: run each pass through an embedded sub-graph."""
+    return {"kind": "subgraph", "value": subgraph.to_dict()}
+
+
+def best_by(reference: str) -> Json:
+    """A fold join: produce the pass whose value maximizes ``reference`` (a path
+    into the accumulated value). The argmax winner the AARG loop needs."""
+    return {"kind": "best_by", "value": reference}
+
+
+def last() -> Json:
+    """A fold join: produce the value of the last pass the loop ran."""
+    return {"kind": "last"}
+
+
+def all_passes() -> Json:
+    """A fold join: produce every pass's value as a list, in pass order."""
+    return {"kind": "all"}
+
+
+@dataclass
+class FoldNode:
+    """A ``fold`` node: bounded iteration that accumulates across passes."""
+
+    id: str
+    body: Json
+    max_iterations: int
+    stop_when: str
+    join: Json
+    name: Optional[str] = None
+    accumulator_schema: Optional[JsonValue] = None
+
+    def to_node(self) -> Json:
+        payload: Json = {"id": self.id}
+        if self.name is not None:
+            payload["name"] = self.name
+        payload["body"] = self.body
+        payload["max_iterations"] = self.max_iterations
+        payload["stop_when"] = self.stop_when
+        payload["join"] = self.join
+        if self.accumulator_schema is not None:
+            payload["accumulator_schema"] = self.accumulator_schema
+        return {"kind": "fold", "payload": payload}
+
+
+# Any of the six node dataclasses.
+NodeSpec = Union[AgentNode, ToolNode, GateNode, BranchNode, MapNode, FoldNode]
 
 
 @dataclass
@@ -303,6 +354,28 @@ class GraphBuilder:
         """Adds a ``map`` node with its fan-out reference, cap, and body."""
         self._nodes.append(
             MapNode(id, over, concurrency, body, name, output_schema).to_node()
+        )
+        return self
+
+    def fold(
+        self,
+        id: str,
+        body: Json,
+        max_iterations: int,
+        stop_when: str,
+        join: Json,
+        *,
+        name: Optional[str] = None,
+        accumulator_schema: Optional[JsonValue] = None,
+    ) -> "GraphBuilder":
+        """Adds a ``fold`` node: bounded iteration with a stop predicate and a
+        join rule. The bound's positivity, the predicate's parse, and a
+        ``best_by`` reference's shape are checked by ``salvor graph validate``,
+        not here."""
+        self._nodes.append(
+            FoldNode(
+                id, body, max_iterations, stop_when, join, name, accumulator_schema
+            ).to_node()
         )
         return self
 

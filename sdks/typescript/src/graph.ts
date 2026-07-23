@@ -105,8 +105,35 @@ export interface MapPayload {
   output_schema?: JsonValue;
 }
 
+/** The body a fold node runs each pass. Adjacently tagged, mirroring {@link MapBody}. */
+export type FoldBody =
+  | { kind: "node"; value: string }
+  | { kind: "subgraph"; value: Graph };
+
 /**
- * One node: exactly one of the five kinds, adjacently tagged as
+ * How a fold folds its passes into the single value it produces. Adjacently
+ * tagged, data only. `best_by` is the argmax winner (the value maximizing a path
+ * into the accumulated value); `last` and `all` are the two simpler folds.
+ */
+export type FoldJoin =
+  | { kind: "best_by"; value: string }
+  | { kind: "last" }
+  | { kind: "all" };
+
+/** The `fold` node payload: bounded iteration that accumulates across passes. */
+export interface FoldPayload {
+  id: string;
+  /** Optional short display label. See the module docs' "The optional node display name" note. */
+  name?: string;
+  body: FoldBody;
+  max_iterations: number;
+  stop_when: string;
+  join: FoldJoin;
+  accumulator_schema?: JsonValue;
+}
+
+/**
+ * One node: exactly one of the six kinds, adjacently tagged as
  * `{ kind, payload }`, mirroring the Rust enum's wire shape.
  */
 export type GraphNode =
@@ -114,7 +141,8 @@ export type GraphNode =
   | { kind: "tool"; payload: ToolPayload }
   | { kind: "gate"; payload: GatePayload }
   | { kind: "branch"; payload: BranchPayload }
-  | { kind: "map"; payload: MapPayload };
+  | { kind: "map"; payload: MapPayload }
+  | { kind: "fold"; payload: FoldPayload };
 
 /** A directed edge. An optional label names a branch case an edge realizes. */
 export interface Edge {
@@ -164,6 +192,12 @@ export interface BranchOptions {
 export interface MapOptions {
   name?: string;
   outputSchema?: JsonValue;
+}
+
+/** The optional fields a fold node may declare. */
+export interface FoldOptions {
+  name?: string;
+  accumulatorSchema?: JsonValue;
 }
 
 /**
@@ -231,6 +265,29 @@ export class GraphBuilder {
     if (options.name !== undefined) payload.name = options.name;
     if (options.outputSchema !== undefined) payload.output_schema = options.outputSchema;
     this.nodes.push({ kind: "map", payload });
+    return this;
+  }
+
+  /** Adds a `fold` node: bounded iteration with a stop predicate and a join rule. */
+  fold(
+    id: string,
+    body: FoldBody,
+    maxIterations: number,
+    stopWhen: string,
+    join: FoldJoin,
+    options: FoldOptions = {},
+  ): this {
+    const payload: FoldPayload = {
+      id,
+      body,
+      max_iterations: maxIterations,
+      stop_when: stopWhen,
+      join,
+    };
+    if (options.name !== undefined) payload.name = options.name;
+    if (options.accumulatorSchema !== undefined)
+      payload.accumulator_schema = options.accumulatorSchema;
+    this.nodes.push({ kind: "fold", payload });
     return this;
   }
 

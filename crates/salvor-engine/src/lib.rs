@@ -440,6 +440,17 @@ pub async fn run_graph(
                     }
                 }
             }
+            // A fold's execution semantics are not implemented yet, so the
+            // engine refuses it with a typed error BEFORE recording its
+            // `NodeEntered`. The fold still validates as a legal
+            // document, and its markers and projection exist for client-driven
+            // runs to record against; the engine simply does not drive the loop.
+            Node::Fold(fold) => {
+                return Err(EngineError::UnsupportedNode {
+                    node: fold.id.clone(),
+                    kind: "fold",
+                });
+            }
         }
     }
 

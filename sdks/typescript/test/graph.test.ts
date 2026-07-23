@@ -57,6 +57,33 @@ test("builder emits the canonical graph document", () => {
   deepStrictEqual(built, canonical);
 });
 
+const scoreSchema = {
+  type: "object",
+  properties: { score: { type: "number" } },
+  required: ["score"],
+};
+
+function buildFoldFlow() {
+  return new GraphBuilder()
+    .agent("tailor", `sha256:${"3".repeat(64)}`, { outputSchema: scoreSchema })
+    .fold(
+      "refine",
+      { kind: "node", value: "tailor" },
+      3,
+      "score >= 0.85",
+      { kind: "best_by", value: "score" },
+      { name: "Refine to threshold", accumulatorSchema: scoreSchema },
+    )
+    .build();
+}
+
+test("builder emits the canonical fold document", () => {
+  const built = JSON.parse(JSON.stringify(buildFoldFlow()));
+  const fixturePath = resolve(process.cwd(), "../../examples/graphs/fold-refine.json");
+  const canonical = JSON.parse(readFileSync(fixturePath, "utf8"));
+  deepStrictEqual(built, canonical);
+});
+
 test("every node kind accepts an optional display name, present only when set", () => {
   const graph = new GraphBuilder()
     .agent("research", `sha256:${"1".repeat(64)}`, { name: "Research the topic" })

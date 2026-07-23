@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "nodes": [
+    {
+      "kind": "agent",
+      "payload": {
+        "id": "tailor",
+        "agent_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+        "output_schema": { "type": "object", "properties": { "score": { "type": "number" } }, "required": ["score"] }
+      }
+    },
+    {
+      "kind": "fold",
+      "payload": {
+        "id": "refine",
+        "name": "Refine to threshold",
+        "body": { "kind": "node", "value": "tailor" },
+        "max_iterations": 3,
+        "stop_when": "score >= 0.85",
+        "join": { "kind": "best_by", "value": "score" },
+        "accumulator_schema": { "type": "object", "properties": { "score": { "type": "number" } }, "required": ["score"] }
+      }
+    }
+  ],
+  "edges": []
+}

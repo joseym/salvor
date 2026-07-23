@@ -1,4 +1,4 @@
-//! The graph document format: the `Graph` envelope, the five node kinds, the
+//! The graph document format: the `Graph` envelope, the six node kinds, the
 //! edges that connect them, and the small payload types a node carries.
 //!
 //! Everything here is pure data. No type reads the clock, draws randomness, or
@@ -101,7 +101,7 @@ pub struct Graph {
     pub edges: Vec<Edge>,
 }
 
-/// One node in a graph: exactly one of the five kinds the runtime knows how to
+/// One node in a graph: exactly one of the six kinds the runtime knows how to
 /// execute.
 ///
 /// Adjacently tagged like the event enum: each node serializes as `{"kind":
@@ -138,6 +138,13 @@ pub enum Node {
     /// Fan-out: spawn a sub-run per element of a typed list, join on
     /// completion, with a concurrency cap.
     Map(MapNode),
+    /// Bounded iteration: run a body repeatedly, accumulating across passes,
+    /// until a stop predicate holds or an iteration bound is reached, then join
+    /// the passes into one value. Models an adversarial refine loop (draft,
+    /// score, review, revise) as one node. Execution is not implemented: the
+    /// fold exists in the format, the validator, the projection, and the
+    /// canvas; the engine records a typed refusal for it.
+    Fold(FoldNode),
 }
 
 impl Node {
@@ -150,6 +157,7 @@ impl Node {
             Node::Gate(n) => &n.id,
             Node::Branch(n) => &n.id,
             Node::Map(n) => &n.id,
+            Node::Fold(n) => &n.id,
         }
     }
 
@@ -162,6 +170,7 @@ impl Node {
             Node::Gate(_) => "gate",
             Node::Branch(_) => "branch",
             Node::Map(_) => "map",
+            Node::Fold(_) => "fold",
         }
     }
 
@@ -175,6 +184,7 @@ impl Node {
             Node::Gate(n) => n.name.as_deref(),
             Node::Branch(n) => n.name.as_deref(),
             Node::Map(n) => n.name.as_deref(),
+            Node::Fold(n) => n.name.as_deref(),
         }
     }
 
@@ -186,9 +196,12 @@ impl Node {
         match self {
             Node::Agent(n) => n.input_schema.as_ref(),
             Node::Tool(n) => n.input_schema.as_ref(),
-            // Gate, branch, and map do not declare a consumed type;
-            // they pass typed payloads through untyped.
-            Node::Gate(_) | Node::Branch(_) | Node::Map(_) => None,
+            // Gate, branch, map, and fold do not declare a consumed type;
+            // they pass typed payloads through untyped. A fold's
+            // `accumulator_schema` is data only, deliberately not wired into
+            // the edge type-compatibility check while its execution is not
+            // implemented.
+            Node::Gate(_) | Node::Branch(_) | Node::Map(_) | Node::Fold(_) => None,
         }
     }
 
@@ -201,7 +214,10 @@ impl Node {
             Node::Agent(n) => n.output_schema.as_ref(),
             Node::Tool(n) => n.output_schema.as_ref(),
             Node::Map(n) => n.output_schema.as_ref(),
-            Node::Gate(_) | Node::Branch(_) => None,
+            // A fold's produced-value type is not implemented with its
+            // execution: its `accumulator_schema` is data only and does not
+            // gate outbound edges.
+            Node::Gate(_) | Node::Branch(_) | Node::Fold(_) => None,
         }
     }
 }
@@ -398,6 +414,105 @@ pub enum MapBody {
     Subgraph(Box<Graph>),
 }
 
+/// A `fold` node: bounded iteration that accumulates across passes.
+///
+/// Models an adversarial refine loop as one node: a `body` is run up to
+/// `max_iterations` times, each pass folding into an accumulated value, and the
+/// loop stops when `stop_when` holds over that value (or the bound is reached).
+/// The `join` rule then selects the value the node produces. Every field is
+/// author-time data; this crate never runs the loop.
+///
+/// Grounded in the AARG tailor loop the graph wiring models: bounded revisions
+/// (`max_iterations`), a stop predicate over the accumulated score
+/// (`stop_when`, an expression in the same language a branch case uses), and an
+/// argmax winner (`join` = [`FoldJoin::BestBy`] over the score). See the
+/// crate-level docs and the graph wiring plan.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FoldNode {
+    /// The node's stable id, unique within the document.
+    pub id: String,
+    /// Optional short display label for this node. See the module docs' "The
+    /// optional node display name" section for the bound and the deliberate
+    /// hash-inclusion contrast with the agent `name` field. Additive: absent
+    /// on the wire when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// What each pass runs: a node already in this document, or an embedded
+    /// sub-graph. Not implemented exactly as [`MapBody`]'s subgraph form is not —
+    /// the shape is legal, but no engine runs it yet.
+    pub body: FoldBody,
+    /// The iteration bound: the most passes the loop may run. Must be at least
+    /// 1; [`crate::validate`] reports a zero bound by node id.
+    pub max_iterations: u32,
+    /// A boolean expression over the accumulated value that stops the loop when
+    /// it holds. Written in the [`crate::expr`] condition language, the same one
+    /// a [`BranchCondition::Expression`] uses, and validated at submit so a
+    /// malformed predicate is a node-precise error, never a run-time failure.
+    pub stop_when: String,
+    /// How the passes are folded into the value the node produces.
+    pub join: FoldJoin,
+    /// Optional JSON Schema for the accumulated value the loop carries and
+    /// produces. Data only, like an [`AgentNode`]'s `output_schema`: recorded
+    /// for authoring and tooling, never wired into the edge type-compatibility
+    /// check (a fold's produced-value semantics are not implemented with
+    /// its execution). Additive: absent on the wire when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accumulator_schema: Option<Value>,
+}
+
+/// The body a [`FoldNode`] runs each pass. Adjacently tagged, mirroring
+/// [`MapBody`], so adding a third form later stays additive. A `node` body names
+/// an existing node by id (checked for existence during validation); a
+/// `subgraph` body embeds a whole [`Graph`] and is deferred exactly as the map's
+/// subgraph body is.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum FoldBody {
+    /// Run each pass through an existing node in this document, by id.
+    Node(String),
+    /// Run each pass through an embedded sub-graph. Boxed because a `Graph`
+    /// contains nodes, one of which may itself be a `fold`, so the type is
+    /// recursive.
+    Subgraph(Box<Graph>),
+}
+
+/// How a [`FoldNode`] folds its passes into the single value it produces.
+///
+/// Adjacently tagged (`{"kind": "...", "value": ...}` for the variant that
+/// carries data, `{"kind": "..."}` for the unit variants) so a future join rule
+/// is a new variant that does not change how an existing document encodes,
+/// exactly like [`BranchCondition`].
+///
+/// The variants are grounded in what the AARG loop actually needs. `best_by` is
+/// the argmax winner the loop's "best draft wins, never the last pass" rule
+/// requires; `last` and `all` are the two obvious simpler folds a different
+/// consumer might want.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum FoldJoin {
+    /// Produce the pass whose value MAXIMIZES the given reference (a path into
+    /// the accumulated value, `score` or `review.overall_score`). This is the
+    /// argmax the AARG loop needs: the best draft wins, never the last. The
+    /// reference is parsed at submit like a [`crate::expr`] path, so a malformed
+    /// one is a node-precise error.
+    BestBy(String),
+    /// Produce the value of the last pass the loop ran.
+    Last,
+    /// Produce every pass's value as a list, in pass order.
+    All,
+}
+
 /// A directed edge: a typed payload flows from one node to another.
 ///
 /// Edges are the single source of graph topology. Referential integrity, the
@@ -509,6 +624,43 @@ mod tests {
             serde_json::to_string(&unnamed).expect("serialize"),
             r#"{"kind":"tool","payload":{"id":"publish","tool":"http_post"}}"#,
             "an unset name must not appear on the wire"
+        );
+    }
+
+    /// A fold node round-trips and serializes with the adjacent kind/payload
+    /// shape, its `join` as an adjacently tagged sub-object, and an unset
+    /// `accumulator_schema` staying off the wire.
+    #[test]
+    fn fold_node_serializes_with_join_and_body_shapes() {
+        let node = Node::Fold(FoldNode {
+            id: "refine".into(),
+            name: None,
+            body: FoldBody::Node("tailor".into()),
+            max_iterations: 3,
+            stop_when: "score >= 0.85".into(),
+            join: FoldJoin::BestBy("score".into()),
+            accumulator_schema: None,
+        });
+        let json = serde_json::to_string(&node).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"kind":"fold","payload":{"id":"refine","body":{"kind":"node","value":"tailor"},"max_iterations":3,"stop_when":"score >= 0.85","join":{"kind":"best_by","value":"score"}}}"#
+        );
+        let restored: Node = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(node, restored, "fold round trip changed the value: {json}");
+    }
+
+    /// The two unit `join` variants serialize with just their `kind` tag, no
+    /// `value`; this is the additive-tagged shape a future join rule extends.
+    #[test]
+    fn fold_join_unit_variants_carry_only_the_kind_tag() {
+        assert_eq!(
+            serde_json::to_string(&FoldJoin::Last).expect("serialize"),
+            r#"{"kind":"last"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&FoldJoin::All).expect("serialize"),
+            r#"{"kind":"all"}"#
         );
     }
 

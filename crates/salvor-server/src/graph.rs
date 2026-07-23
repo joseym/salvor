@@ -790,11 +790,22 @@ fn graph_error_json(error: &GraphError) -> Value {
             "code": "dangling_map_body", "message": message,
             "node": id, "missing": missing, "suggestion": suggestion,
         }),
+        GraphError::DanglingFoldBody {
+            id,
+            missing,
+            suggestion,
+        } => json!({
+            "code": "dangling_fold_body", "message": message,
+            "node": id, "missing": missing, "suggestion": suggestion,
+        }),
         GraphError::MalformedAgentHash { id, hash } => json!({
             "code": "malformed_agent_hash", "message": message, "node": id, "hash": hash,
         }),
         GraphError::NonPositiveConcurrency { id, found } => json!({
             "code": "non_positive_concurrency", "message": message, "node": id, "found": found,
+        }),
+        GraphError::NonPositiveMaxIterations { id, found } => json!({
+            "code": "non_positive_max_iterations", "message": message, "node": id, "found": found,
         }),
         GraphError::ApprovalSchemaNotObject { id } => json!({
             "code": "approval_schema_not_object", "message": message, "node": id,
@@ -811,6 +822,17 @@ fn graph_error_json(error: &GraphError) -> Value {
         }),
         GraphError::ModelDecisionWithoutAgent { node, case } => json!({
             "code": "model_decision_without_agent", "message": message, "node": node, "case": case,
+        }),
+        GraphError::InvalidFoldStopExpression { node, error } => json!({
+            "code": "invalid_fold_stop_expression", "message": message, "node": node, "error": error,
+        }),
+        GraphError::InvalidFoldJoinReference {
+            node,
+            reference,
+            error,
+        } => json!({
+            "code": "invalid_fold_join_reference", "message": message,
+            "node": node, "reference": reference, "error": error,
         }),
         GraphError::NodeNameTooLong { id, len, max } => json!({
             "code": "node_name_too_long", "message": message, "node": id, "len": len, "max": max,
@@ -873,6 +895,25 @@ fn projection_json(projection: &GraphProjection) -> Value {
                     "map".to_owned(),
                     json!({ "items": map.items, "iterations": iterations }),
                 );
+            }
+            if let Some(fold) = &node.fold {
+                let iterations: Vec<Value> = fold
+                    .iterations
+                    .iter()
+                    .map(|it| json!({ "index": it.index, "joined": it.joined }))
+                    .collect();
+                let mut fold_object = serde_json::Map::new();
+                fold_object.insert("iterations".to_owned(), json!(iterations));
+                if let Some(converged) = &fold.converged {
+                    fold_object.insert(
+                        "converged".to_owned(),
+                        json!({
+                            "winner_index": converged.winner_index,
+                            "reason": converged.reason,
+                        }),
+                    );
+                }
+                object.insert("fold".to_owned(), Value::Object(fold_object));
             }
             Value::Object(object)
         })

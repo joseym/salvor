@@ -19,7 +19,7 @@ import unittest
 from pathlib import Path
 
 from salvor import GraphBuilder
-from salvor.graph import BranchCase, expression, map_node
+from salvor.graph import BranchCase, best_by, expression, fold_node, map_node
 
 CANONICAL = (
     Path(__file__).resolve().parents[3]
@@ -28,11 +28,38 @@ CANONICAL = (
     / "research-review-publish.json"
 )
 
+FOLD_FIXTURE = (
+    Path(__file__).resolve().parents[3] / "examples" / "graphs" / "fold-refine.json"
+)
+
 DRAFT_SCHEMA = {
     "type": "object",
     "properties": {"draft": {"type": "string"}},
     "required": ["draft"],
 }
+
+SCORE_SCHEMA = {
+    "type": "object",
+    "properties": {"score": {"type": "number"}},
+    "required": ["score"],
+}
+
+
+def build_fold_flow():
+    return (
+        GraphBuilder()
+        .agent("tailor", f"sha256:{'3' * 64}", output_schema=SCORE_SCHEMA)
+        .fold(
+            "refine",
+            fold_node("tailor"),
+            3,
+            "score >= 0.85",
+            best_by("score"),
+            name="Refine to threshold",
+            accumulator_schema=SCORE_SCHEMA,
+        )
+        .build()
+    )
 
 
 def build_canonical_flow():
@@ -93,6 +120,11 @@ class BuildsCanonicalDocument(unittest.TestCase):
         # exactly what `salvor graph validate` would parse.
         built = json.loads(json.dumps(built))
         canonical = json.loads(CANONICAL.read_text())
+        self.assertEqual(built, canonical)
+
+    def test_matches_fold_fixture(self):
+        built = json.loads(json.dumps(build_fold_flow().to_dict()))
+        canonical = json.loads(FOLD_FIXTURE.read_text())
         self.assertEqual(built, canonical)
 
     def test_every_node_kind_accepts_an_optional_display_name(self):
