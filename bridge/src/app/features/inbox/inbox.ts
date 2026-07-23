@@ -2,6 +2,7 @@ import { Component, computed, effect, inject, signal } from '@angular/core';
 import type { RunState, RunSummary } from '@salvor/client';
 
 import { RunsService, SALVOR_CLIENT, errorMessage } from '../../core/api';
+import { FirstReceiptsService } from '../../core/first-receipts';
 import { focusWhenRendered } from '../../core/focus';
 import { ViewService } from '../../core/view';
 import { derivedStatus, labelOf } from '../runs/run-model';
@@ -70,6 +71,7 @@ export interface InboxCardVM {
 export class Inbox {
   private readonly runsService = inject(RunsService);
   private readonly viewService = inject(ViewService);
+  private readonly firstReceipts = inject(FirstReceiptsService);
 
   readonly loading = this.runsService.loading;
   /** STICKY on purpose — `lastLoadedAt` alone, never `!loading()`. A post-commit refresh flips
@@ -230,6 +232,9 @@ export class Inbox {
   /** A commit re-fetches the list, so the Runs ledger, the health strip, and the shell's Inbox
    * badge all reflect the append — nothing here mutates a count by hand. */
   onCommitted(): void {
+    // First Receipts step 3 reads the REAL committed action — the card's own announce (set on
+    // onAnnounce, which every card emits just before `committed`) carries the verb and the run.
+    this.firstReceipts.noteInboxAction(this.liveMessage());
     void this.load();
   }
 

@@ -19,6 +19,7 @@ import {
   type ForkOrigin,
   type RunEventsChannel,
 } from '../../core/api';
+import { FirstReceiptsService } from '../../core/first-receipts';
 import { ForkIntentService } from '../../core/fork-intent';
 import { PillService } from '../../core/pill';
 import { RunsService } from '../../core/api';
@@ -84,6 +85,7 @@ export class Inspector implements AfterViewInit {
   private readonly destroyRef = inject(DestroyRef);
   private readonly caps = inject(SERVER_CAPABILITIES);
   private readonly forkIntent = inject(ForkIntentService);
+  private readonly firstReceipts = inject(FirstReceiptsService);
 
   @ViewChild('statsEl') private statsEl?: ElementRef<HTMLElement>;
   @ViewChild('lineageEl') private lineageEl?: ElementRef<HTMLElement>;
@@ -768,6 +770,9 @@ export class Inspector implements AfterViewInit {
   private setPrefix(n: number): void {
     const clamped = Math.max(0, Math.min(this.events().length, n));
     this.prefixN.set(clamped);
+    // First Receipts step 2 reads the REAL playhead position — this genuine scrub, never a
+    // tutorial event. Ticks silently the first time the playhead sits before the log's end.
+    this.firstReceipts.noteScrub(clamped, this.events().length);
   }
   onRangeInput(e: Event): void {
     this.setPrefix(Number((e.target as HTMLInputElement).value));
