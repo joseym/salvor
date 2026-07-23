@@ -34,6 +34,11 @@ export interface WfNode {
   readonly prompt?: string;
   readonly inputSchema?: unknown;
   readonly cases?: readonly string[];
+  /** The subset of a branch's `cases` whose condition is `model_decision` rather than an
+   * expression — a case the engine resolves by driving the branch's own `agentHash` at run time,
+   * never by evaluating a predicate. Undefined (or empty) means every case is expression-decided,
+   * so the validator's `model_decision_without_agent` check has nothing to require an agent for. */
+  readonly modelCases?: readonly string[];
   readonly over?: string;
   readonly concurrency?: number;
   readonly body?: { readonly tool?: string; readonly effect?: string; readonly node?: string };

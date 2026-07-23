@@ -29,7 +29,11 @@ export const REFUND_SWEEP_DRAFT: WfGraph = {
     { id: 'n_charge', kind: 'tool', name: 'Charge the card again', tool: 'charge_card', effect: 'write', idempotencyKey: null, input: {} } /* duplicate id */,
     { id: 'n_pick', kind: 'branch', name: 'Retry or give up', cases: ['retry', 'give_up'] },
     { id: 'n_fan', kind: 'map', name: 'Email each watcher', over: '${n_fetch.watchers}', concurrency: 0, body: { tool: 'send_email', effect: 'idempotent' } } /* fans out to nobody */,
-    { id: 'n_notify', kind: 'agent', name: 'Draft the closing note', agentHash: 'sha256:9f2c41b7c0e5a8d3' },
+    /* This hash used to pass the client's old 16-hex tolerance untouched — the padding is
+       mechanical (sync-ledger item 4's own pattern), the same fix `complete_hash` offers, applied
+       up front so the seeded defect count stays six, not seven, once the client requires the
+       server's real 64-hex form. */
+    { id: 'n_notify', kind: 'agent', name: 'Draft the closing note', agentHash: `sha256:${'9f2c41b7c0e5a8d3'.padEnd(64, '0')}` },
   ],
   edges: [
     { from: 'n_start', to: 'n_fetch' },
