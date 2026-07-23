@@ -120,6 +120,11 @@
   </main>
 </div>
 
+<!-- FIRST RECEIPTS — the onboarding dock + coach-mark. Mounted at the shell level, outside every
+     [hidden] view section, so it rides on every view and its coach-mark can ring a target in
+     whichever view is active. -->
+<bridge-first-receipts />
+
 <!-- ⌘K palette: jump to a view by name or a live run by id prefix. A combobox over a listbox;
      the input owns focus and aria-activedescendant points at the highlighted row. -->
 <div class="palette" id="palette" popover="auto" role="dialog" aria-label="Jump to a run or a view" (toggle)="onPaletteToggle($event)">
@@ -225,6 +230,11 @@
         <code>GET /v1/capabilities</code> probe the honesty chip above reads. A dash means the probe has
         not resolved yet, or the server predates this field.
       </p>
+      <p class="mechanism">
+        New here?
+        <button class="link-btn" type="button" id="about-first-receipts" (click)="openFirstReceipts()">Open the First receipts checklist</button>
+        — five real things to try, each logged the moment you do it.
+      </p>
     </div>
   </div>
 </div>
@@ -240,6 +250,9 @@
       <dt>?</dt><dd>This panel.</dd>
       <dt>Esc</dt><dd>Close whichever overlay is open.</dd>
     </dl>
+    <button class="palette-open" type="button" id="keys-first-receipts" (click)="openFirstReceipts()">
+      Open the First receipts checklist
+    </button>
   </div>
   <div class="keys-group">
     <h4>The jump palette</h4>

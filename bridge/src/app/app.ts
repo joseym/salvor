@@ -14,6 +14,8 @@ import { CapabilityProbeService, GraphsService, RunsService } from './core/api';
 import { PillService } from './core/pill';
 import { ThemeService } from './core/theme';
 import { ViewService, type ViewName } from './core/view';
+import { FirstReceiptsService } from './core/first-receipts';
+import { FirstReceipts } from './features/onboarding/first-receipts';
 import { Inbox } from './features/inbox/inbox';
 import { Inspector } from './features/inspector/inspector';
 import { groupOf, labelOf } from './features/runs/run-model';
@@ -54,7 +56,7 @@ const SUBS: Readonly<Record<ViewName, string>> = {
  */
 @Component({
   selector: 'bridge-root',
-  imports: [Runs, Inspector, Inbox, Spend, Workflows],
+  imports: [Runs, Inspector, Inbox, Spend, Workflows, FirstReceipts],
   templateUrl: './app.html',
   host: { '(document:keydown)': 'onGlobalKeydown($event)' },
 })
@@ -65,6 +67,7 @@ export class App implements AfterViewInit {
   private readonly viewService = inject(ViewService);
   private readonly destroyRef = inject(DestroyRef);
   private readonly pill = inject(PillService);
+  private readonly firstReceipts = inject(FirstReceiptsService);
   protected readonly theme = inject(ThemeService);
 
   @ViewChild('appNav') private appNav?: ElementRef<HTMLElement>;
@@ -258,6 +261,15 @@ export class App implements AfterViewInit {
   }
   openKeys(): void {
     (document.getElementById('keys') as HTMLElement & { showPopover?: () => void })?.showPopover?.();
+  }
+
+  /** Expand the First Receipts checklist — the reopen path from the "?" shortcuts popover and the
+   * About panel. Closes whichever popover invoked it first, then expands the dock. */
+  openFirstReceipts(): void {
+    (document.getElementById('keys') as HTMLElement & { hidePopover?: () => void })?.hidePopover?.();
+    (document.getElementById('wf-about') as HTMLElement & { hidePopover?: () => void })?.hidePopover?.();
+    this.firstReceipts.reopen();
+    setTimeout(() => document.getElementById('fr-dismiss')?.focus(), 0);
   }
 
   onPaletteInput(e: Event): void {

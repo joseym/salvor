@@ -1,0 +1,98 @@
+<!-- FIRST RECEIPTS — a persistent dock present on every view. The collapsed tab is always
+     reachable; the expanded panel is a small log of the operator's own firsts. No scrim, never a
+     modal, never gates the page. -->
+
+<!-- Collapsed: the persistent tab. Shows progress; quiets to a check on completion. Reopens the
+     panel — the one path a tick or completion never takes (the dock never auto-expands). -->
+<button
+  class="fr-tab"
+  type="button"
+  id="fr-tab"
+  [hidden]="fr.open()"
+  aria-haspopup="true"
+  [attr.aria-expanded]="fr.open()"
+  aria-controls="first-receipts"
+  (click)="fr.reopen()"
+>
+  First receipts
+  <span class="fr-tally" aria-hidden="true">{{ fr.complete() ? '✓' : fr.count() + '/' + fr.total }}</span>
+  <span class="sr">{{ fr.complete() ? 'complete' : fr.count() + ' of ' + fr.total + ' done' }} — open the checklist</span>
+</button>
+
+<!-- Expanded: the checklist panel. -->
+<aside class="fr-panel" id="first-receipts" [hidden]="!fr.open()" aria-labelledby="fr-title">
+  <div class="fr-head">
+    <div>
+      <h2 class="fr-title" id="fr-title">First receipts</h2>
+      <p class="fr-progress"><span class="fr-tally-mono">{{ fr.count() }}/{{ fr.total }}</span> done</p>
+    </div>
+    <button class="fr-x" type="button" id="fr-dismiss" aria-label="Collapse the checklist to its tab" (click)="fr.dismiss()">×</button>
+  </div>
+
+  <p class="fr-lede">{{ lede }}</p>
+
+  <ol class="fr-steps">
+    @for (step of fr.steps; track step.id) {
+      <li
+        class="fr-step"
+        [attr.data-step]="step.id"
+        [class.is-done]="fr.isTicked(step.id)"
+        [class.is-active]="!fr.isTicked(step.id) && fr.activeStepId() === step.id"
+        [class.is-blocked]="step.id === 'inbox' && !fr.isTicked(step.id) && !fr.hasParkedRun()"
+      >
+        @if (fr.isTicked(step.id); as _done) {
+          <!-- A ticked step IS its receipt line, in the app's receipt voice. -->
+          <p class="fr-receipt">
+            <span class="fr-check" aria-hidden="true">✓</span>
+            <span class="fr-at">{{ fr.receiptOf(step.id)?.at }}</span>
+            <span class="fr-detail">— {{ fr.receiptOf(step.id)?.detail }}. {{ step.coda }}</span>
+          </p>
+        } @else {
+          <p class="fr-label">{{ step.label }}</p>
+          <p class="fr-why">{{ step.why }}</p>
+
+          @if (step.id === 'inbox' && !fr.hasParkedRun()) {
+            <!-- HONEST FALLBACK: the step's material is absent. Offer an explicit, labelled practice
+                 seed — a real run, tagged practice, that the operator can read and then abandon. -->
+            <div class="fr-practice" id="fr-practice">
+              <p class="fr-practice-note">
+                No run is parked right now, so there is nothing here to clear yet. Want a practice one?
+                This creates a real run, tagged <span class="fr-mono">practice</span> on its labels, that
+                you can read and then abandon — a genuine run, never a fake.
+              </p>
+              @if (fr.practiceRunId()) {
+                <p class="fr-practice-note">
+                  Practice run <span class="fr-mono">{{ short(fr.practiceRunId()) }}</span> created and tagged
+                  <span class="fr-mono">practice</span>. Abandon it when you are done — that appends a final
+                  receipt, it does not erase the run.
+                </p>
+                <button class="fr-btn" type="button" id="fr-abandon-practice" (click)="fr.abandonPractice()">
+                  Abandon the practice run
+                </button>
+              } @else {
+                <button class="fr-btn" type="button" id="fr-seed-practice" [disabled]="fr.seeding()" (click)="fr.seedPractice()">
+                  {{ fr.seeding() ? 'Creating…' : 'Create a practice run' }}
+                </button>
+              }
+              @if (fr.seedError()) {
+                <p class="fr-practice-err" role="status">{{ fr.seedError() }}</p>
+              }
+            </div>
+          }
+        }
+      </li>
+    }
+  </ol>
+</aside>
+
+<!-- COACH-MARK LAYER. The ring is drawn OVER the real target (pointer-events: none, aria-hidden),
+     so the target keeps its own semantics and stays clickable. The callout is a popover=auto:
+     native light-dismiss, Escape closes, no focus trap, no scrim. -->
+<div class="fr-ring" id="fr-ring" aria-hidden="true" [hidden]="!coachVisible()" [style]="ringStyle()"></div>
+
+<div class="fr-callout" id="fr-callout" #callout popover="auto" role="note" [style]="calloutStyle()" (toggle)="onCalloutToggle($event)">
+  @if (activeStep(); as step) {
+    <p class="fr-callout-label">{{ step.label }}</p>
+    <p class="fr-callout-hint">The ring marks where. Do it on the page — this step ticks itself the moment you do.</p>
+  }
+</div>
