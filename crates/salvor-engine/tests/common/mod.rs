@@ -69,6 +69,9 @@ pub fn event_kinds(log: &[EventEnvelope]) -> Vec<&'static str> {
             Event::MapFannedOut { .. } => "MapFannedOut",
             Event::MapIterationStarted { .. } => "MapIterationStarted",
             Event::MapIterationJoined { .. } => "MapIterationJoined",
+            Event::FoldIterationStarted { .. } => "FoldIterationStarted",
+            Event::FoldIterationJoined { .. } => "FoldIterationJoined",
+            Event::FoldConverged { .. } => "FoldConverged",
         })
         .collect()
 }

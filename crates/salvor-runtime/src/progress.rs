@@ -71,6 +71,9 @@ pub fn event_kind(event: &Event) -> &'static str {
         Event::MapFannedOut { .. } => "MapFannedOut",
         Event::MapIterationStarted { .. } => "MapIterationStarted",
         Event::MapIterationJoined { .. } => "MapIterationJoined",
+        Event::FoldIterationStarted { .. } => "FoldIterationStarted",
+        Event::FoldIterationJoined { .. } => "FoldIterationJoined",
+        Event::FoldConverged { .. } => "FoldConverged",
     }
 }
 
@@ -175,6 +178,16 @@ pub fn event_detail(event: &Event) -> String {
             child_run,
         } => format!("map {node}[{index}] child {}", short_hash(child_run)),
         Event::MapIterationJoined { node, index } => format!("map {node}[{index}] joined"),
+        Event::FoldIterationStarted { node, index } => format!("fold {node}[{index}] started"),
+        Event::FoldIterationJoined { node, index } => format!("fold {node}[{index}] joined"),
+        Event::FoldConverged {
+            node,
+            winner_index,
+            reason,
+        } => format!(
+            "fold {node} converged on [{winner_index}]: {}",
+            truncate_str(reason)
+        ),
     }
 }
 

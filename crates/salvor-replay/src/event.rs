@@ -56,11 +56,13 @@ use crate::id::{RunId, SequenceNumber};
 ///
 /// # Why the graph events do not bump this
 ///
-/// The graph-run events ([`Event::GraphRunStarted`] and the node/branch/map
+/// The graph-run events ([`Event::GraphRunStarted`] and the node/branch/map/fold
 /// markers) are new variants, added the same read-compatible way the
 /// deterministic-context events were: a log written before them contains none
 /// of the new kinds, so every event in it parses to the identical value under
-/// the new build. [`Event::GraphRunStarted`]'s own `labels` and `forked_from`
+/// the new build. The fold markers ([`Event::FoldIterationStarted`],
+/// [`Event::FoldIterationJoined`], and [`Event::FoldConverged`]) were added
+/// last, the same way and for the same reason, and the version stayed 1. [`Event::GraphRunStarted`]'s own `labels` and `forked_from`
 /// are additive-optional under the same
 /// `#[serde(default, skip_serializing_if = "Option::is_none")]` contract, so a
 /// graph run that is neither labeled nor forked omits both keys entirely.
@@ -443,6 +445,44 @@ pub enum Event {
         /// The zero-based position of the iteration that joined.
         index: u64,
     },
+    /// A fold node began one bounded iteration: a single revision pass of the
+    /// accumulate-and-refine loop the node models. A fold's passes run
+    /// sequentially in the one log (never as child runs, unlike a map's
+    /// iterations), so `index` is both the pass position and its recorded
+    /// order.
+    FoldIterationStarted {
+        /// The id of the fold node this iteration belongs to.
+        node: String,
+        /// The zero-based position of this pass in the fold loop.
+        index: u64,
+    },
+    /// A fold iteration joined back: its pass result was folded into the fold
+    /// node's accumulated value. Recorded in index order, exactly like
+    /// [`Event::MapIterationJoined`]; because a fold's passes are sequential,
+    /// index order already is completion order.
+    FoldIterationJoined {
+        /// The id of the fold node this iteration belongs to.
+        node: String,
+        /// The zero-based position of the iteration that joined.
+        index: u64,
+    },
+    /// A fold node settled: its loop stopped and its `join` rule selected the
+    /// winning iteration. This is the sole recorded authority for WHICH pass
+    /// the fold's output came from — the argmax of a `best_by` join is read
+    /// from `winner_index`, never inferred from the iteration order — exactly
+    /// as [`Event::BranchTaken`] is the sole authority for a branch's route.
+    /// `reason` records WHY the loop ended (its stop predicate fired, the
+    /// iteration bound was reached, or a pass failed to improve), an opaque
+    /// audit string like [`Event::NodeSkipped`]'s.
+    FoldConverged {
+        /// The id of the fold node that settled.
+        node: String,
+        /// The zero-based index of the iteration whose value the `join` rule
+        /// selected as the fold's output.
+        winner_index: u64,
+        /// Why the loop ended, recorded for the audit trail.
+        reason: String,
+    },
 }
 
 /// The recorded link from a forked run back to the run it forked from.
@@ -726,6 +766,19 @@ mod tests {
             node: "fanout".into(),
             index: 0,
         });
+        assert_round_trips(Event::FoldIterationStarted {
+            node: "refine".into(),
+            index: 0,
+        });
+        assert_round_trips(Event::FoldIterationJoined {
+            node: "refine".into(),
+            index: 1,
+        });
+        assert_round_trips(Event::FoldConverged {
+            node: "refine".into(),
+            winner_index: 1,
+            reason: "score >= threshold".into(),
+        });
     }
 
     /// Pins the exact serialized form of a representative envelope. A change to
@@ -997,6 +1050,28 @@ mod tests {
                     index: 0,
                 },
                 r#"{"kind":"MapIterationJoined","payload":{"node":"fanout","index":0}}"#,
+            ),
+            (
+                Event::FoldIterationStarted {
+                    node: "refine".into(),
+                    index: 0,
+                },
+                r#"{"kind":"FoldIterationStarted","payload":{"node":"refine","index":0}}"#,
+            ),
+            (
+                Event::FoldIterationJoined {
+                    node: "refine".into(),
+                    index: 1,
+                },
+                r#"{"kind":"FoldIterationJoined","payload":{"node":"refine","index":1}}"#,
+            ),
+            (
+                Event::FoldConverged {
+                    node: "refine".into(),
+                    winner_index: 1,
+                    reason: "score >= threshold".into(),
+                },
+                r#"{"kind":"FoldConverged","payload":{"node":"refine","winner_index":1,"reason":"score >= threshold"}}"#,
             ),
         ];
 

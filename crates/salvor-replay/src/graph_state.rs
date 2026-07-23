@@ -12,7 +12,8 @@
 //!
 //! The projection is built only from the graph markers the log actually
 //! records ([`Event::GraphRunStarted`], the `Node*` events, [`Event::BranchTaken`],
-//! and the `Map*` events). Two invariants follow from that discipline:
+//! the `Map*` events, and the `Fold*` events). Two invariants follow from that
+//! discipline:
 //!
 //! - **Skipped is not the same as not-reached.** A node the run recorded a
 //!   [`Event::NodeSkipped`] for appears in [`GraphProjection::nodes`] with
@@ -88,6 +89,45 @@ pub struct MapProgress {
     pub iterations: Vec<MapIteration>,
 }
 
+/// One iteration (revision pass) of a fold node's loop.
+///
+/// A fold's passes run sequentially in the one log, so — unlike a
+/// [`MapIteration`] — there is no child run: an iteration is just its index and
+/// whether it has folded back into the accumulated value yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FoldIteration {
+    /// The zero-based position of this pass in the fold loop.
+    pub index: u64,
+    /// Whether the pass has joined back into the fold's accumulated value.
+    /// Joins are recorded in index order, so a projection at any prefix shows a
+    /// contiguous run of joined iterations followed by any still-running one.
+    pub joined: bool,
+}
+
+/// How a fold node settled, from a recorded [`Event::FoldConverged`].
+///
+/// Present only once the fold's loop has ended. The winner is the sole recorded
+/// authority for which pass the fold's output came from; it is never inferred
+/// from the iteration order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FoldConvergence {
+    /// The index of the iteration whose value the node's `join` rule selected.
+    pub winner_index: u64,
+    /// Why the loop ended (its stop predicate fired, the iteration bound was
+    /// reached, or a pass failed to improve), recorded verbatim.
+    pub reason: String,
+}
+
+/// A fold node's loop progress, present only once the node has begun iterating.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FoldProgress {
+    /// The iterations that have started, in recorded (index) order.
+    pub iterations: Vec<FoldIteration>,
+    /// How the loop settled, once it has. `None` while the fold is still
+    /// iterating (no [`Event::FoldConverged`] recorded yet).
+    pub converged: Option<FoldConvergence>,
+}
+
 /// Everything the log implies about one graph node.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodeProgress {
@@ -101,6 +141,9 @@ pub struct NodeProgress {
     pub branch_case: Option<String>,
     /// Map fan-out progress. `Some` only for a map node that has fanned out.
     pub map: Option<MapProgress>,
+    /// Fold loop progress. `Some` only for a fold node that has begun
+    /// iterating.
+    pub fold: Option<FoldProgress>,
 }
 
 /// Everything a graph run's log prefix implies about its node-level progress.
@@ -200,6 +243,30 @@ pub fn derive_graph_projection(log: &[EventEnvelope]) -> GraphProjection {
                     iteration.joined = true;
                 }
             }
+            Event::FoldIterationStarted { node, index } => {
+                let fold = fold_entry(node_entry(&mut projection.nodes, node));
+                fold.iterations.push(FoldIteration {
+                    index: *index,
+                    joined: false,
+                });
+            }
+            Event::FoldIterationJoined { node, index } => {
+                let fold = fold_entry(node_entry(&mut projection.nodes, node));
+                if let Some(iteration) = fold.iterations.iter_mut().find(|it| it.index == *index) {
+                    iteration.joined = true;
+                }
+            }
+            Event::FoldConverged {
+                node,
+                winner_index,
+                reason,
+            } => {
+                let fold = fold_entry(node_entry(&mut projection.nodes, node));
+                fold.converged = Some(FoldConvergence {
+                    winner_index: *winner_index,
+                    reason: reason.clone(),
+                });
+            }
             // Every non-graph event (the agent-run vocabulary and the
             // deterministic-context observations) is a no-op for the per-node
             // picture: those boundaries belong to the run-level fold, not this
@@ -228,9 +295,21 @@ fn node_entry<'a>(nodes: &'a mut Vec<NodeProgress>, id: &str) -> &'a mut NodePro
             state: NodeState::Entered,
             branch_case: None,
             map: None,
+            fold: None,
         });
         nodes.last_mut().expect("just pushed")
     }
+}
+
+/// Returns a mutable reference to a node's fold progress, creating an empty one
+/// (no iterations, not converged) if no fold marker preceded this one. The
+/// empty fallback keeps the fold total for an out-of-order log; a well-formed
+/// graph run always opens the fold with [`Event::FoldIterationStarted`] first.
+fn fold_entry(node: &mut NodeProgress) -> &mut FoldProgress {
+    node.fold.get_or_insert_with(|| FoldProgress {
+        iterations: Vec::new(),
+        converged: None,
+    })
 }
 
 /// Returns a mutable reference to a node's map progress, creating an empty one
@@ -463,6 +542,129 @@ mod tests {
                 child_run: "sha256:child-1".into(),
                 joined: false,
             }
+        );
+    }
+
+    /// A full fold loop projects its per-pass iterations (joins landing in
+    /// index order) and the recorded convergence: which pass won and why the
+    /// loop stopped.
+    #[test]
+    fn fold_loop_projects_iterations_and_convergence() {
+        let projection = derive_graph_projection(&log(vec![
+            graph_started(),
+            Event::NodeEntered {
+                node: "refine".into(),
+            },
+            Event::FoldIterationStarted {
+                node: "refine".into(),
+                index: 0,
+            },
+            Event::FoldIterationJoined {
+                node: "refine".into(),
+                index: 0,
+            },
+            Event::FoldIterationStarted {
+                node: "refine".into(),
+                index: 1,
+            },
+            Event::FoldIterationJoined {
+                node: "refine".into(),
+                index: 1,
+            },
+            Event::FoldConverged {
+                node: "refine".into(),
+                winner_index: 1,
+                reason: "score >= threshold".into(),
+            },
+            Event::NodeExited {
+                node: "refine".into(),
+            },
+        ]));
+        let fold = projection.node("refine").unwrap().fold.as_ref().unwrap();
+        assert_eq!(fold.iterations.len(), 2);
+        assert_eq!(
+            fold.iterations[0],
+            FoldIteration {
+                index: 0,
+                joined: true,
+            }
+        );
+        assert_eq!(
+            fold.iterations[1],
+            FoldIteration {
+                index: 1,
+                joined: true,
+            }
+        );
+        assert_eq!(
+            fold.converged,
+            Some(FoldConvergence {
+                winner_index: 1,
+                reason: "score >= threshold".into(),
+            })
+        );
+        // The node itself exited, and the fold is orthogonal to the node state.
+        assert_eq!(projection.node("refine").unwrap().state, NodeState::Exited);
+    }
+
+    /// While a fold is still iterating, the last pass shows unjoined and the
+    /// convergence is absent: a mid-loop projection reads honestly.
+    #[test]
+    fn fold_mid_loop_has_no_convergence_yet() {
+        let projection = derive_graph_projection(&log(vec![
+            graph_started(),
+            Event::NodeEntered {
+                node: "refine".into(),
+            },
+            Event::FoldIterationStarted {
+                node: "refine".into(),
+                index: 0,
+            },
+            Event::FoldIterationJoined {
+                node: "refine".into(),
+                index: 0,
+            },
+            Event::FoldIterationStarted {
+                node: "refine".into(),
+                index: 1,
+            },
+        ]));
+        let fold = projection.node("refine").unwrap().fold.as_ref().unwrap();
+        assert_eq!(fold.iterations.len(), 2);
+        assert!(fold.iterations[0].joined, "first pass joined");
+        assert!(!fold.iterations[1].joined, "second pass still running");
+        assert_eq!(fold.converged, None, "loop has not settled");
+        assert_eq!(projection.current_node.as_deref(), Some("refine"));
+    }
+
+    /// Fold markers with no prior `FoldIterationStarted` (a join or a
+    /// convergence out of order) are folded defensively into an empty fold,
+    /// never panicking.
+    #[test]
+    fn orphaned_fold_markers_are_total() {
+        let projection = derive_graph_projection(&log(vec![
+            graph_started(),
+            Event::FoldIterationJoined {
+                node: "refine".into(),
+                index: 5,
+            },
+            Event::FoldConverged {
+                node: "refine".into(),
+                winner_index: 0,
+                reason: "bound reached".into(),
+            },
+        ]));
+        let fold = projection.node("refine").unwrap().fold.as_ref().unwrap();
+        assert!(
+            fold.iterations.is_empty(),
+            "the orphaned join added nothing"
+        );
+        assert_eq!(
+            fold.converged,
+            Some(FoldConvergence {
+                winner_index: 0,
+                reason: "bound reached".into(),
+            })
         );
     }
 

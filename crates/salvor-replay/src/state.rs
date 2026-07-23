@@ -278,7 +278,7 @@ pub fn derive_state(log: &[EventEnvelope]) -> RunState {
             Event::GraphRunStarted { .. } => {
                 state.status = RunStatus::Running;
             }
-            // The graph node/branch/map markers narrate the walk for the
+            // The graph node/branch/map/fold markers narrate the walk for the
             // per-node projection; at the run level they are structural notes
             // that change no status, exactly like the context observations
             // above. A graph run sits at `Running` across all of them (the
@@ -289,7 +289,10 @@ pub fn derive_state(log: &[EventEnvelope]) -> RunState {
             | Event::BranchTaken { .. }
             | Event::MapFannedOut { .. }
             | Event::MapIterationStarted { .. }
-            | Event::MapIterationJoined { .. } => {}
+            | Event::MapIterationJoined { .. }
+            | Event::FoldIterationStarted { .. }
+            | Event::FoldIterationJoined { .. }
+            | Event::FoldConverged { .. } => {}
         }
     }
     state

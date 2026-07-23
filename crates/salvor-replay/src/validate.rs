@@ -356,6 +356,9 @@ fn kind_name(event: &Event) -> &'static str {
         Event::MapFannedOut { .. } => "MapFannedOut",
         Event::MapIterationStarted { .. } => "MapIterationStarted",
         Event::MapIterationJoined { .. } => "MapIterationJoined",
+        Event::FoldIterationStarted { .. } => "FoldIterationStarted",
+        Event::FoldIterationJoined { .. } => "FoldIterationJoined",
+        Event::FoldConverged { .. } => "FoldConverged",
     }
 }
 

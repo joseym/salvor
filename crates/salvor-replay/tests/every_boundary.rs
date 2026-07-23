@@ -257,6 +257,9 @@ fn expected_status(prefix: &[EventEnvelope]) -> RunStatus {
         | Event::MapFannedOut { .. }
         | Event::MapIterationStarted { .. }
         | Event::MapIterationJoined { .. }
+        | Event::FoldIterationStarted { .. }
+        | Event::FoldIterationJoined { .. }
+        | Event::FoldConverged { .. }
         | Event::ModelCallCompleted { .. }
         | Event::ToolCallCompleted { .. }
         | Event::NowObserved { .. }
