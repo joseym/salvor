@@ -39,6 +39,16 @@
 # 5.4b below, right after the original `running`-shaped stall (5.4). Both shapes must render as
 # stalled; the second is what the derivation's old, narrower rule (`state !== 'running'`) missed.
 #
+# Demo-tool-registry ADDITION, on top of everything above, unchanged: `salvor serve` is now
+# started with `--demo-tools`, so it registers the three deterministic demo tools
+# (`salvor_cli::demo_tools`: lookup_invoice read, issue_refund write, send_email idempotent) the
+# stock server refuses. That closes the gap noted above: a SECOND graph document, the
+# prototype-shaped 8-node invoice-dispute graph (agent, tool, branch, gate, agent, tool, tool,
+# agent, real tool nodes this time, not agent/gate only), is submitted and driven for real. One
+# run completes the whole shape (lookup -> split over_500 -> approve -> refund -> notify -> close,
+# with n_fast genuinely skipped as the road not taken), and one is left parked at the gate. See
+# step 5.7 below.
+#
 # Usage:
 #     bridge/e2e-serve.sh                 # start everything, print TARGET_URL, stay up
 #     bridge/e2e-serve.sh --stop          # tear down the servers this script started
@@ -63,6 +73,9 @@ SERVE_ADDR="${SERVE_ADDR:-127.0.0.1:${APP_PORT}}"
 API="http://${SERVE_ADDR}"
 STORE="/tmp/salvor-bridge-e2e-store.sqlite"
 FINDINGS="/tmp/salvor-bridge-e2e-findings.txt"
+# Demo-tools addition: the demo tool registry's own write ledger (issue_refund), separate from FINDINGS
+# above (the MCP research fixture's own file) so the two effect-class stories never share a file.
+TOOL_LEDGER="/tmp/salvor-bridge-e2e-tool-ledger.txt"
 # EXACT-PID TEARDOWN: every background process this script starts records its own $! here, one pid
 # per line, and stop() kills ONLY these recorded pids — never a name/argv pattern. A pattern kill
 # (the old `pkill -f 'salvor .*serve'`) also matches the OWNER'S real server on :8080, whose argv is
@@ -117,7 +130,7 @@ if [ "${1:-}" = "--stop" ]; then stop; exit 0; fi
 
 stop            # clean any prior run first (only its own recorded pids)
 : > "$PIDFILE"  # start this run with a fresh, empty pid ledger
-rm -f "$STORE" "$STORE"-wal "$STORE"-shm "$FINDINGS" "$RECON_REPORT"
+rm -f "$STORE" "$STORE"-wal "$STORE"-shm "$FINDINGS" "$RECON_REPORT" "$TOOL_LEDGER"
 
 # 1. Build the CLI + fixture binaries (fixture is a default feature). Cheap if already built.
 echo "[e2e-serve] building salvor-cli"
@@ -136,17 +149,20 @@ target/debug/salvor-demo-model --port "$MODEL_PORT" --delay-ms 120 \
 record_pid $!
 until curl -s -o /dev/null -X POST "http://127.0.0.1:${MODEL_PORT}/v1/messages" -d '{"messages":[]}' 2>/dev/null; do sleep 0.2; done
 
-# 3. Control plane over the disposable store.
-echo "[e2e-serve] starting salvor serve on ${SERVE_ADDR} (store ${STORE})"
+# 3. Control plane over the disposable store. `--demo-tools` registers the three
+#    deterministic demo tools (salvor_cli::demo_tools) the stock server otherwise refuses, so the
+#    invoice graph seed below (step 5.7) can drive real tool nodes.
+echo "[e2e-serve] starting salvor serve on ${SERVE_ADDR} (store ${STORE}, --demo-tools)"
 # SALVOR_CLIENT_LEASE_TTL_SECS shortens the client-driven-run lease so the seeded STALLED run
 # (step 5.4) reports no attached driver within seconds of its last append, rather than the 60s
 # default. It affects only client-run leases; no other seed here opens a client-driven run.
 SALVOR_DEMO_BASE_URL="http://127.0.0.1:${MODEL_PORT}" \
 SALVOR_DEMO_FINDINGS="$FINDINGS" \
+SALVOR_DEMO_TOOL_LEDGER="$TOOL_LEDGER" \
 SALVOR_RECORD_PROMPTS=1 \
 SALVOR_CLIENT_LEASE_TTL_SECS=2 \
 RUST_LOG=warn \
-target/debug/salvor --store "$STORE" serve --bind "$SERVE_ADDR" \
+target/debug/salvor --store "$STORE" serve --bind "$SERVE_ADDR" --demo-tools \
   >/tmp/salvor-bridge-e2e-serve.log 2>&1 &
 record_pid $!
 until curl -s -o /dev/null "${API}/v1/runs" 2>/dev/null; do sleep 0.2; done
@@ -564,6 +580,140 @@ assert fo["from_node"] == "approve", fo
 print("[e2e-serve] child's GET /v1/runs/{id}/graph shows forked_from:", fo)
 PYEOF
 echo "[e2e-serve] gate graph seeds verified: graph=${GRAPH_HASH} A=${GRUN_A} B=${GRUN_B} C=${GRUN_C}"
+
+# 5.7. Invoice-graph addition (additive only): a SECOND graph document, the prototype-shaped 8-node
+#      invoice-dispute graph, this time with real `tool` nodes dispatched through the server's
+#      `--demo-tools` registry (step 3): lookup_invoice (read), issue_refund (write), send_email
+#      (idempotent), see crates/salvor-cli/src/demo_tools.rs. Same node ids and names as the
+#      prototype's own invoice-dispute fixture graph, so a spec that keys on them reads the same
+#      story on both targets; the one shape divergence is `n_notify`, a plain `tool` node here
+#      rather than the prototype's inline `map` fan-out (the real graph format has no inline map
+#      body, see salvor_graph::document::MapBody, and the build does not render map iterations
+#      yet either, so a single-recipient tool call tells the identical idempotent-retry story with
+#      nothing lost).
+#
+#      Two entry nodes (n_lookup, a tool; n_triage, an agent) so BOTH a tool-node walk and an
+#      agent-node walk start the graph directly off the run's own input, with no fragile
+#      agent-prose-into-typed-tool-input edge anywhere in the document: n_split routes on
+#      n_lookup's structured output, n_fast (agent) is the untaken arm on this seed (genuinely
+#      SKIPPED, never called), and n_approve's gate is resumed with a body this script controls
+#      completely, carrying every field n_refund and n_notify need downstream.
+#
+#      Seed D (graph-run-completed): started over invoice inv_2002 (amount $512, so the branch
+#      takes over_500), awaited to the gate, resumed with the full record (approval plus the
+#      invoice/watcher fields n_refund and n_notify consume), awaited to completion, the whole
+#      8-node shape walks: n_lookup, n_split, n_approve, n_refund, n_notify, n_close, and n_triage
+#      all EXITED, n_fast SKIPPED.
+#      Seed E (graph-run-parked): a second run over the same invoice, left suspended at the gate on
+#      purpose, same shape as the gate graph's seed B, but this time the parked origin is a tool-bearing
+#      graph run, not agent+gate only.
+echo "[e2e-serve] submitting the invoice graph document (8-node invoice-dispute shape, real tool nodes)"
+cat > /tmp/salvor-bridge-e2e-graph9-build.py <<'PYEOF'
+import json, sys
+agent_hash = sys.argv[1]
+doc = {
+    "schema_version": 1,
+    "nodes": [
+        {"kind": "tool", "payload": {
+            "id": "n_lookup", "name": "Look up the invoice", "tool": "lookup_invoice",
+        }},
+        {"kind": "agent", "payload": {
+            "id": "n_triage", "name": "Classify the dispute", "agent_hash": agent_hash,
+        }},
+        {"kind": "branch", "payload": {
+            "id": "n_split", "name": "Refund threshold",
+            "cases": [
+                {"name": "under_500", "when": {"kind": "expression", "value": "amount_usd < 500"}},
+                {"name": "over_500", "when": {"kind": "expression", "value": "amount_usd >= 500"}},
+            ],
+        }},
+        {"kind": "agent", "payload": {
+            "id": "n_fast", "name": "Fast-track the refund", "agent_hash": agent_hash,
+        }},
+        {"kind": "gate", "payload": {
+            "id": "n_approve", "name": "Approve the refund",
+            "prompt": "This refund exceeds $500. Approve?",
+            "approval_schema": {
+                "type": "object",
+                "required": ["approved"],
+                "properties": {"approved": {"type": "boolean"}},
+            },
+        }},
+        {"kind": "tool", "payload": {
+            "id": "n_refund", "name": "Issue the refund", "tool": "issue_refund",
+        }},
+        {"kind": "tool", "payload": {
+            "id": "n_notify", "name": "Notify the watcher", "tool": "send_email",
+        }},
+        {"kind": "agent", "payload": {
+            "id": "n_close", "name": "Draft the closing note", "agent_hash": agent_hash,
+        }},
+    ],
+    "edges": [
+        {"from": "n_lookup", "to": "n_split"},
+        {"from": "n_split", "to": "n_fast", "label": "under_500"},
+        {"from": "n_split", "to": "n_approve", "label": "over_500"},
+        {"from": "n_approve", "to": "n_refund"},
+        {"from": "n_refund", "to": "n_notify"},
+        {"from": "n_notify", "to": "n_close"},
+    ],
+}
+with open("/tmp/salvor-bridge-e2e-graph9.json", "w") as f:
+    json.dump(doc, f)
+PYEOF
+python3 /tmp/salvor-bridge-e2e-graph9-build.py "$DEMO_AGENT"
+curl -s -X POST "${API}/v1/graphs" -H 'Content-Type: application/json' \
+  --data-binary @/tmp/salvor-bridge-e2e-graph9.json > /tmp/salvor-bridge-e2e-graph9-submit.json
+GRAPH9_HASH=$(python3 -c 'import json;print(json.load(open("/tmp/salvor-bridge-e2e-graph9-submit.json"))["graph"])')
+if [ -z "$GRAPH9_HASH" ]; then
+  echo "[e2e-serve] FATAL: invoice graph submit failed: $(cat /tmp/salvor-bridge-e2e-graph9-submit.json)" >&2
+  exit 1
+fi
+echo "[e2e-serve] invoice graph stored: ${GRAPH9_HASH}"
+
+INVOICE_INPUT='{"invoice_id":"inv_2002"}'
+RESUME_BODY='{"input":{"approved":true,"invoice_id":"inv_2002","amount_usd":512.0,"watcher":"carol@example.com"}}'
+
+echo "[e2e-serve] seed D: the 8-node graph, driven to completion"
+curl -s -X POST "${API}/v1/graph-runs" -H 'Content-Type: application/json' \
+  -d "{\"graph_hash\":\"${GRAPH9_HASH}\",\"input\":${INVOICE_INPUT}}" \
+  > /tmp/salvor-bridge-e2e-grund.json
+GRUN_D=$(python3 -c 'import json;print(json.load(open("/tmp/salvor-bridge-e2e-grund.json"))["run"])')
+wait_for_run_state "$GRUN_D" "suspended"
+curl -s -X POST "${API}/v1/runs/${GRUN_D}/resume" -H 'Content-Type: application/json' \
+  --data-binary "$RESUME_BODY" >/dev/null
+wait_for_run_state "$GRUN_D" "completed" 400
+echo "[e2e-serve] seed D completed: ${GRUN_D}"
+
+echo "[e2e-serve] seed E: a second 8-node graph run, parked at the gate on purpose"
+curl -s -X POST "${API}/v1/graph-runs" -H 'Content-Type: application/json' \
+  -d "{\"graph_hash\":\"${GRAPH9_HASH}\",\"input\":${INVOICE_INPUT}}" \
+  > /tmp/salvor-bridge-e2e-grune.json
+GRUN_E=$(python3 -c 'import json;print(json.load(open("/tmp/salvor-bridge-e2e-grune.json"))["run"])')
+wait_for_run_state "$GRUN_E" "suspended"
+echo "[e2e-serve] seed E parked: ${GRUN_E}"
+
+echo "[e2e-serve] verifying the invoice graph seeds"
+curl -s "${API}/v1/runs/${GRUN_D}/graph" > /tmp/salvor-bridge-e2e-grund-graph.json
+python3 - <<'PYEOF'
+import json
+with open("/tmp/salvor-bridge-e2e-grund-graph.json") as f:
+    d = json.load(f)
+nodes = {n["node"]: n for n in d["nodes"]}
+assert len(nodes) == 8, f"expected 8 nodes in the projection, got {len(nodes)}: {nodes.keys()}"
+exited = {"n_lookup", "n_triage", "n_split", "n_approve", "n_refund", "n_notify", "n_close"}
+for node_id in exited:
+    assert nodes[node_id]["state"] == "exited", f"{node_id}: {nodes[node_id]}"
+assert nodes["n_fast"]["state"] == "skipped", nodes["n_fast"]
+assert nodes["n_split"].get("branch_case") == "over_500", nodes["n_split"]
+print("[e2e-serve] seed D's 8-node projection verified: 7 exited, n_fast skipped, over_500 taken")
+PYEOF
+ledger_lines=$(wc -l < "$TOOL_LEDGER" | tr -d ' ')
+if [ "$ledger_lines" != "1" ]; then
+  echo "[e2e-serve] FATAL: expected exactly 1 durable issue_refund line, found ${ledger_lines}: $(cat "$TOOL_LEDGER")" >&2
+  exit 1
+fi
+echo "[e2e-serve] invoice graph seeds verified: graph=${GRAPH9_HASH} D=${GRUN_D} E=${GRUN_E} ledger=1 line"
 
 # 6. Let them settle (the 24-step demo runs drive the offline model at the pace above).
 sleep 14
