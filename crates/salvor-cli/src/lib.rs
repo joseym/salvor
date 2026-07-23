@@ -38,6 +38,8 @@ pub mod cli;
 pub mod commands;
 #[cfg(feature = "fixture")]
 pub mod demo_script;
+#[cfg(feature = "fixture")]
+pub mod demo_tools;
 pub mod dev_server;
 pub mod render;
 pub mod serve_kill;

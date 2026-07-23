@@ -1044,6 +1044,15 @@ step is retriable once the tool is present. A dispatch failure is `502
 tool_execution`; no completion is recorded, so the write-ahead intent is left
 dangling (the legal crash story), drivable-or-reconcilable per the tool's effect.
 
+The CLI's `salvor serve --demo-tools` is the one built-in exception, off by
+default: it registers three deterministic demo tools (`lookup_invoice` read,
+`issue_refund` write, `send_email` idempotent, see
+`salvor_cli::demo_tools`) so a demo or the served end-to-end suite can run a
+tool-bearing graph with no embedding host at all. It changes nothing about the
+seam above: the demo tools register through the exact same `ToolRegistry`
+any other host would, and a plain `salvor serve` with no flag still wires it
+empty, byte for byte.
+
 ### POST /v1/client-runs/{id}/resolve
 
 Record the completion of a dangling write by hand for a client-driven run, the

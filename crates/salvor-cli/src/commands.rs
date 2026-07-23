@@ -546,12 +546,35 @@ pub async fn serve(store_path: &Path, args: ServeArgs) -> Result<u8> {
     let model_client = salvor_llm::Client::new(model_config)
         .context("building the model client for the client-driven model step")?;
 
-    // An empty tool registry: the mechanism is wired, but salvor serve ships no
-    // tools of its own. A tool-step for any name is a clean `unknown_tool` until
-    // a host registers one, mirroring how the model executor is wired.
+    // The tool registry: EMPTY by default (the mechanism is wired, but
+    // salvor serve ships no tools of its own — a tool-step or a graph `tool`
+    // node for any name is a clean `unknown_tool` until a host registers
+    // one, mirroring how the model executor is wired), or the deterministic
+    // demo set when `--demo-tools` opts in. This is the one place that flag
+    // is read; every other line of `serve` is unchanged whether it is
+    // passed or not, so the stock, no-flag path stays byte-identical.
+    let tool_registry = if args.demo_tools {
+        #[cfg(feature = "fixture")]
+        {
+            tracing::info!(
+                "demo tools registered: lookup_invoice (read), issue_refund (write), send_email \
+                 (idempotent) — see salvor_cli::demo_tools"
+            );
+            crate::demo_tools::registry()
+        }
+        #[cfg(not(feature = "fixture"))]
+        {
+            bail!(
+                "--demo-tools requires the `fixture` feature (this binary was built with \
+                 --no-default-features); rebuild with the default features to use it"
+            );
+        }
+    } else {
+        ToolRegistry::new()
+    };
     let mut state = AppState::new(store, factory)
         .with_model_executor(Arc::new(LlmModelExecutor::new(model_client)))
-        .with_tool_registry(Arc::new(ToolRegistry::new()));
+        .with_tool_registry(Arc::new(tool_registry));
     // The client-driven-run lease TTL: how long a client run reports an attached
     // driver after its last guarded operation. Default 60s (set in AppState);
     // `SALVOR_CLIENT_LEASE_TTL_SECS`, when a positive integer, shortens it so a

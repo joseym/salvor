@@ -274,4 +274,22 @@ pub struct ServeArgs {
     /// installed `salvor` embeds is prebuilt and does not hot-reload.
     #[arg(long)]
     pub dev: bool,
+    /// Register a small set of deterministic demo tools (`lookup_invoice`
+    /// read, `issue_refund` write, `send_email` idempotent) instead of the
+    /// stock empty tool registry.
+    ///
+    /// Off by default: a plain `salvor serve` ships NO tools of its own (see
+    /// `salvor_server::ToolRegistry`'s own docs), so a `tool` node or a
+    /// client-driven tool step is a clean `unknown_tool` until a host
+    /// registers something — the honest default for a library other hosts
+    /// (aarg's own render tool, for one) compose their own registry into.
+    /// This flag is that one host, built in for demos and for the served
+    /// end-to-end suite: with it, a graph carrying `tool` nodes can actually
+    /// run against `salvor serve` with no embedding host at all. The demo
+    /// tools are deterministic and hermetic (no network); see
+    /// `salvor_cli::demo_tools` for what each one does and why it exists.
+    /// Requires the crate's `fixture` feature (on by default; a
+    /// `--no-default-features` build refuses this flag).
+    #[arg(long)]
+    pub demo_tools: bool,
 }

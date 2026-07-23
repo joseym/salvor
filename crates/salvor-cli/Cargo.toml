@@ -41,7 +41,7 @@ default-features = false
 # rmcp with the server features on, so feature unification means no new
 # crate.
 default = ["fixture", "ui"]
-fixture = ["dep:rmcp", "dep:schemars"]
+fixture = ["dep:rmcp", "dep:schemars", "dep:async-trait"]
 # Forwards the embedded dashboard through to salvor-server. On by default so the
 # shipped `salvor serve` answers the web app and the API together;
 # `--no-default-features` builds a headless, API-only binary.
@@ -124,6 +124,10 @@ rmcp = { workspace = true, optional = true, features = [
     "schemars",
 ] }
 schemars = { workspace = true, optional = true }
+# Only `demo_tools` (the `--demo-tools` registry) uses this, for its
+# `ToolHandler` impls; optional and behind the `fixture` feature like the two
+# deps above.
+async-trait = { workspace = true, optional = true }
 
 [dev-dependencies]
 assert_cmd.workspace = true
