@@ -48,11 +48,27 @@ describe('first-receipts predicates', () => {
   });
 });
 
+function stubStorage(): void {
+  const store = new Map<string, string>();
+  vi.stubGlobal('localStorage', {
+    getItem: (k: string) => store.get(k) ?? null,
+    setItem: (k: string, v: string) => void store.set(k, String(v)),
+    removeItem: (k: string) => void store.delete(k),
+    clear: () => store.clear(),
+    key: (i: number) => [...store.keys()][i] ?? null,
+    get length() {
+      return store.size;
+    },
+  } as Storage);
+}
+
 describe('first-receipts persistence', () => {
-  beforeEach(() => localStorage.clear());
+  // A stubbed in-memory storage: deterministic in every environment, incl.
+  // Node runners with no localStorage global at all.
+  beforeEach(() => stubStorage());
   afterEach(() => {
     vi.restoreAllMocks();
-    localStorage.clear();
+    vi.unstubAllGlobals();
   });
 
   it('a fresh profile (no stored key) defaults to the collapsed dock with no ticks', () => {
@@ -73,9 +89,11 @@ describe('first-receipts persistence', () => {
   });
 
   it('READ FAILURE defaults to SHOWN/teaching — an expanded dock, never suppression', () => {
-    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
-      throw new Error('storage unavailable');
-    });
+    vi.stubGlobal('localStorage', {
+      getItem: () => {
+        throw new Error('storage unavailable');
+      },
+    } as unknown as Storage);
     const state = readState();
     expect(state.open).toBe(true);
     expect(state.steps).toEqual({});
@@ -90,12 +108,12 @@ describe('first-receipts persistence', () => {
 
 describe('FirstReceiptsService — ticks', () => {
   beforeEach(() => {
-    localStorage.clear();
+    stubStorage();
     TestBed.configureTestingModule({
       providers: [provideRouter(routes), provideSalvorApi({ baseUrl: 'http://test.local' })],
     });
   });
-  afterEach(() => localStorage.clear());
+  afterEach(() => vi.unstubAllGlobals());
 
   it('tick is first-write-wins — a second trigger never rewrites the recorded time (silent pre-ticking)', () => {
     const svc = TestBed.inject(FirstReceiptsService);
