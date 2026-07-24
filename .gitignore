@@ -1,3 +1,9 @@
 /target
 /salvor.db*
 /findings.txt
+
+# A stray self-referential symlink and the personal study material that
+# renders from it; neither belongs in the published tree.
+/salvor
+/.rdm/
+/study-guide/

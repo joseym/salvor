@@ -2,8 +2,8 @@
 //! per run for `status` before this change: this test measures whether
 //! adding `usage`/`step_count`/`agent_def_hash` (all derived from the log
 //! and derived state already in hand, no second store read) moves the needle
-//! on a store of a size in line with what `scripts/demo-live.sh` seeds
-//! (dozens of runs, ~20 events each), scaled up for a stable signal.
+//! on a store of a realistic size (dozens of runs, ~20 events each), scaled
+//! up for a stable signal.
 //!
 //! Run with `cargo test -p salvor-server --test runs_list_timing --
 //! --ignored --nocapture` to see the printed numbers; it is `#[ignore]`d so

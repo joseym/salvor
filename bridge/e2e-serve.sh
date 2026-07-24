@@ -2,9 +2,9 @@
 #
 # e2e-serve.sh — bring up the Bridge build for the Playwright suite.
 #
-# It seeds a real Salvor control plane (mirroring scripts/demo-live.sh: an OFFLINE demo model,
-# a disposable SQLite store, two agents, two runs — one completed, one budget-exceeded so the
-# waiting group is non-empty), builds the Angular app, and serves the app + the API on ONE origin
+# It seeds a real Salvor control plane (an OFFLINE demo model, a disposable SQLite store, two
+# agents, two runs — one completed, one budget-exceeded so the waiting group is non-empty),
+# builds the Angular app, and serves the app + the API on ONE origin
 # from `salvor serve` itself: the ui-enabled server embeds the dashboard and answers both the
 # static app and /v1/* on the same port, so there is no separate proxy and no CORS to configure.
 # The debug binary reads the freshly built dist/ from the filesystem, so the app is built before
