@@ -2388,7 +2388,7 @@ version = "0.0.0"
 
 [[package]]
 name = "salvor-cli"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2422,14 +2422,14 @@ dependencies = [
 
 [[package]]
 name = "salvor-core"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "salvor-replay",
 ]
 
 [[package]]
 name = "salvor-engine"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "salvor-core",
@@ -2450,7 +2450,7 @@ dependencies = [
 
 [[package]]
 name = "salvor-graph"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "proptest",
  "schemars",
@@ -2461,7 +2461,7 @@ dependencies = [
 
 [[package]]
 name = "salvor-llm"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
@@ -2474,7 +2474,7 @@ dependencies = [
 
 [[package]]
 name = "salvor-replay"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2485,7 +2485,7 @@ dependencies = [
 
 [[package]]
 name = "salvor-replay-wasm"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "salvor-replay",
  "serde",
@@ -2497,7 +2497,7 @@ dependencies = [
 
 [[package]]
 name = "salvor-runtime"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "salvor-core",
@@ -2518,7 +2518,7 @@ dependencies = [
 
 [[package]]
 name = "salvor-server"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -2549,7 +2549,7 @@ dependencies = [
 
 [[package]]
 name = "salvor-store"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "rusqlite",
@@ -2566,7 +2566,7 @@ dependencies = [
 
 [[package]]
 name = "salvor-store-conformance"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "salvor-core",
@@ -2578,7 +2578,7 @@ dependencies = [
 
 [[package]]
 name = "salvor-tools"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -2594,7 +2594,7 @@ dependencies = [
 
 [[package]]
 name = "salvor-tools-macros"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2605,7 +2605,7 @@ dependencies = [
 
 [[package]]
 name = "salvor-wasm"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "salvor-core",

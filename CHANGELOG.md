@@ -1,0 +1,206 @@
+# Changelog
+All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
+
+- - -
+## v0.5.0 - 2026-07-24
+#### Features
+- (**agents**) give an agent an optional display name, outside its identity - (60827a4) - Josey Morton
+- (**bridge**) require the server's full 64-hex agent hash and police model-decision cases in wf-validate - (bc31083) - Josey Morton
+- (**bridge**) render the fold node and its loop progress on the canvas - (42d2286) - Josey Morton
+- (**bridge**) first receipts dock, coach-mark, and reopen paths - (02d96e6) - Josey Morton
+- (**bridge**) first receipts step state, predicates, and real-signal wiring - (2e0f747) - Josey Morton
+- (**bridge**) stage the abandon confirm's entrance and give its receipt an exit - (af9efcc) - Josey Morton
+- (**bridge**) derive and surface a stalled run from liveness evidence - (1d23dc2) - Josey Morton
+- (**bridge**) surface fork discoverability and lineage - (7d9d6b3) - Josey Morton
+- (**bridge**) sign-post waiting runs to the inbox and fix the empty state copy - (8ee4783) - Josey Morton
+- (**bridge**) show the running server's build in the About panel - (34fc589) - Josey Morton
+- (**bridge**) render the graph format's optional node name - (addbf3b) - Josey Morton
+- (**bridge**) un-hold the Workflows view - (44ecf70) - Josey Morton
+- (**bridge**) wire the app-wide fork entry points through one door - (950e375) - Josey Morton
+- (**bridge**) complete the canvas's deferred pieces - (f300b12) - Josey Morton
+- (**bridge**) port the workflows canvas behind the held flag - (c2abc98) - Josey Morton
+- (**bridge**) add POST /v1/graphs submission to the graph catalog API - (5e63e65) - Josey Morton
+- (**bridge**) graph API layer and a real capabilities probe - (8cb055e) - Josey Morton
+- (**bridge**) mark the scrubber fold boundary and follow it while dragging - (b00e654) - Josey Morton
+- (**bridge**) replace Last event column with Agent, add grouped view - (f020471) - Josey Morton
+- (**bridge**) add agent identity and grouping to the runs model - (5b716f3) - Josey Morton
+- (**bridge**) add agent registry service for name resolution - (b3b8881) - Josey Morton
+- (**bridge**) make Cmd-K jump to real runs and views, and mirror the keys - (cfaaa29) - Josey Morton
+- (**bridge**) hold Workflows out of the shipped build until the graph engine - (b36155f) - Josey Morton
+- (**bridge**) Spend, folded from the real log - (ef83d8c) - Josey Morton
+- (**bridge**) let another view apply a filter to Runs - (b02ea0e) - Josey Morton
+- (**bridge**) give a lone caption its Note eyebrow - (5960940) - Josey Morton
+- (**bridge**) let RunRef show an agent hash or a driver label - (7f92413) - Josey Morton
+- (**bridge**) wire the Inspector and Inbox views into the shell - (b0a6585) - Josey Morton
+- (**bridge**) app shell, path routing and the Runs ledger - (cdc043e) - Josey Morton
+- (**bridge**) API service layer over @salvor/client + connection state machine - (9cb8ad3) - Josey Morton
+- (**bridge**) add the token-parity page and a build-time CSS gate - (a649b1c) - Josey Morton
+- (**bridge**) port the ledger token system and add the theme toggle - (18c1290) - Josey Morton
+- (**bridge**) scaffold the Angular workspace with Tailwind wired in - (96dc4b0) - Josey Morton
+- (**cli**) add salvor serve --demo-tools - (70f1699) - Josey Morton
+- (**cli**) add salvor fork for local fork-from-node - (8bf81ad) - Josey Morton
+- (**cli**) add local graph run and graph-aware resume - (e622747) - Josey Morton
+- (**cli**) add salvor serve --dev for hot-reloading UI iteration - (1b342b1) - Josey Morton
+- (**cli**) thread run labels through run and resume - (963bf07) - Josey Morton
+- (**cli**) add salvor serve --kill to find and stop a running server - (173cc82) - Josey Morton
+- (**cli**) add a build verb that produces the whole product - (d668804) - Josey Morton
+- (**cli**) honor SALVOR_MODEL_BASE_URL in the client-run model executor - (99732a9) - Josey Morton
+- (**cli**) add run, resume, list, history, and replay commands - (89022dc) - Josey Morton
+- (**core**) add optional labels to RunStarted - (96dbd48) - Josey Morton
+- (**core**) add replay cursor, state derivation, and context events - (195e077) - Josey Morton
+- (**core**) add the versioned event model - (d083a94) - Josey Morton
+- (**dashboard**) add run list, inbox, and spend views - (a175e76) - Josey Morton
+- (**dashboard**) build the run inspector on the real replay fold - (81f688d) - Josey Morton
+- (**dashboard**) scaffold Leptos wasm app with the real replay fold - (bf445e1) - Josey Morton
+- (**e2e**) seed an 8-node tool-bearing graph in e2e-serve.sh - (8b2df21) - Josey Morton
+- (**engine**) execute map fan-out inline and sequentially - (31a9d71) - Josey Morton
+- (**engine**) derive fork-safe idempotency keys and plan forks - (3281527) - Josey Morton
+- (**engine**) execute gate and branch nodes - (70e2e72) - Josey Morton
+- (**engine**) add the graph engine for linear agent and tool graphs - (6800e89) - Josey Morton
+- (**examples**) complete the client-run model step offline - (9e69ed1) - Josey Morton
+- (**graph**) add the fold node to the format, validator, and builders - (b0f94be) - Josey Morton
+- (**graph**) add optional node display name - (c0649b3) - Josey Morton
+- (**graph**) resolve a value reference with the expression path grammar - (9c35e76) - Josey Morton
+- (**graph**) add branch model-decision agent hash - (ab1554b) - Josey Morton
+- (**graph**) add the branch condition expression language - (0fd044a) - Josey Morton
+- (**graph**) add typed graph builders for Rust, TypeScript, and Python - (ca81e90) - Josey Morton
+- (**graph**) add the graph document format, validation, and CLI - (9197ece) - Josey Morton
+- (**inbox**) put the run's recent substance at the gate decision point - (d3f6e78) - Josey Morton
+- (**inbox**) waiting-run cards with schema-generated forms, honest budget floor and exclusive reconciliation - (b36f98e) - Josey Morton
+- (**inspector**) timeline, wasm scrubber, JSON highlighting, live ticker - (0410d79) - Josey Morton
+- (**llm**) allow the system prompt to be a text-block array - (8238230) - Josey Morton
+- (**llm**) add streaming responses and image and document input blocks - (d40c244) - Josey Morton
+- (**llm**) support OAuth bearer authentication - (d6fb4b6) - Josey Morton
+- (**llm**) add the Messages API client extracted from cargo-mentor - (f19ca77) - Josey Morton
+- (**replay**) record fold iteration markers and project their loop state - (7f7201a) - Josey Morton
+- (**replay**) record map fan-out markers through the cursor - (68dfb8d) - Josey Morton
+- (**replay**) record branch and skip graph markers - (7cfa7a6) - Josey Morton
+- (**replay**) add graph-run events and per-node fold projection - (35289be) - Josey Morton
+- (**replay-wasm**) fold event logs to state in the browser - (4023c30) - Josey Morton
+- (**runs**) lead the view with a minute-one teaching strip - (b11b00b) - Josey Morton
+- (**runtime**) expose map fan-out markers on RunCtx - (702c87a) - Josey Morton
+- (**runtime**) thread run labels through Agent, Runtime, and RunCtx - (30f866f) - Josey Morton
+- (**runtime**) add a streaming model call that records identically - (cc6e481) - Josey Morton
+- (**runtime**) opt-in recording of model request bodies - (5dd21a6) - Josey Morton
+- (**runtime**) add RunCtx, Agent builder, budgets, and the built-in loop - (33d3464) - Josey Morton
+- (**sdk-py**) accept and decode run labels - (1a7798a) - Josey Morton
+- (**sdk-ts**) accept and decode run labels - (04352a1) - Josey Morton
+- (**sdks**) client-driven run drivers in the Python and TS SDKs - (bcc81ad) - Josey Morton
+- (**sdks**) add thin Python and TypeScript control-plane clients - (564558b) - Josey Morton
+- (**server**) report per-run driver liveness on the run list - (4831dfd) - Josey Morton
+- (**server**) name the exact build in GET /v1/capabilities - (316c4cc) - Josey Morton
+- (**server**) add fork with refuse-then-record and a capabilities probe - (c034ee2) - Josey Morton
+- (**server**) add the graph control plane and graph-run execution - (0f241b9) - Josey Morton
+- (**server**) accept and surface run labels over HTTP - (866c398) - Josey Morton
+- (**server**) embed and serve the dashboard behind a ui feature - (32142e4) - Josey Morton
+- (**server**) enrich GET /v1/runs with usage, step_count, agent_def_hash - (dcd233e) - Josey Morton
+- (**server**) server-performed tool step and client-driven resolve - (3238bb0) - Josey Morton
+- (**server**) server-performed model step for client-driven runs - (216580f) - Josey Morton
+- (**server**) client-driven run surface over a pure append-guard validator - (c4b8258) - Josey Morton
+- (**server**) add the HTTP and SSE control plane - (1094ba3) - Josey Morton
+- (**store**) add the EventStore conformance kit - (b3332f3) - Josey Morton
+- (**store**) add EventStore trait and SQLite backend - (d62da58) - Josey Morton
+- (**tools**) add HTTP transport for remote MCP servers - (dec03b1) - Josey Morton
+- (**tools**) add MCP tool integration via rmcp over stdio - (3c56513) - Josey Morton
+- (**tools**) add the derive(Tool) macro - (d93e40d) - Josey Morton
+- (**tools**) add typed tool contracts, erased dispatch, and registry - (27c5d0e) - Josey Morton
+- (**wasm**) sandbox untrusted tools with wasmtime components - (6881573) - Josey Morton
+- (**workflows**) the duplicate-id stack names itself on the canvas - (62c06e0) - Josey Morton
+- add the abandon-run affordance to the Bridge - (06afc84) - Josey Morton
+- add the RunAbandoned terminal event and the abandon operation - (dc05a42) - Josey Morton
+- stream live progress, add salvor resolve, settle the budget type - (9dd6b47) - Josey Morton
+- record the kill -9 demo and lead the readme with it - (33f95a8) - Josey Morton
+- add the release-gate property suite and the demo research agent - (2d1fd00) - Josey Morton
+#### Bug Fixes
+- (**bridge**) pin the budget card's secondary abandon receipt against reclassification - (e5ab336) - Josey Morton
+- (**bridge**) stage the abandon card's fold-away so it reads smooth, not jagged - (45e58e5) - Josey Morton
+- (**bridge**) keep the stalled card's action row stable when abandon opens - (146801f) - Josey Morton
+- (**bridge**) align the stalled card's action row with its siblings - (dca6183) - Josey Morton
+- (**bridge**) redraw the runs status pill's filter glyph as a funnel - (34f1ddc) - Josey Morton
+- (**bridge**) unify the row click target and mark the status pill as a filter - (be290bb) - Josey Morton
+- (**bridge**) stop the health strip reading all-clear while runs need attention - (e77a74a) - Josey Morton
+- (**bridge**) name the status groups, define client-driven runs, retitle the canvas Run mode - (833305b) - Josey Morton
+- (**bridge**) give the reconciliation refusal an honest off-ramp - (e1a86b1) - Josey Morton
+- (**bridge**) land the inbox signpost focus and drop the lingering signpost - (fac4342) - Josey Morton
+- (**bridge**) make the held scrubber read as a preview of past state - (7e2ae12) - Josey Morton
+- (**bridge**) keyboard reach for the Runs row and the Inspector scrubber - (cb22882) - Josey Morton
+- (**bridge**) state a run's true resting state and fill the graph-run agent card - (f2601ad) - Josey Morton
+- (**bridge**) render honest timeline detail instead of literal undefined - (5344b62) - Josey Morton
+- (**bridge**) cold-load path deep links land on their view - (8015009) - Josey Morton
+- (**bridge**) live-target corrections for the un-held canvas - (05cb0e4) - Josey Morton
+- (**bridge**) render graph runs distinctly in the Runs agent column - (5b01ec6) - Josey Morton
+- (**bridge**) keep every view within a 390px viewport - (b5fa300) - Josey Morton
+- (**bridge**) close the a11y gaps the full sweep turned up - (ab7a93e) - Josey Morton
+- (**bridge**) serve wasm with its real MIME type in the e2e harness - (ab7814a) - Josey Morton
+- (**bridge**) render-safe focus hand-off for the panel dock - (ae2e1b8) - Josey Morton
+- (**inbox**) correct the client-run enumeration caption - (94c480c) - Josey Morton
+- (**inspector**) keep the event strip's ticks inside the container - (27c4ff8) - Josey Morton
+- (**runs**) stall on the in-progress family, not literal running - (1182864) - Josey Morton
+- (**sdks**) skip the python driver tests cleanly when httpx is absent - (1f733ce) - Josey Morton
+- (**server**) stamp client-run append recorded_at with the server clock - (00033b2) - Josey Morton
+- (**spend**) partition the activity histogram's click-target geometry - (f3832f5) - Josey Morton
+- (**spend**) exclude zero-call runs from the all-unpriced check - (b4ccac2) - Josey Morton
+- (**spend**) lead with one unpriced banner instead of scattered essays - (c1e8362) - Josey Morton
+- (**spend**) exclude implausible recorded_at stamps from the activity window - (8f67206) - Josey Morton
+- (**spend**) iterate the activity histogram extent so a wide event window cannot overflow the stack - (2971488) - Josey Morton
+- (**workflows**) route graph edges clear of the node cards - (71d55f0) - Josey Morton
+- (**workflows**) keep the node error mark off the effect badge - (64aad08) - Josey Morton
+- (**workflows**) bring the canvas up to the prototype design - (f9ff504) - Josey Morton
+- (**workflows**) port the canvas layout sidecar and orthogonal edge geometry - (a8387ba) - Josey Morton
+#### Documentation
+- (**examples**) add five examples covering the free and durable paths - (8959ab3) - Josey Morton
+- (**runtime**) add runnable library examples for both tiers - (6a15eda) - Josey Morton
+- (**server**) correct build.rs's dirty-tree wording - (808086e) - Josey Morton
+- drop references to the personal teaching layer - (423f676) - Josey Morton
+- open the quickstart with a gentle first run - (29a7391) - Josey Morton
+- bring the README up to the current surface - (b425c49) - Josey Morton
+- add the naming note and record the demo gif - (38f3a4e) - Josey Morton
+- teach salvor resolve and the remote MCP url form in the examples - (4277061) - Josey Morton
+- add Python and TypeScript MCP tool examples - (3b3e3f2) - Josey Morton
+- add a live web-research example with real MCP servers - (cbd9dc9) - Josey Morton
+- add readme with project one-liner and crate map - (5bceb9c) - Josey Morton
+#### Tests
+- (**bridge**) stub storage in the first receipts spec so it runs everywhere - (9c20162) - Josey Morton
+- (**bridge**) harden load-sensitive inbox and agent-registry specs - (5755275) - Josey Morton
+- (**bridge**) seed a stalled run in the e2e control plane - (9ff8046) - Josey Morton
+- (**bridge**) seed real graph runs in e2e-serve - (61c8891) - Josey Morton
+- (**bridge**) seed a named agent in e2e-serve for the Agent column - (0d3106c) - Josey Morton
+- (**bridge**) seed labelled runs and register the recon agent in e2e-serve - (8583e92) - Josey Morton
+- (**bridge**) seed one needs_reconciliation run in the e2e harness - (63c3dde) - Josey Morton
+- (**bridge**) e2e serve harness for the Playwright suite - (eafd660) - Josey Morton
+- (**cli**) update RunStarted fixtures for the new labels field - (c3b05a1) - Josey Morton
+- (**engine**) pin the fold refusal before it records anything - (600562b) - Josey Morton
+- (**sdks**) prove the live model step offline in both driver suites - (61519a0) - Josey Morton
+- seed an abandoned run and fix the e2e teardown to exact pids - (af4cf57) - Josey Morton
+#### Build system
+- wire dormant cargo-dist distribution pipeline - (5ca0ab0) - Josey Morton
+- replace hand-rolled commit hook with cocogitto - (6e963d2) - Josey Morton
+- enforce conventional commits with a commit-msg hook - (1d5993c) - Josey Morton
+- scaffold cargo workspace with five crates - (949e70f) - Josey Morton
+#### Continuous Integration
+- prove the dashboard embed in a dedicated ui job - (9a4fa83) - Josey Morton
+- add the workspace test workflow - (7bb9478) - Josey Morton
+#### Refactoring
+- (**bridge**) open about and pedagogy surfaces with what things do - (aee9bed) - Josey Morton
+- (**bridge**) point the moved highlighter specs at the shared module - (0383164) - Josey Morton
+- (**bridge**) fold the two JSON highlighters into one shared module - (2213c18) - Josey Morton
+- (**core**) extract the replay engine into the salvor-replay crate - (22cb34a) - Josey Morton
+- (**harness**) serve the e2e suite from salvor serve itself - (84e4372) - Josey Morton
+- (**runtime**) split drive into begin and drive_loop - (4511be3) - Josey Morton
+- gather every example under the top-level examples directory - (4f07e59) - Josey Morton
+#### Miscellaneous Chores
+- (**bridge**) opt out of angular cli analytics for headless runs - (876aacd) - Josey Morton
+- (**bridge**) consume salvor-replay-wasm as a dependency and build asset - (dc313cc) - Josey Morton
+- ignore local-only artifacts and drop references to a removed demo script - (c904072) - Josey Morton
+- dual-license under MIT OR Apache-2.0 - (4398dad) - Josey Morton
+- remove license data while licensing is reconsidered - (2a06327) - Josey Morton
+- add the salvor umbrella crate to hold the name - (5e31600) - Josey Morton
+- add license files and dual-license wording - (ce42996) - Josey Morton
+#### Style
+- (**bridge**) make abandon's danger treatment destructive, not just serious - (3deb3f7) - Josey Morton
+- (**bridge**) still all motion from the two motion tokens under reduced motion - (02a627f) - Josey Morton
+- (**bridge**) comments state constraints, not provenance - (d1163cb) - Josey Morton
+
+- - -
+
+Changelog generated by [cocogitto](https://github.com/cocogitto/cocogitto).
