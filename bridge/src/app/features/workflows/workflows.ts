@@ -238,6 +238,14 @@ export class Workflows implements AfterViewInit {
   readonly graphName = computed(() => this.currentGraph()?.name ?? '—');
   readonly graphState = computed(() => this.currentGraph()?.state ?? 'draft');
   readonly graphHash = computed(() => this.currentGraph()?.hash ?? null);
+
+  /** A published graph with no document name reads AS its short hash, so rendering the hash chip
+   * next to that title would state the same identity twice. */
+  readonly graphHashChip = computed(() => {
+    const hash = this.graphHash();
+    if (hash === null) return null;
+    return this.graphName() === this.hashShort(hash) ? null : hash;
+  });
   readonly zoomLabel = computed(() => zoomPercent(this.view().k));
 
   /** ONE error list per render — the canvas, the list, the panel and the publish gate all read
@@ -1153,7 +1161,7 @@ export class Workflows implements AfterViewInit {
       this.drafts.set(removeDraft(g.key));
       await this.load();
       this.currentKey.set(hash);
-      this.published.set(`published ${hash.slice(0, 15)}`);
+      this.published.set('published');
     } catch (err) {
       this.published.set(`publish refused — ${err instanceof Error ? err.message : String(err)}`);
     }

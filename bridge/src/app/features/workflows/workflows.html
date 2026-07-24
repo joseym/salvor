@@ -4,9 +4,9 @@
     <span class="wf-state" id="wf-state">{{ graphState() }}</span>
     <!-- the hash, or the honest absence of one — a draft has no identity until published -->
     <span class="wf-hashwrap" id="wf-hashwrap">
-      @if (graphHash(); as h) {
+      @if (graphHashChip(); as h) {
         <span class="mono" [attr.title]="h">{{ hashShort(h) }}</span>
-      } @else {
+      } @else if (graphHash() === null) {
         <span class="wf-state" data-state="draft">no hash until published</span>
       }
     </span>
@@ -15,7 +15,9 @@
     <label class="sr" for="wf-pick">Graph</label>
     <select id="wf-pick" [value]="currentKey()" (change)="onPick($event)">
       @for (opt of pickerOptions(); track opt.value) {
-        <option [value]="opt.value">{{ opt.label }}</option>
+        <!-- `selected` per option, not `value` on the select: the browser resets selectedIndex to 0
+             as options are appended, so a value bound before the options exist is discarded. -->
+        <option [value]="opt.value" [selected]="opt.value === currentKey()">{{ opt.label }}</option>
       }
     </select>
     <button class="fold-all" type="button" id="wf-about-open" aria-haspopup="dialog" popovertarget="wf-about">About this canvas</button>
@@ -152,7 +154,7 @@
         <label class="sr" for="wf-run">Run to project</label>
         <select class="wf-runpick" id="wf-run" [hidden]="mode() !== 'run' || graphRunOptions().length === 0" [value]="runId() ?? ''" (change)="onPickRun($event)">
           @for (r of graphRunOptions(); track r.id) {
-            <option [value]="r.id">{{ r.label }} · {{ r.status }}</option>
+            <option [value]="r.id" [selected]="r.id === runId()">{{ r.label }} · {{ r.status }}</option>
           }
         </select>
         <span class="wf-bar-sep" aria-hidden="true"></span>
@@ -334,8 +336,6 @@
             </div>
           }
         </div>
-      } @else {
-        <p class="wf-ok">No errors. This graph can be published.</p>
       }
     </div>
   </aside>

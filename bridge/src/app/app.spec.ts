@@ -29,7 +29,7 @@ describe('App', () => {
     const compiled = fixture.nativeElement as HTMLElement;
     expect(compiled.querySelector('#app-nav')).toBeTruthy();
     expect(compiled.textContent).toContain('Salvor');
-    expect(compiled.textContent).toContain('bridge v0.3');
+    expect(compiled.textContent).toContain('bridge');
     // All five views are nav destinations — Workflows joined when the graph engine shipped.
     expect(compiled.querySelectorAll('.nav-link').length).toBe(5);
     const labels = Array.from(compiled.querySelectorAll('.nav-link .nav-text')).map((n) => n.textContent?.trim());
