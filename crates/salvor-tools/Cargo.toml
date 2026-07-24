@@ -4,6 +4,7 @@ description = "ToolHandler trait, derive macro, and MCP client integration for t
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 
 # salvor-tools declares one binary, `salvor-mcp-fixture`, which is a test
 # fixture gated behind `required-features = ["mcp"]`. It is not product surface,

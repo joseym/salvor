@@ -145,3 +145,7 @@ cog install-hook --all
 ```
 
 Commit messages follow Conventional Commits, enforced by `cog verify` in the commit-msg hook. Releases are cut with `cog bump`; see [docs/RELEASING.md](docs/RELEASING.md) for the distribution pipeline and how a release becomes prebuilt binaries.
+
+## License
+
+Salvor is dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option, following the convention most of the Rust ecosystem uses. Unless you state otherwise, any contribution you submit for inclusion is licensed under both, with no additional terms or conditions.

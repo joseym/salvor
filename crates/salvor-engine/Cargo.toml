@@ -4,6 +4,7 @@ description = "The Salvor graph engine: drives a validated graph document throug
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 
 [dependencies]
 salvor-core.workspace = true

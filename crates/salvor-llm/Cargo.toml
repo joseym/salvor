@@ -4,6 +4,7 @@ description = "Messages API client for Anthropic-compatible endpoints (hosted an
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 
 [dependencies]
 reqwest.workspace = true

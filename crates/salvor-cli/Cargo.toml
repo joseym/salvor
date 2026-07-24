@@ -4,6 +4,7 @@ description = "Salvor CLI: run, resume, list, history, and replay for durable ag
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 # Homebrew formulae require a homepage; without it the tap-publish job warns.
 homepage = "https://github.com/joseym/salvor"
 

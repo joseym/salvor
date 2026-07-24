@@ -4,6 +4,7 @@ description = "EventStore trait and SQLite (WAL) implementation for the Salvor a
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 
 [dependencies]
 salvor-core.workspace = true

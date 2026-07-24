@@ -4,6 +4,7 @@ description = "Pure, IO-free event model, replay cursor, and state fold for the 
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 
 [dependencies]
 serde.workspace = true

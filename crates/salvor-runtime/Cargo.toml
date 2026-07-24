@@ -4,6 +4,7 @@ description = "The Salvor runtime IO edge: the public RunCtx durability substrat
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 
 [dependencies]
 salvor-core.workspace = true

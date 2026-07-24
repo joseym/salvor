@@ -4,6 +4,7 @@ description = "The #[derive(Tool)] procedural macro for the Salvor agent runtime
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 
 [lib]
 proc-macro = true

@@ -4,6 +4,7 @@ description = "Pure, IO-free graph document model, strict versioned validation, 
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 
 [dependencies]
 serde.workspace = true

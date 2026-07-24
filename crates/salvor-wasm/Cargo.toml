@@ -4,6 +4,7 @@ description = "wasmtime-sandboxed WebAssembly component tools for the Salvor age
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 
 [dependencies]
 salvor-core.workspace = true

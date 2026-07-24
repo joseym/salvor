@@ -4,6 +4,7 @@ description = "A thin wasm-bindgen wrapper over the pure salvor-replay crate: fo
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 
 # cdylib is the wasm artifact wasm-pack packages for npm; rlib keeps the crate
 # linkable as a normal Rust library so the native test harness (the same-fold

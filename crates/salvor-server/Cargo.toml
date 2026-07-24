@@ -4,6 +4,7 @@ description = "Salvor control plane: an HTTP + server-sent-events server over th
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 
 [features]
 # The embedded dashboard. On by default so the shipped `salvor serve` answers

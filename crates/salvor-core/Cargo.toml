@@ -4,6 +4,7 @@ description = "Event model, replay engine, budget enforcement, and deterministic
 version.workspace = true
 edition.workspace = true
 repository.workspace = true
+license.workspace = true
 
 [dependencies]
 # The event model, replay cursor, and state fold live in salvor-replay (a pure,
