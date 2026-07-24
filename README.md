@@ -1,24 +1,24 @@
 # Salvor
 
-A durable execution runtime for AI agents, in Rust.
+**A durable execution runtime for AI agents, in Rust.** `kill -9` a run mid-flight, resume it, and nothing happens twice.
 
-A salvor is the one who recovers a wrecked ship and its cargo. This runtime does the same for agent runs: when a process dies mid-flight, the durable log brings it back and finishes it from exactly where it stopped, with no work done twice.
-
-Event-sourced runs, typed tool contracts with side-effect classification, crash-exact resume, and hard budgets, deployed as a single static binary with an embedded store.
+A salvor is the one who recovers a wrecked ship and its cargo. This runtime does that for agent runs: the durable log brings a dead run back and finishes it from exactly where it stopped.
 
 ![Salvor kills a research agent mid-run and resumes it to completion with no duplicate side effects](docs/demo.gif)
 
-**Status:** pre-0.1, unpublished. The runtime, CLI, control plane, SDKs, and web dashboard all work end to end today; none of it is published anywhere yet (see [Quickstart](#quickstart)).
+- **Crash-exact resume.** Every event is written before the runtime acts on it, so a resume replays what already happened and re-executes none of it.
+- **No duplicate side effects.** Tools declare an effect — read, write, or idempotent — and a write is never replayed blind. A write left dangling by a crash blocks the resume until a human reconciles it.
+- **The log is the run.** State is a pure fold over events: the same code in the runtime, in `salvor replay`, and in the browser via wasm.
+- **Hard budgets.** Ceilings on steps, tokens, dollars, and wall time, enforced by the runtime rather than suggested to the model. Wall time is measured between recorded clock observations, never against the ambient clock.
+- **One static binary.** The event store and the web UI ship inside it.
+
+**Status:** v0.5.0. Not on crates.io or npm yet, so build from source — a stable Rust toolchain is all you need.
 
 ## Quickstart
 
-Salvor is pre-0.1 and not published anywhere, so build the binary from source (a stable Rust toolchain is all you need):
-
+```sh
+cargo build          # produces target/debug/salvor
 ```
-cargo build            # produces target/debug/salvor
-```
-
-### A first run
 
 An agent is a TOML file. Save this as `hello-agent.toml`:
 
@@ -27,8 +27,6 @@ model = "claude-opus-4-8"
 system_prompt = "You are a concise assistant. Answer in one or two sentences."
 ```
 
-Run it, with a key exported (Salvor talks to the public Anthropic endpoint by default):
-
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
 
@@ -36,14 +34,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
     --input '"What does it mean for a program to be durable?"'
 ```
 
-That prints the run's id, then its answer, once the model responds:
-
-```
-run 2cfc5c00-4e7f-4ad9-942a-8c8e942f6051
-"Durability means the run's state survives a crash: every event is written before the runtime acts on it, so a resume replays exactly what already happened and finishes the rest without repeating any side effect."
-```
-
-(The id is a fresh UUID and the wording is the model's own, so both vary run to run.) `salvor history <run-id>` shows what actually happened, as a durable event log rather than only the final answer:
+That prints a run id and the model's answer. `salvor history <run-id>` prints what actually happened:
 
 ```
    0  2026-07-14 02:44:30Z  RunStarted           agent sha256:abd8d6f… input "What does it mean for a program to be durable?"
@@ -53,99 +44,108 @@ run 2cfc5c00-4e7f-4ad9-942a-8c8e942f6051
    4  2026-07-14 02:44:30Z  RunCompleted         output "Durability means the run's state survives a crash: every event is written befor…
 ```
 
-Every one of those five lines is a durably recorded event, written before the run moved past it. The rest of this Quickstart tests that property against a real crash.
+Five events, each written before the run moved past it. Even the clock reading is recorded, because a replay has to see the same `now()` the first run saw.
 
-### The kill and resume walkthrough
-
-The headline workload lives in `demo/`: a research agent you can `kill -9` partway through and resume with an identical event history and zero repeated writes. From the repository root, with a key exported:
+### Now kill it
 
 ```sh
-export ANTHROPIC_API_KEY=sk-ant-...
-
-# 1. start a run in the background; it prints its run id first, before any
-#    step executes, so a kill still leaves you an id to resume.
+# starts in the background and prints its run id before the first step executes
 ./target/debug/salvor run --agent demo/agent.toml --input @demo/input.json &
-
-# 2. kill it dead, mid-run.
 kill -9 $!
-
-# 3. resume from the durable log: completed work is replayed from the log,
-#    never re-executed, and the run finishes from the first unrecorded step.
 ./target/debug/salvor resume <run-id> --agent demo/agent.toml
 ```
 
-The demo's MCP server appends one line to a findings file per real write, so `wc -l` before the kill and after the resume is the zero-duplicate proof. `salvor list` shows the crashed run and its id; `salvor history <run-id>` prints the event log. `demo/README.md` has the full walkthrough, including a hermetic mock-model mode that needs no key and no network (the same mode records the GIF above).
+The demo's MCP server appends one line per real write, so `wc -l` on that file before the kill and after the resume is the zero-duplicate proof. [`demo/README.md`](demo/README.md) has the full walkthrough, including an offline mock-model mode that needs no key and no network — the same mode that records the GIF above.
 
-For a live version against real tools, `examples/web-research/` runs an agent over the official fetch and filesystem MCP servers and applies the same kill/resume story to real HTTP fetches and a real report write.
+For the same story against real tools, [`examples/web-research/`](examples/web-research/) runs an agent over the official fetch and filesystem MCP servers, killing it between real HTTP fetches and a real file write.
 
-### Use it as a library
+## The Bridge
 
-Salvor is also usable as a library, at two tiers you build against directly. The batteries-included tier is `Agent::builder()` plus a `Runtime`: you write typed tools and let the built-in loop drive them. The library-first tier is a hand-written async function over the public `RunCtx`, which gets the same durability and replay without the built-in loop. Each has a runnable example under `examples/todo-agent/` and `examples/approval-loop/`, wired into `salvor-runtime`'s `Cargo.toml` as out-of-package `[[example]]` targets:
-
-```sh
-export ANTHROPIC_API_KEY=sk-ant-...
-cargo run -p salvor-runtime --example todo_agent      # batteries-included: Agent::builder + native tools
-cargo run -p salvor-runtime --example approval_loop   # library-first: your own loop over RunCtx
-```
-
-`todo_agent` prints a run id you can kill and recover with `RESUME_RUN_ID=<id>`; `approval_loop` parks awaiting approval on the first run and completes on a second run with `APPROVAL` set.
-
-## Control plane
-
-`salvor serve` puts the runtime on a network: an HTTP and server-sent-events server that owns one event store and drives runs in the background, so a client submits an agent definition and an input, then reads the run's events as they land.
+`salvor serve` puts the runtime on a network and serves a web UI from the same binary, on the same origin. No separate deploy, no CORS.
 
 ```sh
 ./target/debug/salvor serve --bind 127.0.0.1:8080
 ```
 
-When iterating on the dashboard's UI from a checkout, `salvor serve --dev` starts the same API and, alongside it, the Angular dev server for `bridge/` with hot module reloading, proxying `/v1` to the API. Open the printed dev URL, and edits under `bridge/src` appear without restarting anything. Ctrl-C (or `salvor serve --kill`) tears both processes down together. `--dev` needs a salvor checkout with `bridge/`; the dashboard an installed `salvor` embeds is prebuilt and does not hot-reload.
+The inspector reads one run from its log. Drag the scrubber and the state re-derives in the browser from a prefix of the log — the real `salvor-replay` crate compiled to wasm, the same fold the runtime runs, not a JavaScript reimplementation of it.
 
-An agent is data, so registration (`POST /v1/agents`, TOML or JSON body) hashes the definition and returns that hash; every start, resume, and recover after that references the agent by hash, not by re-sending it. From there: `POST /v1/runs` starts a run, `GET /v1/runs/{id}/events` streams it over SSE with resumable cursors, `POST /v1/runs/{id}/resume` continues a parked or crashed run, and `POST /v1/runs/{id}/resolve` records a dangling write's completion by hand after a human verifies it externally. Every guarantee the CLI has (exact replay, crash-safe resume, the write-ahead reconciliation rule) holds unchanged over HTTP, because the same runtime enforces it.
+![The run inspector: a 222-event graph run, its tick strip, and the event timeline with per-tool effect badges](docs/bridge-inspector.png)
 
-A second, additive surface under `/v1/client-runs` moves ownership of the agent loop to the client while the server keeps ownership of the durable log: a client (an SDK driver, or a browser folding its own log with a wasm `ReplayCursor`) drives its own loop and appends the events it produces, and the server re-folds the log on every append to confirm each one is the legal next event. The model and tool calls stay server-performed, since the server holds the key or the binary; everything else the client appends directly. The full contract, every route, status code, and event shape, is in [`crates/salvor-server/API.md`](crates/salvor-server/API.md).
+The ledger sorts runs that need a human to the top, and the inbox states the one action that unblocks each one — raise a budget ceiling, answer a gate, reconcile a write the crash left dangling.
 
-Prompt recording is opt-in and off by default: a per-agent `record_prompts` TOML flag (or a `SALVOR_RECORD_PROMPTS` environment default, when the flag is unset) records the exact model request body on `ModelCallRequested`. Recorded bodies land only in the durable log, never in the progress stream or console output, so turn it on only where you accept that PII and secrets in the prompt get written to the store.
+<p align="center">
+  <img src="docs/bridge-runs.png" width="49%" alt="The runs ledger, grouped by agent, with a run-health strip and a detail panel">
+  <img src="docs/bridge-inbox.png" width="49%" alt="The inbox: a run stopped at its step ceiling, with the evidence and a raise-and-resume form">
+</p>
 
-### Client SDKs
+There is also a spend view and a canvas for authoring graph workflows and forking real runs from any node they entered.
 
-Thin Python and TypeScript clients over the control plane live under `sdks/` (`sdks/python`, `sdks/typescript`): register an agent, start a run, stream events, resume, all over HTTP. The durability stays in the one Rust process; each SDK is a few hundred lines. See each directory's README.
+Working on the UI from a checkout? `salvor serve --dev` runs the API and the Angular dev server together with hot reload, and `Ctrl-C` stops both.
 
-Both SDKs also drive the client-driven mode: a `ClientRunDriver` that opens or resumes a run, appends control events, and calls the model and tool steps directly against the server (see [Control plane](#control-plane) above). The model step is still performed by `salvor serve` itself, so pointing the server's own `SALVOR_MODEL_BASE_URL` at a local or offline endpoint (instead of the public Anthropic one) redirects every model step an SDK driver makes, with no change on the client side. `examples/browser-client-run` drives the same surface from a browser page.
+## Control plane
 
-## Workspace
+An agent is data: `POST /v1/agents` hashes the definition and returns the hash, and every call after that references it by hash.
 
-| Crate | Purpose |
+| | |
 |---|---|
-| `salvor-core` | Stable public surface over the event model, replay engine, budget enforcement, and deterministic context; re-exports `salvor-replay` |
-| `salvor-replay` | Pure, IO-free event vocabulary, replay cursor, and state fold: the durability engine's core, wasm32-portable, shared by the runtime, the CLI's `replay`, and the dashboard |
-| `salvor-store` | `EventStore` trait + SQLite (WAL) implementation |
-| `salvor-store-conformance` | Store-agnostic conformance kit that proves an `EventStore` backend satisfies the trait contract |
-| `salvor-llm` | Messages API client (Anthropic hosted and local endpoints) |
-| `salvor-tools` | `ToolHandler` trait, effect classification, MCP client |
-| `salvor-tools-macros` | The `#[derive(Tool)]` macro, re-exported by `salvor-tools` |
-| `salvor-wasm` | Sandboxed WebAssembly component tools (wasmtime, WASI p2, deny-all capabilities) |
-| `salvor-runtime` | The IO edge: `RunCtx`, the `Agent` builder, budget enforcement, the built-in agent loop |
-| `salvor-graph` | Pure graph document model, versioned validation, and JSON Schema emission for the declarative graph-authoring format |
-| `salvor-server` | The control plane: HTTP + server-sent-events over the durable runtime, server-driven and client-driven |
-| `salvor-cli` | The `salvor` binary: `run`, `resume`, `resolve`, `list`, `history`, `replay`, `serve`, `graph` |
-| `salvor` | The umbrella crate that holds the published name; re-exports the family once v0.1 ships |
+| `POST /v1/runs` | start a run |
+| `GET /v1/runs/{id}/events` | stream it over SSE, with resumable cursors |
+| `POST /v1/runs/{id}/resume` | continue a parked or crashed run |
+| `POST /v1/runs/{id}/resolve` | record a dangling write a human verified by hand |
 
-`sdks/python` and `sdks/typescript` are the thin client SDKs described above; neither is a Rust crate, so neither is a workspace member. `dashboard/` is a client-side Leptos app compiled to wasm (`trunk build` / `trunk serve`) that talks to the control plane over `/v1` and folds event logs with the real `salvor-replay` code, so its run-inspector scrubber recomputes state in the browser rather than re-implementing the fold in JavaScript; it is excluded from the Cargo workspace because it targets `wasm32-unknown-unknown` and carries its own lockfile.
+Every guarantee the CLI has holds over HTTP, because the same runtime enforces it. A second surface under `/v1/client-runs` inverts ownership: your client drives the agent loop and appends its own events, and the server re-folds the log on each append to confirm the event is a legal next one. Model and tool calls stay server-side, since the server holds the key and the binaries.
+
+Full contract — every route, status code, and event shape — in [`crates/salvor-server/API.md`](crates/salvor-server/API.md). Prompt recording is off by default and writes request bodies to the durable log when enabled; see the API doc before turning it on.
+
+### SDKs and libraries
+
+Thin Python and TypeScript clients live in [`sdks/`](sdks/) — register, start, stream, resume, a few hundred lines each. Both also drive the client-owned mode above.
+
+As a Rust library there are two tiers, one example each:
+
+```sh
+cargo run -p salvor-runtime --example todo_agent      # Agent::builder + typed tools
+cargo run -p salvor-runtime --example approval_loop   # your own async loop over RunCtx
+```
+
+`todo_agent` prints a run id you can kill and recover with `RESUME_RUN_ID=<id>`; `approval_loop` parks for approval and completes on a second run.
 
 ## Correctness
 
-The kill demo is one crash at one boundary. The property suite behind it is the release gate: the same shape of run, killed at every one of its event boundaries, resumed through the full runtime, and checked for a byte-identical final log with zero duplicate writes at each one (`crates/salvor-runtime/tests/release_gate.rs`). Passing that suite is the release gate for v0.1.
+The kill demo is one crash at one boundary. The release gate is the property suite behind it: the same run killed at *every* event boundary, resumed through the full runtime, then checked for a byte-identical final log and zero duplicate writes at each one ([`crates/salvor-runtime/tests/release_gate.rs`](crates/salvor-runtime/tests/release_gate.rs)).
+
+<details>
+<summary><strong>Workspace layout</strong></summary>
+
+| Crate | Purpose |
+|---|---|
+| `salvor-core` | Stable public surface over the event model, replay, budgets, and deterministic context |
+| `salvor-replay` | Pure, IO-free event vocabulary, replay cursor, and state fold; wasm32-portable |
+| `salvor-store` | `EventStore` trait + SQLite (WAL) implementation |
+| `salvor-store-conformance` | Proves an `EventStore` backend satisfies the trait contract |
+| `salvor-llm` | Messages API client (hosted and local endpoints) |
+| `salvor-tools` | `ToolHandler` trait, effect classification, MCP client |
+| `salvor-tools-macros` | The `#[derive(Tool)]` macro |
+| `salvor-wasm` | Sandboxed WebAssembly component tools (wasmtime, WASI p2, deny-all) |
+| `salvor-runtime` | The IO edge: `RunCtx`, the `Agent` builder, the built-in loop |
+| `salvor-graph` | Graph document model, validation, JSON Schema emission |
+| `salvor-engine` | Executes graph documents: linear chains, gates, branches, maps, forks |
+| `salvor-server` | The control plane: HTTP + SSE, server-driven and client-driven |
+| `salvor-cli` | The `salvor` binary |
+| `salvor` | Umbrella crate holding the published name |
+
+`bridge/` is the Angular web UI embedded in the binary. `dashboard/` is an earlier client-side Leptos app; both fold logs with the real `salvor-replay` code compiled to wasm. Neither is a Cargo workspace member (`bridge/` is not Rust; `dashboard/` targets wasm32 and carries its own lockfile), and neither are the SDKs.
+
+</details>
 
 ## Development
 
-Run this once after cloning (install cocogitto first with `brew install cocogitto` if you do not have it):
-
-```
-cog install-hook --all
+```sh
+cog install-hook --all     # brew install cocogitto, if you need it
 ```
 
-Commit messages follow Conventional Commits, enforced by `cog verify` in the commit-msg hook. Releases are cut with `cog bump`; see [docs/RELEASING.md](docs/RELEASING.md) for the distribution pipeline and how a release becomes prebuilt binaries.
+Commit messages follow Conventional Commits, enforced by `cog verify`. Releases are cut with `cog bump`; see [docs/RELEASING.md](docs/RELEASING.md).
 
 ## License
 
-Salvor is dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option, following the convention most of the Rust ecosystem uses. Unless you state otherwise, any contribution you submit for inclusion is licensed under both, with no additional terms or conditions.
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option, following the Rust ecosystem convention. Unless you state otherwise, any contribution you submit is licensed under both.
