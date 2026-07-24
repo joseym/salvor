@@ -344,6 +344,54 @@ export function renderTimelineHtml(events: readonly SalvorEvent[], arrivedSeq: n
     .join('');
 }
 
+/**
+ * The event strip's tick geometry: N ticks packed onto a fixed 0–100% axis so the strip ALWAYS
+ * tiles exactly to its container's width, at any event count — the CSS-percentage parallel to the
+ * Spend histogram's SVG viewBox scaling (`activity.ts`'s `step`). The old CSS gave every tick a
+ * hard `min-width: 3px` floor plus a fixed `2px` gap with no ceiling on how many ticks could
+ * exist: on a 206-event run in the Scrubber's ~316px column that demanded 206×3 + 205×2 ≈ 1028px,
+ * over three times the available width, so most of the strip rendered off the right edge of its
+ * own container (and of the viewport) — the true root of the suite's longest-standing flake,
+ * p2-14 "tick-targets" (a pointerdown at a tick's CENTER sometimes landed off-screen).
+ *
+ * The fix keeps the prototype's explicit contract for this strip — "the tick→seq mapping stays
+ * 1:1", no bucketing — by never merging events: `renderStripHtml` below still emits exactly one
+ * `<button>` per event. What changes is that the gap between ticks no longer comes from a fixed
+ * CSS pixel value; it is computed HERE, in percent of the strip's own width, capped so `n − 1`
+ * gaps can never consume more than {@link ESTRIP_GAP_BUDGET_PCT} of the axis regardless of `n` —
+ * the same "partition the axis; do not let a per-item floor multiply past the container" principle
+ * commit f63a7f0 used for the Spend histogram's `.hhit` click targets. Tick WIDTH is never set
+ * explicitly: with the floor gone (`min-width: 0` in `inspector.css`), equal `flex: 1 1 0%` ticks
+ * divide whatever percent the gaps leave over exactly evenly, so the row is provably ≤ 100% of
+ * the container at any `n` — see the property test in `event-model.spec.ts` sweeping n = 1..500,
+ * and {@link estripTickBox}, which models that same flex arithmetic as a pure function so the
+ * property test can check it without a real layout engine.
+ */
+export const ESTRIP_GAP_BUDGET_PCT = 12; // total strip width, in percent, ever ceded to gaps
+export const ESTRIP_GAP_MAX_PCT = 0.55; // one seam's own ceiling — ~2px at the panel's usual ~340px width
+
+/** The `.estrip` container's `gap`, in percent of its own width, for `n` ticks — set inline by
+ *  `Inspector#renderStrip` on every render. Bounded so `(n - 1) * estripGapPct(n) <=
+ *  ESTRIP_GAP_BUDGET_PCT` for every `n >= 1`: the strip can never be asked to spend more than that
+ *  share of its own width on gaps, however dense the log, so there is always width left for the
+ *  ticks themselves. */
+export function estripGapPct(n: number): number {
+  if (n <= 1) return 0;
+  return Math.min(ESTRIP_GAP_MAX_PCT, ESTRIP_GAP_BUDGET_PCT / (n - 1));
+}
+
+/** The tick at index `i` of `n`'s computed box on the strip's 0–100% axis — the same arithmetic
+ *  `display: flex` performs once `.estrip`'s `gap` is {@link estripGapPct} and every `.etick` is
+ *  an equal `flex: 1 1 0%` item with no min-width floor: the `n - 1` gaps come off the top first,
+ *  and whatever percent remains splits `n` ways, evenly. Exported so a property test can verify
+ *  the layout algebra directly rather than trusting a jsdom flex implementation to expose it. */
+export function estripTickBox(i: number, n: number): { leftPct: number; widthPct: number } {
+  if (n <= 0) return { leftPct: 0, widthPct: 0 };
+  const gap = estripGapPct(n);
+  const widthPct = (100 - gap * (n - 1)) / n;
+  return { leftPct: i * (widthPct + gap), widthPct };
+}
+
 /** The event strip's ticks — one button per event, sized/hued by kind. */
 export function renderStripHtml(events: readonly SalvorEvent[], arrivedSeq: number | null): string {
   return events

@@ -26,7 +26,7 @@ import { RunsService } from '../../core/api';
 import { ViewService } from '../../core/view';
 import { age, derivedStatus, groupOf, labelOf } from '../runs/run-model';
 import { SERVER_CAPABILITIES, forkOffered } from './capability';
-import { KINDS, clock, renderStripHtml, renderTimelineHtml, zoneOf } from './event-model';
+import { KINDS, clock, estripGapPct, renderStripHtml, renderTimelineHtml, zoneOf } from './event-model';
 import { esc } from '../../shared/json-hi';
 import { focusWhenRendered } from '../../core/focus';
 import { type CostTotal, int, usd } from './pricing';
@@ -581,7 +581,12 @@ export class Inspector implements AfterViewInit {
   private renderStrip(): void {
     const el = this.stripEl?.nativeElement;
     if (!el) return;
-    el.innerHTML = renderStripHtml(this.events(), this.arrivedSeq);
+    const evs = this.events();
+    // The gap is density-scaled so it can never itself overflow the strip (see
+    // event-model.ts#estripGapPct) — set inline because it depends on the event count, which
+    // renderStripHtml's returned markup (the ticks alone) has no way to carry onto the container.
+    el.style.gap = `${estripGapPct(evs.length)}%`;
+    el.innerHTML = renderStripHtml(evs, this.arrivedSeq);
   }
 
   private applyFilter(): void {
@@ -829,17 +834,27 @@ export class Inspector implements AfterViewInit {
     this.setPrefix(seq + 1);
   }
 
-  /** Which tick is under `clientX` — asked of the ticks' own geometry, not a proportion of the
-   *  strip (the off-by-one fix). Returns -1 for "off the left edge: fold nothing". */
+  /** Which tick is under `clientX` — asked of the strip's own geometry, not a proportion of a
+   *  DOM measurement (the off-by-one fix this replaced). Returns -1 for "off the left edge: fold
+   *  nothing".
+   *
+   *  Pitch is `box.width / n` — the strip's floating-point `getBoundingClientRect().width`
+   *  divided by the tick count — matching `estripTickBox`'s own algebra (`event-model.ts`): `n`
+   *  equal-share ticks tile the strip, so each occupies `1/n` of it (the tiny density-scaled gap
+   *  budget is within ESTRIP_GAP_MAX_PCT ≈ 0.5% and negligible here). This used to be measured
+   *  empirically as `ticks[1].offsetLeft - ticks[0].offsetLeft`, but `offsetLeft` is an INTEGER
+   *  (rounded to the nearest CSS pixel) — once the geometry fix let a dense run's true per-tick
+   *  pitch drop under ~2px (a 206-event run in the Scrubber's ~316px column pitches at ~1.3px),
+   *  that rounding was a large fraction of the true pitch, and the quantized value it produced
+   *  resolved a center-click on tick i to some OTHER tick — the same off-by-a-few defect the strip
+   *  overflow was masking. The analytic pitch has no such rounding: it stays accurate at any n. */
   private tickAt(clientX: number): number {
     const strip = this.stripEl?.nativeElement;
     const n = this.events().length;
     if (!strip || n === 0) return -1;
     const box = strip.getBoundingClientRect();
     if (clientX < box.left) return -1;
-    const ticks = strip.children;
-    const pitch =
-      n > 1 ? (ticks[1] as HTMLElement).offsetLeft - (ticks[0] as HTMLElement).offsetLeft : box.width;
+    const pitch = box.width / n;
     return Math.min(n - 1, Math.floor((clientX - box.left) / pitch));
   }
   private scrubFromX(clientX: number): void {

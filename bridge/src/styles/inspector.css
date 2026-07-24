@@ -618,15 +618,23 @@
   --estrip-h: 44px;
   display: flex;
   align-items: flex-end;
-  gap: 2px;
+  /* `gap` is set inline, per render (Inspector#renderStrip), to `estripGapPct(eventCount)` —
+     a PERCENT of the strip's own width, never a fixed px. A fixed 2px gap times 205 seams (a
+     206-event run) alone demanded ~410px against a strip only ~316px wide; see event-model.ts. */
   height: var(--estrip-h);
   margin: 0 0 var(--space-2);
   cursor: ew-resize;
   touch-action: none;
 }
 .etick {
-  flex: 1;
-  min-width: 3px;
+  flex: 1 1 0%;
+  /* NO min-width floor. The old `min-width: 3px` was the other half of the overflow: with it,
+     206 ticks demanded >= 618px of un-shrinkable width alone, so flexbox let the row overflow its
+     container rather than violate the floor. Equal `flex: 1 1 0%` items with no floor always sum
+     to exactly the strip's own width (100%) minus its gaps, at any event count — wide when there
+     is room, compressed only once density genuinely leaves no choice (the spend histogram's own
+     precedent for its `.hhit` click targets, commit f63a7f0). */
+  min-width: 0;
   border: 0;
   padding: 0;
   cursor: ew-resize;
