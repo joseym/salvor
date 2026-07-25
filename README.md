@@ -2,7 +2,10 @@
 
 **A durable execution runtime for AI agents, in Rust.** `kill -9` a run mid-flight, resume it, and nothing happens twice.
 
-A salvor is the one who recovers a wrecked ship and its cargo. This runtime does that for agent runs: the durable log brings a dead run back and finishes it from exactly where it stopped.
+> **sal·vor** *(noun)* — the one who goes out after the wreck and brings the ship and its cargo back.
+> Not the storm. Not the insurance. The crew that shows up when it's already on the rocks.
+
+That's the job here. Your process is the ship, the run is the cargo, and the durable log is how it gets recovered: a dead run comes back and finishes from exactly where it stopped.
 
 ![Salvor kills a research agent mid-run and resumes it to completion with no duplicate side effects](docs/demo.gif)
 
