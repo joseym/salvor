@@ -21,10 +21,13 @@
   with:
     node-version: "24"
 
+# Built from source rather than fetched as a prebuilt binary: the release matrix includes aarch64
+# Linux and macOS, where the prebuilt route either ships an x86_64 binary that cannot execute or an
+# older release that cannot parse an edition-2024 manifest. ci.yml never sees this because its UI
+# job runs on x86_64 Linux alone.
 - name: Install wasm-pack
-  uses: jetli/wasm-pack-action@v0.4.0
-  with:
-    version: latest
+  run: cargo install wasm-pack --locked
+  shell: bash
 
 - name: Build the wasm fold package
   run: wasm-pack build crates/salvor-replay-wasm --target web --out-dir pkg --out-name salvor_replay_wasm

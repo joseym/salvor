@@ -134,9 +134,8 @@ jobs:
         with:
           "node-version": "24"
       - name: "Install wasm-pack"
-        uses: "jetli/wasm-pack-action@v0.4.0"
-        with:
-          "version": "latest"
+        run: "cargo install wasm-pack --locked"
+        shell: "bash"
       - name: "Build the wasm fold package"
         run: "wasm-pack build crates/salvor-replay-wasm --target web --out-dir pkg --out-name salvor_replay_wasm"
         shell: "bash"
