@@ -52,7 +52,7 @@ From the repository root, build the binaries once:
 cargo build
 ```
 
-That produces `target/debug/salvor` (the control plane), `salvor-demo-model`
+That produces `salvor` (the control plane), `salvor-demo-model`
 (the scripted offline model), and `salvor-demo-research` (the MCP server the
 agent calls).
 
@@ -73,7 +73,7 @@ If you would rather run each piece by hand, start the scripted model:
 
 ```sh
 # from the repository root
-./target/debug/salvor-demo-model --port 8893 --delay-ms 50 &
+salvor-demo-model --port 8893 --delay-ms 50 &
 ```
 
 Then start the control plane, pointing the agent's model calls at that server
@@ -83,7 +83,7 @@ scratch path:
 ```sh
 export SALVOR_DEMO_BASE_URL=http://127.0.0.1:8893
 export SALVOR_DEMO_FINDINGS=/tmp/salvor-polyglot-findings.txt
-./target/debug/salvor --store /tmp/salvor-polyglot.db serve --bind 127.0.0.1:8080 &
+salvor --store /tmp/salvor-polyglot.db serve --bind 127.0.0.1:8080 &
 ```
 
 Now run each app against `http://127.0.0.1:8080`.

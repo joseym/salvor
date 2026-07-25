@@ -37,9 +37,9 @@ model step runs offline with no key (the streaming note below explains the
 unary fallback the demo takes here).
 
 ```sh
-./target/debug/salvor-demo-model --port 8893 --delay-ms 50 &
+salvor-demo-model --port 8893 --delay-ms 50 &
 SALVOR_MODEL_BASE_URL=http://127.0.0.1:8893 \
-    ./target/debug/salvor --store /tmp/salvor-browser.db serve --bind 127.0.0.1:8080 &
+    salvor --store /tmp/salvor-browser.db serve --bind 127.0.0.1:8080 &
 ```
 
 ### Verify the logic headless

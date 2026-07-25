@@ -1,6 +1,8 @@
 [package]
 name = "salvor-tools"
 description = "ToolHandler trait, derive macro, and MCP client integration for the Salvor agent runtime"
+keywords.workspace = true
+categories.workspace = true
 version.workspace = true
 edition.workspace = true
 repository.workspace = true

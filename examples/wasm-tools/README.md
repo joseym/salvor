@@ -101,7 +101,7 @@ the agent file, so any working directory works; the store path below is just
 tidy):
 
 ```sh
-./target/debug/salvor --store /tmp/salvor-wasm.db run \
+salvor --store /tmp/salvor-wasm.db run \
   --agent examples/wasm-tools/agent.toml \
   --input @examples/wasm-tools/input.json
 ```

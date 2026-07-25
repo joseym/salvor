@@ -1,6 +1,8 @@
 [package]
 name = "salvor-store"
 description = "EventStore trait and SQLite (WAL) implementation for the Salvor agent runtime"
+keywords.workspace = true
+categories.workspace = true
 version.workspace = true
 edition.workspace = true
 repository.workspace = true

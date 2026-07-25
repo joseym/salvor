@@ -33,7 +33,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 export SALVOR_DEMO_FINDINGS=/tmp/salvor-demo-findings.txt
 rm -f "$SALVOR_DEMO_FINDINGS"
 
-./target/debug/salvor --store /tmp/salvor-demo.db \
+salvor --store /tmp/salvor-demo.db \
     run --agent demo/agent.toml --input @demo/input.json &
 SALVOR_PID=$!
 ```
@@ -52,8 +52,8 @@ Inspect what survived, then resume. Resume replays the recorded history
 live from the first unrecorded step:
 
 ```sh
-./target/debug/salvor --store /tmp/salvor-demo.db history <run-id>
-./target/debug/salvor --store /tmp/salvor-demo.db \
+salvor --store /tmp/salvor-demo.db history <run-id>
+salvor --store /tmp/salvor-demo.db \
     resume <run-id> --agent demo/agent.toml
 wc -l "$SALVOR_DEMO_FINDINGS"     # exactly 9: nothing was written twice
 ```

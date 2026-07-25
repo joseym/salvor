@@ -62,7 +62,7 @@ running:
 ```sh
 cargo build
 
-target/debug/salvor --store /tmp/salvor-local-model.db \
+salvor --store /tmp/salvor-local-model.db \
     run --agent examples/local-model/agent.toml \
         --input @examples/local-model/input.json
 ```
@@ -72,9 +72,9 @@ The run prints its id, then the model's answer to the question in
 other example uses:
 
 ```sh
-target/debug/salvor --store /tmp/salvor-local-model.db list
-target/debug/salvor --store /tmp/salvor-local-model.db history <run-id>
-target/debug/salvor --store /tmp/salvor-local-model.db replay <run-id>
+salvor --store /tmp/salvor-local-model.db list
+salvor --store /tmp/salvor-local-model.db history <run-id>
+salvor --store /tmp/salvor-local-model.db replay <run-id>
 ```
 
 The event log, the durable store, and replay are identical whether the

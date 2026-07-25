@@ -1,6 +1,8 @@
 [package]
 name = "salvor-core"
 description = "Event model, replay engine, budget enforcement, and deterministic context for the Salvor agent runtime"
+keywords.workspace = true
+categories.workspace = true
 version.workspace = true
 edition.workspace = true
 repository.workspace = true

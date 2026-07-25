@@ -1,6 +1,8 @@
 [package]
 name = "salvor-replay-wasm"
 description = "A thin wasm-bindgen wrapper over the pure salvor-replay crate: folds a run's event log to state in the browser, with no server round trip, from the same code the runtime uses"
+keywords.workspace = true
+categories.workspace = true
 version.workspace = true
 edition.workspace = true
 repository.workspace = true

@@ -1,6 +1,8 @@
 [package]
 name = "salvor-wasm"
 description = "wasmtime-sandboxed WebAssembly component tools for the Salvor agent runtime"
+keywords.workspace = true
+categories.workspace = true
 version.workspace = true
 edition.workspace = true
 repository.workspace = true

@@ -43,11 +43,15 @@ Rust users who want to build from source can still use cargo. This is the one
 path that needs a toolchain:
 
 ```sh
-cargo install salvor-cli --no-default-features
+cargo install salvor-cli --no-default-features --features ui
 ```
 
 `--no-default-features` matters: it drops the `fixture` feature and its
-test-only binaries, so cargo builds only the real `salvor` binary. See the
+test-only binaries, so cargo builds only the real `salvor` binary. Naming
+`ui` back in matters just as much: without it the binary serves the API and
+answers `/` with a note saying it has no dashboard. A cargo install cannot
+run the npm build, so it embeds whatever `bridge/dist` holds, which is empty
+unless you built the Bridge in that checkout first. See the
 binary note at the end.
 
 ## The binary that ships
@@ -161,8 +165,9 @@ With the token and a free (or owned) package name, `npm install -g salvor`
 works.
 
 **crates.io** publishing is a separate track and is not part of this pipeline.
-Note that `cargo install salvor-cli` only works once the crates
-are published to crates.io, which is that separate track.
+The family is published as of 0.5.0, so `cargo install salvor-cli` works; a new
+version means publishing each crate again, bottom-up in dependency order.
+The umbrella `salvor` crate stays at 0.0.0 until it re-exports the family.
 
 ## Current state, and what the first tag activates
 

@@ -51,7 +51,7 @@ You also need `node` on your `PATH`, which `agent.toml` spawns the server with.
 cargo build
 export DEMO_ANTHROPIC_API_KEY=sk-ant-...
 
-./target/debug/salvor --store /tmp/salvor-typescript.db \
+salvor --store /tmp/salvor-typescript.db \
     run --agent examples/typescript-tools/agent.toml \
         --input @examples/typescript-tools/input.json
 ```
@@ -85,7 +85,7 @@ not grow one, and the store is the evidence.
 Start the run, let a few bookmarks land, then kill the process dead:
 
 ```sh
-./target/debug/salvor --store /tmp/salvor-typescript.db \
+salvor --store /tmp/salvor-typescript.db \
     run --agent examples/typescript-tools/agent.toml \
         --input @examples/typescript-tools/input.json &
 SALVOR_PID=$!
@@ -98,7 +98,7 @@ kill -9 $SALVOR_PID
 Resume from the durable log:
 
 ```sh
-./target/debug/salvor --store /tmp/salvor-typescript.db \
+salvor --store /tmp/salvor-typescript.db \
     resume <run-id> --agent examples/typescript-tools/agent.toml
 
 wc -l examples/typescript-tools/bookmarks.jsonl
@@ -134,7 +134,7 @@ call.
   write happened; record what it wrote:
 
   ```sh
-  ./target/debug/salvor --store /tmp/salvor-typescript.db \
+  salvor --store /tmp/salvor-typescript.db \
       resolve <run-id> --output '{"content":[{"type":"text","text":"Saved \"The Raft Consensus Algorithm\"."}]}'
   ```
 

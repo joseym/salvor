@@ -95,7 +95,7 @@ venv's interpreter so the `mcp` package is on its path.
 cargo build
 export DEMO_ANTHROPIC_API_KEY=sk-ant-...
 
-./target/debug/salvor --store /tmp/salvor-support-ops.db \
+salvor --store /tmp/salvor-support-ops.db \
     run --agent examples/support-ops/agent.toml \
         --input @examples/support-ops/input.json
 ```
@@ -121,7 +121,7 @@ never written to any file. A subscription OAuth token works too: set
 ## What was verified offline, and what needs a model
 
 There is no scripted offline model here, unlike the research demo under
-`demo/`. `target/debug/salvor-demo-model` is scripted for that agent's exact
+`demo/`. `salvor-demo-model` is scripted for that agent's exact
 question-answering shape; it would not produce sensible ticket triage calls,
 and faking a run against it would misrepresent what this example shows. The
 honest offline claim is narrower, and everything below was actually run, not
@@ -154,7 +154,7 @@ and only then a clean failure at the model call:
 
 ```sh
 export DEMO_ANTHROPIC_API_KEY=sk-ant-invalid-for-offline-verification
-./target/debug/salvor --store /tmp/salvor-support-ops.db \
+salvor --store /tmp/salvor-support-ops.db \
     run --agent examples/support-ops/agent.toml \
         --input @examples/support-ops/input.json
 ```

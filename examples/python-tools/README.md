@@ -42,7 +42,7 @@ interpreter so the `mcp` package is on its path.
 cargo build
 export DEMO_ANTHROPIC_API_KEY=sk-ant-...
 
-./target/debug/salvor --store /tmp/salvor-python.db \
+salvor --store /tmp/salvor-python.db \
     run --agent examples/python-tools/agent.toml \
         --input @examples/python-tools/input.json
 ```
@@ -76,7 +76,7 @@ does not grow one, and the ledger is the evidence.
 Start the run, let a few expenses land, then kill the process dead:
 
 ```sh
-./target/debug/salvor --store /tmp/salvor-python.db \
+salvor --store /tmp/salvor-python.db \
     run --agent examples/python-tools/agent.toml \
         --input @examples/python-tools/input.json &
 SALVOR_PID=$!
@@ -89,7 +89,7 @@ kill -9 $SALVOR_PID
 Resume from the durable log:
 
 ```sh
-./target/debug/salvor --store /tmp/salvor-python.db \
+salvor --store /tmp/salvor-python.db \
     resume <run-id> --agent examples/python-tools/agent.toml
 
 wc -l examples/python-tools/ledger.jsonl
@@ -125,7 +125,7 @@ amount and category `salvor history <run-id>` shows for the pending
   write happened; record what it wrote:
 
   ```sh
-  ./target/debug/salvor --store /tmp/salvor-python.db \
+  salvor --store /tmp/salvor-python.db \
       resolve <run-id> --output '{"content":[{"type":"text","text":"Recorded $8.75 in Food."}]}'
   ```
 

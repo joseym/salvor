@@ -1,6 +1,8 @@
 [package]
 name = "salvor-graph"
 description = "Pure, IO-free graph document model, strict versioned validation, and JSON Schema emission for the Salvor v0.4 graph API"
+keywords.workspace = true
+categories.workspace = true
 version.workspace = true
 edition.workspace = true
 repository.workspace = true

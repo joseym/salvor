@@ -1,6 +1,8 @@
 [package]
 name = "salvor-tools-macros"
 description = "The #[derive(Tool)] procedural macro for the Salvor agent runtime; re-exported by salvor-tools"
+keywords.workspace = true
+categories.workspace = true
 version.workspace = true
 edition.workspace = true
 repository.workspace = true

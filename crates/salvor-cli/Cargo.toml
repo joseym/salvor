@@ -1,6 +1,8 @@
 [package]
 name = "salvor-cli"
 description = "Salvor CLI: run, resume, list, history, and replay for durable agent runs"
+keywords.workspace = true
+categories.workspace = true
 version.workspace = true
 edition.workspace = true
 repository.workspace = true

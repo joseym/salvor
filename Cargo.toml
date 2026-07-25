@@ -39,6 +39,9 @@ repository = "https://github.com/joseym/salvor"
 license = "MIT OR Apache-2.0"
 # Verified floor: 1.94 is refused by sysinfo, 1.95 builds the workspace clean.
 rust-version = "1.95"
+# crates.io discovery: at most five keywords, and categories must come from its fixed list.
+keywords = ["durable-execution", "event-sourcing", "agents", "workflow", "replay"]
+categories = ["asynchronous", "development-tools", "web-programming"]
 
 [workspace.dependencies]
 salvor-replay = { path = "crates/salvor-replay", version = "0.5.0" }

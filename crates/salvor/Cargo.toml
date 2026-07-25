@@ -9,6 +9,8 @@ edition.workspace = true
 repository.workspace = true
 license.workspace = true
 description = "Durable execution runtime for AI agents in Rust: event-sourced runs, typed tool effects, crash-exact resume. This is the umbrella crate; the runtime currently ships as the salvor-* crates and the salvor binary."
+keywords.workspace = true
+categories.workspace = true
 readme = "README.md"
 
 [lib]

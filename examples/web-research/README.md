@@ -63,7 +63,7 @@ cargo build
 export DEMO_ANTHROPIC_API_KEY=sk-ant-...
 mkdir -p examples/web-research/out    # the filesystem server needs this to exist
 
-./target/debug/salvor --store /tmp/salvor-web.db \
+salvor --store /tmp/salvor-web.db \
     run --agent examples/web-research/agent.toml \
         --input @examples/web-research/input.json
 ```
@@ -82,20 +82,20 @@ Start the run in the background, let a couple of fetches land, then kill it
 dead:
 
 ```sh
-./target/debug/salvor --store /tmp/salvor-web.db \
+salvor --store /tmp/salvor-web.db \
     run --agent examples/web-research/agent.toml \
         --input @examples/web-research/input.json &
 SALVOR_PID=$!
 
 # watch the history until a fetch or two has completed, then:
-./target/debug/salvor --store /tmp/salvor-web.db history <run-id>
+salvor --store /tmp/salvor-web.db history <run-id>
 kill -9 $SALVOR_PID
 ```
 
 Resume from the durable log:
 
 ```sh
-./target/debug/salvor --store /tmp/salvor-web.db \
+salvor --store /tmp/salvor-web.db \
     resume <run-id> --agent examples/web-research/agent.toml
 ```
 
@@ -126,7 +126,7 @@ on:
   happened; record what it wrote:
 
   ```sh
-  ./target/debug/salvor --store /tmp/salvor-web.db \
+  salvor --store /tmp/salvor-web.db \
       resolve <run-id> --output '{"content":[{"type":"text","text":"Successfully wrote to examples/web-research/out/raft-vs-paxos.md"}],"structuredContent":{"content":"Successfully wrote to examples/web-research/out/raft-vs-paxos.md"}}'
   ```
 

@@ -1,6 +1,8 @@
 [package]
 name = "salvor-server"
 description = "Salvor control plane: an HTTP + server-sent-events server over the durable runtime"
+keywords.workspace = true
+categories.workspace = true
 version.workspace = true
 edition.workspace = true
 repository.workspace = true

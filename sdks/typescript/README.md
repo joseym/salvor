@@ -187,7 +187,7 @@ package, then run the script:
 cargo build --bin salvor
 
 ANTHROPIC_API_KEY=sk-ant-... \
-    ./target/debug/salvor serve --bind 127.0.0.1:8080 --store /tmp/answer.db &
+    salvor serve --bind 127.0.0.1:8080 --store /tmp/answer.db &
 
 cd sdks/typescript
 npm install && npm run build

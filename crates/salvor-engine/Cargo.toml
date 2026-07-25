@@ -1,6 +1,8 @@
 [package]
 name = "salvor-engine"
 description = "The Salvor graph engine: drives a validated graph document through its nodes over the public RunCtx durability substrate"
+keywords.workspace = true
+categories.workspace = true
 version.workspace = true
 edition.workspace = true
 repository.workspace = true

@@ -162,7 +162,7 @@ of the CLI. Start a server with a key on its environment, then run the script:
 cargo build --bin salvor
 
 ANTHROPIC_API_KEY=sk-ant-... \
-    ./target/debug/salvor serve --bind 127.0.0.1:8080 --store /tmp/answer.db &
+    salvor serve --bind 127.0.0.1:8080 --store /tmp/answer.db &
 
 pip install -e sdks/python
 python sdks/python/example/answer.py http://127.0.0.1:8080
