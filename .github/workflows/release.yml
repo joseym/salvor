@@ -126,17 +126,30 @@ jobs:
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
             echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           fi
+      - name: "Add the wasm target for the fold package"
+        run: "rustup target add wasm32-unknown-unknown"
+        shell: "bash"
       - name: "Set up Node for the Bridge build"
         uses: "actions/setup-node@v6"
         with:
-          "cache": "npm"
-          "cache-dependency-path": "bridge/package-lock.json"
           "node-version": "24"
+      - name: "Install wasm-pack"
+        uses: "jetli/wasm-pack-action@v0.4.0"
+        with:
+          "version": "latest"
+      - name: "Build the wasm fold package"
+        run: "wasm-pack build crates/salvor-replay-wasm --target web --out-dir pkg --out-name salvor_replay_wasm"
+        shell: "bash"
+      - name: "Build the TypeScript client"
+        run: "npm ci --prefix sdks/typescript && npm run build --prefix sdks/typescript"
+        shell: "bash"
       - name: "Build the Bridge"
-        run: "cd bridge && npm ci && npm run build"
+        run: "npm ci --prefix bridge && npm run build --prefix bridge"
         shell: "bash"
       - name: "Verify the Bridge output exists"
-        run: "test -f bridge/dist/bridge/browser/index.html"
+        run: |
+          test -s bridge/dist/bridge/browser/index.html
+          test -s bridge/dist/bridge/browser/salvor_replay_wasm_bg.wasm
         shell: "bash"
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
