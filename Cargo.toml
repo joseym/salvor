@@ -37,21 +37,23 @@ version = "0.5.0"
 edition = "2024"
 repository = "https://github.com/joseym/salvor"
 license = "MIT OR Apache-2.0"
+# Verified floor: 1.94 is refused by sysinfo, 1.95 builds the workspace clean.
+rust-version = "1.95"
 
 [workspace.dependencies]
-salvor-replay = { path = "crates/salvor-replay" }
-salvor-replay-wasm = { path = "crates/salvor-replay-wasm" }
-salvor-graph = { path = "crates/salvor-graph" }
-salvor-core = { path = "crates/salvor-core" }
-salvor-store = { path = "crates/salvor-store" }
-salvor-store-conformance = { path = "crates/salvor-store-conformance" }
-salvor-llm = { path = "crates/salvor-llm" }
-salvor-tools = { path = "crates/salvor-tools" }
-salvor-tools-macros = { path = "crates/salvor-tools-macros" }
-salvor-runtime = { path = "crates/salvor-runtime" }
-salvor-engine = { path = "crates/salvor-engine" }
-salvor-wasm = { path = "crates/salvor-wasm" }
-salvor-server = { path = "crates/salvor-server" }
+salvor-replay = { path = "crates/salvor-replay", version = "0.5.0" }
+salvor-replay-wasm = { path = "crates/salvor-replay-wasm", version = "0.5.0" }
+salvor-graph = { path = "crates/salvor-graph", version = "0.5.0" }
+salvor-core = { path = "crates/salvor-core", version = "0.5.0" }
+salvor-store = { path = "crates/salvor-store", version = "0.5.0" }
+salvor-store-conformance = { path = "crates/salvor-store-conformance", version = "0.5.0" }
+salvor-llm = { path = "crates/salvor-llm", version = "0.5.0" }
+salvor-tools = { path = "crates/salvor-tools", version = "0.5.0" }
+salvor-tools-macros = { path = "crates/salvor-tools-macros", version = "0.5.0" }
+salvor-runtime = { path = "crates/salvor-runtime", version = "0.5.0" }
+salvor-engine = { path = "crates/salvor-engine", version = "0.5.0" }
+salvor-wasm = { path = "crates/salvor-wasm", version = "0.5.0" }
+salvor-server = { path = "crates/salvor-server", version = "0.5.0" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
