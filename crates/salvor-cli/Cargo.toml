@@ -22,6 +22,12 @@ homepage = "https://github.com/joseym/salvor"
 # the manifest without evaluating required-features, so it would otherwise try
 # to package the three fixture binaries and fail when the default-features-off
 # build never produced them. Naming `salvor` alone ships exactly that binary.
+# docs.rs builds under a time and memory budget, and the default features pull the whole
+# wasmtime tree in for a binary crate whose docs do not describe it. Documenting the lean
+# build keeps the crate page from failing.
+[package.metadata.docs.rs]
+no-default-features = true
+
 [package.metadata.dist]
 # No default features (the fixture binaries stay out of a release), but `ui` is named back in:
 # a released binary that cannot serve the dashboard is the thing users report as broken.
