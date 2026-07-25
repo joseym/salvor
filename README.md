@@ -15,13 +15,17 @@ That's the job here. Your process is the ship, the run is the cargo, and the dur
 - **Hard budgets.** Ceilings on steps, tokens, dollars, and wall time, enforced by the runtime rather than suggested to the model. Wall time is measured between recorded clock observations, never against the ambient clock.
 - **One static binary.** The event store and the web UI ship inside it.
 
-**Status:** v0.5.0. Not on crates.io or npm yet, so build from source — a stable Rust toolchain is all you need.
+**Status:** v0.5.0, on crates.io. Rust 1.95 or newer.
 
 ## Quickstart
 
 ```sh
-cargo build          # produces target/debug/salvor
+cargo install salvor-cli      # or: cargo build, from a checkout
 ```
+
+Examples below call `salvor`; from a checkout it is `./target/debug/salvor`.
+
+The [release page](https://github.com/joseym/salvor/releases/latest) also has prebuilt binaries and an install script for people who would rather not compile it.
 
 An agent is a TOML file. Save this as `hello-agent.toml`:
 
@@ -33,7 +37,7 @@ system_prompt = "You are a concise assistant. Answer in one or two sentences."
 ```sh
 export ANTHROPIC_API_KEY=sk-ant-...
 
-./target/debug/salvor run --agent hello-agent.toml \
+salvor run --agent hello-agent.toml \
     --input '"What does it mean for a program to be durable?"'
 ```
 
@@ -53,9 +57,9 @@ Five events, each written before the run moved past it. Even the clock reading i
 
 ```sh
 # starts in the background and prints its run id before the first step executes
-./target/debug/salvor run --agent demo/agent.toml --input @demo/input.json &
+salvor run --agent demo/agent.toml --input @demo/input.json &
 kill -9 $!
-./target/debug/salvor resume <run-id> --agent demo/agent.toml
+salvor resume <run-id> --agent demo/agent.toml
 ```
 
 The demo's MCP server appends one line per real write, so `wc -l` on that file before the kill and after the resume is the zero-duplicate proof. [`demo/README.md`](demo/README.md) has the full walkthrough, including an offline mock-model mode that needs no key and no network — the same mode that records the GIF above.
@@ -67,7 +71,7 @@ For the same story against real tools, [`examples/web-research/`](examples/web-r
 `salvor serve` puts the runtime on a network and serves a web UI from the same binary, on the same origin. No separate deploy, no CORS.
 
 ```sh
-./target/debug/salvor serve --bind 127.0.0.1:8080
+salvor serve --bind 127.0.0.1:8080
 ```
 
 The inspector reads one run from its log. Drag the scrubber and the state re-derives in the browser from a prefix of the log — the real `salvor-replay` crate compiled to wasm, the same fold the runtime runs, not a JavaScript reimplementation of it.
@@ -135,7 +139,7 @@ The kill demo is one crash at one boundary. The release gate is the property sui
 | `salvor-engine` | Executes graph documents: linear chains, gates, branches, maps, forks |
 | `salvor-server` | The control plane: HTTP + SSE, server-driven and client-driven |
 | `salvor-cli` | The `salvor` binary |
-| `salvor` | Umbrella crate holding the published name |
+| `salvor` | Umbrella crate holding the published name, still a 0.0.0 seed; depend on the `salvor-*` crates or install `salvor-cli` |
 
 `bridge/` is the Angular web UI embedded in the binary. `dashboard/` is an earlier client-side Leptos app; both fold logs with the real `salvor-replay` code compiled to wasm. Neither is a Cargo workspace member (`bridge/` is not Rust; `dashboard/` targets wasm32 and carries its own lockfile), and neither are the SDKs.
 
