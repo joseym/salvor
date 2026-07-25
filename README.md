@@ -85,7 +85,11 @@ The ledger sorts runs that need a human to the top, and the inbox states the one
   <img src="docs/bridge-inbox.png" width="49%" alt="The inbox: a run stopped at its step ceiling, with the evidence and a raise-and-resume form">
 </p>
 
-There is also a spend view and a canvas for authoring graph workflows and forking real runs from any node they entered.
+A graph is a document: nodes are agents, tools, gates and branches, and the canvas authors them and forks real runs from any node a run entered.
+
+![The workflow canvas: an eight-node invoice-dispute graph with a branch on refund amount and a human gate above $500](docs/bridge-workflows.png)
+
+There is also a spend view.
 
 Working on the UI from a checkout? `salvor serve --dev` runs the API and the Angular dev server together with hot reload, and `Ctrl-C` stops both.
 

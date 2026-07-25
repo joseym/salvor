@@ -524,7 +524,11 @@
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  max-width: calc(100% - 32px);
+  /* The bar is centred, so it grows toward BOTH edges: the minimap sits 12px from the right and is
+     160px wide, and half of that footprint plus the bar's own inset is what the centre line must
+     keep clear. The legend inside already ellipsises, so the bar truncates furniture instead of
+     sliding its controls under the minimap. */
+  max-width: calc(100% - 2 * (160px + 12px) - 32px);
   padding: 5px var(--space-3);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -592,8 +596,13 @@
 .wf-canvas {
   container-type: inline-size;
 }
-@container (max-width: 760px) {
-  .wf-legend {
+/* 1240px is where the controls, the legend at full length, and the minimap's reserved footprint
+   stop fitting on one line. Below it the legend goes entirely rather than ellipsising to a stub
+   like "drag t…", which occupies the same room while saying nothing. */
+@container (max-width: 1240px) {
+  .wf-legend,
+  /* the divider exists to separate the controls FROM the legend, so it goes with it */
+  .wf-legend-sep {
     display: none;
   }
 }
