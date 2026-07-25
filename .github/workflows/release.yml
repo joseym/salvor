@@ -126,6 +126,17 @@ jobs:
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
             echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           fi
+      - name: "Set up Node for the Bridge build"
+        uses: "actions/setup-node@v6"
+        with:
+          "cache": "npm"
+          "cache-dependency-path": "bridge/package-lock.json"
+          "node-version": "24"
+      - name: "Build the Bridge"
+        run: "npm ci && npm run build"
+      - name: "Verify the Bridge output exists"
+        run: "test -f bridge/dist/bridge/browser/index.html"
+        shell: "bash"
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest

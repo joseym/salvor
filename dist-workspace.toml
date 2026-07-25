@@ -25,6 +25,9 @@ install-updater = false
 # tag (see the tag pattern in the generated release.yml). This keeps the
 # pipeline dormant: nothing builds or publishes until a `v*` tag exists.
 pr-run-mode = "skip"
+# Steps injected ahead of the cargo build in CI: they produce `bridge/dist`, which the `ui`
+# feature embeds. Without them the release binaries ship with no dashboard.
+github-build-setup = "build-setup.yml"
 # Publish the generated Homebrew formula to the tap repo and the npm installer
 # package to the npm registry. Both jobs run only on a tag and only when their
 # tokens are present, so they stay inert until the first real release.

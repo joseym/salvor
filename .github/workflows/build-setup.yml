@@ -1,0 +1,20 @@
+# Injected into every dist build job (see `github-build-setup` in dist-workspace.toml).
+#
+# The release binaries embed the Bridge, and `bridge/dist` is a build output that is not in git, so
+# it has to be produced before cargo runs. Without this, the binary compiles against an empty asset
+# folder and serves no dashboard, which is a silent failure: the server starts, the API answers, and
+# only `/` reveals that the UI never shipped.
+- name: Set up Node for the Bridge build
+  uses: actions/setup-node@v6
+  with:
+    node-version: "24"
+    cache: npm
+    cache-dependency-path: bridge/package-lock.json
+
+- name: Build the Bridge
+  run: npm ci && npm run build
+  working-directory: bridge
+
+- name: Verify the Bridge output exists
+  shell: bash
+  run: test -f bridge/dist/bridge/browser/index.html

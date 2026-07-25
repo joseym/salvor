@@ -21,7 +21,10 @@ homepage = "https://github.com/joseym/salvor"
 # to package the three fixture binaries and fail when the default-features-off
 # build never produced them. Naming `salvor` alone ships exactly that binary.
 [package.metadata.dist]
+# No default features (the fixture binaries stay out of a release), but `ui` is named back in:
+# a released binary that cannot serve the dashboard is the thing users report as broken.
 default-features = false
+features = ["ui"]
 
 # `"*"` applies to every target triple.
 [package.metadata.dist.binaries]

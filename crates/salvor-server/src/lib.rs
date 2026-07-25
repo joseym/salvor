@@ -112,6 +112,17 @@ pub fn build_router(state: AppState) -> Router {
     #[cfg(feature = "ui")]
     let api = api.fallback(ui::static_handler);
 
+    // A headless build answers the same question rather than a bare 404, which reads as a broken
+    // route: the dashboard is genuinely absent, and the caller needs to know that is the reason.
+    #[cfg(not(feature = "ui"))]
+    let api = api.fallback(|| async {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            "this salvor build has no dashboard: it was built without the `ui` feature. \
+             The API is at /v1.\n",
+        )
+    });
+
     api.with_state(state)
 }
 
