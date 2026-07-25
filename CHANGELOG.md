@@ -2,6 +2,29 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.5.1 - 2026-07-25
+#### Bug Fixes
+- (**bridge**) keep the canvas toolbar clear of the minimap - (0143b0d) - Josey Morton
+- (**bridge**) stop stating the same fact twice and make the pickers show what is selected - (1703996) - Josey Morton
+- (**cli**) treat an unreaped exited server as stopped, not still running - (1d0bc39) - Josey Morton
+- (**cli**) give a SIGTERM'd server room to shut down before calling it stuck - (1513911) - Josey Morton
+- (**release**) ship the dashboard in released binaries and say so when it is absent - (7cdc02f) - Josey Morton
+#### Documentation
+- point the quickstart at the published crates - (14d7302) - Josey Morton
+- explain what a salvor is - (471c0be) - Josey Morton
+- tighten the README and show the Bridge - (833093a) - Josey Morton
+#### Build system
+- give the remaining internal dependencies the version crates.io requires - (22c80d1) - Josey Morton
+- keep the two internal dev-dependency cycles out of published manifests - (6042ee7) - Josey Morton
+#### Continuous Integration
+- run the Bridge jobs on a Node the Angular CLI supports - (4367e04) - Josey Morton
+#### Miscellaneous Chores
+- (**cli**) document the lean build on docs.rs - (2b013a2) - Josey Morton
+- add crates.io discovery metadata and use the installed binary name in docs - (4c4db61) - Josey Morton
+- declare the supported Rust version and add contributor and security docs - (1227183) - Josey Morton
+
+- - -
+
 ## v0.5.0 - 2026-07-24
 #### Features
 - (**agents**) give an agent an optional display name, outside its identity - (60827a4) - Josey Morton
