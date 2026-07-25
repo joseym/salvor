@@ -17,7 +17,9 @@ use std::io::{self, IsTerminal, Write as _};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use sysinfo::{Pid, Process, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, Signal, System};
+use sysinfo::{
+    Pid, Process, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, RefreshKind, Signal, System,
+};
 
 use crate::render;
 
@@ -332,8 +334,16 @@ async fn terminate(pid: u32) -> TerminateOutcome {
             true,
             ProcessRefreshKind::nothing(),
         );
-        if system.process(target).is_none() {
-            return TerminateOutcome::Exited;
+        // Gone from the table, or still in it as a zombie: both mean the server itself has stopped.
+        // A process that exits keeps its slot until its parent reaps it, so when the caller of
+        // `--kill` is also the server's parent, the entry outlives the shutdown and only the status
+        // distinguishes "finished, unreaped" from "still serving".
+        match system.process(target) {
+            None => return TerminateOutcome::Exited,
+            Some(p) if matches!(p.status(), ProcessStatus::Zombie | ProcessStatus::Dead) => {
+                return TerminateOutcome::Exited;
+            }
+            Some(_) => {}
         }
         if Instant::now() >= deadline {
             return TerminateOutcome::StillRunning;
