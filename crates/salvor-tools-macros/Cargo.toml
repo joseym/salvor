@@ -21,4 +21,6 @@ trybuild.workspace = true
 # `salvor_tools::Tool` surface a user sees. Cargo permits this cycle because it
 # runs only through dev-dependencies: building this crate's library never needs
 # salvor-tools, only its tests do.
-salvor-tools.workspace = true
+# Path-only on purpose: salvor-tools depends on this crate, so a versioned dev-dep would be a
+# publish-time cycle. Cargo strips a version-less dev-dependency on publish.
+salvor-tools = { path = "../salvor-tools" }

@@ -17,6 +17,8 @@ rusqlite.workspace = true
 async-trait.workspace = true
 
 [dev-dependencies]
-salvor-store-conformance.workspace = true
+# Path-only on purpose: the conformance kit depends on this crate, so a versioned dev-dep
+# would be a publish-time cycle. Cargo strips a version-less dev-dependency on publish.
+salvor-store-conformance = { path = "../salvor-store-conformance" }
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
