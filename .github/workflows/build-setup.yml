@@ -11,9 +11,12 @@
     cache: npm
     cache-dependency-path: bridge/package-lock.json
 
+# The directory change lives INSIDE `run`: dist re-serializes these steps into release.yml and
+# drops keys it does not know about, `working-directory` among them, so a step that relies on it
+# silently runs at the repo root.
 - name: Build the Bridge
-  run: npm ci && npm run build
-  working-directory: bridge
+  run: cd bridge && npm ci && npm run build
+  shell: bash
 
 - name: Verify the Bridge output exists
   shell: bash
