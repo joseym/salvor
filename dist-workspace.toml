@@ -31,7 +31,11 @@ github-build-setup = "build-setup.yml"
 # Publish the generated Homebrew formula to the tap repo and the npm installer
 # package to the npm registry. Both jobs run only on a tag and only when their
 # tokens are present, so they stay inert until the first real release.
-publish-jobs = ["homebrew", "npm"]
+# No publish jobs: the Homebrew formula and the npm installer package are still BUILT and
+# attached to the release, but pushing them needs HOMEBREW_TAP_TOKEN and NPM_TOKEN, which do
+# not exist. Attempting the push turns every release red for something nobody asked it to do.
+# Add the secrets and put the jobs back when either channel is real.
+publish-jobs = []
 # The Homebrew tap the formula is pushed to, giving `brew install joseym/tap/salvor`.
 tap = "joseym/homebrew-tap"
 # The Homebrew formula name.
