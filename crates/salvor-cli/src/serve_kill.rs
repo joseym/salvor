@@ -28,6 +28,13 @@ pub const DEFAULT_BIND: &str = "127.0.0.1:8080";
 /// [`crate::cli::Cli::store`]'s `default_value`).
 pub const DEFAULT_STORE: &str = "./salvor.db";
 
+/// How long `--kill` waits for a SIGTERM'd server to exit before it reports the process as still
+/// running. Generous rather than tight: a graceful shutdown finishes in milliseconds when the
+/// machine is idle, but the same shutdown on a loaded machine (a CI runner, a busy laptop) can take
+/// seconds, and reporting failure for a shutdown that is merely slow sends the operator to `kill -9`
+/// for no reason.
+const TERMINATE_GRACE: Duration = Duration::from_secs(10);
+
 /// One discovered `salvor serve` process: its pid, and the `--bind` / `--store`
 /// it was launched with (recovered from argv, defaults substituted).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -266,11 +273,12 @@ async fn kill_one(server: &RunningServer) -> Result<u8> {
         }
         TerminateOutcome::StillRunning => {
             println!(
-                "sent SIGTERM to pid {} (bind {}, store {}), but it had not exited after 2s. \
+                "sent SIGTERM to pid {} (bind {}, store {}), but it had not exited after {secs}s. \
                  It may still be shutting down. To force it: kill -9 {pid}",
                 server.pid,
                 server.bind,
                 server.store,
+                secs = TERMINATE_GRACE.as_secs(),
                 pid = server.pid,
             );
             Ok(1)
@@ -316,7 +324,7 @@ async fn terminate(pid: u32) -> TerminateOutcome {
         Some(true) => {}
     }
 
-    let deadline = Instant::now() + Duration::from_millis(2000);
+    let deadline = Instant::now() + TERMINATE_GRACE;
     loop {
         tokio::time::sleep(Duration::from_millis(100)).await;
         system.refresh_processes_specifics(
