@@ -1,5 +1,0 @@
-# Cargo build output for this excluded crate (the root .gitignore only anchors
-# /target at the workspace root, so this one is needed here).
-/target
-# Trunk's bundled web output.
-/dist

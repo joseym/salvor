@@ -175,8 +175,8 @@ pub enum Event {
         request_hash: String,
         /// The full model request body, verbatim, recorded only when prompt
         /// recording is opted into (per-agent `record_prompts` or the
-        /// `SALVOR_RECORD_PROMPTS` default). It exists so the v0.3 dashboard
-        /// inspector can show the exact prompt sent.
+        /// `SALVOR_RECORD_PROMPTS` default). It exists so the inspector can
+        /// show the exact prompt sent.
         ///
         /// Off by default, and for a reason: the body can hold user data and
         /// secrets. When recording is off the field is `None` and, thanks to

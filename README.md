@@ -145,7 +145,7 @@ The kill demo is one crash at one boundary. The release gate is the property sui
 | `salvor-cli` | The `salvor` binary |
 | `salvor` | Umbrella crate holding the published name, still a 0.0.0 seed; depend on the `salvor-*` crates or install `salvor-cli` |
 
-`bridge/` is the Angular web UI embedded in the binary. `dashboard/` is an earlier client-side Leptos app; both fold logs with the real `salvor-replay` code compiled to wasm. Neither is a Cargo workspace member (`bridge/` is not Rust; `dashboard/` targets wasm32 and carries its own lockfile), and neither are the SDKs.
+`bridge/` is the Angular web UI embedded in the binary. It folds logs with the real `salvor-replay` code compiled to wasm, so the scrubber runs the same state machine the server does. Neither it nor the SDKs are Cargo workspace members.
 
 </details>
 
