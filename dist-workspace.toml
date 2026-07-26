@@ -27,7 +27,10 @@ install-updater = false
 pr-run-mode = "skip"
 # Steps injected ahead of the cargo build in CI: they produce `bridge/dist`, which the `ui`
 # feature embeds. Without them the release binaries ship with no dashboard.
-github-build-setup = "build-setup.yml"
+# Path is relative to .github/workflows/, so this points one level up: a file that lives IN
+# .github/workflows/ is treated by GitHub as a workflow, and one with no `on:` trigger fails
+# instantly on every push.
+github-build-setup = "../build-setup.yml"
 # Publish the generated Homebrew formula to the tap repo and the npm installer
 # package to the npm registry. Both jobs run only on a tag and only when their
 # tokens are present, so they stay inert until the first real release.
