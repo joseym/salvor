@@ -113,11 +113,30 @@ Every guarantee the CLI has holds over HTTP, because the same runtime enforces i
 
 Full contract — every route, status code, and event shape — in [`crates/salvor-server/API.md`](crates/salvor-server/API.md). Prompt recording is off by default and writes request bodies to the durable log when enabled; see the API doc before turning it on.
 
-### SDKs and libraries
+### Clients
 
-Thin Python and TypeScript clients live in [`sdks/`](sdks/) — register, start, stream, resume, a few hundred lines each. Both also drive the client-owned mode above.
+Thin clients over the control plane: register an agent, start a run, stream events, resume. A few hundred lines each, and the durability stays in the one Rust process.
 
-As a Rust library there are two tiers, one example each:
+```sh
+npm install @salvor-run/client     # TypeScript
+pip install salvor                 # Python
+```
+
+Both also drive the client-owned mode above. See [`sdks/typescript`](sdks/typescript) and [`sdks/python`](sdks/python).
+
+### As a Rust library
+
+```sh
+cargo add salvor
+```
+
+One dependency over the family. The default features carry the agent loop, the tool contract, the SQLite store, and the event model; `graph`, `engine`, `server`, `llm` and `wasm` are opt-in. Depending on the individual `salvor-*` crates instead is equally supported and gives a narrower build.
+
+```rust
+use salvor::prelude::*;
+```
+
+There are two tiers, and a runnable example of each in the repository: `Agent::builder()` with typed tools, and a hand-written async loop over `RunCtx` that gets the same durability without the built-in loop. From a checkout:
 
 ```sh
 cargo run -p salvor-runtime --example todo_agent      # Agent::builder + typed tools

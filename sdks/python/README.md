@@ -180,14 +180,13 @@ Python mirror of `examples/web-research`, driven over the control plane instead
 of the CLI. Start a server with a key on its environment, then run the script:
 
 ```sh
-# from the repository root
-cargo build --bin salvor
+npm install -g salvor          # or: cargo install salvor-cli
 
 ANTHROPIC_API_KEY=sk-ant-... \
     salvor serve --bind 127.0.0.1:8080 --store /tmp/answer.db &
 
-pip install -e sdks/python
-python sdks/python/example/answer.py http://127.0.0.1:8080
+pip install salvor
+python example/answer.py http://127.0.0.1:8080    # from sdks/python in a checkout
 ```
 
 It registers the agent, starts a run, streams every event to completion, and

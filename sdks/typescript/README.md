@@ -201,8 +201,7 @@ instead of the CLI. Start a server with a key on its environment, build the
 package, then run the script:
 
 ```sh
-# from the repository root
-cargo build --bin salvor
+npm install -g salvor          # or: cargo install salvor-cli
 
 ANTHROPIC_API_KEY=sk-ant-... \
     salvor serve --bind 127.0.0.1:8080 --store /tmp/answer.db &
