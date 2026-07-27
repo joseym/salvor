@@ -1,17 +1,55 @@
 [package]
 name = "salvor"
-# Deliberately 0.0.0: this is the name-holding seed of the umbrella crate.
-# The full release republishes this as a re-export facade over the salvor-*
-# crates at 0.1.0. Not workspace-inherited so the family's version moves
-# independently until then.
-version = "0.0.0"
+# Workspace-inherited now that this is a real facade: the re-exports pin their siblings to `=`
+# this version, so the umbrella and the family it fronts can never drift apart.
+version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 repository.workspace = true
 license.workspace = true
-description = "Durable execution runtime for AI agents in Rust: event-sourced runs, typed tool effects, crash-exact resume. This is the umbrella crate; the runtime currently ships as the salvor-* crates and the salvor binary."
+description = "Durable execution runtime for AI agents in Rust: event-sourced runs, typed tool effects, crash-exact resume. One dependency over the salvor-* family."
 keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
 
 [lib]
 path = "src/lib.rs"
+
+[features]
+# Enough to define an agent, run it, kill it, and resume it. Anything that drags in a network
+# server, a wasm engine, or a graph walker is opt-in.
+default = ["runtime", "tools", "store"]
+
+runtime = ["dep:salvor-runtime"]
+tools = ["dep:salvor-tools"]
+store = ["dep:salvor-store"]
+graph = ["dep:salvor-graph"]
+# The engine walks a graph document, so it cannot be useful without the document types.
+engine = ["dep:salvor-engine", "graph"]
+server = ["dep:salvor-server"]
+llm = ["dep:salvor-llm"]
+wasm = ["dep:salvor-wasm"]
+# Forwarded rather than re-declared: MCP support lives in salvor-tools' own feature.
+mcp = ["tools", "salvor-tools/mcp"]
+
+[dependencies]
+# `=` on every sibling: a facade whose parts can move independently is a facade that lies about
+# what it was tested with.
+salvor-core = { path = "../salvor-core", version = "=0.5.1" }
+salvor-runtime = { path = "../salvor-runtime", version = "=0.5.1", optional = true }
+salvor-tools = { path = "../salvor-tools", version = "=0.5.1", optional = true }
+salvor-store = { path = "../salvor-store", version = "=0.5.1", optional = true }
+salvor-graph = { path = "../salvor-graph", version = "=0.5.1", optional = true }
+salvor-engine = { path = "../salvor-engine", version = "=0.5.1", optional = true }
+salvor-server = { path = "../salvor-server", version = "=0.5.1", optional = true }
+salvor-llm = { path = "../salvor-llm", version = "=0.5.1", optional = true }
+salvor-wasm = { path = "../salvor-wasm", version = "=0.5.1", optional = true }
+
+[package.metadata.docs.rs]
+# Document the whole surface, including the opt-in modules, so the crate page shows what is
+# available rather than only the default build.
+all-features = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tempfile = { workspace = true }

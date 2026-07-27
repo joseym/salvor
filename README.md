@@ -143,7 +143,7 @@ The kill demo is one crash at one boundary. The release gate is the property sui
 | `salvor-engine` | Executes graph documents: linear chains, gates, branches, maps, forks |
 | `salvor-server` | The control plane: HTTP + SSE, server-driven and client-driven |
 | `salvor-cli` | The `salvor` binary |
-| `salvor` | Umbrella crate holding the published name, still a 0.0.0 seed; depend on the `salvor-*` crates or install `salvor-cli` |
+| `salvor` | Facade over the family: `cargo add salvor` for the library, with `graph`, `engine`, `server`, `llm` and `wasm` as opt-in features |
 
 `bridge/` is the Angular web UI embedded in the binary. It folds logs with the real `salvor-replay` code compiled to wasm, so the scrubber runs the same state machine the server does. Neither it nor the SDKs are Cargo workspace members.
 

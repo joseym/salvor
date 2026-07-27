@@ -59,6 +59,18 @@ sed -E \
   "$MANIFEST" >"$tmp"
 mv "$tmp" "$MANIFEST"
 
+# The umbrella facade pins each sibling to `="<this version>"`, so the family it fronts can never
+# be mixed with a version it was not tested against. Those pins are literal strings, so they have to
+# be stamped here too or the next bump leaves them pointing at a version that no longer exists.
+FACADE="$ROOT/crates/salvor/Cargo.toml"
+if [ -f "$FACADE" ]; then
+  ftmp="$FACADE.tmp.$$"
+  trap 'rm -f "$tmp" "$ftmp"' EXIT
+  sed -E "s/version = \"=[0-9][^\"]*\"/version = \"=$VERSION\"/g" "$FACADE" >"$ftmp"
+  mv "$ftmp" "$FACADE"
+  echo "stamped the facade's sibling pins"
+fi
+
 # Refresh the lockfile's workspace-member entries to the new version.
 ( cd "$ROOT" && cargo update --workspace )
 
