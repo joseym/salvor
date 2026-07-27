@@ -65,3 +65,6 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: sdks/python/dist
+          # A PyPI version is immutable, so a re-run of the same tag would otherwise fail on an
+          # upload that already succeeded. The crates and npm jobs skip for the same reason.
+          skip-existing: true

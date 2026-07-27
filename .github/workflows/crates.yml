@@ -33,10 +33,15 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # salvor-wasm's integration tests build a WASI p2 component fixture, so the target has to be
+      # present before the suite runs, exactly as in ci.yml.
+      - name: Add the wasm32-wasip2 target
+        run: rustup target add wasm32-wasip2
+
       # A crates.io version can be yanked but never replaced, so the suite runs first. This is the
       # same workspace test CI runs on main; here it gates something irreversible.
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
 
       # The tag is the release's identity. set-version.sh stamps the workspace version on every
       # bump, so a mismatch means the bump did not run and the tag points at nothing coherent.
