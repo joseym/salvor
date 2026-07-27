@@ -36,7 +36,7 @@ Once the first release is published, the install commands are:
 - npm (global install of the binary):
 
   ```sh
-  npm install -g salvor
+  npm install -g @salvor-run/cli
   ```
 
 Rust users who want to build from source can still use cargo. This is the one
@@ -149,20 +149,20 @@ work. These need no extra secrets.
 With the tap repo and this token, `brew install joseym/tap/salvor` works. The
 formula file is `salvor.rb` and is pushed to the tap by the workflow.
 
-**npm (required for `npm install -g salvor`):**
+**npm (required for `npm install -g @salvor-run/cli`):**
 
-- The npm package name `salvor` is claimed by publishing to it. The unscoped
-  name was unclaimed on the registry when this was set up, so the name is
-  provisional until that first publish reserves it. If `salvor` turns out to be
-  taken by then, fall back to a scoped name (`@salvor/cli`; note the SDK already
-  uses `@salvor-run/client`) by setting `npm-scope`/`npm-package` in
-  `dist-workspace.toml` and updating the install command here.
+- The npm package name is `@salvor-run/cli`, scoped to match `@salvor-run/client`
+  rather than a personal account. The unscoped name `salvor` was published
+  briefly while this was still being decided (it's real, v0.5.1, and will keep
+  working for anyone who already installed it) but is not the intended
+  long-term package; new installs and all docs point at the scoped name.
 - A secret named `NPM_TOKEN` is set on the `joseym/salvor` repository. It is an
-  npm automation token with publish rights for that package name. The publish
-  job reads it as `NODE_AUTH_TOKEN` and runs `npm publish --access public`.
+  npm automation token with publish rights for the `@salvor-run` org. The
+  publish job reads it as `NODE_AUTH_TOKEN` and runs `npm publish --access public`,
+  which is required for a scoped package to publish as public rather than
+  defaulting to private.
 
-With the token and a free (or owned) package name, `npm install -g salvor`
-works.
+With the token in place, `npm install -g @salvor-run/cli` works.
 
 **crates.io** publishing runs from `.github/workflows/crates.yml` on the same
 tag, using trusted publishing (no stored token). It calls

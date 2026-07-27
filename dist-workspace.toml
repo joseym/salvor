@@ -40,7 +40,8 @@ publish-jobs = ["npm"]
 tap = "joseym/homebrew-tap"
 # The Homebrew formula name.
 formula = "salvor"
-# The npm package name for the binary-installer package. Unscoped `salvor` was
-# unclaimed on the registry at setup time; the name is provisional until the
-# first npm publish actually reserves it.
-npm-package = "salvor"
+# The npm package name for the binary-installer package. Scoped to match
+# @salvor-run/client rather than published under a personal account: the
+# unscoped `salvor` name is real and live (v0.5.1, published while this was
+# still provisional) but is not the intended long-term package.
+npm-package = "@salvor-run/cli"

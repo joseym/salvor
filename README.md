@@ -20,7 +20,7 @@ That's the job here. Your process is the ship, the run is the cargo, and the dur
 ## Quickstart
 
 ```sh
-npm install -g salvor         # prebuilt binary, no Rust toolchain
+npm install -g @salvor-run/cli # prebuilt binary, no Rust toolchain
 cargo install salvor-cli      # builds from source, needs Rust 1.95+
 ```
 

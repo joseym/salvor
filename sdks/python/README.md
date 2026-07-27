@@ -20,7 +20,7 @@ with Client("http://127.0.0.1:8080") as client:
     print(state.status.state)
 ```
 
-You need a control plane to talk to: `npm install -g salvor && salvor serve`, or
+You need a control plane to talk to: `npm install -g @salvor-run/cli && salvor serve`, or
 see the [repository](https://github.com/joseym/salvor) for other install routes.
 
 ## What the control plane is
@@ -180,7 +180,7 @@ Python mirror of `examples/web-research`, driven over the control plane instead
 of the CLI. Start a server with a key on its environment, then run the script:
 
 ```sh
-npm install -g salvor          # or: cargo install salvor-cli
+npm install -g @salvor-run/cli  # or: cargo install salvor-cli
 
 ANTHROPIC_API_KEY=sk-ant-... \
     salvor serve --bind 127.0.0.1:8080 --store /tmp/answer.db &

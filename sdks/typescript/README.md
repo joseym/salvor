@@ -18,7 +18,7 @@ for await (const event of salvor.streamEvents(run)) {
 }
 ```
 
-You need a control plane to talk to: `npm install -g salvor && salvor serve`.
+You need a control plane to talk to: `npm install -g @salvor-run/cli && salvor serve`.
 
 ## What the control plane is
 
@@ -201,7 +201,7 @@ instead of the CLI. Start a server with a key on its environment, build the
 package, then run the script:
 
 ```sh
-npm install -g salvor          # or: cargo install salvor-cli
+npm install -g @salvor-run/cli  # or: cargo install salvor-cli
 
 ANTHROPIC_API_KEY=sk-ant-... \
     salvor serve --bind 127.0.0.1:8080 --store /tmp/answer.db &
