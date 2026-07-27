@@ -31,14 +31,11 @@ pr-run-mode = "skip"
 # .github/workflows/ is treated by GitHub as a workflow, and one with no `on:` trigger fails
 # instantly on every push.
 github-build-setup = "../build-setup.yml"
-# Publish the generated Homebrew formula to the tap repo and the npm installer
-# package to the npm registry. Both jobs run only on a tag and only when their
-# tokens are present, so they stay inert until the first real release.
-# No publish jobs: the Homebrew formula and the npm installer package are still BUILT and
-# attached to the release, but pushing them needs HOMEBREW_TAP_TOKEN and NPM_TOKEN, which do
-# not exist. Attempting the push turns every release red for something nobody asked it to do.
-# Add the secrets and put the jobs back when either channel is real.
-publish-jobs = []
+# The npm installer package goes to the registry on every tag, using the NPM_TOKEN secret. The
+# Homebrew formula is still only BUILT and attached to the release: joseym/homebrew-tap exists, but
+# pushing to it needs a HOMEBREW_TAP_TOKEN that does not, and a job that always fails turns every
+# release red. Add "homebrew" back alongside the secret when that channel is real.
+publish-jobs = ["npm"]
 # The Homebrew tap the formula is pushed to, giving `brew install joseym/tap/salvor`.
 tap = "joseym/homebrew-tap"
 # The Homebrew formula name.

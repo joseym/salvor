@@ -20,12 +20,17 @@ That's the job here. Your process is the ship, the run is the cargo, and the dur
 ## Quickstart
 
 ```sh
-cargo install salvor-cli      # or: cargo build, from a checkout
+npm install -g salvor         # prebuilt binary, no Rust toolchain
+cargo install salvor-cli      # builds from source, needs Rust 1.95+
 ```
 
-Examples below call `salvor`; from a checkout it is `./target/debug/salvor`.
+Or take the binary straight from the [release page](https://github.com/joseym/salvor/releases/latest), which also has a shell installer:
 
-The [release page](https://github.com/joseym/salvor/releases/latest) also has prebuilt binaries and an install script for people who would rather not compile it.
+```sh
+curl -LsSf https://github.com/joseym/salvor/releases/latest/download/salvor-cli-installer.sh | sh
+```
+
+All four routes install the same `salvor`. Examples below call it by name; from a checkout it is `./target/debug/salvor`.
 
 An agent is a TOML file. Save this as `hello-agent.toml`:
 
