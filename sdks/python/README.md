@@ -2,6 +2,24 @@
 
 A thin Python client for the Salvor control plane.
 
+```sh
+pip install salvor
+```
+
+```python
+from salvor import SalvorClient
+
+salvor = SalvorClient(base_url="http://127.0.0.1:8080")
+agent = salvor.register_agent(definition)
+run = salvor.start_run(agent=agent, input=payload)
+
+for event in salvor.stream_events(run):
+    print(event.seq, event.event["kind"])
+```
+
+You need a control plane to talk to: `npm install -g salvor && salvor serve`, or
+see the [repository](https://github.com/joseym/salvor) for other install routes.
+
 ## What the control plane is
 
 Salvor is a durable execution runtime for AI agents. A run is an append-only
@@ -28,10 +46,11 @@ the SDK stays consistent with it by construction.
 ## Install
 
 ```sh
-pip install -e sdks/python        # from the repository root
+pip install salvor
 ```
 
-The one runtime dependency is `httpx`.
+The one runtime dependency is `httpx`. To work on the SDK itself, install it
+from a checkout instead: `pip install -e sdks/python`.
 
 ## The client surface
 

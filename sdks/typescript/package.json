@@ -12,7 +12,12 @@
       "default": "./dist/index.js"
     }
   },
-  "files": ["dist", "src"],
+  "files": [
+    "dist",
+    "src",
+    "!src/**/*.teach.md",
+    "!dist/**/*.teach.md"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",

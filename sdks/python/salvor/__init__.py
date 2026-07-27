@@ -96,7 +96,15 @@ __all__ = [
     "all_passes",
 ]
 
-__version__ = "0.3.0"
+# Read from the installed distribution's metadata rather than hardcoded here: a literal is a
+# second place the version lives, and it drifted two minor releases behind pyproject.toml before
+# anyone noticed. Running from a source tree that was never installed has no metadata to read.
+try:
+    from importlib.metadata import PackageNotFoundError, version as _dist_version
+
+    __version__ = _dist_version("salvor")
+except PackageNotFoundError:  # pragma: no cover - a source checkout, not an install
+    __version__ = "0.0.0+source"
 
 
 def __getattr__(name: str):

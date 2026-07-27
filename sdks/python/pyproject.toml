@@ -17,5 +17,11 @@ dependencies = ["httpx>=0.24"]
 [project.urls]
 Repository = "https://github.com/joseym/salvor"
 
+# The teaching companions next to each module are personal notes, kept out of git by a global
+# ignore. A build reads the working tree rather than the index, so without an explicit exclusion
+# they ride along into the published artifact.
+[tool.hatch.build]
+exclude = ["*.teach.md"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["salvor"]
