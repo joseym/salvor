@@ -164,10 +164,13 @@ formula file is `salvor.rb` and is pushed to the tap by the workflow.
 With the token and a free (or owned) package name, `npm install -g salvor`
 works.
 
-**crates.io** publishing is a separate track and is not part of this pipeline.
-The family is published as of 0.5.0, so `cargo install salvor-cli` works; a new
-version means publishing each crate again, bottom-up in dependency order.
-The umbrella `salvor` crate stays at 0.0.0 until it re-exports the family.
+**crates.io** publishing runs from `.github/workflows/crates.yml` on the same
+tag, using trusted publishing (no stored token). It calls
+`scripts/publish-crates.sh`, which walks the family bottom-up and skips any
+version already on the index, so an interrupted run resumes safely and the same
+script works by hand: `scripts/publish-crates.sh --dry-run` packages everything
+without uploading. Each crate needs a trusted publisher registered at
+crates.io/crates/<name>/settings before CI can publish it.
 
 ## Current state, and what the first tag activates
 

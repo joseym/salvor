@@ -1,0 +1,60 @@
+# Publishes the crate family to crates.io on a version tag.
+#
+# Authentication is crates.io trusted publishing: GitHub mints a short-lived OIDC token, crates.io
+# verifies it against publishers it has on record, and the action's post step revokes the token when
+# the job ends. Nothing long-lived is stored in the repository.
+#
+# Trusted publishers are configured PER CRATE, so every crate in the family below needs one
+# registered at crates.io/crates/<name>/settings, each with:
+#
+#   repository: joseym/salvor   workflow: crates.yml   environment: crates
+#
+# A crate without a publisher fails at its turn and stops the run; the script is idempotent, so
+# fixing the registration and re-running the tag resumes from there.
+name: crates.io
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+
+permissions: {}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: crates
+    permissions:
+      contents: read
+      # The only permission needed: mint an OIDC token for crates.io to verify.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # A crates.io version can be yanked but never replaced, so the suite runs first. This is the
+      # same workspace test CI runs on main; here it gates something irreversible.
+      - name: Test
+        run: cargo test --workspace
+
+      # The tag is the release's identity. set-version.sh stamps the workspace version on every
+      # bump, so a mismatch means the bump did not run and the tag points at nothing coherent.
+      - name: Check the workspace version matches the tag
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          manifest=$(sed -nE 's/^version = "([^"]+)"/\1/p' Cargo.toml | head -1)
+          if [ "$tag" != "$manifest" ]; then
+            echo "tag $tag does not match the workspace version $manifest" >&2
+            exit 1
+          fi
+          echo "tag and workspace agree on $manifest"
+
+      - name: Authenticate with crates.io
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: Publish the family
+        run: scripts/publish-crates.sh
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
