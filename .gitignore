@@ -10,3 +10,4 @@
 
 # Installed dependencies, including the examples that now depend on the published packages.
 node_modules/
+.venv/

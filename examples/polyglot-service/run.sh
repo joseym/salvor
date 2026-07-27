@@ -70,9 +70,17 @@ echo
 echo "############################################"
 echo "# Python app"
 echo "############################################"
-PYTHON="$ROOT/sdks/python/.venv/bin/python"
-[[ -x "$PYTHON" ]] || PYTHON="python3"
-PYTHONPATH="$ROOT/sdks/python" "$PYTHON" "$HERE/python/service.py" "$BASE_URL"
+# The Python app depends on the PUBLISHED salvor package, not this repository's SDK sources. A
+# venv beside the example keeps that install out of the caller's environment, the same way the
+# other Python examples here do it.
+PYVENV="$HERE/.venv"
+if [[ ! -x "$PYVENV/bin/python" ]]; then
+  echo "== installing salvor for the Python app =="
+  python3 -m venv "$PYVENV"
+  "$PYVENV/bin/pip" install --quiet --upgrade pip
+  "$PYVENV/bin/pip" install --quiet salvor
+fi
+"$PYVENV/bin/python" "$HERE/python/service.py" "$BASE_URL"
 
 # The TypeScript app imports the SDK's built output; build it if needed. Node
 # lives under nvm here, which a non-interactive shell does not load. Fall back to the newest nvm
