@@ -62,12 +62,60 @@ use crate::render;
 use crate::serve_kill;
 
 /// `salvor run`: start a fresh run, print its id, drive it, and report.
+///
+/// `--fixture <DIR>` is the offline variant: the agent, the input, and a
+/// recorded model conversation all come from one directory, and a scripted
+/// model is stood up locally to serve that conversation (see [`crate::fixture`]).
+/// It changes only where those three things come from — everything below the
+/// resolution is the same store, the same runtime, and the same event log a
+/// `--agent`/`--input` run gets.
 pub async fn run(store_path: &Path, args: RunArgs) -> Result<u8> {
-    let config = AgentConfig::load(&args.agent)?;
-    let input = parse_input(&args.input)?;
+    // Resolve the two ways of naming a run into the one shape the rest of this
+    // handler works in. clap already guarantees exactly one of them is present
+    // (see `RunArgs`), so the `None` arms below are unreachable in practice;
+    // they still return an actionable message rather than panicking, because a
+    // handler is not the place to trust a parse tree absolutely.
+    let fixture = args
+        .fixture
+        .as_deref()
+        .map(crate::fixture::Fixture::load)
+        .transpose()?;
+    let (agent_path, input) = match &fixture {
+        Some(fixture) => (fixture.agent_path().to_owned(), fixture.input().clone()),
+        None => {
+            let agent = args
+                .agent
+                .clone()
+                .context("`salvor run` needs --agent <file>, or --fixture <dir>")?;
+            let raw = args
+                .input
+                .as_deref()
+                .context("`salvor run` needs --input <json|@file>, or --fixture <dir>")?;
+            (agent, parse_input(raw)?)
+        }
+    };
+
+    let config = AgentConfig::load(&agent_path)?;
     let store = open_store(store_path)?;
 
-    let (agent, servers) = agent_config::build_agent(&config, &args.agent).await?;
+    // The fixture's model binds a local port and exports the agent's declared
+    // `base_url_env` at it. This must happen BEFORE the agent is built: the
+    // client config reads that variable once, at build time.
+    let model = match &fixture {
+        Some(fixture) => Some(fixture.start_model(&config).await?),
+        None => None,
+    };
+
+    // From here the fixture path and the ordinary path are the same code. Any
+    // failure between the model starting and the run finishing tears it down
+    // first, the way `close_servers` runs regardless of outcome below.
+    let (agent, servers) = match agent_config::build_agent(&config, &agent_path).await {
+        Ok(built) => built,
+        Err(error) => {
+            shutdown_model(model).await;
+            return Err(error);
+        }
+    };
     // The agent carries the resolved prompt-recording flag (per-agent config
     // over SALVOR_RECORD_PROMPTS over off); hand it to the runtime so the
     // RunCtx driving this run records the body only when opted in.
@@ -89,8 +137,9 @@ pub async fn run(store_path: &Path, args: RunArgs) -> Result<u8> {
     // regardless of the outcome, so a teardown always happens before the `?`.
     let outcome = runtime.start_with_id(&agent, run_id, input).await;
     close_servers(servers).await;
+    shutdown_model(model).await;
 
-    report_outcome(outcome?, &uuid, &args.agent)
+    report_outcome(outcome?, &uuid, &agent_path)
 }
 
 /// `salvor resume`: continue an existing run, dispatching on its derived state.
@@ -1187,6 +1236,15 @@ fn report_outcome(outcome: RunOutcome, uuid: &str, agent_path: &Path) -> Result<
             print!("{}", render::parked_report(uuid, &reason, agent_path));
             Ok(0)
         }
+    }
+}
+
+/// Stops the fixture's scripted model, if there was one. A `None` (the
+/// ordinary `--agent`/`--input` run) is a no-op, so the call site stays one
+/// unconditional line next to `close_servers`.
+async fn shutdown_model(model: Option<crate::fixture::FixtureModel>) {
+    if let Some(model) = model {
+        model.shutdown().await;
     }
 }
 

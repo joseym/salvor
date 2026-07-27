@@ -17,7 +17,9 @@ homepage = "https://github.com/joseym/salvor"
 # fixture. That leaves the real `salvor` binary as the sole artifact. The binary
 # stays fully functional: MCP-client support and the wasm sandbox arrive through
 # the unconditional lib dependencies (salvor-tools, salvor-wasm), not through
-# this crate's own features.
+# this crate's own features. `salvor run --fixture` is likewise unconditional:
+# it is ordinary product code (src/fixture.rs), and only the tool server a given
+# fixture happens to name is feature-gated.
 #
 # `binaries` is an explicit allowlist: dist enumerates a package's binaries from
 # the manifest without evaluating required-features, so it would otherwise try
@@ -126,6 +128,11 @@ salvor-server = { path = "../salvor-server", version = "0.5.0", default-features
 # not compile a wasm runtime depend on the library crates, never on this one.
 salvor-wasm.workspace = true
 anyhow.workspace = true
+# The in-process scripted model behind `salvor run --fixture` (src/fixture.rs).
+# Unconditional, because `--fixture` is a product flag rather than test
+# scaffolding. It is also free: salvor-server already compiles axum into the
+# tree, so naming it here adds a manifest line, not a crate.
+axum.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

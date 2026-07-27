@@ -116,14 +116,43 @@ pub struct GraphRunArgs {
 }
 
 /// Arguments to `run`.
+///
+/// Two mutually exclusive ways to say what to run: the ordinary
+/// `--agent`/`--input` pair, or a single `--fixture <DIR>` naming a
+/// self-contained fixture directory. The pair stays required when `--fixture`
+/// is absent, and passing both is a clap error rather than a runtime surprise,
+/// so an operator who mixes them is told at parse time which flags conflict.
 #[derive(Debug, Args)]
 pub struct RunArgs {
-    /// Path to the agent definition (TOML).
-    #[arg(long, value_name = "FILE")]
-    pub agent: PathBuf,
+    /// Path to the agent definition (TOML). Required unless `--fixture` is
+    /// given, which supplies the agent itself.
+    #[arg(
+        long,
+        value_name = "FILE",
+        required_unless_present = "fixture",
+        conflicts_with = "fixture"
+    )]
+    pub agent: Option<PathBuf>,
     /// The run input: a JSON value, or `@path` to read JSON from a file.
-    #[arg(long, value_name = "JSON|@FILE")]
-    pub input: String,
+    /// Required unless `--fixture` is given, which supplies the input itself.
+    #[arg(
+        long,
+        value_name = "JSON|@FILE",
+        required_unless_present = "fixture",
+        conflicts_with = "fixture"
+    )]
+    pub input: Option<String>,
+    /// Run a self-contained fixture directory offline: no API key, no network.
+    ///
+    /// The directory holds `agent.toml`, `input.json`, and `model.json` (the
+    /// recorded model conversation). Salvor serves that conversation from an
+    /// in-process HTTP server on a free local port and points the agent's
+    /// declared `[llm] base_url_env` variable at it, so the agent file needs
+    /// no edit to switch between the fixture and a real model. Everything
+    /// after that is an ordinary run: the same store, the same event log, the
+    /// same kill/resume guarantee. See [`crate::fixture`].
+    #[arg(long, value_name = "DIR")]
+    pub fixture: Option<PathBuf>,
 }
 
 /// Arguments to `resume`.

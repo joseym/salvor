@@ -11,6 +11,9 @@
 //!   a live [`salvor_runtime::Agent`].
 //! - [`commands`] is one handler per verb, wiring [`salvor_runtime`] and
 //!   [`salvor_store`] together.
+//! - [`fixture`] is `salvor run --fixture <DIR>`: the offline, self-contained
+//!   fixture directory (agent, input, and a recorded model conversation) and
+//!   the in-process scripted model that serves it.
 //! - [`render`] is pure value-to-text formatting, shared by the commands.
 //! - [`serve_kill`] is the process discovery and termination behind `salvor
 //!   serve --kill`, kept separate from [`commands::serve`] because it has
@@ -41,6 +44,7 @@ pub mod demo_script;
 #[cfg(feature = "fixture")]
 pub mod demo_tools;
 pub mod dev_server;
+pub mod fixture;
 pub mod render;
 pub mod serve_kill;
 
