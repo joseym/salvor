@@ -75,11 +75,23 @@ PYTHON="$ROOT/sdks/python/.venv/bin/python"
 PYTHONPATH="$ROOT/sdks/python" "$PYTHON" "$HERE/python/service.py" "$BASE_URL"
 
 # The TypeScript app imports the SDK's built output; build it if needed. Node
-# lives under nvm here; add it to PATH so this runs under a plain bash.
-export PATH="$HOME/.nvm/versions/node/v24.18.0/bin:$PATH"
-if [[ ! -f "$ROOT/sdks/typescript/dist/index.js" ]]; then
-  echo "== building @salvor/client =="
-  (cd "$ROOT/sdks/typescript" && npm install --silent && npm run build --silent)
+# lives under nvm here, which a non-interactive shell does not load. Fall back to the newest nvm
+# install only when node is genuinely absent, so this never overrides a node the caller chose, and
+# never depends on one exact version being present.
+if ! command -v node >/dev/null 2>&1; then
+  NVM_BIN=$(ls -d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | sort -V | tail -1)
+  [[ -n "$NVM_BIN" ]] && export PATH="$NVM_BIN:$PATH"
+fi
+if ! command -v node >/dev/null 2>&1; then
+  echo "run.sh: node is required for the TypeScript half; install Node 24 or newer" >&2
+  exit 1
+fi
+
+# The TypeScript app depends on the PUBLISHED client, declared in its own package.json, so the
+# setup is an ordinary install rather than a build of this repository's SDK sources.
+if [[ ! -d "$HERE/typescript/node_modules" ]]; then
+  echo "== installing @salvor-run/client for the TypeScript app =="
+  (cd "$HERE/typescript" && npm install --silent)
 fi
 
 echo
