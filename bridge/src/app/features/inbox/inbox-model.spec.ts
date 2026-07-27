@@ -1,4 +1,4 @@
-import { SalvorClient } from '@salvor/client';
+import { SalvorClient } from '@salvor-run/client';
 
 import {
   budgetFloor,

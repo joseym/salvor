@@ -1,4 +1,4 @@
-import type { SalvorEvent } from '@salvor/client';
+import type { SalvorEvent } from '@salvor-run/client';
 
 import { esc, pretty } from '../../shared/json-hi';
 import { callCost, int, usd } from './pricing';

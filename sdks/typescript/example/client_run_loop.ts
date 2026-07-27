@@ -29,7 +29,7 @@
  * end to end and the model leg reports why it skipped, so this is runnable
  * offline as-is. examples/browser-client-run shows the unary-retry fallback
  * that completes the step against the demo model. In your own project you
- * would `import { SalvorClient } from "@salvor/client"`.
+ * would `import { SalvorClient } from "@salvor-run/client"`.
  */
 
 import { SalvorApiError, SalvorClient, SalvorStreamError } from "../dist/index.js";

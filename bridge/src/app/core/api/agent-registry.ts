@@ -6,7 +6,7 @@ import { SALVOR_CLIENT } from './client';
  * Resolves an `agent_def_hash` to a human name, when one is discoverable — for the Runs
  * ledger's agent column.
  *
- * `GET /v1/agents/{hash}` (`@salvor/client#getAgent`) answers `{ agent, format, definition }`,
+ * `GET /v1/agents/{hash}` (`@salvor-run/client#getAgent`) answers `{ agent, format, definition }`,
  * where `definition` is the raw TOML/JSON body a client registered. The real agent schema
  * (`crates/salvor-cli/src/agent_config.rs`, `#[serde(deny_unknown_fields)]`) has no top-level
  * `name` field today, so a hash that resolves (200, registered) usually still carries no name to

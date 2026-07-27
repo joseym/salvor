@@ -1,4 +1,4 @@
-import type { RunSummary } from '@salvor/client';
+import type { RunSummary } from '@salvor-run/client';
 
 /**
  * The Runs view-model: the fold's three-way GROUP split and per-state labels, plus a thin

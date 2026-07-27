@@ -2,11 +2,11 @@
 
 This project was generated using [Angular CLI](https://github.com/angular/angular-cli) version 22.0.7.
 
-## The `@salvor/client` dependency
+## The `@salvor-run/client` dependency
 
 `bridge/` consumes the TypeScript SDK at `sdks/typescript` as a local npm `file:`
-dependency (`package.json`: `"@salvor/client": "file:../sdks/typescript"`). `npm install`
-symlinks it into `node_modules/@salvor/client` the same way `npm link` would, so edits to
+dependency (`package.json`: `"@salvor-run/client": "file:../sdks/typescript"`). `npm install`
+symlinks it into `node_modules/@salvor-run/client` the same way `npm link` would, so edits to
 the SDK's source are picked up on the SDK's own next `npm run build` with no republish or
 version bump. Nothing is published anywhere; there is no npm registry involved.
 

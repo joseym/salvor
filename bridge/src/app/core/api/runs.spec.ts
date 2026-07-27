@@ -1,5 +1,5 @@
 import { TestBed } from '@angular/core/testing';
-import { SalvorClient } from '@salvor/client';
+import { SalvorClient } from '@salvor-run/client';
 
 import { SALVOR_CLIENT } from './client';
 import { RunsService } from './runs';

@@ -1,5 +1,5 @@
 import { Component, computed, effect, inject, signal } from '@angular/core';
-import type { RunState, RunSummary } from '@salvor/client';
+import type { RunState, RunSummary } from '@salvor-run/client';
 
 import { RunsService, SALVOR_CLIENT, errorMessage } from '../../core/api';
 import { FirstReceiptsService } from '../../core/first-receipts';

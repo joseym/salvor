@@ -1,4 +1,4 @@
-import { SalvorError } from '@salvor/client';
+import { SalvorError } from '@salvor-run/client';
 
 /** Render any thrown value as a display string, without ever leaking `any`. */
 export function errorMessage(err: unknown): string {

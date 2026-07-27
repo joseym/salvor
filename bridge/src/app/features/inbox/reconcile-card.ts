@@ -8,7 +8,7 @@ import {
   output,
   signal,
 } from '@angular/core';
-import type { RunSummary } from '@salvor/client';
+import type { RunSummary } from '@salvor-run/client';
 
 import { RunDetailService, SALVOR_CLIENT, errorMessage } from '../../core/api';
 import { ViewService } from '../../core/view';

@@ -1,4 +1,4 @@
-import type { SalvorEvent } from '@salvor/client';
+import type { SalvorEvent } from '@salvor-run/client';
 
 import { esc } from '../../shared/json-hi';
 import { hourKey } from '../runs/run-model';

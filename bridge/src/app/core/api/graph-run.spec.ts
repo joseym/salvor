@@ -1,5 +1,5 @@
 import { TestBed } from '@angular/core/testing';
-import { SalvorApiError, SalvorClient } from '@salvor/client';
+import { SalvorApiError, SalvorClient } from '@salvor-run/client';
 
 import { SALVOR_CLIENT } from './client';
 import { GraphRunService } from './graph-run';

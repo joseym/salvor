@@ -13,7 +13,7 @@
   "private": true,
   "packageManager": "npm@11.17.0",
   "dependencies": {
-    "@salvor/client": "file:../sdks/typescript",
+    "@salvor-run/client": "file:../sdks/typescript",
     "salvor-replay-wasm": "file:../crates/salvor-replay-wasm/pkg",
     "@angular/common": "^22.0.0",
     "@angular/compiler": "^22.0.0",

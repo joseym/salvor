@@ -1,4 +1,4 @@
-import type { SalvorEvent } from '@salvor/client';
+import type { SalvorEvent } from '@salvor-run/client';
 
 import { activityDescText, activityExclusionNote, bucketEvents, hourTermOf, renderActivityHtml } from './activity';
 

@@ -1,5 +1,5 @@
 import { Injectable, inject } from '@angular/core';
-import type { SalvorEvent } from '@salvor/client';
+import type { SalvorEvent } from '@salvor-run/client';
 
 import { SALVOR_CLIENT } from '../../core/api';
 import { agentOf, completedCallsOf, costOfPrefix } from '../inspector/state-model';

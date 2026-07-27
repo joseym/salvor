@@ -1,5 +1,5 @@
 /**
- * @salvor/client: a thin TypeScript client over the Salvor control plane.
+ * @salvor-run/client: a thin TypeScript client over the Salvor control plane.
  *
  * Submit an agent definition, start a run, stream its events to completion, and
  * resume or reconcile it, all over HTTP. The client holds no durability logic:
@@ -7,7 +7,7 @@
  * and the write-ahead reconciliation rule.
  *
  * ```ts
- * import { SalvorClient } from "@salvor/client";
+ * import { SalvorClient } from "@salvor-run/client";
  *
  * const client = new SalvorClient("http://127.0.0.1:8080");
  * const agent = await client.registerAgent(agentToml);

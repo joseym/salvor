@@ -12,7 +12,7 @@
  * checks stay with `salvor graph validate`.
  */
 
-import { GraphBuilder } from "@salvor/client";
+import { GraphBuilder } from "@salvor-run/client";
 
 const draftSchema = {
   type: "object",

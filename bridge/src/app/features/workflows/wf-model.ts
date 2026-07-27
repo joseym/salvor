@@ -1,4 +1,4 @@
-import type { Graph, GraphNode } from '@salvor/client';
+import type { Graph, GraphNode } from '@salvor-run/client';
 
 import type { GraphSummary } from '../../core/api';
 
@@ -67,7 +67,7 @@ export interface WfGraph {
   readonly edges: readonly WfEdge[];
 }
 
-/** The id of a server graph node — every kind's payload carries `id` (see `@salvor/client` graph). */
+/** The id of a server graph node — every kind's payload carries `id` (see `@salvor-run/client` graph). */
 function nodeId(n: GraphNode): string {
   return n.payload.id;
 }

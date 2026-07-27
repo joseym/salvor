@@ -1,6 +1,6 @@
 import { Component, computed, inject, input, output, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
-import type { AbandonResult, RunSummary } from '@salvor/client';
+import type { AbandonResult, RunSummary } from '@salvor-run/client';
 
 import { SALVOR_CLIENT, errorMessage } from '../../core/api';
 import { focusWhenRendered } from '../../core/focus';

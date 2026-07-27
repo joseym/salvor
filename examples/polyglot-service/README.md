@@ -143,7 +143,7 @@ line for line, confirming the two SDKs behave the same.
 - `agent.toml`: the research agent with a low step budget so a run parks.
 - `input.json`: the run input.
 - `python/service.py`: the Python app, using the `salvor` SDK.
-- `typescript/service.ts`: the TypeScript app, using `@salvor/client`.
+- `typescript/service.ts`: the TypeScript app, using `@salvor-run/client`.
 - `run.sh`: brings the offline stack up, runs both apps, tears it down.
 
 The SDK sources under `sdks/` are used unmodified. See

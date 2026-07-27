@@ -1,5 +1,5 @@
 import { Injectable, type Signal, inject, signal } from '@angular/core';
-import type { Graph } from '@salvor/client';
+import type { Graph } from '@salvor-run/client';
 
 import { SALVOR_API_CONFIG, SALVOR_CLIENT, type SalvorApiConfig } from './client';
 import { errorMessage } from './errors';

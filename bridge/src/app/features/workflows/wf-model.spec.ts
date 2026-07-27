@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import type { Graph } from '@salvor/client';
+import type { Graph } from '@salvor-run/client';
 import { fromServerGraph } from './wf-model';
 
 /**

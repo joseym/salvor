@@ -1,5 +1,5 @@
 import { TestBed } from '@angular/core/testing';
-import { GraphBuilder, SalvorClient } from '@salvor/client';
+import { GraphBuilder, SalvorClient } from '@salvor-run/client';
 
 import { SALVOR_CLIENT } from './client';
 import { GraphsService } from './graphs';

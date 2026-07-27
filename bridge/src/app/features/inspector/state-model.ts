@@ -1,4 +1,4 @@
-import type { SalvorEvent } from '@salvor/client';
+import type { SalvorEvent } from '@salvor-run/client';
 
 import { GROUP, LABEL, groupOf, labelOf } from '../runs/run-model';
 import { esc } from '../../shared/json-hi';

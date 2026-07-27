@@ -1,8 +1,8 @@
-import type { Graph } from '@salvor/client';
+import type { Graph } from '@salvor-run/client';
 
 /**
  * Typed views over the graph control-plane's JSON (`crates/salvor-server/API.md`, "Graphs and
- * graph runs"). Same posture as `@salvor/client`'s own `types.ts`: thin decoders, camelCase
+ * graph runs"). Same posture as `@salvor-run/client`'s own `types.ts`: thin decoders, camelCase
  * fields, and a `raw` escape hatch on every decoded object so a server field this layer has not
  * been taught yet is never lost.
  *

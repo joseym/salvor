@@ -13,7 +13,7 @@
  *     npm install && npm run build
  *     node --experimental-strip-types example/answer.ts http://127.0.0.1:8080
  *
- * In your own project you would `import { SalvorClient } from "@salvor/client"`;
+ * In your own project you would `import { SalvorClient } from "@salvor-run/client"`;
  * this example imports the freshly built output next to it.
  */
 

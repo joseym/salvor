@@ -1,6 +1,6 @@
 import { TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
-import { SalvorClient } from '@salvor/client';
+import { SalvorClient } from '@salvor-run/client';
 
 import { routes } from '../../app.routes';
 import { SALVOR_CLIENT, provideSalvorApi } from '../../core/api';

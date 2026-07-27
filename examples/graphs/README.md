@@ -88,7 +88,7 @@ reduce to the exact same canonical JSON. Each builder wraps the same format
 without inventing a new one.
 
 - **Rust**: `salvor_graph::GraphBuilder` (crate `salvor-graph`).
-- **TypeScript**: `GraphBuilder` from `@salvor/client` (`sdks/typescript`), zero
+- **TypeScript**: `GraphBuilder` from `@salvor-run/client` (`sdks/typescript`), zero
   runtime dependencies.
 - **Python**: `salvor.GraphBuilder` (`sdks/python`), standard library only.
 
@@ -117,7 +117,7 @@ let graph = GraphBuilder::new()
 TypeScript:
 
 ```ts
-import { GraphBuilder } from "@salvor/client";
+import { GraphBuilder } from "@salvor-run/client";
 
 const graph = new GraphBuilder()
   .agent("research", `sha256:${"1".repeat(64)}`, { outputSchema: draft })

@@ -1,4 +1,4 @@
-import type { RunState, SalvorClient, SalvorEvent } from '@salvor/client';
+import type { RunState, SalvorClient, SalvorEvent } from '@salvor-run/client';
 
 /**
  * Shared types and pure math for the Inbox: the budget-raise floor computation, currency/number

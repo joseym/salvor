@@ -1,5 +1,5 @@
 import { Injectable, type Signal, inject, signal } from '@angular/core';
-import type { EndFrame, EventStream, SalvorClient, SalvorEvent } from '@salvor/client';
+import type { EndFrame, EventStream, SalvorClient, SalvorEvent } from '@salvor-run/client';
 
 import { SALVOR_CLIENT } from './client';
 import { type ConnectionState, createConnectionStateMachine } from './connection-state';

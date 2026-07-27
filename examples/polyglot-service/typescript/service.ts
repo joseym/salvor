@@ -14,7 +14,7 @@
  *
  * It imports the SDK's built output by relative path, so no install is needed
  * beyond `npm run build` in sdks/typescript. In your own project you would
- * `import { SalvorClient } from "@salvor/client"`.
+ * `import { SalvorClient } from "@salvor-run/client"`.
  *
  * Bring the offline stack up first (see ../README.md or ../run.sh), then:
  *

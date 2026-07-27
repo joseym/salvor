@@ -1,6 +1,24 @@
-# @salvor/client (TypeScript)
+# @salvor-run/client (TypeScript)
 
 A thin TypeScript client for the Salvor control plane.
+
+```sh
+npm install @salvor-run/client
+```
+
+```ts
+import { SalvorClient } from "@salvor-run/client";
+
+const salvor = new SalvorClient({ baseUrl: "http://127.0.0.1:8080" });
+const agent = await salvor.registerAgent(definition);
+const run = await salvor.startRun({ agent, input });
+
+for await (const event of salvor.streamEvents(run)) {
+  console.log(event.seq, event.event.kind);
+}
+```
+
+You need a control plane to talk to: `npm install -g salvor && salvor serve`.
 
 ## What the control plane is
 
@@ -46,7 +64,7 @@ npm run build    # tsc -> dist/
 Then in your project:
 
 ```ts
-import { SalvorClient } from "@salvor/client";
+import { SalvorClient } from "@salvor-run/client";
 ```
 
 ## The client surface
@@ -107,7 +125,7 @@ Verify what that write did, then call `resolve(runId, output)` so replay never
 re-runs it.
 
 ```ts
-import { NeedsReconciliationError } from "@salvor/client";
+import { NeedsReconciliationError } from "@salvor-run/client";
 
 try {
   await client.resume(runId);

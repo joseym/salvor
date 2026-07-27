@@ -1,5 +1,5 @@
 import { InjectionToken, type Provider, inject } from '@angular/core';
-import { SalvorClient, type SalvorClientOptions } from '@salvor/client';
+import { SalvorClient, type SalvorClientOptions } from '@salvor-run/client';
 
 /** Where the control plane lives, and how to authenticate to it. */
 export interface SalvorApiConfig {

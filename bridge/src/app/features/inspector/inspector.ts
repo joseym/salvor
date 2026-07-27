@@ -9,7 +9,7 @@ import {
   inject,
   signal,
 } from '@angular/core';
-import type { SalvorEvent } from '@salvor/client';
+import type { SalvorEvent } from '@salvor-run/client';
 
 import {
   GraphRunService,

@@ -1236,7 +1236,7 @@ function nodeFields(n: WfNode): string[] {
 
 /** Convert a canvas draft back to a server document for publish — `{ kind, payload }` per node,
  * carrying every field the draft genuinely holds and the minimum each kind requires. */
-function toServerDocument(g: WfGraph): import('@salvor/client').Graph {
+function toServerDocument(g: WfGraph): import('@salvor-run/client').Graph {
   const nodes = g.nodes.map((n) => {
     switch (n.kind) {
       case 'agent':
@@ -1255,7 +1255,7 @@ function toServerDocument(g: WfGraph): import('@salvor/client').Graph {
           kind: 'gate' as const,
           payload: {
             id: n.id,
-            approval_schema: (n.inputSchema as import('@salvor/client').JsonValue) ?? { type: 'object' },
+            approval_schema: (n.inputSchema as import('@salvor-run/client').JsonValue) ?? { type: 'object' },
             ...(n.prompt !== undefined ? { prompt: n.prompt } : {}),
           },
         };

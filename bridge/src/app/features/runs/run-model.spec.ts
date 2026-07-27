@@ -11,7 +11,7 @@ import {
   toRunRow,
   type RunRow,
 } from './run-model';
-import type { RunSummary } from '@salvor/client';
+import type { RunSummary } from '@salvor-run/client';
 
 function row(agentDefHash: string | undefined): RunRow {
   return { id: 'r1', status: 'completed', eventCount: 1, agentDefHash };

@@ -1,6 +1,6 @@
 import { TestBed } from '@angular/core/testing';
-import { SalvorClient } from '@salvor/client';
-import type { RunSummary } from '@salvor/client';
+import { SalvorClient } from '@salvor-run/client';
+import type { RunSummary } from '@salvor-run/client';
 
 import { SALVOR_CLIENT } from '../../core/api';
 import { ReconcileCard } from './reconcile-card';

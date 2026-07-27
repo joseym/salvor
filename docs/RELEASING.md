@@ -155,7 +155,7 @@ formula file is `salvor.rb` and is pushed to the tap by the workflow.
   name was unclaimed on the registry when this was set up, so the name is
   provisional until that first publish reserves it. If `salvor` turns out to be
   taken by then, fall back to a scoped name (`@salvor/cli`; note the SDK already
-  uses `@salvor/client`) by setting `npm-scope`/`npm-package` in
+  uses `@salvor-run/client`) by setting `npm-scope`/`npm-package` in
   `dist-workspace.toml` and updating the install command here.
 - A secret named `NPM_TOKEN` is set on the `joseym/salvor` repository. It is an
   npm automation token with publish rights for that package name. The publish

@@ -1,5 +1,5 @@
 import { Component, computed, inject, input, output, signal } from '@angular/core';
-import type { RunSummary } from '@salvor/client';
+import type { RunSummary } from '@salvor-run/client';
 
 import { ViewService } from '../../core/view';
 import { age, labelOf } from '../runs/run-model';

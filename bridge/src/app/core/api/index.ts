@@ -1,5 +1,5 @@
 /**
- * The API layer: an Angular service wrapper around `@salvor/client`.
+ * The API layer: an Angular service wrapper around `@salvor-run/client`.
  *
  * Everything here is signal-based and zoneless-compatible (no `NgZone`, no RxJS on the
  * public surface — the SDK itself is promise/async-iterable native, so wrapping it in
@@ -18,7 +18,7 @@
  * a client-driven run has no server push to be live about).
  *
  * The v0.4 graph surface (`API.md`, "Graphs and graph runs") adds three more, all reading over
- * `graphRequest` (a raw-fetch primitive — `@salvor/client` does not wrap these endpoints yet):
+ * `graphRequest` (a raw-fetch primitive — `@salvor-run/client` does not wrap these endpoints yet):
  *
  *   - {@link GraphsService}          — the graph catalog: list, read one back, validate-only
  *   - {@link GraphRunService}        — `POST /v1/graph-runs`, the per-node projection, fork, forks

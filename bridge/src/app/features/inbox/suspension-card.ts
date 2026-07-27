@@ -1,5 +1,5 @@
 import { Component, computed, effect, inject, input, output, signal } from '@angular/core';
-import type { RunSummary } from '@salvor/client';
+import type { RunSummary } from '@salvor-run/client';
 
 import { GraphRunService, GraphsService, RunDetailService, SALVOR_CLIENT, errorMessage } from '../../core/api';
 import { ViewService } from '../../core/view';

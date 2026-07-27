@@ -1,10 +1,10 @@
-import { SalvorApiError, type SalvorClient } from '@salvor/client';
+import { SalvorApiError, type SalvorClient } from '@salvor-run/client';
 
 import type { SalvorApiConfig } from './client';
 
 /**
  * A minimal raw-fetch primitive for the graph control-plane endpoints (`API.md`, "Graphs and
- * graph runs"). `@salvor/client` does not wrap these yet — the Bridge's typed graph API layer
+ * graph runs"). `@salvor-run/client` does not wrap these yet — the Bridge's typed graph API layer
  * ships ahead of the SDK gaining this surface — so `graphs.ts`, `graph-run.ts`, and
  * `capabilities.ts` talk to them directly over `fetch`, mirroring `SalvorClient`'s own private
  * `request()` byte-for-byte (same header/timeout/error-envelope handling) so a future SDK release
@@ -42,7 +42,7 @@ export async function graphRequest(
 /**
  * Decode the control plane's one error-envelope shape (`{ error: { code, message, details } }`)
  * into the SDK's own `SalvorApiError`, so a caller here matches on `.code` exactly like every
- * other surface in this app does against `@salvor/client`'s own errors.
+ * other surface in this app does against `@salvor-run/client`'s own errors.
  */
 function errorFromEnvelope(status: number, parsed: Record<string, unknown>): SalvorApiError {
   const envelope = (parsed['error'] as Record<string, unknown>) ?? {};

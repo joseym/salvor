@@ -1,5 +1,5 @@
 import { Injectable } from '@angular/core';
-import type { SalvorEvent } from '@salvor/client';
+import type { SalvorEvent } from '@salvor-run/client';
 import init, { deriveState as wasmDeriveState, eventCount as wasmEventCount } from 'salvor-replay-wasm';
 
 /**

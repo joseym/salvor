@@ -71,6 +71,28 @@ if [ -f "$FACADE" ]; then
   echo "stamped the facade's sibling pins"
 fi
 
+# The SDKs ship the same protocol as the crates and are versioned with them, but they are not Cargo
+# packages, so nothing else here would move them. Left unstamped they silently drift, which is how
+# they ended up two minor versions behind the family.
+for sdk_manifest in \
+  "$ROOT/sdks/typescript/package.json" \
+  "$ROOT/sdks/typescript/package-lock.json"; do
+  [ -f "$sdk_manifest" ] || continue
+  stmp="$sdk_manifest.tmp.$$"
+  # Only the top-level "version" key, which sits at two spaces of indent; a dependency's version is
+  # nested deeper and must not move.
+  sed -E "s/^  \"version\": \"[0-9][^\"]*\"/  \"version\": \"$VERSION\"/" "$sdk_manifest" >"$stmp"
+  mv "$stmp" "$sdk_manifest"
+done
+
+PYPROJECT="$ROOT/sdks/python/pyproject.toml"
+if [ -f "$PYPROJECT" ]; then
+  ptmp="$PYPROJECT.tmp.$$"
+  sed -E "s/^version = \"[0-9][^\"]*\"/version = \"$VERSION\"/" "$PYPROJECT" >"$ptmp"
+  mv "$ptmp" "$PYPROJECT"
+fi
+echo "stamped the SDK manifests"
+
 # Refresh the lockfile's workspace-member entries to the new version.
 ( cd "$ROOT" && cargo update --workspace )
 

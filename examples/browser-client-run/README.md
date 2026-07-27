@@ -10,7 +10,7 @@ next event. The client here is a browser page.
 The page opens a client-driven run, appends its own control events, re-opens the
 run and re-drives it from the fetched log with zero live calls, drives a
 streaming model step whose tokens paint a live ticker, and attempts a tool step.
-It imports the built `@salvor/client` SDK by relative path, the same pattern
+It imports the built `@salvor-run/client` SDK by relative path, the same pattern
 `examples/polyglot-service` uses, so there is no bundler.
 
 ## Files

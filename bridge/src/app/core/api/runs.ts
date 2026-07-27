@@ -1,5 +1,5 @@
 import { Injectable, type Signal, inject, signal } from '@angular/core';
-import type { RunSummary } from '@salvor/client';
+import type { RunSummary } from '@salvor-run/client';
 
 import { SALVOR_CLIENT } from './client';
 import { errorMessage } from './errors';
@@ -7,7 +7,7 @@ import { errorMessage } from './errors';
 /**
  * The Runs ledger's list surface: `GET /v1/runs`.
  *
- * `RunSummary` (from `@salvor/client`) already carries the fields `e3182c5` added —
+ * `RunSummary` (from `@salvor-run/client`) already carries the fields `e3182c5` added —
  * `usage`, `stepCount`, `agentDefHash` — additively and honestly absent (never a
  * fabricated zero) when a run's log could not fold; this service does no re-shaping, it
  * just surfaces the SDK's typed decode as a signal. This is a REST snapshot, not a
