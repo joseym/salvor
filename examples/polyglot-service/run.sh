@@ -17,14 +17,18 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 cd "$ROOT"
 
-BIND="127.0.0.1:8080"
+# Every port and path is overridable, because the defaults collide with a real server: 8080 is
+# salvor's own default bind, so anyone already running one cannot execute this example without
+# them. Overriding is also how CI runs it on a port nothing else claims.
+BIND="${SALVOR_EXAMPLE_BIND:-127.0.0.1:8080}"
 BASE_URL="http://$BIND"
-MODEL_PORT="8893"
-STORE="/tmp/salvor-polyglot.db"
-FINDINGS="/tmp/salvor-polyglot-findings.txt"
+MODEL_PORT="${SALVOR_EXAMPLE_MODEL_PORT:-8893}"
+STORE="${SALVOR_EXAMPLE_STORE:-/tmp/salvor-polyglot.db}"
+FINDINGS="${SALVOR_EXAMPLE_FINDINGS:-/tmp/salvor-polyglot-findings.txt}"
 
-SALVOR="$ROOT/target/debug/salvor"
-DEMO_MODEL="$ROOT/target/debug/salvor-demo-model"
+# Default to a checkout's build, but let an installed CLI serve instead.
+SALVOR="${SALVOR_BIN:-$ROOT/target/debug/salvor}"
+DEMO_MODEL="${SALVOR_DEMO_MODEL_BIN:-$ROOT/target/debug/salvor-demo-model}"
 
 for bin in "$SALVOR" "$DEMO_MODEL" "$ROOT/target/debug/salvor-demo-research"; do
   if [[ ! -x "$bin" ]]; then
