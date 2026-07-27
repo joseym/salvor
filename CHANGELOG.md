@@ -2,6 +2,27 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.5.2 - 2026-07-27
+#### Features
+- (**salvor**) make the umbrella crate a real facade over the family - (9659b59) - Josey Morton
+- (**sdks**) move the TypeScript client to the salvor-run scope and align SDK versions - (1ded75d) - Josey Morton
+#### Bug Fixes
+- (**sdks**) correct the Python example and stop exporting an implementation import - (c08c3a0) - Josey Morton
+- (**sdks**) keep personal notes out of published packages and read the version from metadata - (5784797) - Josey Morton
+#### Documentation
+- put the published packages ahead of the checkout in every install path - (a725dd9) - Josey Morton
+#### Continuous Integration
+- publish the crate family on a version tag with trusted publishing - (977ca3f) - Josey Morton
+- publish the TypeScript client to npm on a version tag - (712c813) - Josey Morton
+- publish the Python SDK to PyPI on a version tag - (7758102) - Josey Morton
+- publish the npm installer package on release - (cc2f0db) - Josey Morton
+- keep the injected build steps out of the workflows directory - (f81f204) - Josey Morton
+- stop attempting publishes that have no credentials - (e5bbe1e) - Josey Morton
+#### Miscellaneous Chores
+- remove the superseded Leptos dashboard - (5d86b7d) - Josey Morton
+
+- - -
+
 ## v0.5.1 - 2026-07-25
 #### Bug Fixes
 - (**bridge**) keep the canvas toolbar clear of the minimap - (0143b0d) - Josey Morton
