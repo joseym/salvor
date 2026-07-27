@@ -71,6 +71,12 @@ The demo's MCP server appends one line per real write, so `wc -l` on that file b
 
 For the same story against real tools, [`examples/web-research/`](examples/web-research/) runs an agent over the official fetch and filesystem MCP servers, killing it between real HTTP fetches and a real file write.
 
+The smallest version of all of this is [`examples/hero/`](examples/hero/), the run behind the terminal on [salvor.run](https://salvor.run): ten events, exactly one write, and no key or network needed.
+
+```sh
+salvor run --fixture examples/hero
+```
+
 ## The Bridge
 
 `salvor serve` puts the runtime on a network and serves a web UI from the same binary, on the same origin. No separate deploy, no CORS.

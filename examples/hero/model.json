@@ -1,0 +1,49 @@
+{
+  "_comment": [
+    "The recorded model conversation for this fixture, served by",
+    "`salvor run --fixture examples/hero` with no key and no network.",
+    "",
+    "Each entry is keyed by `messages`: the number of messages in the request",
+    "body when that turn reaches the model. Every turn appends to the",
+    "conversation, so turn k carries 2k - 1 messages. Selecting on that count",
+    "is stateless, which is what makes the fixture replay-safe: after a",
+    "`kill -9` and a `resume` the earlier turns are read from the durable log",
+    "and never reach the model, and the first live turn arrives with exactly",
+    "the message count it would have had uninterrupted.",
+    "",
+    "`response` is an Anthropic Messages API response body, verbatim."
+  ],
+  "turns": [
+    {
+      "messages": 1,
+      "response": {
+        "id": "msg_tool_tu_save_claim",
+        "model": "salvor-hero-fixture",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "tu_save_claim",
+            "name": "save_claim",
+            "input": { "item": "ss-waratah" }
+          }
+        ],
+        "stop_reason": "tool_use",
+        "usage": { "input_tokens": 24, "output_tokens": 41 }
+      }
+    },
+    {
+      "messages": 3,
+      "response": {
+        "id": "msg_text",
+        "model": "salvor-hero-fixture",
+        "role": "assistant",
+        "content": [
+          { "type": "text", "text": "1 claim recorded for ss-waratah." }
+        ],
+        "stop_reason": "end_turn",
+        "usage": { "input_tokens": 96, "output_tokens": 38 }
+      }
+    }
+  ]
+}
