@@ -27,7 +27,10 @@ It imports the built `@salvor-run/client` SDK by relative path, the same pattern
 Build the binaries and the SDK once, from the repository root:
 
 ```sh
-cargo build --bin salvor --bin salvor-demo-model
+# This example spawns the demo fixture binaries, which ship with the cargo install but not with
+# the npm package:
+cargo install salvor-cli            # or, from a checkout: cargo build
+
 ( cd sdks/typescript && npm install && npm run build )
 ```
 

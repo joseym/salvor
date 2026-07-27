@@ -60,7 +60,11 @@ From the repository root, with the model server from either option above
 running:
 
 ```sh
+# the CLI, however you like it:
+npm install -g @salvor-run/cli      # or: cargo install salvor-cli
+# or, from a checkout of this repository:
 cargo build
+
 
 salvor --store /tmp/salvor-local-model.db \
     run --agent examples/local-model/agent.toml \

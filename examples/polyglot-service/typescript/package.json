@@ -1,0 +1,9 @@
+{
+  "name": "salvor-polyglot-service-example",
+  "private": true,
+  "type": "module",
+  "description": "Runs the TypeScript half of the polyglot-service example against the published client.",
+  "dependencies": {
+    "@salvor-run/client": "^0.5.2"
+  }
+}

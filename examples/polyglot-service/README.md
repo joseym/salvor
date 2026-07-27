@@ -49,7 +49,10 @@ the 20-model-call run with headroom.
 From the repository root, build the binaries once:
 
 ```sh
-cargo build
+# This example spawns the demo fixture binaries, which ship with the cargo install but not with
+# the npm package:
+cargo install salvor-cli            # or, from a checkout: cargo build
+
 ```
 
 That produces `salvor` (the control plane), `salvor-demo-model`
@@ -91,7 +94,7 @@ Now run each app against `http://127.0.0.1:8080`.
 **Python** (the SDK's one dependency is `httpx`):
 
 ```sh
-pip install -e sdks/python
+pip install salvor
 python examples/polyglot-service/python/service.py http://127.0.0.1:8080
 ```
 
@@ -99,8 +102,7 @@ python examples/polyglot-service/python/service.py http://127.0.0.1:8080
 output by relative path):
 
 ```sh
-npm --prefix sdks/typescript install
-npm --prefix sdks/typescript run build
+npm --prefix examples/polyglot-service/typescript install
 node --experimental-strip-types \
     examples/polyglot-service/typescript/service.ts http://127.0.0.1:8080
 ```
@@ -146,6 +148,6 @@ line for line, confirming the two SDKs behave the same.
 - `typescript/service.ts`: the TypeScript app, using `@salvor-run/client`.
 - `run.sh`: brings the offline stack up, runs both apps, tears it down.
 
-The SDK sources under `sdks/` are used unmodified. See
+Both apps use the published SDKs, not the sources under `sdks/`. See
 `crates/salvor-server/API.md` for the full HTTP and server-sent-events
 contract these clients speak.

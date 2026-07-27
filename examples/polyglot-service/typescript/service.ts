@@ -25,8 +25,11 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
-import { SalvorClient } from "../../../sdks/typescript/dist/index.js";
-import type { EventStream } from "../../../sdks/typescript/dist/index.js";
+// The published package by name, so this file reads exactly as it would in your own project. The
+// package.json beside it declares the dependency; `npm install` in this directory is all the setup
+// there is.
+import { SalvorClient } from "@salvor-run/client";
+import type { EventStream } from "@salvor-run/client";
 
 const baseUrl = process.argv[2] ?? "http://127.0.0.1:8080";
 

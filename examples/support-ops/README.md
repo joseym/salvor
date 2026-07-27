@@ -92,7 +92,10 @@ venv's interpreter so the `mcp` package is on its path.
 ## Running it
 
 ```sh
-cargo build
+# This example spawns the demo fixture binaries, which ship with the cargo install but not with
+# the npm package:
+cargo install salvor-cli            # or, from a checkout: cargo build
+
 export DEMO_ANTHROPIC_API_KEY=sk-ant-...
 
 salvor --store /tmp/salvor-support-ops.db \

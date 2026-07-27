@@ -59,7 +59,11 @@ can point at your own question.
 From the repository root:
 
 ```sh
+# the CLI, however you like it:
+npm install -g @salvor-run/cli      # or: cargo install salvor-cli
+# or, from a checkout of this repository:
 cargo build
+
 export DEMO_ANTHROPIC_API_KEY=sk-ant-...
 mkdir -p examples/web-research/out    # the filesystem server needs this to exist
 
