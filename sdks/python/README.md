@@ -7,14 +7,17 @@ pip install salvor
 ```
 
 ```python
-from salvor import SalvorClient
+from salvor import Client
 
-salvor = SalvorClient(base_url="http://127.0.0.1:8080")
-agent = salvor.register_agent(definition)
-run = salvor.start_run(agent=agent, input=payload)
+with Client("http://127.0.0.1:8080") as client:
+    agent = client.register_agent(open("agent.toml").read())
+    run_id = client.start_run(agent, {"question": "..."})
 
-for event in salvor.stream_events(run):
-    print(event.seq, event.event["kind"])
+    for event in client.stream_events(run_id):
+        print(event.seq, event.kind)
+
+    state = client.get_run(run_id)
+    print(state.status.state)
 ```
 
 You need a control plane to talk to: `npm install -g salvor && salvor serve`, or
