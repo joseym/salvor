@@ -11,16 +11,17 @@ license.workspace = true
 homepage = "https://github.com/joseym/salvor"
 
 # dist metadata for the released artifact. Building with default features OFF
-# drops salvor-cli's `fixture` feature, and with it the three fixture-gated
-# binaries (salvor-mcp-count-fixture, salvor-demo-research, salvor-demo-model)
-# that exist only for tests and the demo. That leaves the real `salvor` binary
-# as the sole artifact. The binary stays fully functional: MCP-client support
-# and the wasm sandbox arrive through the unconditional lib dependencies
-# (salvor-tools, salvor-wasm), not through this crate's own features.
+# drops salvor-cli's `fixture` feature, and with it the four fixture-gated
+# binaries (salvor-mcp-count-fixture, salvor-demo-research, salvor-demo-model,
+# salvor-hero-tools) that exist only for tests, the demo, and the examples/hero
+# fixture. That leaves the real `salvor` binary as the sole artifact. The binary
+# stays fully functional: MCP-client support and the wasm sandbox arrive through
+# the unconditional lib dependencies (salvor-tools, salvor-wasm), not through
+# this crate's own features.
 #
 # `binaries` is an explicit allowlist: dist enumerates a package's binaries from
 # the manifest without evaluating required-features, so it would otherwise try
-# to package the three fixture binaries and fail when the default-features-off
+# to package the four fixture binaries and fail when the default-features-off
 # build never produced them. Naming `salvor` alone ships exactly that binary.
 # docs.rs builds under a time and memory budget, and the default features pull the whole
 # wasmtime tree in for a binary crate whose docs do not describe it. Documenting the lean
@@ -39,15 +40,17 @@ features = ["ui"]
 "*" = ["salvor"]
 
 [features]
-# `fixture` builds the two in-repo MCP servers: the counting server the CLI
-# integration tests spawn (`src/bin/mcp_count_fixture.rs`) and the research
-# server behind the demo/ reference agent (`src/bin/demo_research.rs`). Both
-# pull in the server half of the rmcp SDK and schemars only for those
-# binaries. The feature is on by default so a plain `cargo test --workspace`
-# builds them and Cargo sets CARGO_BIN_EXE_salvor-mcp-count-fixture and
-# CARGO_BIN_EXE_salvor-demo-research for the tests, exactly the pattern
-# salvor-tools uses for its own fixture. `--no-default-features` drops both,
-# and with them the server-side rmcp surface, leaving only the client MCP
+# `fixture` builds the three in-repo MCP servers: the counting server the CLI
+# integration tests spawn (`src/bin/mcp_count_fixture.rs`), the research
+# server behind the demo/ reference agent (`src/bin/demo_research.rs`), and the
+# salvage-claim server behind the examples/hero fixture
+# (`src/bin/hero_tools.rs`). All three pull in the server half of the rmcp SDK
+# and schemars only for those binaries. The feature is on by default so a plain
+# `cargo test --workspace` builds them and Cargo sets
+# CARGO_BIN_EXE_salvor-mcp-count-fixture, CARGO_BIN_EXE_salvor-demo-research,
+# and CARGO_BIN_EXE_salvor-hero-tools for the tests, exactly the pattern
+# salvor-tools uses for its own fixture. `--no-default-features` drops all
+# three, and with them the server-side rmcp surface, leaving only the client MCP
 # support the product uses (which arrives transitively through salvor-tools).
 # Adding these deps costs the workspace nothing: salvor-tools already compiles
 # rmcp with the server features on, so feature unification means no new
@@ -85,6 +88,16 @@ required-features = ["fixture"]
 [[bin]]
 name = "salvor-demo-model"
 path = "src/bin/salvor_demo_model.rs"
+required-features = ["fixture"]
+
+# The salvage-claim MCP server behind the examples/hero fixture: one `save_claim`
+# tool appending one line per real execution, which is the zero-duplicate-write
+# proof `salvor run --fixture examples/hero` demonstrates. Fixture-support,
+# gated exactly like the three above; `examples/hero/agent.toml` names it at
+# `target/debug/salvor-hero-tools`, the path a plain `cargo build` produces.
+[[bin]]
+name = "salvor-hero-tools"
+path = "src/bin/hero_tools.rs"
 required-features = ["fixture"]
 
 [dependencies]
