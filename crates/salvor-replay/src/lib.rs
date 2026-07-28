@@ -5,7 +5,7 @@
 //! A run is an append-only sequence of events; nothing else is state. On
 //! resume, completed model and tool calls are read from the log, never
 //! re-executed, and execution continues live from the first unrecorded step.
-//! Three layers live here:
+//! These layers live here:
 //!
 //! - **The event vocabulary.** Every event is an [`Event`] payload wrapped in
 //!   an [`EventEnvelope`] carrying run identity ([`RunId`]), log position
@@ -27,6 +27,15 @@
 //!   [`derive_state`] on purpose — a graph run keeps the same run-level status
 //!   vocabulary as an agent run, and the per-node picture lives here — and, like
 //!   the rest of the crate, it never depends on `salvor-graph`.
+//! - **Values read back out of a log.** [`ParkReason`] (why a run stopped short
+//!   of completing) and [`RunSummary`] (the one-line-per-run projection a store
+//!   returns) are plain values over the vocabulary above. They live here so a
+//!   consumer that only reads or renders runs can name them without linking the
+//!   IO edge that produced them.
+//! - **Event rendering.** [`event_kind`] and [`event_detail`] turn one event
+//!   into the kind label and the one-line detail every surface prints: the live
+//!   progress stream, the `history` command, and a browser inspector. One pure
+//!   implementation, so a step reads the same wherever you meet it.
 //!
 //! # The purity contract
 //!
@@ -74,8 +83,11 @@ mod effect;
 mod event;
 mod graph_state;
 mod id;
+mod park;
+mod render;
 mod replay;
 mod state;
+mod summary;
 mod validate;
 
 pub use effect::Effect;
@@ -87,9 +99,12 @@ pub use graph_state::{
     GraphProjection, MapIteration, MapProgress, NodeProgress, NodeState, derive_graph_projection,
 };
 pub use id::{RunId, SequenceNumber};
+pub use park::ParkReason;
+pub use render::{event_detail, event_kind};
 pub use replay::{
     BeginPermit, Emitted, GraphBeginPermit, LoggedStep, ModelCallPermit, ModelReply, NowPermit,
     Outcome, Parked, RandomPermit, ReplayCursor, ReplayError, RequestedStep, ToolCallPermit,
 };
 pub use state::{PendingCall, RunState, RunStatus, TokenTotals, derive_state};
+pub use summary::RunSummary;
 pub use validate::{LogValidator, ValidationError, validate_next};

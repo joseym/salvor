@@ -1,0 +1,347 @@
+//! Rendering one event as the two short strings an operator reads: the stable
+//! kind label ([`event_kind`]) and a one-line detail ([`event_detail`]).
+//!
+//! Both are pure functions from an [`Event`] to text: no clock, no IO, no
+//! dependency on the layer that produced the event. That is what lets a single
+//! implementation serve every surface. The runtime emits these two strings live
+//! as each event becomes durable, the CLI prints them again when inspecting a
+//! log afterward, and a browser inspector renders them from the same compiled
+//! fold. A step therefore reads identically wherever you meet it.
+//!
+//! # What the detail withholds
+//!
+//! The detail deliberately does **not** carry full payloads. Inputs, outputs,
+//! resume values, and error messages are truncated, and hashes are shortened,
+//! so a model's raw output or a tool's raw arguments never reach a progress
+//! stream in full. The untruncated form lives only in the event log.
+
+use serde_json::Value;
+use time::OffsetDateTime;
+
+use crate::event::{BudgetKind, Event};
+
+/// The stable `kind` label for one event, matching the enum variant name so
+/// it reads the same as the wire form's `kind` tag.
+#[must_use]
+pub fn event_kind(event: &Event) -> &'static str {
+    match event {
+        Event::RunStarted { .. } => "RunStarted",
+        Event::ModelCallRequested { .. } => "ModelCallRequested",
+        Event::ModelCallCompleted { .. } => "ModelCallCompleted",
+        Event::ToolCallRequested { .. } => "ToolCallRequested",
+        Event::ToolCallCompleted { .. } => "ToolCallCompleted",
+        Event::NowObserved { .. } => "NowObserved",
+        Event::RandomObserved { .. } => "RandomObserved",
+        Event::Suspended { .. } => "Suspended",
+        Event::Resumed { .. } => "Resumed",
+        Event::BudgetExceeded { .. } => "BudgetExceeded",
+        Event::RunCompleted { .. } => "RunCompleted",
+        Event::RunFailed { .. } => "RunFailed",
+        Event::RunAbandoned { .. } => "RunAbandoned",
+        Event::GraphRunStarted { .. } => "GraphRunStarted",
+        Event::NodeEntered { .. } => "NodeEntered",
+        Event::NodeExited { .. } => "NodeExited",
+        Event::NodeSkipped { .. } => "NodeSkipped",
+        Event::BranchTaken { .. } => "BranchTaken",
+        Event::MapFannedOut { .. } => "MapFannedOut",
+        Event::MapIterationStarted { .. } => "MapIterationStarted",
+        Event::MapIterationJoined { .. } => "MapIterationJoined",
+        Event::FoldIterationStarted { .. } => "FoldIterationStarted",
+        Event::FoldIterationJoined { .. } => "FoldIterationJoined",
+        Event::FoldConverged { .. } => "FoldConverged",
+    }
+}
+
+/// The informative payload of one event, rendered as a single line. Picks the
+/// fields that matter per kind: a tool call shows its name and effect, a model
+/// completion its token usage, a suspension its reason. Hashes are shortened
+/// and every payload is truncated, so no full input, output, or error text
+/// reaches the progress stream; `salvor history --json` is the escape hatch for
+/// the untruncated envelope.
+#[must_use]
+pub fn event_detail(event: &Event) -> String {
+    match event {
+        Event::RunStarted {
+            agent_def_hash,
+            input,
+            ..
+        } => format!(
+            "agent {} input {}",
+            short_hash(agent_def_hash),
+            truncate_json(input)
+        ),
+        Event::ModelCallRequested { request_hash, .. } => {
+            format!("request {}", short_hash(request_hash))
+        }
+        Event::ModelCallCompleted { usage, .. } => format!(
+            "usage in {} out {}",
+            usage.input_tokens, usage.output_tokens
+        ),
+        Event::ToolCallRequested {
+            tool,
+            input,
+            effect,
+            idempotency_key,
+            ..
+        } => {
+            let key = idempotency_key
+                .as_deref()
+                .map_or_else(String::new, |k| format!(" key {k}"));
+            format!("{tool} [{effect:?}]{key} input {}", truncate_json(input))
+        }
+        Event::ToolCallCompleted { output, .. } => {
+            if let Some(reason) = suspension_reason(output) {
+                format!("suspends: {reason}")
+            } else if let Some(failure) = recorded_failure(output) {
+                format!(
+                    "error ({}, {} attempt(s)): {}",
+                    failure.kind,
+                    failure.attempts,
+                    truncate_str(failure.message)
+                )
+            } else {
+                format!("output {}", truncate_json(output))
+            }
+        }
+        Event::NowObserved { now } => format_ts(*now),
+        Event::RandomObserved { value } => format!("value {value}"),
+        Event::Suspended { reason, .. } => format!("reason: {reason}"),
+        Event::Resumed { input } => format!("input {}", truncate_json(input)),
+        Event::BudgetExceeded { budget, observed } => {
+            format!(
+                "{} limit {}, observed {}",
+                budget_label(budget.kind),
+                fmt_num(budget.limit),
+                fmt_num(*observed)
+            )
+        }
+        Event::RunCompleted { output } => format!("output {}", truncate_json(output)),
+        Event::RunFailed { error } => format!("error: {}", truncate_str(error)),
+        Event::RunAbandoned {
+            reason,
+            unresolved_write,
+        } => {
+            let why = reason
+                .as_deref()
+                .map_or_else(|| "no reason given".to_owned(), truncate_str);
+            match unresolved_write {
+                Some(write) => format!(
+                    "abandoned: {why} (unresolved write at seq {}, tool {})",
+                    write.seq.get(),
+                    write.tool
+                ),
+                None => format!("abandoned: {why}"),
+            }
+        }
+        Event::GraphRunStarted {
+            graph_hash, input, ..
+        } => format!(
+            "graph {} input {}",
+            short_hash(graph_hash),
+            truncate_json(input)
+        ),
+        Event::NodeEntered { node } => format!("enter {node}"),
+        Event::NodeExited { node } => format!("exit {node}"),
+        Event::NodeSkipped { node, reason } => format!("skip {node}: {}", truncate_str(reason)),
+        Event::BranchTaken { node, case } => format!("branch {node} -> {case}"),
+        Event::MapFannedOut { node, items } => {
+            format!("map {node} fan-out {}", truncate_json(items))
+        }
+        Event::MapIterationStarted {
+            node,
+            index,
+            child_run,
+        } => format!("map {node}[{index}] child {}", short_hash(child_run)),
+        Event::MapIterationJoined { node, index } => format!("map {node}[{index}] joined"),
+        Event::FoldIterationStarted { node, index } => format!("fold {node}[{index}] started"),
+        Event::FoldIterationJoined { node, index } => format!("fold {node}[{index}] joined"),
+        Event::FoldConverged {
+            node,
+            winner_index,
+            reason,
+        } => format!(
+            "fold {node} converged on [{winner_index}]: {}",
+            truncate_str(reason)
+        ),
+    }
+}
+
+/// The reserved key marking a completion output as a recorded suspension.
+///
+/// The two sentinel shapes below are a recorded wire contract. `salvor-runtime`
+/// writes them into a tool call's completion output and decodes them back into
+/// its own `Suspension` and `ToolFailure` types; this module reads the same
+/// recorded fields to render the line. The key names, the field names, and the
+/// three legal `kind` strings must therefore agree between the two.
+///
+/// The reading is spelled out here instead of calling the runtime's decoders
+/// because those decoders return types owned by the tools layer, which is
+/// executor-bound. A renderer needs the recorded fields, not those types, and
+/// must stay free of that dependency to remain buildable for wasm32.
+const SUSPEND_SENTINEL_KEY: &str = "__salvor_suspend";
+
+/// The reserved key marking a completion output as a recorded tool failure.
+/// See [`SUSPEND_SENTINEL_KEY`] for the shared-contract note.
+const ERROR_SENTINEL_KEY: &str = "__salvor_error";
+
+/// The three legal values of a recorded failure's `kind` field, mirroring the
+/// runtime's `ToolFailureKind` wire strings. A completion carrying any other
+/// value is not a failure sentinel and renders as an ordinary output.
+const FAILURE_KINDS: [&str; 3] = ["invalid_input", "handler", "output_serialization"];
+
+/// The recorded failure fields a detail line shows, borrowed out of the
+/// sentinel body.
+struct RecordedFailure<'v> {
+    /// Which dispatch layer failed, as its recorded wire string.
+    kind: &'v str,
+    /// The full recorded error chain, truncated only at render time.
+    message: &'v str,
+    /// How many times the call executed, counting retries.
+    attempts: u32,
+}
+
+/// The reason of a completion output that is the suspension sentinel; `None`
+/// for every other value.
+fn suspension_reason(output: &Value) -> Option<&str> {
+    let body = sentinel_body(output, SUSPEND_SENTINEL_KEY)?;
+    let reason = body.get("reason")?.as_str()?;
+    // A recorded suspension always carries the schema its resume input must
+    // satisfy; a body missing it is not one.
+    body.get("input_schema")?;
+    Some(reason)
+}
+
+/// The recorded fields of a completion output that is the failure sentinel;
+/// `None` for every other value.
+fn recorded_failure(output: &Value) -> Option<RecordedFailure<'_>> {
+    let body = sentinel_body(output, ERROR_SENTINEL_KEY)?;
+    let kind = body.get("kind")?.as_str()?;
+    if !FAILURE_KINDS.contains(&kind) {
+        return None;
+    }
+    Some(RecordedFailure {
+        kind,
+        message: body.get("message")?.as_str()?,
+        attempts: u32::try_from(body.get("attempts")?.as_u64()?).ok()?,
+    })
+}
+
+/// The sentinel's body when `output` is an object with exactly one key equal
+/// to `key`; `None` for every other value.
+fn sentinel_body<'v>(output: &'v Value, key: &str) -> Option<&'v Value> {
+    let map = output.as_object()?;
+    if map.len() != 1 {
+        return None;
+    }
+    map.get(key)
+}
+
+/// Shortens a `sha256:...` hash to its prefix and the first seven hex digits,
+/// so a line names a request without a 64-character wall of hex.
+fn short_hash(hash: &str) -> String {
+    match hash.split_once(':') {
+        Some((scheme, hex)) => {
+            let head: String = hex.chars().take(7).collect();
+            if hex.len() > 7 {
+                format!("{scheme}:{head}\u{2026}")
+            } else {
+                format!("{scheme}:{hex}")
+            }
+        }
+        None => hash.chars().take(12).collect(),
+    }
+}
+
+/// A human word for a budget dimension.
+fn budget_label(kind: BudgetKind) -> &'static str {
+    match kind {
+        BudgetKind::Steps => "steps",
+        BudgetKind::Tokens => "tokens",
+        BudgetKind::CostUsd => "cost_usd",
+        BudgetKind::WallTime => "wall_time",
+    }
+}
+
+/// Formats an `f64` budget figure without a needless `.0` when it is integral.
+/// Steps and tokens are whole numbers even though every budget dimension rides
+/// the wire as a float; the integral cutoff stays inside the range where an
+/// `f64` holds integers exactly (see the `Budget` docs).
+fn fmt_num(value: f64) -> String {
+    if value.fract() == 0.0 && value.abs() < 1e15 {
+        format!("{}", value as i64)
+    } else {
+        format!("{value}")
+    }
+}
+
+/// Formats a timestamp as `YYYY-MM-DD HH:MM:SSZ` from its components, avoiding
+/// a dependency on the `time` crate's optional `formatting` feature.
+fn format_ts(ts: OffsetDateTime) -> String {
+    let utc = ts.to_offset(time::UtcOffset::UTC);
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}Z",
+        utc.year(),
+        u8::from(utc.month()),
+        utc.day(),
+        utc.hour(),
+        utc.minute(),
+        utc.second(),
+    )
+}
+
+/// Compact one-line JSON, truncated so a payload never blows out a line and
+/// never streams in full.
+fn truncate_json(value: &serde_json::Value) -> String {
+    truncate_str(&value.to_string())
+}
+
+/// Truncates a string to a scannable length with an ellipsis, so no full
+/// payload or error message reaches the progress stream.
+fn truncate_str(text: &str) -> String {
+    const CAP: usize = 80;
+    if text.chars().count() > CAP {
+        let head: String = text.chars().take(CAP).collect();
+        format!("{head}\u{2026}")
+    } else {
+        text.to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A long input is truncated, so a raw payload never reaches the stream in
+    /// full: the detail line stays capped even for a large value.
+    #[test]
+    fn detail_truncates_long_payloads() {
+        let big = "x".repeat(500);
+        let detail = event_detail(&Event::RunStarted {
+            agent_def_hash: "sha256:abcdef0123456789".into(),
+            input: json!({ "prompt": big }),
+            labels: None,
+        });
+        assert!(detail.contains('\u{2026}'), "detail should be truncated");
+        assert!(
+            detail.chars().count() < 200,
+            "truncated detail stays short: {} chars",
+            detail.chars().count()
+        );
+        // The short hash appears; the full 64-hex form does not.
+        assert!(detail.contains("sha256:abcdef0"));
+    }
+
+    /// Every kind maps to its variant name, matching the wire tag.
+    #[test]
+    fn kind_matches_variant_name() {
+        assert_eq!(
+            event_kind(&Event::RunCompleted { output: json!(1) }),
+            "RunCompleted"
+        );
+        assert_eq!(
+            event_kind(&Event::RandomObserved { value: 7 }),
+            "RandomObserved"
+        );
+    }
+}

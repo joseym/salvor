@@ -12,8 +12,9 @@
 //! fold event logs client-side. That crate holds the event vocabulary
 //! ([`Event`], [`EventEnvelope`], [`RunId`], [`SequenceNumber`],
 //! [`SCHEMA_VERSION`]), the replay cursor ([`ReplayCursor`] and its typed
-//! [`Outcome`] permits), and the state fold ([`derive_state`] into
-//! [`RunState`]).
+//! [`Outcome`] permits), the state fold ([`derive_state`] into [`RunState`]),
+//! the values read back out of a log ([`ParkReason`], [`RunSummary`]), and the
+//! event renderers ([`event_kind`], [`event_detail`]).
 //!
 //! `salvor-core` re-exports that surface unchanged. Every `salvor_core::` path
 //! that existed before the extraction keeps resolving, so the store, the
@@ -26,7 +27,8 @@
 pub use salvor_replay::{
     BeginPermit, Budget, BudgetKind, Effect, Emitted, Event, EventEnvelope, ForkOrigin,
     GraphBeginPermit, LogValidator, LoggedStep, ModelCallPermit, ModelReply, NowPermit, Outcome,
-    Parked, PendingCall, RandomPermit, ReplayCursor, ReplayError, RequestedStep, RunId, RunState,
-    RunStatus, SCHEMA_VERSION, SequenceNumber, TokenTotals, TokenUsage, ToolCallPermit,
-    UnresolvedWrite, ValidationError, derive_state, validate_next,
+    ParkReason, Parked, PendingCall, RandomPermit, ReplayCursor, ReplayError, RequestedStep, RunId,
+    RunState, RunStatus, RunSummary, SCHEMA_VERSION, SequenceNumber, TokenTotals, TokenUsage,
+    ToolCallPermit, UnresolvedWrite, ValidationError, derive_state, event_detail, event_kind,
+    validate_next,
 };

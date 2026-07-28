@@ -31,10 +31,16 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use salvor_core::{
-    Budget, Event, EventEnvelope, PendingCall, RunId, RunStatus, UnresolvedWrite, derive_state,
+    Event, EventEnvelope, PendingCall, RunId, RunStatus, UnresolvedWrite, derive_state,
 };
 use salvor_store::EventStore;
 use serde_json::Value;
+
+// `ParkReason` is a plain value over the event vocabulary, so it lives in the
+// pure `salvor-replay` crate that `salvor-core` re-exports rather than at this
+// IO edge. Re-exported here so every `salvor_runtime::ParkReason` and
+// `crate::runtime::ParkReason` path keeps resolving.
+pub use salvor_core::ParkReason;
 
 use crate::agent::Agent;
 use crate::budgets::validate_extension_input;
@@ -42,25 +48,6 @@ use crate::ctx::{ClockFn, RandomFn, RunCtx};
 use crate::driver::{self, LoopOutcome};
 use crate::error::RuntimeError;
 use crate::validate::validate_against_schema;
-
-/// Why a run parked instead of completing.
-#[derive(Debug, Clone)]
-pub enum ParkReason {
-    /// A tool suspended the run, awaiting input matching the schema.
-    Suspended {
-        /// The recorded suspension reason.
-        reason: String,
-        /// The JSON Schema the resume input must satisfy.
-        input_schema: Value,
-    },
-    /// A declared budget was crossed. Resume may carry an extension.
-    BudgetExceeded {
-        /// The crossed budget, with its effective limit.
-        budget: Budget,
-        /// The observed value that crossed it.
-        observed: f64,
-    },
-}
 
 /// How a drive of a run ended.
 #[derive(Debug, Clone)]
