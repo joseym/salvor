@@ -1,0 +1,34 @@
+Run the control-plane HTTP + server-sent-events server over the store
+
+Usage: salvor serve [OPTIONS]
+
+Options:
+      --bind <ADDR>
+          The address to bind, host and port
+          
+          [default: 127.0.0.1:8080]
+
+      --store <PATH>
+          Path to the SQLite event store.
+          
+          The precedence is flag, then the `SALVOR_STORE` environment variable, then the default: an explicit `--store` wins, else `SALVOR_STORE`, else `./salvor.db`.
+          
+          [env: SALVOR_STORE=]
+          [default: ./salvor.db]
+
+      --auth-token <ENV_VAR>
+          The NAME of an environment variable holding a shared-secret bearer token. When set (and the variable is non-empty), every request must carry `Authorization: Bearer <that value>`. When omitted, the server runs without auth, trusting a reverse proxy to guard it. Never the token itself, matching how agent files name key variables
+
+      --kill [<PID|PORT>]
+          Kill the running `salvor serve` instead of serving. With no value, discovers every running `salvor serve` (by inspecting the process table, since there are no pid files): zero found is reported and this exits; exactly one is killed; multiple print a numbered table and prompt for a choice. Given a value (a pid or a listening port), kills that one directly with no prompt. When present at all, this short-circuits before `--bind` or `--store` are acted on: the process never binds a port
+
+      --dev
+          Also start the Angular dev server (`ng serve`) for `bridge/`, hot module reloading included, with `/v1` proxied to this API so a browser at the dev server's own URL calls straight through. This process's own bind/store handling is otherwise unchanged: the API binds and serves exactly as plain `serve` does. Requires a salvor checkout with a `bridge/` directory alongside it; the dashboard an installed `salvor` embeds is prebuilt and does not hot-reload
+
+      --demo-tools
+          Register a small set of deterministic demo tools (`lookup_invoice` read, `issue_refund` write, `send_email` idempotent) instead of the stock empty tool registry.
+          
+          Off by default: a plain `salvor serve` ships NO tools of its own (see `salvor_server::ToolRegistry`'s own docs), so a `tool` node or a client-driven tool step is a clean `unknown_tool` until a host registers something, the honest default for a library other hosts (aarg's own render tool, for one) compose their own registry into. This flag is that one host, built in for demos and for the served end-to-end suite: with it, a graph carrying `tool` nodes can actually run against `salvor serve` with no embedding host at all. The demo tools are deterministic and hermetic (no network); see `salvor_cli::demo_tools` for what each one does and why it exists. Requires the crate's `fixture` feature (on by default; a `--no-default-features` build refuses this flag).
+
+  -h, --help
+          Print help (see a summary with '-h')

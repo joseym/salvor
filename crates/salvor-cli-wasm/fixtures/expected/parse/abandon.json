@@ -1,0 +1,11 @@
+{
+  "command": {
+    "command": {
+      "reason": "husk is dead forever",
+      "run_id": "00000000-0000-4000-8000-0000000000aa",
+      "verb": "abandon"
+    },
+    "store": "./salvor.db"
+  },
+  "ok": true
+}

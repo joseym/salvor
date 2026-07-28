@@ -1,0 +1,10 @@
+{
+  "command": {
+    "command": {
+      "status": [],
+      "verb": "list"
+    },
+    "store": "./salvor.db"
+  },
+  "ok": true
+}

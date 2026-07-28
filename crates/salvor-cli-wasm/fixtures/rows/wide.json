@@ -1,0 +1,16 @@
+[
+  {
+    "event_count": 1234567,
+    "first_recorded_at": "2025-07-15T08:00:00Z",
+    "last_recorded_at": "2026-07-15T08:00:00Z",
+    "run_id": "00000000-0000-4000-8000-0000000000b0",
+    "status": "needs-reconciliation"
+  },
+  {
+    "event_count": 0,
+    "first_recorded_at": "2025-07-15T08:01:00Z",
+    "last_recorded_at": "2025-07-15T08:01:00Z",
+    "run_id": "00000000-0000-4000-8000-0000000000b1",
+    "status": "not-started"
+  }
+]

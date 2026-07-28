@@ -1,0 +1,11 @@
+{
+  "command": {
+    "command": {
+      "agent": "agents/writer.toml",
+      "input": "@input.json",
+      "verb": "run"
+    },
+    "store": "./salvor.db"
+  },
+  "ok": true
+}

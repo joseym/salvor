@@ -1,0 +1,10 @@
+{
+  "message": {
+    "ansi": "\u001b[1m\u001b[31merror:\u001b[0m invalid value '\u001b[33mwaiting\u001b[0m' for '\u001b[1m--status <STATUS>\u001b[0m'\n  [possible values: \u001b[32mnot-started\u001b[0m, \u001b[32mrunning\u001b[0m, \u001b[32mawaiting-model\u001b[0m, \u001b[32mawaiting-tool\u001b[0m, \u001b[32msuspended\u001b[0m, \u001b[32mbudget-exceeded\u001b[0m, \u001b[32mneeds-reconciliation\u001b[0m, \u001b[32mcompleted\u001b[0m, \u001b[32mfailed\u001b[0m, \u001b[32mabandoned\u001b[0m]\n\n  \u001b[32mtip:\u001b[0m `waiting` is a group, not a status. Use `--group waiting` for every state in it.\n\nFor more information, try '\u001b[1m--help\u001b[0m'.\n",
+    "exit_code": 2,
+    "is_error": true,
+    "kind": "InvalidValue",
+    "plain": "error: invalid value 'waiting' for '--status <STATUS>'\n  [possible values: not-started, running, awaiting-model, awaiting-tool, suspended, budget-exceeded, needs-reconciliation, completed, failed, abandoned]\n\n  tip: `waiting` is a group, not a status. Use `--group waiting` for every state in it.\n\nFor more information, try '--help'.\n"
+  },
+  "ok": false
+}

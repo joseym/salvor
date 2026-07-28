@@ -1,0 +1,11 @@
+{
+  "command": {
+    "command": {
+      "json": true,
+      "run_id": "00000000-0000-4000-8000-0000000000aa",
+      "verb": "history"
+    },
+    "store": "./salvor.db"
+  },
+  "ok": true
+}

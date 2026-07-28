@@ -1,0 +1,12 @@
+[
+  "salvor",
+  "graph",
+  "run",
+  "flow.json",
+  "--input",
+  "{}",
+  "--agent",
+  "a.toml",
+  "--label",
+  "tenant=acme"
+]

@@ -1,0 +1,16 @@
+[
+  "salvor",
+  "--store",
+  "/tmp/runs.db",
+  "list",
+  "--status",
+  "completed",
+  "--status",
+  "failed",
+  "--group",
+  "terminal",
+  "--agent",
+  "graph run",
+  "--limit",
+  "20"
+]

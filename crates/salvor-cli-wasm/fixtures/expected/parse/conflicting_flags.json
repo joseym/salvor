@@ -1,0 +1,10 @@
+{
+  "message": {
+    "ansi": "\u001b[1m\u001b[31merror:\u001b[0m the argument '\u001b[33m--fixture <DIR>\u001b[0m' cannot be used with '\u001b[33m--agent <FILE>\u001b[0m'\n\n\u001b[1m\u001b[4mUsage:\u001b[0m \u001b[1msalvor run\u001b[0m \u001b[1m--fixture\u001b[0m <DIR>\n\nFor more information, try '\u001b[1m--help\u001b[0m'.\n",
+    "exit_code": 2,
+    "is_error": true,
+    "kind": "ArgumentConflict",
+    "plain": "error: the argument '--fixture <DIR>' cannot be used with '--agent <FILE>'\n\nUsage: salvor run --fixture <DIR>\n\nFor more information, try '--help'.\n"
+  },
+  "ok": false
+}

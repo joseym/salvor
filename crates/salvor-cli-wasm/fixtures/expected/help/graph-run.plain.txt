@@ -1,0 +1,28 @@
+Drive a graph document locally over the store, exactly as `salvor run` drives an agent run: each `agent` node resolves to a provided `--agent` file (keyed by its computed definition hash), and each `tool` node resolves from the tools those agents carry
+
+Usage: salvor graph run [OPTIONS] --input <JSON|@FILE> <FILE>
+
+Arguments:
+  <FILE>
+          Path to the graph document (JSON)
+
+Options:
+      --input <JSON|@FILE>
+          The run input: a JSON value, or `@path` to read JSON from a file
+
+      --store <PATH>
+          Path to the SQLite event store.
+          
+          The precedence is flag, then the `SALVOR_STORE` environment variable, then the default: an explicit `--store` wins, else `SALVOR_STORE`, else `./salvor.db`.
+          
+          [env: SALVOR_STORE=]
+          [default: ./salvor.db]
+
+      --agent <FILE>
+          An agent definition (TOML) an `agent` node may reference. Repeatable: each file is built and keyed by its computed definition hash, and a graph `agent_hash` that matches none of them fails with a precise message listing the hashes that were provided
+
+      --label <KEY=VALUE>
+          A correlation tag `key=value`, recorded once on the run's `GraphRunStarted`. Repeatable
+
+  -h, --help
+          Print help (see a summary with '-h')

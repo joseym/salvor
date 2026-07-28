@@ -1,0 +1,34 @@
+Fork a graph run from a node boundary into a NEW run, refusing to re-execute a recorded write the operator has not acknowledged
+
+Usage: salvor fork [OPTIONS] --from-node <NODE> --graph <FILE> <RUN_ID>
+
+Arguments:
+  <RUN_ID>
+          The origin run id (a UUID) to fork
+
+Options:
+      --from-node <NODE>
+          The node boundary to restart the fork from: the fork re-walks from this node, carrying the origin's events below it as an identical prefix
+
+      --store <PATH>
+          Path to the SQLite event store.
+          
+          The precedence is flag, then the `SALVOR_STORE` environment variable, then the default: an explicit `--store` wins, else `SALVOR_STORE`, else `./salvor.db`.
+          
+          [env: SALVOR_STORE=]
+          [default: ./salvor.db]
+
+      --graph <FILE>
+          Path to the graph document (JSON) the origin ran. Re-supplied the same way a graph resume re-supplies it (the log records only the hash); its hash must match the recorded one, since a fork reuses the origin's graph unchanged
+
+      --agent <FILE>
+          An agent definition (TOML) the graph's `agent` nodes reference. Repeatable, exactly as `graph run` and a graph `resume` take them
+
+      --acknowledge-writes <SEQ,SEQ|all>
+          Acknowledge the writes the re-walked segment would re-fire: a comma-separated list of origin log positions (`4,7`), or `all` to acknowledge the full hazard set. Recorded permanently into the child's fork origin. Omit when the fork boundary sits before any write
+
+      --dry-run
+          Print what the fork WOULD do (the hazard list and the would-be prefix summary) without creating a run
+
+  -h, --help
+          Print help (see a summary with '-h')

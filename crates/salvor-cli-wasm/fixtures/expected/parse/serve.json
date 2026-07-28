@@ -1,0 +1,13 @@
+{
+  "command": {
+    "command": {
+      "auth_token": "SALVOR_TOKEN",
+      "bind": "0.0.0.0:9000",
+      "demo_tools": true,
+      "dev": true,
+      "verb": "serve"
+    },
+    "store": "./salvor.db"
+  },
+  "ok": true
+}

@@ -50,6 +50,7 @@ ORDER=(
   salvor-cli-core
   salvor-cli
   salvor-replay-wasm
+  salvor-cli-wasm
   salvor
 )
 

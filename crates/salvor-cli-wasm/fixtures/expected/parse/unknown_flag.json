@@ -1,0 +1,10 @@
+{
+  "message": {
+    "ansi": "\u001b[1m\u001b[31merror:\u001b[0m unexpected argument '\u001b[33m--nope\u001b[0m' found\n\n\u001b[1m\u001b[4mUsage:\u001b[0m \u001b[1msalvor list\u001b[0m [OPTIONS]\n\nFor more information, try '\u001b[1m--help\u001b[0m'.\n",
+    "exit_code": 2,
+    "is_error": true,
+    "kind": "UnknownArgument",
+    "plain": "error: unexpected argument '--nope' found\n\nUsage: salvor list [OPTIONS]\n\nFor more information, try '--help'.\n"
+  },
+  "ok": false
+}

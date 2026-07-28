@@ -1,0 +1,8 @@
+[
+  "salvor",
+  "run",
+  "--agent",
+  "agents/writer.toml",
+  "--input",
+  "@input.json"
+]

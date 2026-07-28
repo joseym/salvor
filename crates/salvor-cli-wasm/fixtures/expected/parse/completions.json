@@ -1,0 +1,10 @@
+{
+  "command": {
+    "command": {
+      "shell": "zsh",
+      "verb": "completions"
+    },
+    "store": "./salvor.db"
+  },
+  "ok": true
+}

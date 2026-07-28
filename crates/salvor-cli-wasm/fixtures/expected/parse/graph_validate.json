@@ -1,0 +1,13 @@
+{
+  "command": {
+    "command": {
+      "command": {
+        "graph_verb": "validate",
+        "path": "flow.json"
+      },
+      "verb": "graph"
+    },
+    "store": "./salvor.db"
+  },
+  "ok": true
+}

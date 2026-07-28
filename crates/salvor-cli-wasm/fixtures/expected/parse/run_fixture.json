@@ -1,0 +1,10 @@
+{
+  "command": {
+    "command": {
+      "fixture": "demo/",
+      "verb": "run"
+    },
+    "store": "./salvor.db"
+  },
+  "ok": true
+}

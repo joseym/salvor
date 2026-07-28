@@ -1,0 +1,15 @@
+{
+  "command": {
+    "command": {
+      "acknowledge_writes": "4,7",
+      "agents": [],
+      "dry_run": true,
+      "from_node": "settle",
+      "graph": "flow.json",
+      "run_id": "00000000-0000-4000-8000-0000000000aa",
+      "verb": "fork"
+    },
+    "store": "./salvor.db"
+  },
+  "ok": true
+}

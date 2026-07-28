@@ -1,0 +1,58 @@
+[package]
+name = "salvor-cli-wasm"
+description = "A thin wasm-bindgen wrapper over the pure salvor-cli-core crate: parses a salvor command line and renders its help, its refusals, and its tables in the browser, from the same clap tree and the same renderer the terminal binary uses"
+keywords.workspace = true
+categories.workspace = true
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+# wasm-pack's output directories are build artifacts, not sources: each holds a
+# half-megabyte .wasm compiled from the very `src/` beside it. They are
+# self-gitignored, so a publish from a clean checkout already drops them; this
+# says so explicitly, for a publish that does not run through git.
+exclude = ["pkg", "pkg-node"]
+
+# cdylib is the wasm artifact wasm-pack packages for npm; rlib keeps the crate
+# linkable as a normal Rust library so the native test harness (the same-render
+# proof's native side) can call the parse and render cores directly. Both come
+# from one source, which is the point: the bytes that parse and render natively
+# are the bytes that parse and render in the browser.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The real clap parse tree and the real value-to-text renderer. Inherited from
+# the workspace rather than declared as a direct path dependency, because there
+# is no feature to turn off here: salvor-cli-core already depends on
+# salvor-replay with `default-features = false`, so the host-only `rng` feature
+# is off before this crate sees it.
+salvor-cli-core.workspace = true
+# `RunSummary`, the row value the list table takes. Depended on directly rather
+# than through the workspace table so `default-features = false` can turn off
+# that same `rng` feature: Cargo unions features across a build, so inheriting
+# the workspace entry (which leaves defaults on) would pull a randomness backend
+# back in and break the wasm32-unknown-unknown build. A browser reads run ids
+# out of a listing; it never mints one.
+salvor-replay = { path = "../salvor-replay", version = "0.6.0", default-features = false }
+clap.workspace = true
+# `strip_str`, the same ANSI stripper `salvor list` runs its table through when
+# stdout is not a terminal, so the plain variants here are plain in exactly the
+# way a piped CLI is. Declared directly, not inherited, so `default-features =
+# false` can drop the `auto` and `wincon` features: terminal detection and a
+# Windows console API have no meaning in a browser, and Cargo forbids
+# overriding default features on a workspace-inherited dependency.
+anstream = { version = "1", default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# The wasm boundary. wasm-bindgen compiles on native targets too (the generated
+# glue is inert off wasm32), so this crate is a normal workspace member that
+# `cargo build/test --workspace` builds natively without a wasm toolchain.
+wasm-bindgen = "0.2"
+
+[dev-dependencies]
+# The same-render proof's native side builds the reference rows, which needs
+# fixed run ids and timestamps. Dev-only: the shipped cdylib never touches them.
+serde_json = { workspace = true }
+time = { workspace = true }
+uuid = { workspace = true }

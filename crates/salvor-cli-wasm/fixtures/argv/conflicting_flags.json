@@ -1,0 +1,8 @@
+[
+  "salvor",
+  "run",
+  "--fixture",
+  "demo/",
+  "--agent",
+  "writer.toml"
+]

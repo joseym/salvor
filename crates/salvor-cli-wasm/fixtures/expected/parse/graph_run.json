@@ -1,0 +1,20 @@
+{
+  "command": {
+    "command": {
+      "command": {
+        "agents": [
+          "a.toml"
+        ],
+        "graph": "flow.json",
+        "graph_verb": "run",
+        "input": "{}",
+        "labels": [
+          "tenant=acme"
+        ]
+      },
+      "verb": "graph"
+    },
+    "store": "./salvor.db"
+  },
+  "ok": true
+}

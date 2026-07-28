@@ -1,0 +1,10 @@
+{
+  "message": {
+    "ansi": "\u001b[1m\u001b[31merror:\u001b[0m invalid value '\u001b[33mawaiting-model\u001b[0m' for '\u001b[1m--group <GROUP>\u001b[0m'\n  [possible values: \u001b[32mwaiting\u001b[0m, \u001b[32mprogress\u001b[0m, \u001b[32mterminal\u001b[0m]\n\n  \u001b[32mtip:\u001b[0m `awaiting-model` is a status, not a group. Use `--status awaiting-model` for that one state, or `--group progress` for every state that behaves like it.\n\nFor more information, try '\u001b[1m--help\u001b[0m'.\n",
+    "exit_code": 2,
+    "is_error": true,
+    "kind": "InvalidValue",
+    "plain": "error: invalid value 'awaiting-model' for '--group <GROUP>'\n  [possible values: waiting, progress, terminal]\n\n  tip: `awaiting-model` is a status, not a group. Use `--status awaiting-model` for that one state, or `--group progress` for every state that behaves like it.\n\nFor more information, try '--help'.\n"
+  },
+  "ok": false
+}

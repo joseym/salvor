@@ -1,0 +1,16 @@
+{
+  "command": {
+    "command": {
+      "agents": [
+        "a.toml",
+        "b.toml"
+      ],
+      "graph": "flow.json",
+      "input": "{\"approved\":true}",
+      "run_id": "00000000-0000-4000-8000-0000000000aa",
+      "verb": "resume"
+    },
+    "store": "./salvor.db"
+  },
+  "ok": true
+}

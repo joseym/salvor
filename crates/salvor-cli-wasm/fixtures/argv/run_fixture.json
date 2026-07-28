@@ -1,0 +1,6 @@
+[
+  "salvor",
+  "run",
+  "--fixture",
+  "demo/"
+]

@@ -1,0 +1,12 @@
+[
+  "salvor",
+  "fork",
+  "00000000-0000-4000-8000-0000000000aa",
+  "--from-node",
+  "settle",
+  "--graph",
+  "flow.json",
+  "--acknowledge-writes",
+  "4,7",
+  "--dry-run"
+]

@@ -99,7 +99,8 @@ for member_manifest in \
   "$ROOT/crates/salvor-cli/Cargo.toml" \
   "$ROOT/crates/salvor-cli-core/Cargo.toml" \
   "$ROOT/crates/salvor-wasm/Cargo.toml" \
-  "$ROOT/crates/salvor-replay-wasm/Cargo.toml"; do
+  "$ROOT/crates/salvor-replay-wasm/Cargo.toml" \
+  "$ROOT/crates/salvor-cli-wasm/Cargo.toml"; do
   [ -f "$member_manifest" ] || continue
   mtmp="$member_manifest.tmp.$$"
   sed -E "s/^(salvor-[A-Za-z0-9_-]+ = \{ path = \"[^\"]*\", version = \")[0-9][^\"]*(\")/\1$FLOOR\2/" "$member_manifest" >"$mtmp"

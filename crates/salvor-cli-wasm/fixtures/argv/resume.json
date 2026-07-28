@@ -1,0 +1,13 @@
+[
+  "salvor",
+  "resume",
+  "00000000-0000-4000-8000-0000000000aa",
+  "--agent",
+  "a.toml",
+  "--agent",
+  "b.toml",
+  "--graph",
+  "flow.json",
+  "--input",
+  "{\"approved\":true}"
+]

@@ -1,0 +1,26 @@
+Start a fresh run of an agent
+
+Usage: salvor run [OPTIONS]
+
+Options:
+      --agent <FILE>
+          Path to the agent definition (TOML). Required unless `--fixture` is given, which supplies the agent itself
+
+      --store <PATH>
+          Path to the SQLite event store.
+          
+          The precedence is flag, then the `SALVOR_STORE` environment variable, then the default: an explicit `--store` wins, else `SALVOR_STORE`, else `./salvor.db`.
+          
+          [env: SALVOR_STORE=]
+          [default: ./salvor.db]
+
+      --input <JSON|@FILE>
+          The run input: a JSON value, or `@path` to read JSON from a file. Required unless `--fixture` is given, which supplies the input itself
+
+      --fixture <DIR>
+          Run a self-contained fixture directory offline: no API key, no network.
+          
+          The directory holds `agent.toml`, `input.json`, and `model.json` (the recorded model conversation). Salvor serves that conversation from an in-process HTTP server on a free local port and points the agent's declared `[llm] base_url_env` variable at it, so the agent file needs no edit to switch between the fixture and a real model. Everything after that is an ordinary run: the same store, the same event log, the same kill/resume guarantee. See [`crate::fixture`].
+
+  -h, --help
+          Print help (see a summary with '-h')

@@ -1,0 +1,19 @@
+Validate a graph document JSON file: parse it strictly and run every check, printing a summary on success or the precise node/edge errors on failure
+
+Usage: salvor graph validate [OPTIONS] <FILE>
+
+Arguments:
+  <FILE>
+          Path to the graph document (JSON)
+
+Options:
+      --store <PATH>
+          Path to the SQLite event store.
+          
+          The precedence is flag, then the `SALVOR_STORE` environment variable, then the default: an explicit `--store` wins, else `SALVOR_STORE`, else `./salvor.db`.
+          
+          [env: SALVOR_STORE=]
+          [default: ./salvor.db]
+
+  -h, --help
+          Print help (see a summary with '-h')

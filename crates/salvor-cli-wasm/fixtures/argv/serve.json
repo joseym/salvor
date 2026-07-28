@@ -1,0 +1,10 @@
+[
+  "salvor",
+  "serve",
+  "--bind",
+  "0.0.0.0:9000",
+  "--auth-token",
+  "SALVOR_TOKEN",
+  "--dev",
+  "--demo-tools"
+]

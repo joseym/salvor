@@ -2461,6 +2461,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "salvor-cli-wasm"
+version = "0.6.0"
+dependencies = [
+ "anstream",
+ "clap",
+ "salvor-cli-core",
+ "salvor-replay",
+ "serde",
+ "serde_json",
+ "time",
+ "uuid",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "salvor-core"
 version = "0.6.0"
 dependencies = [

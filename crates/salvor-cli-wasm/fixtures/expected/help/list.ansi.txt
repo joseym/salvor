@@ -1,0 +1,31 @@
+List runs in the store, newest activity last. Filters narrow what is printed; with none, every run is listed
+
+[1m[4mUsage:[0m [1msalvor list[0m [OPTIONS]
+
+[1m[4mOptions:[0m
+      [1m--status[0m <STATUS>
+          Keep only runs with this status. Repeatable; a run matching ANY of them is kept. Values are the labels the STATUS column prints. To filter by a whole group of states instead, use `--group`
+          
+          [possible values: not-started, running, awaiting-model, awaiting-tool, suspended, budget-exceeded, needs-reconciliation, completed, failed, abandoned]
+
+      [1m--store[0m <PATH>
+          Path to the SQLite event store.
+          
+          The precedence is flag, then the `SALVOR_STORE` environment variable, then the default: an explicit `--store` wins, else `SALVOR_STORE`, else `./salvor.db`.
+          
+          [env: SALVOR_STORE=]
+          [default: ./salvor.db]
+
+      [1m--group[0m <GROUP>
+          Keep only runs in this group: `waiting` (needs a person), `progress` (moving on its own), or `terminal` (finished, one way or another). These are the same three groups the status colours use. To filter by a single state instead, use `--status`
+          
+          [possible values: waiting, progress, terminal]
+
+      [1m--agent[0m <TEXT>
+          Keep only runs whose agent identity contains this text: a definition hash, or `graph run` for a graph
+
+      [1m--limit[0m <N>
+          Print at most N runs, keeping the most recently active ones. The order on screen is unchanged, so the newest still sit at the bottom
+
+  [1m-h[0m, [1m--help[0m
+          Print help (see a summary with '-h')

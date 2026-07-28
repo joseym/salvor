@@ -1,0 +1,10 @@
+{
+  "message": {
+    "ansi": "\u001b[1m\u001b[31merror:\u001b[0m unrecognized subcommand '\u001b[33mlst\u001b[0m'\n\n  \u001b[32mtip:\u001b[0m a similar subcommand exists: '\u001b[32mlist\u001b[0m'\n\n\u001b[1m\u001b[4mUsage:\u001b[0m \u001b[1msalvor\u001b[0m [OPTIONS] <COMMAND>\n\nFor more information, try '\u001b[1m--help\u001b[0m'.\n",
+    "exit_code": 2,
+    "is_error": true,
+    "kind": "InvalidSubcommand",
+    "plain": "error: unrecognized subcommand 'lst'\n\n  tip: a similar subcommand exists: 'list'\n\nUsage: salvor [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"
+  },
+  "ok": false
+}
