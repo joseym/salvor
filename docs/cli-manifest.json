@@ -1,0 +1,546 @@
+{
+  "salvor_version": "0.5.3",
+  "root": {
+    "name": "salvor",
+    "about": "Salvor CLI: run, resume, list, history, and replay for durable agent runs",
+    "hidden": false,
+    "args": [
+      {
+        "long": "--store",
+        "short": null,
+        "value_name": "PATH",
+        "required": false,
+        "repeatable": false,
+        "global": true,
+        "help": "Path to the SQLite event store",
+        "possible_values": null
+      }
+    ],
+    "subcommands": [
+      {
+        "name": "run",
+        "about": "Start a fresh run of an agent",
+        "hidden": false,
+        "args": [
+          {
+            "long": "--agent",
+            "short": null,
+            "value_name": "FILE",
+            "required": false,
+            "repeatable": false,
+            "global": false,
+            "help": "Path to the agent definition (TOML). Required unless `--fixture` is given, which supplies the agent itself",
+            "possible_values": null
+          },
+          {
+            "long": "--input",
+            "short": null,
+            "value_name": "JSON|@FILE",
+            "required": false,
+            "repeatable": false,
+            "global": false,
+            "help": "The run input: a JSON value, or `@path` to read JSON from a file. Required unless `--fixture` is given, which supplies the input itself",
+            "possible_values": null
+          },
+          {
+            "long": "--fixture",
+            "short": null,
+            "value_name": "DIR",
+            "required": false,
+            "repeatable": false,
+            "global": false,
+            "help": "Run a self-contained fixture directory offline: no API key, no network",
+            "possible_values": null
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "resume",
+        "about": "Continue an existing run: resume a parked one, or recover a crashed one",
+        "hidden": false,
+        "args": [
+          {
+            "long": null,
+            "short": null,
+            "value_name": "RUN_ID",
+            "required": true,
+            "repeatable": false,
+            "global": false,
+            "help": "The run id (a UUID) to continue",
+            "possible_values": null
+          },
+          {
+            "long": "--agent",
+            "short": null,
+            "value_name": "FILE",
+            "required": false,
+            "repeatable": true,
+            "global": false,
+            "help": "Path to an agent definition (TOML), needed to rebuild the agent. Repeatable: an agent run needs exactly one; a graph run needs the files its `agent` nodes reference (zero or more)",
+            "possible_values": null
+          },
+          {
+            "long": "--graph",
+            "short": null,
+            "value_name": "FILE",
+            "required": false,
+            "repeatable": false,
+            "global": false,
+            "help": "Path to the graph document (JSON), needed to re-drive a GRAPH run. The run's log records only the graph's hash, not the document, exactly as it records an agent by hash and not its definition; so a graph run's resume re-supplies the document here, the same way an agent run re-supplies its definition through `--agent`. Its hash must match the one the run recorded. Omit for an ordinary agent run",
+            "possible_values": null
+          },
+          {
+            "long": "--input",
+            "short": null,
+            "value_name": "JSON|@FILE",
+            "required": false,
+            "repeatable": false,
+            "global": false,
+            "help": "The resume input, required for a parked run: a JSON value, or `@path`. Ignored (with a warning) when recovering a crashed run",
+            "possible_values": null
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "fork",
+        "about": "Fork a graph run from a node boundary into a NEW run, refusing to re-execute a recorded write the operator has not acknowledged",
+        "hidden": false,
+        "args": [
+          {
+            "long": null,
+            "short": null,
+            "value_name": "RUN_ID",
+            "required": true,
+            "repeatable": false,
+            "global": false,
+            "help": "The origin run id (a UUID) to fork",
+            "possible_values": null
+          },
+          {
+            "long": "--from-node",
+            "short": null,
+            "value_name": "NODE",
+            "required": true,
+            "repeatable": false,
+            "global": false,
+            "help": "The node boundary to restart the fork from: the fork re-walks from this node, carrying the origin's events below it as an identical prefix",
+            "possible_values": null
+          },
+          {
+            "long": "--graph",
+            "short": null,
+            "value_name": "FILE",
+            "required": true,
+            "repeatable": false,
+            "global": false,
+            "help": "Path to the graph document (JSON) the origin ran. Re-supplied the same way a graph resume re-supplies it (the log records only the hash); its hash must match the recorded one, since a fork reuses the origin's graph unchanged",
+            "possible_values": null
+          },
+          {
+            "long": "--agent",
+            "short": null,
+            "value_name": "FILE",
+            "required": false,
+            "repeatable": true,
+            "global": false,
+            "help": "An agent definition (TOML) the graph's `agent` nodes reference. Repeatable, exactly as `graph run` and a graph `resume` take them",
+            "possible_values": null
+          },
+          {
+            "long": "--acknowledge-writes",
+            "short": null,
+            "value_name": "SEQ,SEQ|all",
+            "required": false,
+            "repeatable": false,
+            "global": false,
+            "help": "Acknowledge the writes the re-walked segment would re-fire: a comma-separated list of origin log positions (`4,7`), or `all` to acknowledge the full hazard set. Recorded permanently into the child's fork origin. Omit when the fork boundary sits before any write",
+            "possible_values": null
+          },
+          {
+            "long": "--dry-run",
+            "short": null,
+            "value_name": null,
+            "required": false,
+            "repeatable": false,
+            "global": false,
+            "help": "Print what the fork WOULD do (the hazard list and the would-be prefix summary) without creating a run",
+            "possible_values": null
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "resolve",
+        "about": "Record the completion of a dangling write by hand, after verifying it",
+        "hidden": false,
+        "args": [
+          {
+            "long": null,
+            "short": null,
+            "value_name": "RUN_ID",
+            "required": true,
+            "repeatable": false,
+            "global": false,
+            "help": "The run id (a UUID) that needs reconciliation",
+            "possible_values": null
+          },
+          {
+            "long": "--output",
+            "short": null,
+            "value_name": "JSON|@FILE",
+            "required": true,
+            "repeatable": false,
+            "global": false,
+            "help": "The output to record for the dangling write, after verifying externally what it did: a JSON value, or `@path` to read JSON from a file. It is recorded verbatim as the tool's output, so replay never re-runs the write",
+            "possible_values": null
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "abandon",
+        "about": "Abandon a run: retire it by hand without finishing or failing it, for a run that is dead forever or no longer worth carrying",
+        "hidden": false,
+        "args": [
+          {
+            "long": null,
+            "short": null,
+            "value_name": "RUN_ID",
+            "required": true,
+            "repeatable": false,
+            "global": false,
+            "help": "The run id (a UUID) to abandon",
+            "possible_values": null
+          },
+          {
+            "long": "--reason",
+            "short": null,
+            "value_name": "TEXT",
+            "required": false,
+            "repeatable": false,
+            "global": false,
+            "help": "An optional note for why the run is being abandoned, recorded on the terminal event. Omit it to abandon with no reason",
+            "possible_values": null
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "list",
+        "about": "List runs in the store, newest activity last. Filters narrow what is printed; with none, every run is listed",
+        "hidden": false,
+        "args": [
+          {
+            "long": "--status",
+            "short": null,
+            "value_name": "STATUS",
+            "required": false,
+            "repeatable": true,
+            "global": false,
+            "help": "Keep only runs with this status. Repeatable; a run matching ANY of them is kept. Values are the labels the STATUS column prints. To filter by a whole group of states instead, use `--group`",
+            "possible_values": [
+              "not-started",
+              "running",
+              "awaiting-model",
+              "awaiting-tool",
+              "suspended",
+              "budget-exceeded",
+              "needs-reconciliation",
+              "completed",
+              "failed",
+              "abandoned"
+            ]
+          },
+          {
+            "long": "--group",
+            "short": null,
+            "value_name": "GROUP",
+            "required": false,
+            "repeatable": false,
+            "global": false,
+            "help": "Keep only runs in this group: `waiting` (needs a person), `progress` (moving on its own), or `terminal` (finished, one way or another). These are the same three groups the status colours use. To filter by a single state instead, use `--status`",
+            "possible_values": [
+              "waiting",
+              "progress",
+              "terminal"
+            ]
+          },
+          {
+            "long": "--agent",
+            "short": null,
+            "value_name": "TEXT",
+            "required": false,
+            "repeatable": false,
+            "global": false,
+            "help": "Keep only runs whose agent identity contains this text: a definition hash, or `graph run` for a graph",
+            "possible_values": null
+          },
+          {
+            "long": "--limit",
+            "short": null,
+            "value_name": "N",
+            "required": false,
+            "repeatable": false,
+            "global": false,
+            "help": "Print at most N runs, keeping the most recently active ones. The order on screen is unchanged, so the newest still sit at the bottom",
+            "possible_values": null
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "completions",
+        "about": "Print a shell completion script for `salvor` on stdout",
+        "hidden": false,
+        "args": [
+          {
+            "long": null,
+            "short": null,
+            "value_name": "SHELL",
+            "required": true,
+            "repeatable": false,
+            "global": false,
+            "help": "The shell to generate for",
+            "possible_values": [
+              "bash",
+              "elvish",
+              "fish",
+              "powershell",
+              "zsh"
+            ]
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "history",
+        "about": "Print a run's event log",
+        "hidden": false,
+        "args": [
+          {
+            "long": null,
+            "short": null,
+            "value_name": "RUN_ID",
+            "required": true,
+            "repeatable": false,
+            "global": false,
+            "help": "The run id (a UUID) whose log to print",
+            "possible_values": null
+          },
+          {
+            "long": "--json",
+            "short": null,
+            "value_name": null,
+            "required": false,
+            "repeatable": false,
+            "global": false,
+            "help": "Print the raw event envelopes as JSON instead of the pretty log",
+            "possible_values": null
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "replay",
+        "about": "Re-derive a run's state from its log without executing anything",
+        "hidden": false,
+        "args": [
+          {
+            "long": null,
+            "short": null,
+            "value_name": "RUN_ID",
+            "required": true,
+            "repeatable": false,
+            "global": false,
+            "help": "The run id (a UUID) to re-derive state for",
+            "possible_values": null
+          },
+          {
+            "long": "--dry-run",
+            "short": null,
+            "value_name": null,
+            "required": false,
+            "repeatable": false,
+            "global": false,
+            "help": "Re-derive state from the log without executing anything. Required in this version: live replay is not yet available",
+            "possible_values": null
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "serve",
+        "about": "Run the control-plane HTTP + server-sent-events server over the store",
+        "hidden": false,
+        "args": [
+          {
+            "long": "--bind",
+            "short": null,
+            "value_name": "ADDR",
+            "required": false,
+            "repeatable": false,
+            "global": false,
+            "help": "The address to bind, host and port",
+            "possible_values": null
+          },
+          {
+            "long": "--auth-token",
+            "short": null,
+            "value_name": "ENV_VAR",
+            "required": false,
+            "repeatable": false,
+            "global": false,
+            "help": "The NAME of an environment variable holding a shared-secret bearer token. When set (and the variable is non-empty), every request must carry `Authorization: Bearer <that value>`. When omitted, the server runs without auth, trusting a reverse proxy to guard it. Never the token itself, matching how agent files name key variables",
+            "possible_values": null
+          },
+          {
+            "long": "--kill",
+            "short": null,
+            "value_name": "PID|PORT",
+            "required": false,
+            "repeatable": false,
+            "global": false,
+            "help": "Kill the running `salvor serve` instead of serving. With no value, discovers every running `salvor serve` (by inspecting the process table, since there are no pid files): zero found is reported and this exits; exactly one is killed; multiple print a numbered table and prompt for a choice. Given a value (a pid or a listening port), kills that one directly with no prompt. When present at all, this short-circuits before `--bind` or `--store` are acted on: the process never binds a port",
+            "possible_values": null
+          },
+          {
+            "long": "--dev",
+            "short": null,
+            "value_name": null,
+            "required": false,
+            "repeatable": false,
+            "global": false,
+            "help": "Also start the Angular dev server (`ng serve`) for `bridge/`, hot module reloading included, with `/v1` proxied to this API so a browser at the dev server's own URL calls straight through. This process's own bind/store handling is otherwise unchanged: the API binds and serves exactly as plain `serve` does. Requires a salvor checkout with a `bridge/` directory alongside it; the dashboard an installed `salvor` embeds is prebuilt and does not hot-reload",
+            "possible_values": null
+          },
+          {
+            "long": "--demo-tools",
+            "short": null,
+            "value_name": null,
+            "required": false,
+            "repeatable": false,
+            "global": false,
+            "help": "Register a small set of deterministic demo tools (`lookup_invoice` read, `issue_refund` write, `send_email` idempotent) instead of the stock empty tool registry",
+            "possible_values": null
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "build",
+        "about": "Build the whole product from a salvor checkout: the web dashboard, then the release binary that embeds it",
+        "hidden": false,
+        "args": [
+          {
+            "long": "--install",
+            "short": null,
+            "value_name": null,
+            "required": false,
+            "repeatable": false,
+            "global": false,
+            "help": "After building, install the release binary onto the PATH with `cargo install --path crates/salvor-cli`, so the `salvor` you run from anywhere carries the dashboard just built",
+            "possible_values": null
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "graph",
+        "about": "Author-time graph document tools: validate a document, or print its JSON Schema. These read no store and drive no run",
+        "hidden": false,
+        "args": [],
+        "subcommands": [
+          {
+            "name": "validate",
+            "about": "Validate a graph document JSON file: parse it strictly and run every check, printing a summary on success or the precise node/edge errors on failure",
+            "hidden": false,
+            "args": [
+              {
+                "long": null,
+                "short": null,
+                "value_name": "FILE",
+                "required": true,
+                "repeatable": false,
+                "global": false,
+                "help": "Path to the graph document (JSON)",
+                "possible_values": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "schema",
+            "about": "Print the graph document JSON Schema to stdout",
+            "hidden": false,
+            "args": [],
+            "subcommands": []
+          },
+          {
+            "name": "run",
+            "about": "Drive a graph document locally over the store, exactly as `salvor run` drives an agent run: each `agent` node resolves to a provided `--agent` file (keyed by its computed definition hash), and each `tool` node resolves from the tools those agents carry",
+            "hidden": false,
+            "args": [
+              {
+                "long": null,
+                "short": null,
+                "value_name": "FILE",
+                "required": true,
+                "repeatable": false,
+                "global": false,
+                "help": "Path to the graph document (JSON)",
+                "possible_values": null
+              },
+              {
+                "long": "--input",
+                "short": null,
+                "value_name": "JSON|@FILE",
+                "required": true,
+                "repeatable": false,
+                "global": false,
+                "help": "The run input: a JSON value, or `@path` to read JSON from a file",
+                "possible_values": null
+              },
+              {
+                "long": "--agent",
+                "short": null,
+                "value_name": "FILE",
+                "required": false,
+                "repeatable": true,
+                "global": false,
+                "help": "An agent definition (TOML) an `agent` node may reference. Repeatable: each file is built and keyed by its computed definition hash, and a graph `agent_hash` that matches none of them fails with a precise message listing the hashes that were provided",
+                "possible_values": null
+              },
+              {
+                "long": "--label",
+                "short": null,
+                "value_name": "KEY=VALUE",
+                "required": false,
+                "repeatable": true,
+                "global": false,
+                "help": "A correlation tag `key=value`, recorded once on the run's `GraphRunStarted`. Repeatable",
+                "possible_values": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "help",
+            "about": "Print this message or the help of the given subcommand(s)",
+            "hidden": false,
+            "args": [],
+            "subcommands": []
+          }
+        ]
+      },
+      {
+        "name": "help",
+        "about": "Print this message or the help of the given subcommand(s)",
+        "hidden": false,
+        "args": [],
+        "subcommands": []
+      }
+    ]
+  }
+}

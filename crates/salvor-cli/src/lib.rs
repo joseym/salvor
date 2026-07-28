@@ -15,6 +15,10 @@
 //!   fixture directory (agent, input, and a recorded model conversation) and
 //!   the in-process scripted model that serves it.
 //! - [`render`] is pure value-to-text formatting, shared by the commands.
+//! - [`manifest`] walks clap's own `Command` tree into the machine-readable
+//!   description checked in at `docs/cli-manifest.json`, for a consumer
+//!   outside this repo that needs to know the CLI surface without
+//!   reimplementing it by hand.
 //! - [`serve_kill`] is the process discovery and termination behind `salvor
 //!   serve --kill`, kept separate from [`commands::serve`] because it has
 //!   nothing to do with actually serving.
@@ -45,6 +49,7 @@ pub mod demo_script;
 pub mod demo_tools;
 pub mod dev_server;
 pub mod fixture;
+pub mod manifest;
 pub mod render;
 pub mod serve_kill;
 
