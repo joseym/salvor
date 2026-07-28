@@ -54,8 +54,8 @@ use uuid::Uuid;
 use crate::agent_config::{self, AgentConfig};
 use crate::checkout;
 use crate::cli::{
-    AbandonArgs, BuildArgs, ForkArgs, GraphRunArgs, GraphValidateArgs, HistoryArgs, ReplayArgs,
-    ResolveArgs, ResumeArgs, RunArgs, ServeArgs,
+    AbandonArgs, BuildArgs, CompletionsArgs, ForkArgs, GraphRunArgs, GraphValidateArgs, HistoryArgs,
+    ListArgs, ReplayArgs, ResolveArgs, ResumeArgs, RunArgs, ServeArgs,
 };
 use crate::dev_server::DevServer;
 use crate::render;
@@ -461,8 +461,28 @@ pub async fn abandon(store_path: &Path, args: AbandonArgs) -> Result<u8> {
     }
 }
 
-/// `salvor list`: one row per run, with status folded from each log.
-pub async fn list(store_path: &Path) -> Result<u8> {
+/// `salvor completions <shell>`: print a completion script on stdout.
+///
+/// Generated from the same `clap::Command` the parser is built from, not a hand-written list, so a
+/// new subcommand or flag completes the moment it exists and cannot drift out of date. That is the
+/// whole reason to generate rather than ship a static script.
+///
+/// It takes no store and reads nothing: shells source this at startup, so it must not touch a
+/// database, and the exit code is always 0 unless writing to stdout fails.
+pub fn completions(args: CompletionsArgs) -> Result<u8> {
+    let mut command = <crate::cli::Cli as clap::CommandFactory>::command();
+    let name = command.get_name().to_string();
+    clap_complete::generate(args.shell, &mut command, name, &mut std::io::stdout());
+    Ok(0)
+}
+
+/// `salvor list`: one row per run, with status folded from each log, narrowed by whatever filters
+/// the caller gave.
+///
+/// Filtering happens after the fold because status is a replay-time projection, not a stored
+/// column: there is nothing to filter on until each log has been read. That also means a filter
+/// saves screen space, not work.
+pub async fn list(store_path: &Path, args: ListArgs) -> Result<u8> {
     let store = open_store(store_path)?;
     let mut summaries = store.list_runs().await?;
     if summaries.is_empty() {
@@ -477,8 +497,38 @@ pub async fn list(store_path: &Path) -> Result<u8> {
         // log to get it. See RunSummary's docs for why status stays out of the
         // store.
         let log = store.read_log(summary.run_id).await?;
-        let status = render::status_label(&derive_state(&log).status).to_owned();
+        let state = derive_state(&log);
+        let status = render::status_label(&state.status).to_owned();
+
+        if !args.status.is_empty() && !args.status.iter().any(|s| s == &status) {
+            continue;
+        }
+        if let Some(group) = &args.group
+            && render::status_group(&status).map(render::StatusGroup::as_str) != Some(group.as_str())
+        {
+            continue;
+        }
+        if let Some(needle) = &args.agent {
+            let identity = agent_identity(&log);
+            if !identity.to_lowercase().contains(&needle.to_lowercase()) {
+                continue;
+            }
+        }
         rows.push((summary, status));
+    }
+
+    // The tail, not the head: a limit exists to show the runs that matter now, and the newest sit
+    // at the end of an ascending list. The surviving rows keep that order, so the shape of the
+    // table never changes with the flag.
+    if let Some(limit) = args.limit
+        && rows.len() > limit
+    {
+        rows.drain(..rows.len() - limit);
+    }
+
+    if rows.is_empty() {
+        println!("no runs matched");
+        return Ok(0);
     }
     // anstream, not print!: it strips the table's styling when stdout is a pipe or a file, and
     // honours NO_COLOR and CLICOLOR, so redirected output stays plain text.
@@ -1027,6 +1077,21 @@ fn check_graph_resolvable(graph: &Graph, agents: &HashMap<String, Agent>) -> Res
         }
     }
     Ok(())
+}
+
+/// What `--agent` matches against: the agent definition hash for an ordinary run, or the literal
+/// `graph run` for a graph, which has no single agent to name.
+///
+/// The same distinction the web UI's agent column draws, and for the same reason: a graph run
+/// genuinely has no one agent, so naming one would be a convenient lie.
+fn agent_identity(log: &[EventEnvelope]) -> String {
+    log.iter()
+        .find_map(|envelope| match &envelope.event {
+            Event::RunStarted { agent_def_hash, .. } => Some(agent_def_hash.clone()),
+            Event::GraphRunStarted { .. } => Some("graph run".to_owned()),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 /// Whether a run's log is a graph run: its first event is `GraphRunStarted`.

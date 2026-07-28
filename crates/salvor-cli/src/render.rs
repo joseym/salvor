@@ -155,26 +155,79 @@ pub fn abandoned_report(
     out
 }
 
-/// The colour a status earns, grouped by what it asks of the reader rather than by name. Scanning a
-/// long list, the question is never "which state is this" but "does anything here need me", so the
-/// four groups are: finished cleanly, finished badly, waiting on a human, still moving.
+/// Every label [`status_label`] can print, which is also every value `salvor list --status`
+/// accepts and offers for completion.
 ///
-/// The same grouping the web UI uses, so an operator reading both does not learn two vocabularies.
+/// Kept beside `status_label` and `status_group` because the three have to agree: a label the
+/// column can print but the filter rejects would be a state you can see and cannot select. A test
+/// asserts this list and `status_group` recognise exactly the same set.
+pub const STATUS_LABELS: [&str; 10] = [
+    "not-started",
+    "running",
+    "awaiting-model",
+    "awaiting-tool",
+    "suspended",
+    "budget-exceeded",
+    "needs-reconciliation",
+    "completed",
+    "failed",
+    "abandoned",
+];
+
+/// What a status asks of the reader. Scanning a long list, the question is never "which state is
+/// this" but "does anything here need me", and these are the three answers.
+///
+/// The same three the web UI names, so an operator reading both surfaces does not learn two
+/// vocabularies, and the same three `salvor list --group` filters on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusGroup {
+    /// Stopped, and it will not move again until a person does something.
+    Waiting,
+    /// Moving on its own; nothing to do but wait.
+    Progress,
+    /// Finished, one way or another.
+    Terminal,
+}
+
+impl StatusGroup {
+    /// The name this group answers to on the command line.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Waiting => "waiting",
+            Self::Progress => "progress",
+            Self::Terminal => "terminal",
+        }
+    }
+}
+
+/// The group a status label belongs to, or `None` for a label this build does not recognise —
+/// which a future status would be, until someone teaches this function about it.
+#[must_use]
+pub fn status_group(status: &str) -> Option<StatusGroup> {
+    match status {
+        "suspended" | "needs-reconciliation" | "budget-exceeded" => Some(StatusGroup::Waiting),
+        "running" | "awaiting-model" | "awaiting-tool" => Some(StatusGroup::Progress),
+        "completed" | "failed" | "abandoned" | "not-started" => Some(StatusGroup::Terminal),
+        _ => None,
+    }
+}
+
+/// The colour a status earns. Group decides the hue, so `--group waiting` returns exactly the rows
+/// that read yellow; within the terminal group the outcome still matters, because "finished" and
+/// "failed" are not the same news.
 fn status_style(status: &str) -> anstyle::Style {
     use anstyle::AnsiColor;
 
-    let color = match status {
-        "completed" => AnsiColor::Green,
-        "failed" => AnsiColor::Red,
-        // Waiting on a person. Yellow because it is the only group where the list is a to-do list.
-        "suspended" | "needs-reconciliation" | "budget-exceeded" => AnsiColor::Yellow,
-        // Moving on its own; nothing to do but wait.
-        "running" | "awaiting-model" | "awaiting-tool" => AnsiColor::Cyan,
-        // Terminal, but by choice or by never having begun: present, and deliberately quiet.
-        "abandoned" | "not-started" => {
-            return anstyle::Style::new().dimmed();
-        }
-        _ => return anstyle::Style::new(),
+    let color = match (status_group(status), status) {
+        // Yellow because this group is the only one where the list is a to-do list.
+        (Some(StatusGroup::Waiting), _) => AnsiColor::Yellow,
+        (Some(StatusGroup::Progress), _) => AnsiColor::Cyan,
+        (Some(StatusGroup::Terminal), "completed") => AnsiColor::Green,
+        (Some(StatusGroup::Terminal), "failed") => AnsiColor::Red,
+        // Terminal by choice, or never begun: present, and deliberately quiet.
+        (Some(StatusGroup::Terminal), _) => return anstyle::Style::new().dimmed(),
+        (None, _) => return anstyle::Style::new(),
     };
     anstyle::Style::new().fg_color(Some(color.into()))
 }
@@ -447,6 +500,65 @@ mod tests {
             status_style("something-new-we-added-later"),
             anstyle::Style::new(),
             "an unrecognised status renders unstyled rather than miscoloured"
+        );
+    }
+
+    /// `--group waiting` is documented as returning exactly the rows that read yellow. That is only
+    /// true while both derive from `status_group`, so this asserts the pair cannot drift: every
+    /// status in a group renders identically, and no two groups share a rendering.
+    #[test]
+    fn the_filter_groups_and_the_colours_are_the_same_partition() {
+        let every_status = [
+            "completed",
+            "failed",
+            "abandoned",
+            "not-started",
+            "running",
+            "awaiting-model",
+            "awaiting-tool",
+            "suspended",
+            "needs-reconciliation",
+            "budget-exceeded",
+        ];
+        assert_eq!(
+            every_status.len(),
+            STATUS_LABELS.len(),
+            "this test enumerates the labels; STATUS_LABELS is what the CLI offers, and a label in \
+             one but not the other is a state you can see but cannot filter for"
+        );
+        for status in STATUS_LABELS {
+            assert!(
+                every_status.contains(&status),
+                "{status} is offered by --status, so this test must cover it"
+            );
+        }
+        for status in every_status {
+            assert!(
+                status_group(status).is_some(),
+                "{status} is printed by the STATUS column, so it must belong to a group or \
+                 `--group` silently drops it"
+            );
+        }
+
+        let waiting: Vec<_> = every_status
+            .iter()
+            .filter(|s| status_group(s) == Some(StatusGroup::Waiting))
+            .map(|s| status_style(s))
+            .collect();
+        assert!(
+            waiting.windows(2).all(|pair| pair[0] == pair[1]),
+            "the waiting group renders as one colour, so `--group waiting` selects one colour"
+        );
+
+        let progress: Vec<_> = every_status
+            .iter()
+            .filter(|s| status_group(s) == Some(StatusGroup::Progress))
+            .map(|s| status_style(s))
+            .collect();
+        assert!(progress.windows(2).all(|pair| pair[0] == pair[1]));
+        assert_ne!(
+            waiting[0], progress[0],
+            "a reader must not have to check the label to tell the two apart"
         );
     }
 

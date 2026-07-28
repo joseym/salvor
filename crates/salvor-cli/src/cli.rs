@@ -50,8 +50,11 @@ pub enum Command {
     /// Abandon a run: retire it by hand without finishing or failing it, for a
     /// run that is dead forever or no longer worth carrying.
     Abandon(AbandonArgs),
-    /// List every run in the store.
-    List,
+    /// List runs in the store, newest activity last. Filters narrow what is
+    /// printed; with none, every run is listed.
+    List(ListArgs),
+    /// Print a shell completion script for `salvor` on stdout.
+    Completions(CompletionsArgs),
     /// Print a run's event log.
     History(HistoryArgs),
     /// Re-derive a run's state from its log without executing anything.
@@ -269,6 +272,252 @@ pub struct BuildArgs {
     /// anywhere carries the dashboard just built.
     #[arg(long)]
     pub install: bool,
+}
+
+#[cfg(test)]
+mod group_parser_tests {
+
+    use clap::Parser;
+
+    fn parse(args: &[&str]) -> Result<super::Cli, clap::Error> {
+        super::Cli::try_parse_from(args)
+    }
+
+    /// The mistake this exists for: reaching for `--group` with a status name. The refusal has to
+    /// name the status flag AND the status's real group, because clap's own similarity guess
+    /// ("a similar value exists: 'waiting'") points at the WRONG group for `awaiting-model`.
+    #[test]
+    fn a_status_passed_as_a_group_is_told_which_flag_to_use() {
+        let err = parse(&["salvor", "list", "--group", "awaiting-model"])
+            .expect_err("a status is not a group")
+            .to_string();
+        assert!(err.contains("--status awaiting-model"), "names the right flag: {err}");
+        assert!(err.contains("--group progress"), "names the real group: {err}");
+        assert!(
+            !err.contains("similar value exists"),
+            "clap's similarity guess must not survive alongside the real answer: {err}"
+        );
+    }
+
+    /// The set of legal values has to reach `--help` and the shell, which is why the parser
+    /// implements `possible_values` rather than validating in a plain function.
+    #[test]
+    fn the_legal_values_are_advertised_not_just_enforced() {
+        let err = parse(&["salvor", "list", "--group", "sideways"])
+            .expect_err("nonsense is refused")
+            .to_string();
+        for group in super::GROUPS {
+            assert!(err.contains(group), "{group} is offered in the refusal: {err}");
+        }
+    }
+
+    /// The mirror of the group test: `--status waiting` is the other easy confusion, and the
+    /// refusal has to hand back the flag that does take it.
+    #[test]
+    fn a_group_passed_as_a_status_is_told_which_flag_to_use() {
+        let err = parse(&["salvor", "list", "--status", "waiting"])
+            .expect_err("a group is not a status")
+            .to_string();
+        assert!(err.contains("--group waiting"), "names the right flag: {err}");
+    }
+
+    /// Every label the STATUS column can print must be offered to the shell and accepted by the
+    /// flag; a state you can see but cannot filter for is the bug this guards.
+    #[test]
+    fn every_printable_status_is_a_legal_filter_value() {
+        for status in crate::render::STATUS_LABELS {
+            assert!(
+                parse(&["salvor", "list", "--status", status]).is_ok(),
+                "{status} is printed by the table, so --status must accept it"
+            );
+        }
+    }
+
+    #[test]
+    fn the_three_groups_parse() {
+        for group in super::GROUPS {
+            assert!(
+                parse(&["salvor", "list", "--group", group]).is_ok(),
+                "{group} is a legal value"
+            );
+        }
+    }
+}
+
+/// Parses `--status`: completes every label the STATUS column can print, and refuses a GROUP name
+/// with the flag that does take it.
+///
+/// The mirror image of [`GroupParser`], and for the same reason. The two flags sit next to each
+/// other in `--help` and answer neighbouring questions, so each is the natural wrong guess for the
+/// other; whichever one a caller reaches for, the refusal should hand them the other rather than
+/// making them re-read the help.
+#[derive(Clone, Debug)]
+struct StatusParser;
+
+impl clap::builder::TypedValueParser for StatusParser {
+    type Value = String;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<Self::Value, clap::Error> {
+        let value = value.to_string_lossy();
+        if crate::render::STATUS_LABELS.contains(&value.as_ref()) {
+            return Ok(value.into_owned());
+        }
+
+        let mut err = clap::Error::new(clap::error::ErrorKind::InvalidValue).with_cmd(cmd);
+        if let Some(arg) = arg {
+            err.insert(
+                clap::error::ContextKind::InvalidArg,
+                clap::error::ContextValue::String(arg.to_string()),
+            );
+        }
+        err.insert(
+            clap::error::ContextKind::InvalidValue,
+            clap::error::ContextValue::String(value.clone().into_owned()),
+        );
+        err.insert(
+            clap::error::ContextKind::ValidValue,
+            clap::error::ContextValue::Strings(
+                crate::render::STATUS_LABELS.map(str::to_owned).to_vec(),
+            ),
+        );
+        if GROUPS.contains(&value.as_ref()) {
+            let tip: clap::builder::StyledStr = format!(
+                "`{value}` is a group, not a status. Use `--group {value}` for every state in it."
+            )
+            .into();
+            err.insert(
+                clap::error::ContextKind::Suggested,
+                clap::error::ContextValue::StyledStrs(vec![tip]),
+            );
+        }
+        Err(err)
+    }
+
+    fn possible_values(
+        &self,
+    ) -> Option<Box<dyn Iterator<Item = clap::builder::PossibleValue> + '_>> {
+        Some(Box::new(
+            crate::render::STATUS_LABELS
+                .into_iter()
+                .map(clap::builder::PossibleValue::new),
+        ))
+    }
+}
+
+/// The three group names, in the order they are offered.
+const GROUPS: [&str; 3] = ["waiting", "progress", "terminal"];
+
+/// Parses `--group`: completes the three names, and refuses a STATUS with the command the caller
+/// actually wanted.
+///
+/// A plain `value_parser = [..]` would give completion and `--help` values but clap's generic
+/// refusal, which for `awaiting-model` suggests "a similar value exists: 'waiting'" — string
+/// similarity pointing at the WRONG group, since `awaiting-model` is `progress`. A plain parser
+/// function would give the right message but no completion candidates, because a function cannot
+/// enumerate what it accepts. Implementing the trait is how you get both: `possible_values` feeds
+/// help and the shell, `parse_ref` owns the refusal.
+#[derive(Clone, Debug)]
+struct GroupParser;
+
+impl clap::builder::TypedValueParser for GroupParser {
+    type Value = String;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<Self::Value, clap::Error> {
+        let value = value.to_string_lossy();
+        if GROUPS.contains(&value.as_ref()) {
+            return Ok(value.into_owned());
+        }
+
+        let mut err = clap::Error::new(clap::error::ErrorKind::InvalidValue).with_cmd(cmd);
+        if let Some(arg) = arg {
+            err.insert(
+                clap::error::ContextKind::InvalidArg,
+                clap::error::ContextValue::String(arg.to_string()),
+            );
+        }
+        // The rejected value goes in the value slot and the legal set in the values slot, so clap
+        // renders its usual "invalid value X ... [possible values: ...]" frame.
+        err.insert(
+            clap::error::ContextKind::InvalidValue,
+            clap::error::ContextValue::String(value.clone().into_owned()),
+        );
+        err.insert(
+            clap::error::ContextKind::ValidValue,
+            clap::error::ContextValue::Strings(GROUPS.map(str::to_owned).to_vec()),
+        );
+        // The advice belongs in the tip slot, NOT the value slot: a status passed where a group
+        // belongs is the common mistake, and clap's own suggestion would be string-similarity
+        // ("did you mean 'waiting'?") pointing at the wrong group.
+        if let Some(group) = crate::render::status_group(&value) {
+            let tip: clap::builder::StyledStr = format!(
+                "`{value}` is a status, not a group. Use `--status {value}` for that one state, \
+                 or `--group {}` for every state that behaves like it.",
+                group.as_str()
+            )
+            .into();
+            err.insert(
+                clap::error::ContextKind::Suggested,
+                clap::error::ContextValue::StyledStrs(vec![tip]),
+            );
+        }
+        Err(err)
+    }
+
+    /// What the shell completes and `--help` lists. Separate from `parse_ref` on purpose: the set
+    /// of legal values is a fact about the flag, while the refusal is a conversation with a caller
+    /// who got it wrong.
+    fn possible_values(
+        &self,
+    ) -> Option<Box<dyn Iterator<Item = clap::builder::PossibleValue> + '_>> {
+        Some(Box::new(
+            GROUPS.into_iter().map(clap::builder::PossibleValue::new),
+        ))
+    }
+}
+
+/// Arguments to `completions`.
+#[derive(Debug, Args)]
+pub struct CompletionsArgs {
+    /// The shell to generate for.
+    #[arg(value_enum)]
+    pub shell: clap_complete::Shell,
+}
+
+/// Arguments to `list`.
+///
+/// The filter vocabulary matches the web UI's, deliberately: `status` and `group` mean the same
+/// things in both, so an operator who learns one surface can read the other.
+#[derive(Debug, Args)]
+pub struct ListArgs {
+    /// Keep only runs with this status. Repeatable; a run matching ANY of them
+    /// is kept. Values are the labels the STATUS column prints. To filter by a
+    /// whole group of states instead, use `--group`.
+    #[arg(long, value_name = "STATUS", value_parser = StatusParser)]
+    pub status: Vec<String>,
+    /// Keep only runs in this group: `waiting` (needs a person), `progress`
+    /// (moving on its own), or `terminal` (finished, one way or another).
+    /// These are the same three groups the status colours use. To filter by a
+    /// single state instead, use `--status`.
+    #[arg(long, value_name = "GROUP", value_parser = GroupParser)]
+    pub group: Option<String>,
+    /// Keep only runs whose agent identity contains this text: a definition
+    /// hash, or `graph run` for a graph.
+    #[arg(long, value_name = "TEXT")]
+    pub agent: Option<String>,
+    /// Print at most N runs, keeping the most recently active ones. The order
+    /// on screen is unchanged, so the newest still sit at the bottom.
+    #[arg(long, value_name = "N")]
+    pub limit: Option<usize>,
 }
 
 /// Arguments to `serve`.
