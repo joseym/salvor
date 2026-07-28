@@ -54,8 +54,8 @@ use uuid::Uuid;
 use crate::agent_config::{self, AgentConfig};
 use crate::checkout;
 use crate::cli::{
-    AbandonArgs, BuildArgs, CompletionsArgs, ForkArgs, GraphRunArgs, GraphValidateArgs, HistoryArgs,
-    ListArgs, ReplayArgs, ResolveArgs, ResumeArgs, RunArgs, ServeArgs,
+    AbandonArgs, BuildArgs, CompletionsArgs, ForkArgs, GraphRunArgs, GraphValidateArgs,
+    HistoryArgs, ListArgs, ReplayArgs, ResolveArgs, ResumeArgs, RunArgs, ServeArgs,
 };
 use crate::dev_server::DevServer;
 use crate::render;
@@ -504,7 +504,8 @@ pub async fn list(store_path: &Path, args: ListArgs) -> Result<u8> {
             continue;
         }
         if let Some(group) = &args.group
-            && render::status_group(&status).map(render::StatusGroup::as_str) != Some(group.as_str())
+            && render::status_group(&status).map(render::StatusGroup::as_str)
+                != Some(group.as_str())
         {
             continue;
         }

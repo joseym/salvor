@@ -291,8 +291,14 @@ mod group_parser_tests {
         let err = parse(&["salvor", "list", "--group", "awaiting-model"])
             .expect_err("a status is not a group")
             .to_string();
-        assert!(err.contains("--status awaiting-model"), "names the right flag: {err}");
-        assert!(err.contains("--group progress"), "names the real group: {err}");
+        assert!(
+            err.contains("--status awaiting-model"),
+            "names the right flag: {err}"
+        );
+        assert!(
+            err.contains("--group progress"),
+            "names the real group: {err}"
+        );
         assert!(
             !err.contains("similar value exists"),
             "clap's similarity guess must not survive alongside the real answer: {err}"
@@ -307,7 +313,10 @@ mod group_parser_tests {
             .expect_err("nonsense is refused")
             .to_string();
         for group in super::GROUPS {
-            assert!(err.contains(group), "{group} is offered in the refusal: {err}");
+            assert!(
+                err.contains(group),
+                "{group} is offered in the refusal: {err}"
+            );
         }
     }
 
@@ -318,7 +327,10 @@ mod group_parser_tests {
         let err = parse(&["salvor", "list", "--status", "waiting"])
             .expect_err("a group is not a status")
             .to_string();
-        assert!(err.contains("--group waiting"), "names the right flag: {err}");
+        assert!(
+            err.contains("--group waiting"),
+            "names the right flag: {err}"
+        );
     }
 
     /// Every label the STATUS column can print must be offered to the shell and accepted by the

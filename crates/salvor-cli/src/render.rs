@@ -566,12 +566,12 @@ mod tests {
     /// padding it shears every column to its right. This is the regression that would produce.
     #[test]
     fn styling_does_not_disturb_the_column_widths() {
+        let padded = format!("{:<20}", "completed");
         let row = format!(
             "{:<36}  {style}{padded}{style:#}  {:>6}\n",
             "run-id",
             42,
             style = status_style("completed"),
-            padded = format!("{:<20}", "completed"),
         );
         let plain = format!("{:<36}  {:<20}  {:>6}\n", "run-id", "completed", 42);
         assert_eq!(
