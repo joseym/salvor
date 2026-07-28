@@ -8,7 +8,11 @@ model call decides to record a claim, one tool call records it, one more model
 call closes the run out. Ten events, exactly one write.
 
 ```sh
+# the CLI, however you like it:
+npm install -g @salvor-run/cli      # or: cargo install salvor-cli
+# or, from a checkout of this repository:
 cargo build
+
 salvor run --fixture examples/hero
 ```
 
