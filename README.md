@@ -15,7 +15,7 @@ That's the job here. Your process is the ship, the run is the cargo, and the dur
 - **Hard budgets.** Ceilings on steps, tokens, dollars, and wall time, enforced by the runtime rather than suggested to the model. Wall time is measured between recorded clock observations, never against the ambient clock.
 - **One static binary.** The event store and the web UI ship inside it.
 
-**Status:** v0.5.0, on crates.io. Rust 1.95 or newer.
+**Status:** published on crates.io, PyPI and npm; see the [releases](https://github.com/joseym/salvor/releases) for the current version. Rust 1.95 or newer.
 
 ## Quickstart
 
@@ -30,7 +30,10 @@ Or take the binary straight from the [release page](https://github.com/joseym/sa
 curl -LsSf https://github.com/joseym/salvor/releases/latest/download/salvor-cli-installer.sh | sh
 ```
 
-All four routes install the same `salvor`. Examples below call it by name; from a checkout it is `./target/debug/salvor`.
+Linux builds come in both glibc and static musl flavours, so the same binary runs on Alpine and in
+slim containers. There is also a container image: see [docs/CONTAINER.md](docs/CONTAINER.md).
+
+All routes install the same `salvor`. Examples below call it by name; from a checkout it is `./target/debug/salvor`.
 
 An agent is a TOML file. Save this as `hello-agent.toml`:
 
