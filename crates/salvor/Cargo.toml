@@ -47,7 +47,8 @@ salvor-wasm = { path = "../salvor-wasm", version = "=0.5.2", optional = true }
 
 [package.metadata.docs.rs]
 # Document the whole surface, including the opt-in modules, so the crate page shows what is
-# available rather than only the default build.
+# available rather than only the default build. `ui` is deliberately absent from this: the
+# dashboard assets live outside the published package, so no registry build can embed them.
 all-features = true
 
 [dev-dependencies]

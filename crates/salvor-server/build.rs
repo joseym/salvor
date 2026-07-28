@@ -56,9 +56,18 @@ fn emit_ui_asset_shim() {
     let manifest = std::env::var("CARGO_MANIFEST_DIR")
         .expect("CARGO_MANIFEST_DIR is always set for a build script");
     let assets = Path::new(&manifest).join("../../bridge/dist/bridge/browser");
-    // A best-effort create: if it already exists (the common case), this is a
-    // no-op; a genuine failure surfaces when the embed macro cannot find it.
-    let _ = std::fs::create_dir_all(&assets);
+    // If it already exists (the common case in a checkout) this is a no-op. When it cannot be
+    // created the build is doomed either way, so say why here rather than letting the embed macro
+    // report a missing folder: the usual cause is building from a published crate, where the path
+    // points outside the package and no registry build can produce it.
+    if let Err(err) = std::fs::create_dir_all(&assets) {
+        println!(
+            "cargo::warning=the `ui` feature needs {} , which could not be created ({err}). \
+             The dashboard assets live outside this package, so `ui` only works from a checkout \
+             that has run the Bridge build; a crates.io build should leave the feature off.",
+            assets.display()
+        );
+    }
 }
 
 fn emit_git_commit() {

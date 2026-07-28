@@ -9,11 +9,13 @@ repository.workspace = true
 license.workspace = true
 
 [features]
-# The embedded dashboard. On by default so the shipped `salvor serve` answers
-# both the API and the web app on one origin; off (`--no-default-features`, or a
-# feature set that omits it) builds a headless, API-only control plane that
-# pulls in neither rust-embed nor the asset tree.
-default = ["ui"]
+# The embedded dashboard is OPT-IN, because it cannot work from a published crate: the assets it
+# embeds live at ../../bridge/dist, outside this package, so a crates.io consumer building with
+# `ui` gets a compile error about a folder that a registry build has no way to produce. Leaving it
+# off by default means `cargo add salvor-server` builds a headless, API-only control plane
+# everywhere. `salvor-cli` names `ui` explicitly, so the shipped `salvor serve` is unaffected and
+# still answers the API and the web app on one origin.
+default = []
 ui = ["dep:rust-embed"]
 
 [dependencies]
