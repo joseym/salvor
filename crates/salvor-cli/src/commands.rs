@@ -480,7 +480,9 @@ pub async fn list(store_path: &Path) -> Result<u8> {
         let status = render::status_label(&derive_state(&log).status).to_owned();
         rows.push((summary, status));
     }
-    print!("{}", render::list_table(&rows));
+    // anstream, not print!: it strips the table's styling when stdout is a pipe or a file, and
+    // honours NO_COLOR and CLICOLOR, so redirected output stays plain text.
+    anstream::print!("{}", render::list_table(&rows));
     Ok(0)
 }
 

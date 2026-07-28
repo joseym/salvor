@@ -155,23 +155,63 @@ pub fn abandoned_report(
     out
 }
 
+/// The colour a status earns, grouped by what it asks of the reader rather than by name. Scanning a
+/// long list, the question is never "which state is this" but "does anything here need me", so the
+/// four groups are: finished cleanly, finished badly, waiting on a human, still moving.
+///
+/// The same grouping the web UI uses, so an operator reading both does not learn two vocabularies.
+fn status_style(status: &str) -> anstyle::Style {
+    use anstyle::AnsiColor;
+
+    let color = match status {
+        "completed" => AnsiColor::Green,
+        "failed" => AnsiColor::Red,
+        // Waiting on a person. Yellow because it is the only group where the list is a to-do list.
+        "suspended" | "needs-reconciliation" | "budget-exceeded" => AnsiColor::Yellow,
+        // Moving on its own; nothing to do but wait.
+        "running" | "awaiting-model" | "awaiting-tool" => AnsiColor::Cyan,
+        // Terminal, but by choice or by never having begun: present, and deliberately quiet.
+        "abandoned" | "not-started" => {
+            return anstyle::Style::new().dimmed();
+        }
+        _ => return anstyle::Style::new(),
+    };
+    anstyle::Style::new().fg_color(Some(color.into()))
+}
+
 /// The `list` table: a header plus one row per run. `rows` pairs each summary
 /// with its derived status label (the store does not carry status; it is a
 /// replay-time projection, so the caller folds each log first).
+///
+/// The status cell carries ANSI styling unconditionally. Stripping it is the writer's job, not
+/// this function's: the caller prints through an [`anstream`] stream, which removes the codes when
+/// stdout is not a terminal and honours `NO_COLOR`. That keeps `salvor list | grep completed`
+/// working and keeps this function's output a pure function of its input.
 #[must_use]
 pub fn list_table(rows: &[(RunSummary, String)]) -> String {
+    let header = anstyle::Style::new().bold();
     let mut out = format!(
-        "{:<36}  {:<20}  {:>6}  {:<20}  {:<20}\n",
-        "RUN ID", "STATUS", "EVENTS", "STARTED", "LAST ACTIVITY"
+        "{header}{:<36}  {:<20}  {:>6}  {:<20}  {:<20}{header:#}\n",
+        "RUN ID",
+        "STATUS",
+        "EVENTS",
+        "STARTED",
+        "LAST ACTIVITY",
+        header = header,
     );
     for (summary, status) in rows {
+        // Pad BEFORE styling: escape codes are zero-width on screen but count as characters to
+        // `{:<20}`, so a styled-then-padded cell would shear the columns to the right of it.
+        let style = status_style(status);
+        let padded = format!("{status:<20}");
         out.push_str(&format!(
-            "{:<36}  {:<20}  {:>6}  {:<20}  {:<20}\n",
+            "{:<36}  {style}{padded}{style:#}  {:>6}  {:<20}  {:<20}\n",
             summary.run_id.as_uuid(),
-            status,
             summary.event_count,
             format_ts(summary.first_recorded_at),
             format_ts(summary.last_recorded_at),
+            style = style,
+            padded = padded,
         ));
     }
     out
@@ -349,4 +389,83 @@ fn indent(text: &str, spaces: usize) -> String {
         .map(|line| format!("{pad}{line}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Strips ANSI escape sequences, so a test can measure what a reader actually sees rather than
+    /// what was written. Deliberately naive: it only needs to handle the CSI sequences anstyle
+    /// emits here, not the full grammar.
+    fn visible(text: &str) -> String {
+        let mut out = String::new();
+        let mut chars = text.chars();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' {
+                for c in chars.by_ref() {
+                    if c == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    /// The grouping is the contract, not the individual colours: a reader scans for "does this need
+    /// me", so anything waiting on a person must be visually distinct from anything still moving,
+    /// and both from the two terminal outcomes.
+    #[test]
+    fn statuses_are_coloured_by_what_they_ask_of_the_reader() {
+        let waiting: Vec<_> = ["suspended", "needs-reconciliation", "budget-exceeded"]
+            .iter()
+            .map(|s| status_style(s))
+            .collect();
+        let moving: Vec<_> = ["running", "awaiting-model", "awaiting-tool"]
+            .iter()
+            .map(|s| status_style(s))
+            .collect();
+
+        assert!(
+            waiting.windows(2).all(|pair| pair[0] == pair[1]),
+            "every waiting-on-a-human status shares one colour"
+        );
+        assert!(
+            moving.windows(2).all(|pair| pair[0] == pair[1]),
+            "every in-progress status shares one colour"
+        );
+        assert_ne!(waiting[0], moving[0], "waiting must not look like moving");
+        assert_ne!(
+            status_style("completed"),
+            status_style("failed"),
+            "the two terminal outcomes must not look alike"
+        );
+        assert_eq!(
+            status_style("something-new-we-added-later"),
+            anstyle::Style::new(),
+            "an unrecognised status renders unstyled rather than miscoloured"
+        );
+    }
+
+    /// Escape codes are zero-width on screen but count toward `{:<20}`, so styling a cell before
+    /// padding it shears every column to its right. This is the regression that would produce.
+    #[test]
+    fn styling_does_not_disturb_the_column_widths() {
+        let row = format!(
+            "{:<36}  {style}{padded}{style:#}  {:>6}\n",
+            "run-id",
+            42,
+            style = status_style("completed"),
+            padded = format!("{:<20}", "completed"),
+        );
+        let plain = format!("{:<36}  {:<20}  {:>6}\n", "run-id", "completed", 42);
+        assert_eq!(
+            visible(&row),
+            plain,
+            "with the styling stripped, a styled row is byte-identical to an unstyled one"
+        );
+    }
 }

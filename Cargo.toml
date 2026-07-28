@@ -84,6 +84,11 @@ rust-embed = "8"
 # parses the agent-definition file (agents are data); tracing-subscriber
 # renders the human-readable run/seq progress to stderr.
 clap = { version = "4", features = ["derive", "env"] }
+# Terminal styling for the CLI tables. anstyle is the style vocabulary; anstream is the
+# stream that strips those codes when stdout is not a terminal, and honours NO_COLOR and
+# CLICOLOR, so a piped `salvor list` stays plain text.
+anstyle = "1"
+anstream = "1"
 toml = "0.8"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Process discovery behind `salvor serve --kill`: finding a running
