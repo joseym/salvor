@@ -2,6 +2,28 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.5.3 - 2026-07-28
+#### Features
+- (**cli**) complete and validate the list filters, and add shell completions - (a0a2cbd) - Josey Morton
+- (**cli**) colour the list table by what each status asks of the reader - (6d076fe) - Josey Morton
+- (**cli**) run a self-contained fixture directory offline - (586f1da) - Josey Morton
+- (**cli**) add the salvage-claim MCP server for the hero fixture - (af6906a) - Josey Morton
+- (**examples**) add the hero fixture behind salvor run --fixture - (412d4b8) - Josey Morton
+#### Bug Fixes
+- (**examples**) run the polyglot Python app against the published package - (169b1fd) - Josey Morton
+- (**examples**) install the published client and stop assuming one node path - (b02b826) - Josey Morton
+- (**examples**) let the polyglot example run on ports a real server is not using - (8a4a45e) - Josey Morton
+- (**sdks**) correct the TypeScript example against the real client API - (d1c5e52) - Josey Morton
+- (**server**) make the embedded dashboard opt-in so the crate builds from the registry - (9eee8f3) - Josey Morton
+#### Documentation
+- (**examples**) install the published packages instead of building from source - (14cc849) - Josey Morton
+#### Tests
+- (**cli**) prove the hero fixture runs offline and writes once - (ee02257) - Josey Morton
+#### Miscellaneous Chores
+- (**examples**) track the polyglot TypeScript lockfile - (24813da) - Josey Morton
+
+- - -
+
 ## v0.5.2 - 2026-07-27
 #### Features
 - (**salvor**) make the umbrella crate a real facade over the family - (9659b59) - Josey Morton

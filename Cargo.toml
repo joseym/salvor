@@ -27,7 +27,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.5.2"
+version = "0.5.3"
 edition = "2024"
 repository = "https://github.com/joseym/salvor"
 license = "MIT OR Apache-2.0"
