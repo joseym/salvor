@@ -27,7 +27,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.5.3"
+version = "0.6.0"
 edition = "2024"
 repository = "https://github.com/joseym/salvor"
 license = "MIT OR Apache-2.0"
@@ -38,19 +38,19 @@ keywords = ["durable-execution", "event-sourcing", "agents", "workflow", "replay
 categories = ["asynchronous", "development-tools", "web-programming"]
 
 [workspace.dependencies]
-salvor-replay = { path = "crates/salvor-replay", version = "0.5.0" }
-salvor-replay-wasm = { path = "crates/salvor-replay-wasm", version = "0.5.0" }
-salvor-graph = { path = "crates/salvor-graph", version = "0.5.0" }
-salvor-core = { path = "crates/salvor-core", version = "0.5.0" }
-salvor-store = { path = "crates/salvor-store", version = "0.5.0" }
-salvor-store-conformance = { path = "crates/salvor-store-conformance", version = "0.5.0" }
-salvor-llm = { path = "crates/salvor-llm", version = "0.5.0" }
-salvor-tools = { path = "crates/salvor-tools", version = "0.5.0" }
-salvor-tools-macros = { path = "crates/salvor-tools-macros", version = "0.5.0" }
-salvor-runtime = { path = "crates/salvor-runtime", version = "0.5.0" }
-salvor-engine = { path = "crates/salvor-engine", version = "0.5.0" }
-salvor-wasm = { path = "crates/salvor-wasm", version = "0.5.0" }
-salvor-server = { path = "crates/salvor-server", version = "0.5.0" }
+salvor-replay = { path = "crates/salvor-replay", version = "0.6.0" }
+salvor-replay-wasm = { path = "crates/salvor-replay-wasm", version = "0.6.0" }
+salvor-graph = { path = "crates/salvor-graph", version = "0.6.0" }
+salvor-core = { path = "crates/salvor-core", version = "0.6.0" }
+salvor-store = { path = "crates/salvor-store", version = "0.6.0" }
+salvor-store-conformance = { path = "crates/salvor-store-conformance", version = "0.6.0" }
+salvor-llm = { path = "crates/salvor-llm", version = "0.6.0" }
+salvor-tools = { path = "crates/salvor-tools", version = "0.6.0" }
+salvor-tools-macros = { path = "crates/salvor-tools-macros", version = "0.6.0" }
+salvor-runtime = { path = "crates/salvor-runtime", version = "0.6.0" }
+salvor-engine = { path = "crates/salvor-engine", version = "0.6.0" }
+salvor-wasm = { path = "crates/salvor-wasm", version = "0.6.0" }
+salvor-server = { path = "crates/salvor-server", version = "0.6.0" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

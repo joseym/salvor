@@ -16,7 +16,7 @@ salvor-core.workspace = true
 # dependency rather than `workspace = true` because cargo forbids a member
 # from overriding the workspace entry's default-features, and the workspace
 # entry keeps defaults on for the consumers that want MCP.
-salvor-tools = { path = "../salvor-tools", version = "0.5.0", default-features = false }
+salvor-tools = { path = "../salvor-tools", version = "0.6.0", default-features = false }
 serde_json.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true

@@ -2,6 +2,25 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.6.0 - 2026-07-28
+#### Features
+- (**cli**) complete real run ids and agents from the store - (ade1e23) - Josey Morton
+- (**cli**) describe the CLI surface in a checked-in manifest, gated against drift - (09c5d0a) - Josey Morton
+- (**container**) publish an API-only image with a durable store volume - (52eb350) - Josey Morton
+#### Bug Fixes
+- (**release**) stamp the version everywhere a bump has to reach - (4bc9b63) - Josey Morton
+#### Documentation
+- (**examples**) point the hero and index docs at the published packages - (bb32155) - Josey Morton
+- describe the release pipeline as one that has shipped - (93a740d) - Josey Morton
+- re-record the demo with the list filters - (9f4a7a8) - Josey Morton
+- stop pinning a version in the README and name the new install routes - (44852d7) - Josey Morton
+#### Build system
+- ship statically linked musl binaries and gate them in CI - (b661081) - Josey Morton
+#### Style
+- satisfy rustfmt and the nested-format lint in the CLI - (928de03) - Josey Morton
+
+- - -
+
 ## v0.5.3 - 2026-07-28
 #### Features
 - (**cli**) complete and validate the list filters, and add shell completions - (a0a2cbd) - Josey Morton
