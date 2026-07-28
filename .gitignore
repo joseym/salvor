@@ -1,6 +1,8 @@
 /target
 /salvor.db*
 /findings.txt
+# The hero example's default write target when SALVOR_HERO_CLAIMS is unset.
+/claims.txt
 
 # A stray self-referential symlink and the personal study material that
 # renders from it; neither belongs in the published tree.

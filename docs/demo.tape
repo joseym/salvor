@@ -73,13 +73,21 @@ Type "kill -9 $SALVOR_PID" Enter
 Sleep 2s
 
 # --- 5. the crashed run is still in the store, awaiting a model call ----------
-Type "salvor list" Enter
-Sleep 3s
+# `--group progress` asks the question an operator actually has after a crash:
+# which runs are unfinished? A killed run folds to awaiting-model, so it is the
+# one this returns. The status column is coloured by the same grouping.
+Type "salvor list --group progress" Enter
+Sleep 4s
 
 # Capture the run id mechanically for the resume command (it is a fresh UUID
-# each recording; the salvor list above shows the same id on screen).
+# each recording; the filtered list above shows that same id on screen).
+#
+# Hide only stops vhs recording frames, so the shell's echo of this line would
+# still be sitting in the buffer when Show resumes. The trailing printf walks
+# the cursor back over the echoed line and clears from there down, and the next
+# prompt draws in its place.
 Hide
-Type `RUN_ID=$(salvor list | awk 'NR==2 {print $1}')` Enter
+Type `RUN_ID=$(salvor list | awk 'NR==2 {print $1}'); printf '\033[1A\033[J'` Enter
 Show
 
 # --- 6. resume: replay the log, run only the unrecorded steps ----------------
@@ -92,4 +100,8 @@ Sleep 4s
 
 # --- 8. exactly nine findings: nothing was written twice ---------------------
 Type "wc -l findings.txt" Enter
+Sleep 4s
+
+# --- 9. and the run now reads as finished -------------------------------------
+Type "salvor list --status completed" Enter
 Sleep 4s
