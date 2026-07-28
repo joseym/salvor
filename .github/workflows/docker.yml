@@ -1,0 +1,181 @@
+name: Docker
+
+# The branch build answers exactly one question: has the Dockerfile stopped
+# working, while there is still time to notice before a release depends on
+# it. Only the Rust workspace and the recipe itself feed the image, so only a
+# change to those can change that answer -- a README edit, a Bridge change,
+# an SDK doc fix cannot, and most pushes to this repo are exactly that.
+# Recompiling the whole tree to re-answer a question those commits never
+# asked costs nobody money on a public repository, but it does cost
+# wall-clock and a concurrency slot the Rust gates in ci.yml would rather
+# have. So the branch build is filtered to the paths that actually feed the
+# image; the tag build is not, because a release must build no matter what
+# its commit happened to touch.
+#
+# That filter is a job-level condition (the `changes` job below) rather than
+# `paths:` on the trigger here, because `paths` cannot be scoped to one ref
+# pattern: GitHub ANDs it with the branches/tags match, so it would gate the
+# tag push too -- and a tag pushed onto a commit already sitting on main
+# carries no file changes at all, which would leave a release silently
+# unbuilt. YAML also forbids a second `push:` key in this mapping, so two
+# trigger blocks are not expressible in one file. Deciding in a job keeps the
+# tag path unconditional by construction rather than by careful filter
+# wording.
+#
+# This workflow is also deliberately separate from ci.yml rather than a job
+# bolted onto it, so an image build never blocks the fast Rust test/clippy
+# feedback loop.
+#
+# Only a pushed `v*` tag logs in and pushes to GHCR, and only a tag builds
+# both published architectures; see the platform reasoning on the planning
+# step below. A push to main never publishes anything: the build step runs
+# with push: false, which still compiles the image but discards the result.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+env:
+  IMAGE: ghcr.io/joseym/salvor
+
+permissions:
+  contents: read
+  # Only the tag-triggered push actually uses this (the login step below is
+  # skipped otherwise), but permissions are granted per workflow, not
+  # conditionally per step, so it has to be declared here regardless.
+  packages: write
+
+jobs:
+  # The cheap gate: works out whether the expensive job below has anything to
+  # prove. A checkout and a `git diff`, no toolchain and no image, so an
+  # unrelated commit pays seconds rather than minutes.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.decide.outputs.build }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # The diff below needs the commit the branch pointed at BEFORE this
+          # push, which a depth-1 checkout does not fetch.
+          fetch-depth: 0
+
+      - name: Decide whether the image needs rebuilding
+        id: decide
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          # A tag always builds, whatever it touched.
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # No usable predecessor to diff against -- a branch created by this
+          # push (`before` is all zeroes), or a force-push that discarded the
+          # commit it names. Build rather than skip: a needless build wastes
+          # minutes, a wrongly skipped one lets a broken Dockerfile reach a
+          # release unnoticed, which is the failure this job exists to catch.
+          if [[ -z "${BEFORE}" || "${BEFORE}" =~ ^0+$ ]] \
+             || ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Everything the Dockerfile's build context reads (Cargo.toml,
+          # Cargo.lock, crates/) plus the recipe and this workflow itself.
+          # Nothing else in the tree can change the resulting image.
+          if git diff --name-only "${BEFORE}" "${GITHUB_SHA}" \
+             | grep -Eq '^(Dockerfile|\.dockerignore|Cargo\.toml|Cargo\.lock|\.github/workflows/docker\.yml)$|^crates/'; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: changes
+    if: needs.changes.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # linux/arm64 has no native GitHub-hosted runner, so the arm64 leg of
+      # a tag's multi-platform build runs under QEMU emulation on this amd64
+      # runner rather than cross-compiling. Harmless on a push to main, where
+      # the build is amd64-only and never invokes it.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # GITHUB_TOKEN, not a stored secret: the built-in token is enough to
+      # push a package to GHCR under this same repository's owner, exactly
+      # like release.yml's built-in-token GitHub Release publish. Skipped
+      # entirely off a version tag, since there is nothing to push.
+      - name: Log in to GHCR
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # TAGS. A version tag publishes the exact version (v1.2.3's leading "v"
+      # stripped, matching the bare version numbers salvor's other release
+      # channels use). `latest` is added ONLY for a stable version: cog's
+      # tag_prefix makes a release candidate `v0.6.0-rc.1`, and moving
+      # `latest` there would hand a prerelease to everyone running
+      # `ghcr.io/joseym/salvor:latest` without them ever asking for one. A
+      # prerelease still publishes its own version tag, so it stays
+      # installable by exact name.
+      #
+      # PLATFORMS, and the wall-clock. A tag builds both published
+      # architectures, because that is the artifact people actually pull. A
+      # push to main builds linux/amd64 ONLY. That build exists to catch "the
+      # Dockerfile stopped working", and amd64 proves that by itself -- the
+      # arm64 leg would re-prove the same Dockerfile against the same sources
+      # under QEMU emulation, roughly 5-10x slower than the ~6 minutes an
+      # aarch64 build of this tree takes natively, compiling the whole
+      # wasmtime tree each time. Tens of minutes of runner time and a held
+      # concurrency slot, for a second copy of a rarely-broken proof, is not a
+      # trade worth making.
+      #
+      # The alternative (keep both platforms everywhere, add
+      # cache-from/cache-to: type=gha) was considered and NOT taken: the
+      # Actions cache is capped at 10 GB per repository and evicts
+      # least-recently-used, which a two-architecture cache of this
+      # dependency tree would blow through, so the expensive emulated build
+      # would come back on eviction rather than reliably staying cheap. It
+      # also would not help the case that most wants help -- a tag build,
+      # which is rare enough that its cache entries are usually evicted or
+      # past the 7-day idle window by the time it runs.
+      - name: Compute image tags and platforms
+        id: plan
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            echo "platforms=linux/amd64,linux/arm64" >> "$GITHUB_OUTPUT"
+            {
+              echo "tags<<EOF"
+              echo "${IMAGE}:${version}"
+              # Stable versions only: 1.2.3 moves `latest`, 1.2.3-rc.1 does not.
+              if [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                echo "${IMAGE}:latest"
+              fi
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "platforms=linux/amd64" >> "$GITHUB_OUTPUT"
+            # Never pushed (push: false below), so this only has to be a
+            # valid reference, not a meaningful one.
+            echo "tags=${IMAGE}:ci-build" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build (push + tag only on a v* tag)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ steps.plan.outputs.platforms }}
+          push: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          tags: ${{ steps.plan.outputs.tags }}

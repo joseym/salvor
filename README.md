@@ -77,6 +77,41 @@ The smallest version of all of this is [`examples/hero/`](examples/hero/), the r
 salvor run --fixture examples/hero
 ```
 
+## Shell completion
+
+There are two kinds, and they compose. The static one prints a script that knows
+every verb, flag, and fixed value set:
+
+```sh
+salvor completions zsh > ~/.zfunc/_salvor      # or bash, fish, elvish, powershell
+```
+
+The dynamic one adds the values only your store knows — the run ids for
+`history`, `replay`, `resume`, `abandon`, `resolve` and `fork`, and the agent
+identities for `salvor list --agent`. It works by calling `salvor` back on each
+Tab, so add one line to your shell's rc file rather than writing a script to disk:
+
+```sh
+# ~/.zshrc, after compinit
+eval "$(COMPLETE=zsh salvor)"
+
+# ~/.bashrc
+eval "$(COMPLETE=bash salvor)"
+```
+
+Then `salvor history <TAB>` offers the run ids actually in your store, newest
+first, narrowing as you type; `salvor list --agent <TAB>` offers the agent
+hashes present, plus `graph run` if you have run a graph. The store it reads is
+the one the command would use: a `--store` already typed on the line, else
+`SALVOR_STORE`, else `./salvor.db`.
+
+It is deliberately unable to interrupt you. No store, an unreadable store, or a
+store busy under another writer all produce no candidates and no message — never
+an error in your prompt — and every lookup runs under a 150 ms deadline with a
+cap of 50 runs inspected, so Tab never blocks on a database. Enable both: the
+static script covers five shells and needs no store, and the dynamic one adds
+the values to it for zsh and bash.
+
 ## The Bridge
 
 `salvor serve` puts the runtime on a network and serves a web UI from the same binary, on the same origin. No separate deploy, no CORS.
@@ -118,6 +153,8 @@ An agent is data: `POST /v1/agents` hashes the definition and returns the hash, 
 Every guarantee the CLI has holds over HTTP, because the same runtime enforces it. A second surface under `/v1/client-runs` inverts ownership: your client drives the agent loop and appends its own events, and the server re-folds the log on each append to confirm the event is a legal next one. Model and tool calls stay server-side, since the server holds the key and the binaries.
 
 Full contract — every route, status code, and event shape — in [`crates/salvor-server/API.md`](crates/salvor-server/API.md). Prompt recording is off by default and writes request bodies to the durable log when enabled; see the API doc before turning it on.
+
+A container image is published to `ghcr.io/joseym/salvor` on tagged releases — API-only, no bundled UI. See [`docs/CONTAINER.md`](docs/CONTAINER.md) for the `docker run` command and why the store volume is mandatory.
 
 ### Clients
 

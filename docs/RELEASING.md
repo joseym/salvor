@@ -39,6 +39,14 @@ Once the first release is published, the install commands are:
   npm install -g @salvor-run/cli
   ```
 
+However it was installed, the binary carries its own shell completion and needs
+no extra artifact from the pipeline: `salvor completions <shell>` prints a
+static script, and `eval "$(COMPLETE=zsh salvor)"` in an rc file adds dynamic
+completion of run ids and agent identities from the user's own store. Neither
+is packaged or shipped separately — the binary generates both at runtime — so a
+release has nothing to do for either. The README's "Shell completion" section is
+the user-facing instructions.
+
 Rust users who want to build from source can still use cargo. This is the one
 path that needs a toolchain:
 
@@ -114,6 +122,17 @@ To cut a release:
    - publishes the npm installer package to the registry.
 
 Rust is required only in CI; end users never need it installed.
+
+A container image is a separate, parallel pipeline: `.github/workflows/docker.yml`
+builds `ghcr.io/joseym/salvor` on pushes to `main` that touch the workspace or
+the Dockerfile (proof it still builds, skipped for commits that cannot affect
+the image) and publishes it for `linux/amd64` and `linux/arm64` on the same
+`v*` tag this section describes, whatever that tag touched. A stable tag
+publishes the version and moves `latest`; a
+prerelease tag publishes only its own version, so `latest` never points at a
+release candidate. It shares nothing with `dist` or the workflow above —
+different job, different artifact, different registry. See
+[CONTAINER.md](CONTAINER.md) for how to run the image.
 
 The release workflow is separate from `ci.yml`. `ci.yml` runs the test, clippy,
 and format gates on pushes and pull requests to `main`; it is untouched by this
