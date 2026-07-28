@@ -9,12 +9,12 @@ npm install @salvor-run/client
 ```ts
 import { SalvorClient } from "@salvor-run/client";
 
-const salvor = new SalvorClient({ baseUrl: "http://127.0.0.1:8080" });
-const agent = await salvor.registerAgent(definition);
-const run = await salvor.startRun({ agent, input });
+const salvor = new SalvorClient("http://127.0.0.1:8080");
+const agent = await salvor.registerAgent(agentToml);
+const runId = await salvor.startRun(agent, { question: "..." });
 
-for await (const event of salvor.streamEvents(run)) {
-  console.log(event.seq, event.event.kind);
+for await (const event of salvor.streamEvents(runId)) {
+  console.log(event.seq, event.kind);
 }
 ```
 
