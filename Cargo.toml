@@ -14,6 +14,7 @@ members = [
     "crates/salvor-engine",
     "crates/salvor-wasm",
     "crates/salvor-server",
+    "crates/salvor-cli-core",
     "crates/salvor-cli",
     "crates/salvor",
 ]
@@ -51,6 +52,7 @@ salvor-runtime = { path = "crates/salvor-runtime", version = "0.6.0" }
 salvor-engine = { path = "crates/salvor-engine", version = "0.6.0" }
 salvor-wasm = { path = "crates/salvor-wasm", version = "0.6.0" }
 salvor-server = { path = "crates/salvor-server", version = "0.6.0" }
+salvor-cli-core = { path = "crates/salvor-cli-core", version = "0.6.0" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

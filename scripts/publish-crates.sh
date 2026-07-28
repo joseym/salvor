@@ -47,6 +47,7 @@ ORDER=(
   salvor-engine
   salvor-wasm
   salvor-server
+  salvor-cli-core
   salvor-cli
   salvor-replay-wasm
   salvor

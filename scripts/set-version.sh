@@ -97,6 +97,7 @@ fi
 # above.
 for member_manifest in \
   "$ROOT/crates/salvor-cli/Cargo.toml" \
+  "$ROOT/crates/salvor-cli-core/Cargo.toml" \
   "$ROOT/crates/salvor-wasm/Cargo.toml" \
   "$ROOT/crates/salvor-replay-wasm/Cargo.toml"; do
   [ -f "$member_manifest" ] || continue

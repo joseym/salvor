@@ -1,0 +1,28 @@
+[package]
+name = "salvor-cli-core"
+description = "The pure half of the Salvor CLI: its clap command tree and its value-to-text renderer, with no IO, so the same parser and renderer can drive a terminal in a browser"
+keywords.workspace = true
+categories.workspace = true
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+# The event model, the run values a surface reads back out of a log
+# (ParkReason, RunSummary), and the shared event kind/detail rendering.
+# Depended on directly rather than through salvor-core so `default-features =
+# false` can turn off the host-only `rng` feature: that is what keeps this
+# crate free of a randomness backend and buildable for
+# wasm32-unknown-unknown. The types are the same ones salvor-core re-exports.
+salvor-replay = { path = "../salvor-replay", version = "0.6.0", default-features = false }
+# The graph document summary `graph validate` prints. A pure, IO-free leaf.
+salvor-graph.workspace = true
+clap.workspace = true
+clap_complete.workspace = true
+# The style vocabulary for the status column. anstyle only describes a style;
+# the stream that decides whether to emit or strip the codes lives with the
+# caller that owns stdout.
+anstyle.workspace = true
+serde_json.workspace = true
+time.workspace = true

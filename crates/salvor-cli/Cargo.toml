@@ -103,6 +103,11 @@ path = "src/bin/hero_tools.rs"
 required-features = ["fixture"]
 
 [dependencies]
+# The CLI's pure half: the clap command tree and the renderer. Both are
+# re-exported from this crate (`salvor_cli::cli`, `salvor_cli::render`), so the
+# parser a browser terminal drives and the parser this binary runs on are one
+# body of code that cannot drift.
+salvor-cli-core.workspace = true
 salvor-core.workspace = true
 # The graph document format + validator behind `salvor graph`. A pure, IO-free
 # leaf: the CLI depends on it, never the other way, so there is no cycle.

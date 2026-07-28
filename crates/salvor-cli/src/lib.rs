@@ -45,7 +45,6 @@
 
 pub mod agent_config;
 pub mod checkout;
-pub mod cli;
 pub mod commands;
 pub mod completion;
 #[cfg(feature = "fixture")]
@@ -57,6 +56,11 @@ pub mod fixture;
 pub mod manifest;
 pub mod render;
 pub mod serve_kill;
+
+/// The `clap` parse tree, which lives in [`salvor_cli_core`] so a browser
+/// terminal can parse a command line with the real parser rather than a copy.
+/// Re-exported here so `salvor_cli::cli::Cli` keeps naming it.
+pub use salvor_cli_core::cli;
 
 use anyhow::Result;
 

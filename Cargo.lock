@@ -2423,6 +2423,7 @@ dependencies = [
  "libc",
  "predicates",
  "rmcp",
+ "salvor-cli-core",
  "salvor-core",
  "salvor-engine",
  "salvor-graph",
@@ -2444,6 +2445,19 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "wiremock",
+]
+
+[[package]]
+name = "salvor-cli-core"
+version = "0.6.0"
+dependencies = [
+ "anstyle",
+ "clap",
+ "clap_complete",
+ "salvor-graph",
+ "salvor-replay",
+ "serde_json",
+ "time",
 ]
 
 [[package]]

@@ -1,7 +1,7 @@
 //! The command-line surface, as `clap` derive types.
 //!
 //! Keeping the parse tree in one module (separate from the handlers in
-//! [`crate::commands`]) means the shape of the CLI reads top to bottom here,
+//! `salvor_cli::commands`) means the shape of the CLI reads top to bottom here,
 //! and the handlers take already-parsed, typed arguments. The one global
 //! option, `--store`, is defined once and shared by every subcommand.
 
@@ -10,8 +10,19 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand};
 
 /// Salvor: a durable execution runtime for AI agents.
+//
+// `about` is written out rather than left bare: bare `about` expands to this
+// crate's own `CARGO_PKG_DESCRIPTION`, which describes the parse tree, whereas
+// the line `salvor --help` opens with has to describe the binary. `version`
+// stays bare because every crate here inherits the one workspace version, so
+// there is only one number it could resolve to.
 #[derive(Debug, Parser)]
-#[command(name = "salvor", version, about, long_about = None)]
+#[command(
+    name = "salvor",
+    version,
+    about = "Salvor CLI: run, resume, list, history, and replay for durable agent runs",
+    long_about = None
+)]
 pub struct Cli {
     /// Path to the SQLite event store.
     ///
@@ -428,7 +439,7 @@ const GROUPS: [&str; 3] = ["waiting", "progress", "terminal"];
 /// actually wanted.
 ///
 /// A plain `value_parser = [..]` would give completion and `--help` values but clap's generic
-/// refusal, which for `awaiting-model` suggests "a similar value exists: 'waiting'" — string
+/// refusal, which for `awaiting-model` suggests "a similar value exists: 'waiting'": string
 /// similarity pointing at the WRONG group, since `awaiting-model` is `progress`. A plain parser
 /// function would give the right message but no completion candidates, because a function cannot
 /// enumerate what it accepts. Implementing the trait is how you get both: `possible_values` feeds
@@ -571,7 +582,7 @@ pub struct ServeArgs {
     /// Off by default: a plain `salvor serve` ships NO tools of its own (see
     /// `salvor_server::ToolRegistry`'s own docs), so a `tool` node or a
     /// client-driven tool step is a clean `unknown_tool` until a host
-    /// registers something — the honest default for a library other hosts
+    /// registers something, the honest default for a library other hosts
     /// (aarg's own render tool, for one) compose their own registry into.
     /// This flag is that one host, built in for demos and for the served
     /// end-to-end suite: with it, a graph carrying `tool` nodes can actually
