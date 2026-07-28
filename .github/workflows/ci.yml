@@ -172,3 +172,39 @@ jobs:
           test -s bridge/dist/bridge/browser/index.html
           test -s bridge/dist/bridge/browser/salvor_replay_wasm_bg.wasm
           strings target/release/salvor | grep -q 'data-beasties-container'
+
+  # Static-linking proof for the musl release targets: a glibc build will not run on
+  # Alpine or in a slim/scratch container, so this has to be its own compile, not an
+  # assumption. Its own job (parallel to `test`, not steps bolted onto it) so a musl
+  # regression is caught on every push instead of only when a release tag cuts the
+  # cross-compiled artifacts via dist.
+  musl:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      # musl-gcc is the C compiler rustc hands off to for this target's native build
+      # scripts: rusqlite's `bundled` feature compiles SQLite from source, and the
+      # wasmtime tree salvor-wasm pulls in has its own native bits. Neither is present
+      # on the runner by default.
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # Same feature set the release build ships (default features off, `ui` named back
+      # in; see crates/salvor-cli/Cargo.toml's [package.metadata.dist]), so this proves
+      # the actual binary users download links and runs statically, not just that some
+      # feature combination happens to compile.
+      - name: Build salvor for musl (static; runs on Alpine and in slim containers)
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: cargo build --release --target x86_64-unknown-linux-musl -p salvor-cli --no-default-features --features ui --bin salvor

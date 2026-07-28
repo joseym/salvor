@@ -10,7 +10,10 @@ ci = "github"
 # The installers to generate for each app
 installers = ["shell", "powershell", "npm", "homebrew"]
 # Target platforms to build apps for (Rust target-triple syntax)
-targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+# The musl pair is statically linked (no glibc dependency), so these are the
+# builds that actually run on Alpine and in slim/scratch containers, where the
+# glibc triples above will not run.
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"]
 # Path that installers should place binaries in
 install-path = "CARGO_HOME"
 # Where to host releases
