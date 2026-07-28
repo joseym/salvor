@@ -1084,7 +1084,11 @@ fn check_graph_resolvable(graph: &Graph, agents: &HashMap<String, Agent>) -> Res
 ///
 /// The same distinction the web UI's agent column draws, and for the same reason: a graph run
 /// genuinely has no one agent, so naming one would be a convenient lie.
-fn agent_identity(log: &[EventEnvelope]) -> String {
+///
+/// Shared with [`crate::completion`], which offers these same identities as Tab candidates for the
+/// flag: what completion offers and what the filter matches are one definition, so they cannot
+/// drift into offering a value the filter would never match.
+pub(crate) fn agent_identity(log: &[EventEnvelope]) -> String {
     log.iter()
         .find_map(|envelope| match &envelope.event {
             Event::RunStarted { agent_def_hash, .. } => Some(agent_def_hash.clone()),

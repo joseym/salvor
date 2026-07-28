@@ -12,6 +12,13 @@ use salvor_cli::cli::Cli;
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // Before tracing, before parsing, before anything reaches stdout: a
+    // completion request is answered by an environment variable and argv that
+    // the parser would (rightly) refuse, and its whole output is the candidate
+    // list a shell reads. See `salvor_cli::completion`.
+    if salvor_cli::completion::try_complete() {
+        return ExitCode::SUCCESS;
+    }
     salvor_cli::init_tracing();
     let cli = Cli::parse();
     match salvor_cli::dispatch(cli).await {

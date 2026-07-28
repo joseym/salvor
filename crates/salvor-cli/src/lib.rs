@@ -11,6 +11,10 @@
 //!   a live [`salvor_runtime::Agent`].
 //! - [`commands`] is one handler per verb, wiring [`salvor_runtime`] and
 //!   [`salvor_store`] together.
+//! - [`completion`] is dynamic shell completion: the run ids and agent
+//!   identities in the operator's own store, answered per Tab. It is additive
+//!   to the static scripts `salvor completions <shell>` prints, which are
+//!   unchanged.
 //! - [`fixture`] is `salvor run --fixture <DIR>`: the offline, self-contained
 //!   fixture directory (agent, input, and a recorded model conversation) and
 //!   the in-process scripted model that serves it.
@@ -43,6 +47,7 @@ pub mod agent_config;
 pub mod checkout;
 pub mod cli;
 pub mod commands;
+pub mod completion;
 #[cfg(feature = "fixture")]
 pub mod demo_script;
 #[cfg(feature = "fixture")]
