@@ -13,8 +13,22 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 for the release-facts gate below. The default checkout is
+      # a single commit with no tags, and that gate derives the shipped versions
+      # from the `v*` tags and the release each workflow first ran in from the
+      # commit that added it, so it needs the tags and the history behind them.
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The generated block in docs/RELEASING.md must still match the tags,
+      # workflow triggers, dist-workspace.toml and publish-crates.sh it is
+      # derived from. Uses only the standard library and reads nothing off the
+      # network, so it needs no setup and cannot flake. Runs before the Rust
+      # toolchain is installed: it is the cheapest gate in the job.
+      - name: Check the generated release facts in docs/RELEASING.md
+        run: scripts/release-facts.py
 
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
@@ -58,7 +72,7 @@ jobs:
   # The Bridge's fold package: salvor-replay-wasm compiled to an npm
   # package, plus the same-fold proof that the wasm fold is byte-identical to the
   # native fold at every prefix of every fixture log. Additive to the purity
-  # build above — it exercises the same wasm32 code path through wasm-bindgen and
+  # build above: it exercises the same wasm32 code path through wasm-bindgen and
   # a Node harness, which the purity build alone does not.
   replay-wasm:
     runs-on: ubuntu-latest
@@ -109,7 +123,7 @@ jobs:
 
   # The embedded-dashboard build. It is its own job, not a step bolted onto the
   # `test` job, on purpose: the test job stays a fast, pure-Rust feedback loop.
-  # It compiles the default `ui` feature without a dashboard present — build.rs
+  # It compiles the default `ui` feature without a dashboard present, so build.rs
   # creates the empty asset folder so the embed macro resolves, and a debug
   # build reads that folder at request time rather than baking it in, so no
   # frontend toolchain is needed to run the Rust tests. Baking the real assets
