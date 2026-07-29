@@ -31,36 +31,112 @@ pub fn history_line(envelope: &EventEnvelope) -> String {
     )
 }
 
+/// The default column width the `salvor` binary passes to the report
+/// functions below.
+///
+/// 80 is what a terminal is unless someone has resized it, and that is the
+/// number that matters here: a line longer than the terminal is wrapped again
+/// by the terminal itself, at whatever column the window happens to end,
+/// which turns one deliberate break into a ragged one nobody chose. Wrapping
+/// at 80 keeps every break ours. The hand-typed text this replaced ran to
+/// about 90 columns and did double-wrap on a default terminal.
+///
+/// A caller that knows its own width, such as a browser terminal sized to its
+/// container, passes that instead of this constant.
+pub const DEFAULT_REPORT_WIDTH: usize = 80;
+
+/// Wraps `text` onto lines no wider than `width` columns, breaking only at
+/// whitespace so a word is never split. `first_prefix` opens the first line
+/// and `rest_prefix` opens every line after it; both count toward `width`,
+/// which is how a numbered list item gets a hanging indent that lines its
+/// continuation up under its own text rather than under the number. A single
+/// word that does not fit after its prefix is still placed on that line
+/// rather than split, since a broken word reads worse than a long line.
+///
+/// This is the only function in this module that reflows text. A report
+/// function calls it exactly on the spans meant to read as paragraphs:
+/// headings and list-item prose. A command line, the aligned key/value
+/// block, and pretty-printed JSON are written straight into the output and
+/// never passed through here, which is the structural reason a command a
+/// reader copies, or a recorded field's alignment, cannot end up broken
+/// across lines: nothing in the report functions below hands those spans to
+/// this function.
+#[must_use]
+fn wrap(text: &str, width: usize, first_prefix: &str, rest_prefix: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = first_prefix.to_owned();
+    let mut prefix_len = first_prefix.len();
+
+    for word in text.split_whitespace() {
+        let has_content = line.len() > prefix_len;
+        if has_content && line.len() + 1 + word.len() > width {
+            lines.push(line);
+            line = rest_prefix.to_owned();
+            prefix_len = rest_prefix.len();
+        } else if has_content {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    lines.push(line);
+    lines.join("\n")
+}
+
 /// The parked report a `run` (or a parking `resume`) prints: why the run
 /// parked and the exact command to type to continue it. Non-error output: a
-/// parked run is a success, not a failure.
+/// parked run is a success, not a failure. `width` is the column count its
+/// prose wraps to; the command line never wraps, see [`wrap`].
 #[must_use]
-pub fn parked_report(run_uuid: &str, reason: &ParkReason, agent_path: &Path) -> String {
+pub fn parked_report(
+    run_uuid: &str,
+    reason: &ParkReason,
+    agent_path: &Path,
+    width: usize,
+) -> String {
     let agent = agent_path.display();
     match reason {
         ParkReason::Suspended {
             reason,
             input_schema,
-        } => format!(
-            "Run {run_uuid} parked: suspended.\n  \
-             reason: {reason}\n  \
-             the resume input must satisfy this schema:\n{}\n\
-             Resume once you have the input:\n  \
-             salvor resume {run_uuid} --agent {agent} --input @resume.json\n",
-            indent(&pretty_json(input_schema), 4),
-        ),
+        } => {
+            let mut out = wrap(&format!("Run {run_uuid} parked: suspended."), width, "", "");
+            out.push_str("\n  reason: ");
+            out.push_str(reason);
+            out.push('\n');
+            out.push_str(&wrap(
+                "the resume input must satisfy this schema:",
+                width,
+                "  ",
+                "  ",
+            ));
+            out.push('\n');
+            out.push_str(&indent(&pretty_json(input_schema), 4));
+            out.push('\n');
+            out.push_str(&wrap("Resume once you have the input:", width, "", ""));
+            out.push_str(&format!(
+                "\n  salvor resume {run_uuid} --agent {agent} --input @resume.json\n"
+            ));
+            out
+        }
         ParkReason::BudgetExceeded { budget, observed } => {
             let kind = budget_kind(budget.kind);
             let extend_key = extend_key(budget.kind);
-            format!(
-                "Run {run_uuid} parked: budget exceeded ({kind}).\n  \
-                 limit:    {}\n  \
-                 observed: {}\n\
-                 Raise the limit and resume:\n  \
-                 salvor resume {run_uuid} --agent {agent} --input '{{\"extend\": {{\"{extend_key}\": <more>}}}}'\n",
+            let mut out = wrap(
+                &format!("Run {run_uuid} parked: budget exceeded ({kind})."),
+                width,
+                "",
+                "",
+            );
+            out.push_str(&format!(
+                "\n  limit:    {}\n  observed: {}\n",
                 fmt_num(budget.limit),
                 fmt_num(*observed),
-            )
+            ));
+            out.push_str(&wrap("Raise the limit and resume:", width, "", ""));
+            out.push_str(&format!(
+                "\n  salvor resume {run_uuid} --agent {agent} --input '{{\"extend\": {{\"{extend_key}\": <more>}}}}'\n"
+            ));
+            out
         }
     }
 }
@@ -74,16 +150,25 @@ pub fn parked_report(run_uuid: &str, reason: &ParkReason, agent_path: &Path) -> 
 /// done externally, and the two honest ways forward, each written out as the
 /// exact command to type. `recorded_at` is the timestamp of the intent
 /// envelope; the caller finds it in the log. Printed before a non-zero exit.
+/// `width` is the column count its prose wraps to; the two command lines and
+/// the recorded-intent block never wrap, see [`wrap`].
 #[must_use]
 pub fn reconciliation_report(
     run_uuid: &str,
     pending: Option<&PendingCall>,
     recorded_at: Option<OffsetDateTime>,
+    width: usize,
 ) -> String {
-    let mut out = format!(
-        "Run {run_uuid} needs reconciliation and cannot be resumed automatically.\n\
-         A write tool call was recorded but never completed, so it may or may not have taken effect.\n"
+    let mut out = wrap(
+        &format!(
+            "Run {run_uuid} needs reconciliation and cannot be resumed automatically. A write \
+             tool call was recorded but never completed, so it may or may not have taken effect."
+        ),
+        width,
+        "",
+        "",
     );
+    out.push('\n');
     if let Some(PendingCall::Tool {
         seq,
         tool,
@@ -94,9 +179,10 @@ pub fn reconciliation_report(
     {
         let key = idempotency_key.as_deref().unwrap_or("<none>");
         let when = recorded_at.map_or_else(|| "<unknown>".to_owned(), format_ts);
+        out.push('\n');
+        out.push_str(&wrap("The recorded intent:", width, "", ""));
         out.push_str(&format!(
-            "\nThe recorded intent:\n  \
-             seq:             {seq}\n  \
+            "\n  seq:             {seq}\n  \
              recorded at:     {when}\n  \
              tool:            {tool}\n  \
              effect:          {effect:?}\n  \
@@ -105,51 +191,98 @@ pub fn reconciliation_report(
             indent(&pretty_json(input), 4),
         ));
     }
-    out.push_str(&format!(
-        "\nBecause the intent was durably recorded before the tool ran, the write may have\n\
-         reached its target, partially applied, or never run at all. Salvor will not guess.\n\
-         \n\
-         There are two honest outcomes. Both begin by verifying externally whether the write\n\
-         took effect, and both end by recording the completion so replay never re-runs it:\n  \
-         1. The write took effect. Record what the tool returned:\n       \
-         salvor resolve {run_uuid} --output '<json the tool returned>'\n  \
-         2. The write did not take effect and still needs to happen. Perform it yourself\n     \
-         first, then record its result the same way. There is no automatic retry for a write.\n"
+    out.push('\n');
+    out.push_str(&wrap(
+        "Because the intent was durably recorded before the tool ran, the write may have \
+         reached its target, partially applied, or never run at all. Salvor will not guess.",
+        width,
+        "",
+        "",
     ));
+    out.push_str("\n\n");
+    out.push_str(&wrap(
+        "There are two honest outcomes. Both begin by verifying externally whether the write \
+         took effect, and both end by recording the completion so replay never re-runs it:",
+        width,
+        "",
+        "",
+    ));
+    out.push('\n');
+    out.push_str(&wrap(
+        "The write took effect. Record what the tool returned:",
+        width,
+        "  1. ",
+        "     ",
+    ));
+    out.push_str(&format!(
+        "\n       salvor resolve {run_uuid} --output '<json the tool returned>'\n"
+    ));
+    out.push_str(&wrap(
+        "The write did not take effect and still needs to happen. Perform it yourself first, \
+         then record its result the same way. There is no automatic retry for a write.",
+        width,
+        "  2. ",
+        "     ",
+    ));
+    out.push('\n');
     out
 }
 
 /// The report `salvor resolve` prints once it has recorded the missing write
 /// completion by hand: the run has left reconciliation and can be continued.
+/// `width` is the column count its prose wraps to; the command line never
+/// wraps, see [`wrap`].
 #[must_use]
-pub fn resolved_report(run_uuid: &str) -> String {
-    format!(
-        "Run {run_uuid} resolved: recorded the missing write completion by hand.\n\
-         The run no longer needs reconciliation. Continue it with:\n  \
-         salvor resume {run_uuid} --agent <agent.toml>\n"
-    )
+pub fn resolved_report(run_uuid: &str, width: usize) -> String {
+    let mut out = wrap(
+        &format!(
+            "Run {run_uuid} resolved: recorded the missing write completion by hand. The run \
+             no longer needs reconciliation. Continue it with:"
+        ),
+        width,
+        "",
+        "",
+    );
+    out.push_str(&format!(
+        "\n  salvor resume {run_uuid} --agent <agent.toml>\n"
+    ));
+    out
 }
 
 /// The report `salvor abandon` prints once it has appended the terminal
 /// `RunAbandoned` by hand. `appended_seq` is the position it landed at, and
 /// `unresolved` is the outstanding write (seq, tool) when a needs-reconciliation
 /// run was abandoned, so the receipt states plainly that the write stays
-/// unresolved and is recorded as such. Nothing was edited or re-run.
+/// unresolved and is recorded as such. Nothing was edited or re-run. `width`
+/// is the column count its prose wraps to, see [`wrap`].
 #[must_use]
 pub fn abandoned_report(
     run_uuid: &str,
     appended_seq: u64,
     unresolved: Option<(u64, &str)>,
+    width: usize,
 ) -> String {
-    let mut out = format!(
-        "Run {run_uuid}: appended RunAbandoned at seq {appended_seq}. Status now abandoned.\n\
-         Nothing was edited or re-run; the run is retired.\n"
+    let mut out = wrap(
+        &format!(
+            "Run {run_uuid}: appended RunAbandoned at seq {appended_seq}. Status now abandoned. \
+             Nothing was edited or re-run; the run is retired."
+        ),
+        width,
+        "",
+        "",
     );
+    out.push('\n');
     if let Some((seq, tool)) = unresolved {
-        out.push_str(&format!(
-            "The write at seq {seq} ({tool}) stays unresolved and is recorded as such; \
-             its effect remains unknown.\n"
+        out.push_str(&wrap(
+            &format!(
+                "The write at seq {seq} ({tool}) stays unresolved and is recorded as such; its \
+                 effect remains unknown."
+            ),
+            width,
+            "",
+            "",
         ));
+        out.push('\n');
     }
     out
 }
@@ -560,5 +693,238 @@ mod tests {
             plain,
             "with the styling stripped, a styled row is byte-identical to an unstyled one"
         );
+    }
+
+    // --- report wrapping ---------------------------------------------------
+
+    use salvor_replay::{Budget, Effect, SequenceNumber};
+
+    const UUID: &str = "00000000-0000-4000-8000-000000000000";
+
+    fn sample_pending() -> PendingCall {
+        PendingCall::Tool {
+            seq: SequenceNumber::new(7),
+            tool: "send_email".to_owned(),
+            input: serde_json::json!({"to": "ops@example.com"}),
+            effect: Effect::Write,
+            idempotency_key: Some("key-123".to_owned()),
+        }
+    }
+
+    fn sample_recorded_at() -> Option<OffsetDateTime> {
+        Some(OffsetDateTime::from_unix_timestamp(1_752_566_400).unwrap())
+    }
+
+    /// Every word in `text`, in the order it appears, regardless of which
+    /// line it landed on. Comparing this between two widths is how a test
+    /// checks that wrapping only ever moves line breaks.
+    fn words(text: &str) -> Vec<&str> {
+        text.split_whitespace().collect()
+    }
+
+    /// `wrap` never drops, reorders, or splits a word, at a width so narrow
+    /// that most words each get their own line.
+    #[test]
+    fn wrap_preserves_word_order_at_a_narrow_width() {
+        let text = "the quick brown fox jumps over the lazy dog and then keeps going";
+        let wrapped = wrap(text, 10, "", "");
+        assert_eq!(words(&wrapped), words(text));
+        for line in wrapped.lines() {
+            assert!(line.len() <= 10, "line exceeds width 10: {line:?}");
+        }
+    }
+
+    /// A word longer than `width` is placed on its own line rather than
+    /// split, because a broken word reads worse than a long line.
+    #[test]
+    fn wrap_does_not_split_a_word_wider_than_the_width() {
+        let wrapped = wrap("short antidisestablishmentarianism short", 10, "", "");
+        assert_eq!(
+            words(&wrapped),
+            vec!["short", "antidisestablishmentarianism", "short"]
+        );
+    }
+
+    /// `first_prefix` and `rest_prefix` both count toward `width`, and a
+    /// continuation line uses `rest_prefix`, not `first_prefix`, which is how
+    /// a numbered list item's wrapped text hangs under its own words instead
+    /// of under the number.
+    #[test]
+    fn wrap_hangs_continuation_lines_under_rest_prefix() {
+        let wrapped = wrap(
+            "The write did not take effect and still needs to happen",
+            30,
+            "  2. ",
+            "     ",
+        );
+        let lines: Vec<&str> = wrapped.lines().collect();
+        assert!(lines.len() > 1, "expected the text to wrap at all");
+        assert!(lines[0].starts_with("  2. "));
+        for line in &lines[1..] {
+            assert!(
+                line.starts_with("     "),
+                "continuation line does not carry the hanging indent: {line:?}"
+            );
+        }
+    }
+
+    /// The same report, wrapped at a narrow and a wide column count, says the
+    /// same thing: only line breaks may move, never words.
+    #[test]
+    fn same_words_at_width_40_and_width_100() {
+        let narrow = reconciliation_report(UUID, Some(&sample_pending()), sample_recorded_at(), 40);
+        let wide = reconciliation_report(UUID, Some(&sample_pending()), sample_recorded_at(), 100);
+        assert_eq!(words(&narrow), words(&wide));
+
+        let narrow = parked_report(
+            UUID,
+            &ParkReason::Suspended {
+                reason: "awaiting operator approval".to_owned(),
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+            Path::new("agent.toml"),
+            40,
+        );
+        let wide = parked_report(
+            UUID,
+            &ParkReason::Suspended {
+                reason: "awaiting operator approval".to_owned(),
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+            Path::new("agent.toml"),
+            100,
+        );
+        assert_eq!(words(&narrow), words(&wide));
+
+        assert_eq!(
+            words(&resolved_report(UUID, 40)),
+            words(&resolved_report(UUID, 100))
+        );
+        assert_eq!(
+            words(&abandoned_report(UUID, 12, Some((3, "send_email")), 40)),
+            words(&abandoned_report(UUID, 12, Some((3, "send_email")), 100))
+        );
+    }
+
+    /// A command a reader is meant to copy verbatim is never broken across
+    /// lines, no matter how narrow the requested width is.
+    #[test]
+    fn command_examples_are_never_split() {
+        let report = reconciliation_report(UUID, Some(&sample_pending()), sample_recorded_at(), 40);
+        assert!(
+            report.lines().any(|line| line
+                == format!("       salvor resolve {UUID} --output '<json the tool returned>'")),
+            "the resolve command must survive on one line:\n{report}"
+        );
+
+        let report = resolved_report(UUID, 40);
+        assert!(
+            report
+                .lines()
+                .any(|line| line == format!("  salvor resume {UUID} --agent <agent.toml>")),
+            "the resume command must survive on one line:\n{report}"
+        );
+
+        let report = parked_report(
+            UUID,
+            &ParkReason::Suspended {
+                reason: "short".to_owned(),
+                input_schema: serde_json::json!({}),
+            },
+            Path::new("agents/writer.toml"),
+            40,
+        );
+        assert!(
+            report.lines().any(|line| line
+                == format!(
+                    "  salvor resume {UUID} --agent agents/writer.toml --input @resume.json"
+                )),
+            "the resume command must survive on one line:\n{report}"
+        );
+    }
+
+    /// The recorded-intent block keeps its label column aligned and its
+    /// values untouched at any width: it is data a reader checks against the
+    /// log, not prose a reader rewraps by eye.
+    #[test]
+    fn the_recorded_intent_block_keeps_its_alignment() {
+        let block = "\n  seq:             7\n  \
+             recorded at:     2025-07-15 08:00:00Z\n  \
+             tool:            send_email\n  \
+             effect:          Write\n  \
+             idempotency key: key-123\n  \
+             input:\n    {\n      \"to\": \"ops@example.com\"\n    }\n";
+        for width in [40, 100] {
+            let report =
+                reconciliation_report(UUID, Some(&sample_pending()), sample_recorded_at(), width);
+            assert!(
+                report.contains(block),
+                "the recorded-intent block at width {width} was reflowed:\n{report}"
+            );
+        }
+    }
+
+    /// No line in a report exceeds the width it was rendered at, except the
+    /// spans this module deliberately never wraps: a command line, the
+    /// recorded-intent block, and pretty-printed JSON.
+    #[test]
+    fn no_wrapped_line_exceeds_its_requested_width() {
+        const WIDTH: usize = 40;
+        let preserved_prefixes = [
+            "  seq:",
+            "  recorded at:",
+            "  tool:",
+            "  effect:",
+            "  idempotency key:",
+            "  input:",
+        ];
+        let is_preserved = |line: &str| {
+            line.contains("salvor ")
+                || preserved_prefixes.iter().any(|p| line.starts_with(p))
+                || line.trim_start().starts_with('{')
+                || line.trim_start().starts_with('}')
+                || line.trim_start().starts_with('"')
+        };
+
+        let reports = [
+            reconciliation_report(UUID, Some(&sample_pending()), sample_recorded_at(), WIDTH),
+            reconciliation_report(UUID, None, None, WIDTH),
+            resolved_report(UUID, WIDTH),
+            abandoned_report(UUID, 12, Some((3, "send_email")), WIDTH),
+            abandoned_report(UUID, 12, None, WIDTH),
+            parked_report(
+                UUID,
+                &ParkReason::Suspended {
+                    reason: "short".to_owned(),
+                    input_schema: serde_json::json!({}),
+                },
+                Path::new("agent.toml"),
+                WIDTH,
+            ),
+            parked_report(
+                UUID,
+                &ParkReason::BudgetExceeded {
+                    budget: Budget {
+                        kind: BudgetKind::Tokens,
+                        limit: 1000.0,
+                    },
+                    observed: 1200.0,
+                },
+                Path::new("agent.toml"),
+                WIDTH,
+            ),
+        ];
+
+        for report in reports {
+            for line in report.lines() {
+                if is_preserved(line) {
+                    continue;
+                }
+                assert!(
+                    line.len() <= WIDTH,
+                    "line exceeds width {WIDTH}: {line:?}\nfull report:\n{report}"
+                );
+            }
+        }
     }
 }

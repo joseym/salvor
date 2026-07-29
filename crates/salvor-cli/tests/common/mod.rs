@@ -187,3 +187,13 @@ pub fn count_lines(count_file: &Path) -> usize {
         .map(|text| text.lines().count())
         .unwrap_or(0)
 }
+
+/// Collapses every run of whitespace in `text` down to a single space, so an
+/// assertion can match a report's wrapped prose by its words instead of by
+/// the exact column the wrapper broke a line at. Only use this for prose
+/// sentences; a command example, an aligned key-value line, or JSON is a
+/// layout guarantee in its own right and should still be matched in its
+/// exact form.
+pub fn flatten_wrapped_prose(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}

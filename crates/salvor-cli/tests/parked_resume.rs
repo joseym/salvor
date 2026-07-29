@@ -53,7 +53,7 @@ async fn budget_park_reports_and_resume_completes() {
     let run_out = String::from_utf8_lossy(&run.stdout);
     assert!(run.status.success(), "parking is not a failure: {run:?}");
     assert!(
-        run_out.contains("parked: budget exceeded (steps)"),
+        common::flatten_wrapped_prose(&run_out).contains("parked: budget exceeded (steps)"),
         "parked report: {run_out}"
     );
     assert!(
@@ -161,7 +161,7 @@ async fn resume_refuses_a_reconciliation_run() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("needs reconciliation"),
+        common::flatten_wrapped_prose(&stdout).contains("needs reconciliation"),
         "refusal explained: {stdout}"
     );
     assert!(

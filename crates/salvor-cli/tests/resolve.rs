@@ -70,17 +70,21 @@ async fn resume_reports_then_resolve_records_the_completion() {
     // `resume` refuses with the enriched reconciliation report. The
     // NeedsReconciliation branch returns before loading the agent, so the path
     // passed to --agent is never read.
-    salvor(&store_path)
+    let refusal = salvor(&store_path)
         .args(["resume", &uuid, "--agent", "/does/not/exist.toml"])
         .assert()
         .code(1)
         .stdout(
-            predicate::str::contains("needs reconciliation")
-                .and(predicate::str::contains("recorded at:"))
+            predicate::str::contains("recorded at:")
                 .and(predicate::str::contains("publish"))
                 .and(predicate::str::contains("k-otters"))
                 .and(predicate::str::contains(format!("salvor resolve {uuid}"))),
         );
+    let stdout = String::from_utf8_lossy(&refusal.get_output().stdout);
+    assert!(
+        common::flatten_wrapped_prose(&stdout).contains("needs reconciliation"),
+        "reconciliation refusal: {stdout}"
+    );
 
     // `resolve` records the completion by hand and exits 0.
     salvor(&store_path)

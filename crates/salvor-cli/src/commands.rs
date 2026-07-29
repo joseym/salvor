@@ -176,7 +176,12 @@ pub async fn resume(store_path: &Path, args: ResumeArgs) -> Result<u8> {
             };
             print!(
                 "{}",
-                render::reconciliation_report(&uuid, state.pending_call.as_ref(), recorded_at)
+                render::reconciliation_report(
+                    &uuid,
+                    state.pending_call.as_ref(),
+                    recorded_at,
+                    render::DEFAULT_REPORT_WIDTH,
+                )
             );
             return Ok(1);
         }
@@ -397,7 +402,10 @@ pub async fn resolve(store_path: &Path, args: ResolveArgs) -> Result<u8> {
     let runtime = Runtime::new(store);
     match runtime.resolve(run_id, output).await {
         Ok(_) => {
-            print!("{}", render::resolved_report(&uuid));
+            print!(
+                "{}",
+                render::resolved_report(&uuid, render::DEFAULT_REPORT_WIDTH)
+            );
             Ok(0)
         }
         // Refusing to resolve a run that is not awaiting reconciliation is a
@@ -445,7 +453,12 @@ pub async fn abandon(store_path: &Path, args: AbandonArgs) -> Result<u8> {
             };
             print!(
                 "{}",
-                render::abandoned_report(&uuid, appended_seq, unresolved)
+                render::abandoned_report(
+                    &uuid,
+                    appended_seq,
+                    unresolved,
+                    render::DEFAULT_REPORT_WIDTH,
+                )
             );
             Ok(0)
         }
@@ -1305,7 +1318,10 @@ fn report_outcome(outcome: RunOutcome, uuid: &str, agent_path: &Path) -> Result<
             Ok(0)
         }
         RunOutcome::Parked { reason, .. } => {
-            print!("{}", render::parked_report(uuid, &reason, agent_path));
+            print!(
+                "{}",
+                render::parked_report(uuid, &reason, agent_path, render::DEFAULT_REPORT_WIDTH)
+            );
             Ok(0)
         }
     }

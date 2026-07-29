@@ -77,14 +77,20 @@ async fn abandon_retires_a_run_then_refuses_a_second() {
     let run_id = seed_running(&store_path).await;
     let uuid = run_id.as_uuid().to_string();
 
-    salvor(&store_path)
+    let receipt = salvor(&store_path)
         .args(["abandon", &uuid, "--reason", "husk is dead forever"])
         .assert()
-        .success()
-        .stdout(
-            predicate::str::contains("appended RunAbandoned at seq 1")
-                .and(predicate::str::contains("Status now abandoned")),
-        );
+        .success();
+    let stdout = String::from_utf8_lossy(&receipt.get_output().stdout);
+    let prose = common::flatten_wrapped_prose(&stdout);
+    assert!(
+        prose.contains("appended RunAbandoned at seq 1"),
+        "abandon receipt: {stdout}"
+    );
+    assert!(
+        prose.contains("Status now abandoned"),
+        "abandon receipt: {stdout}"
+    );
 
     // Exactly one terminal event was appended.
     let store = SqliteStore::open(&store_path).expect("store opens");
@@ -118,15 +124,16 @@ async fn abandon_of_needs_reconciliation_records_the_unresolved_write() {
 
     // Abandoning a needs-reconciliation run is allowed, and the receipt names the
     // write left unresolved rather than claiming it settled.
-    salvor(&store_path)
+    let receipt = salvor(&store_path)
         .args(["abandon", &uuid])
         .assert()
         .success()
-        .stdout(
-            predicate::str::contains("Status now abandoned")
-                .and(predicate::str::contains("publish"))
-                .and(predicate::str::contains("unresolved")),
-        );
+        .stdout(predicate::str::contains("publish").and(predicate::str::contains("unresolved")));
+    let stdout = String::from_utf8_lossy(&receipt.get_output().stdout);
+    assert!(
+        common::flatten_wrapped_prose(&stdout).contains("Status now abandoned"),
+        "abandon receipt: {stdout}"
+    );
 
     let store = SqliteStore::open(&store_path).expect("store opens");
     let log = store.read_log(run_id).await.expect("log reads");
