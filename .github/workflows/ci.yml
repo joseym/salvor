@@ -110,7 +110,13 @@ jobs:
       - name: Install wasm-pack
         uses: jetli/wasm-pack-action@v0.4.0
         with:
-          version: latest
+          # Pinned, not `latest`. This action resolves `latest` at run time, and
+          # on 2026-07-29 it resolved to v0.9.1, a release old enough to predate
+          # Cargo workspace inheritance, so it could not parse
+          # `repository.workspace = true` and every wasm build failed with no
+          # change to this repository. A pin means the toolchain moves when
+          # someone decides to move it.
+          version: v0.15.0
 
       # The native side of the same-fold proof: the committed expected states
       # equal the live native fold at every prefix (and the committed logs equal
@@ -169,7 +175,13 @@ jobs:
       - name: Install wasm-pack
         uses: jetli/wasm-pack-action@v0.4.0
         with:
-          version: latest
+          # Pinned, not `latest`. This action resolves `latest` at run time, and
+          # on 2026-07-29 it resolved to v0.9.1, a release old enough to predate
+          # Cargo workspace inheritance, so it could not parse
+          # `repository.workspace = true` and every wasm build failed with no
+          # change to this repository. A pin means the toolchain moves when
+          # someone decides to move it.
+          version: v0.15.0
 
       # The fold package the Bridge imports (bridge/package.json depends on it
       # by path). Same invocation the replay-wasm job's --target web build uses.
