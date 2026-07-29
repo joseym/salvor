@@ -62,7 +62,7 @@ token -- see `salvor serve --help` for the full flag list).
 image for `linux/amd64` on pushes to `main` that touch something the image is
 built from (the `Dockerfile`, `.dockerignore`, `Cargo.toml`, `Cargo.lock`, or
 `crates/`), proving the Dockerfile still compiles without publishing
-anything. Commits that cannot affect the image — docs, the Bridge, the SDKs —
+anything. Commits that cannot affect the image (docs, the Bridge, the SDKs)
 skip it, so the answer arrives quickly when it is actually needed. A `v*` tag
 builds both `linux/amd64` and `linux/arm64`, regardless of what it touched,
 and pushes them to `ghcr.io/joseym/salvor`.

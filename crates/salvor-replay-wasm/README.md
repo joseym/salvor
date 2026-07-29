@@ -2,7 +2,7 @@
 
 A thin `wasm-bindgen` wrapper over the pure [`salvor-replay`](../salvor-replay)
 crate. It compiles the runtime's own event fold to WebAssembly so the Bridge's
-inspector can scrub a run's history in the browser — deriving the state at any
+inspector can scrub a run's history in the browser, deriving the state at any
 log prefix instantly, with no server round trip, from the same code the runtime
 and server use. `salvor-replay` itself stays dependency-free; all the wasm
 plumbing lives here.
@@ -32,7 +32,7 @@ where `0` is the empty (not-started) prefix and `len` is the head.
 ## Boundary choice (measured, not assumed)
 
 The log crosses in as the **exact wire JSON** the store already writes, and the
-folded state crosses back as JSON — strings across the boundary. This matches the
+folded state crosses back as JSON, so only strings cross the boundary. This matches the
 store's exact-wire-JSON posture and the existing SSE client, which already
 deserializes each frame straight into `salvor_replay::EventEnvelope`.
 
@@ -61,7 +61,7 @@ Together: **native == committed == wasm**, all three checked live. Latest run:
 **13 logs, 1044 prefixes** verified on each side.
 
 The reference logs deliberately touch every event kind and every derived status,
-including the `f64` budget paths and the `u64` random/sequence paths — the
+including the `f64` budget paths and the `u64` random/sequence paths, so the
 cross-target number-formatting that is the real miscompilation risk.
 
 ## Building
@@ -83,7 +83,7 @@ committed. Latest `.wasm` size: **274 KB** optimized (before gzip).
 # Native side (fast, no wasm toolchain):
 cargo test -p salvor-replay-wasm
 
-# Wasm side — build the nodejs package first, then:
+# Wasm side. Build the nodejs package first, then:
 node js/same-fold.mjs   # the same-fold proof: wasm vs native, byte-identical
 node js/surface.mjs     # pins the types/index.d.ts surface against runtime output
 node js/latency.mjs      # the scrub-latency measurement on the 1k-event log
@@ -102,6 +102,6 @@ REGEN_FIXTURES=1 cargo test -p salvor-replay-wasm --test same_fold -- --ignored 
 
 The wasm build depends on `salvor-replay` with `default-features = false`, so the
 `rng` feature (the one randomness-drawing constructor) is off and the module
-draws no randomness — the same purity the CI `wasm32` build proves for
+draws no randomness, the same purity the CI `wasm32` build proves for
 `salvor-replay`. The fold core is ordinary Rust that also builds natively, so
 `cargo build/test --workspace` needs no wasm toolchain.
