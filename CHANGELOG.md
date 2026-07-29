@@ -2,6 +2,16 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.7.0 - 2026-07-29
+#### Features
+- (**cli**) wrap the reports to a width the caller chooses - (ecd96ad) - Josey Morton
+- (**cli**) expose the parser and renderer to the browser - (767fcc8) - Josey Morton
+#### Refactoring
+- (**cli**) split the parse tree and renderer into salvor-cli-core - (1c18362) - Josey Morton
+- move the pure view types down into the replay leaf - (a3d3eca) - Josey Morton
+
+- - -
+
 ## v0.6.0 - 2026-07-28
 #### Features
 - (**cli**) complete real run ids and agents from the store - (ade1e23) - Josey Morton
