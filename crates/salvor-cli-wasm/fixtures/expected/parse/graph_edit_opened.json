@@ -1,0 +1,14 @@
+{
+  "command": {
+    "command": {
+      "command": {
+        "graph_verb": "edit",
+        "path": "flow.json",
+        "script": "session.salvor"
+      },
+      "verb": "graph"
+    },
+    "store": "./salvor.db"
+  },
+  "ok": true
+}

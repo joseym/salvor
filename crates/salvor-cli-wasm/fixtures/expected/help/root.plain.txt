@@ -15,7 +15,7 @@ Commands:
   serve        Run the control-plane HTTP + server-sent-events server over the store
   build        Build the whole product from a salvor checkout: the web dashboard, then the release binary that embeds it
   agent        Author-time agent definition tools: print the content hash a graph `agent` node has to reference. Reads no store and drives no run
-  graph        Author-time graph document tools: validate a document, or print its JSON Schema. These read no store and drive no run
+  graph        Graph document tools. `edit`, `validate` and `schema` are author-time: they read no store and drive no run. `run` drives a document over the store, exactly as `salvor run` drives an agent run
   help         Print this message or the help of the given subcommand(s)
 
 Options:

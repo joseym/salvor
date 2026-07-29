@@ -864,6 +864,17 @@ pub async fn agent_hash(args: AgentHashArgs) -> Result<u8> {
     Ok(0)
 }
 
+/// `salvor graph edit`: fold typed lines into a graph document.
+///
+/// The editor itself is [`salvor_cli_core::graph_editor`], which performs no IO;
+/// everything host-shaped about a session (the prompt, the streams, the three
+/// lines that name a file) is [`crate::graph_edit`]. This handler is the seam
+/// between the parse tree and that loop, and it takes no store, because an
+/// author building a document has not started a run.
+pub async fn graph_edit(args: crate::cli::GraphEditArgs) -> Result<u8> {
+    crate::graph_edit::edit(args).await
+}
+
 /// `salvor graph validate <path>`: parse a graph document strictly and run
 /// every validation check.
 ///
@@ -1070,9 +1081,10 @@ fn load_and_validate_graph(path: &Path) -> Result<Graph> {
 /// sessions for the caller to keep alive and close.
 ///
 /// The one place a `--agent` path becomes a live [`Agent`], so what
-/// [`agent_hash`] prints and what [`build_graph_agents`] keys a graph node
-/// against cannot be two different numbers.
-async fn build_agents(paths: &[PathBuf]) -> Result<(Vec<Agent>, Vec<McpServer>)> {
+/// [`agent_hash`] prints, what [`build_graph_agents`] keys a graph node
+/// against, and what `graph edit` resolves an `add agent --file` line to cannot
+/// be three different numbers.
+pub(crate) async fn build_agents(paths: &[PathBuf]) -> Result<(Vec<Agent>, Vec<McpServer>)> {
     let mut agents: Vec<Agent> = Vec::with_capacity(paths.len());
     let mut servers: Vec<McpServer> = Vec::new();
     for path in paths {
@@ -1386,7 +1398,7 @@ async fn shutdown_model(model: Option<crate::fixture::FixtureModel>) {
 
 /// Closes every MCP server session tidily. Errors are logged, not propagated:
 /// the run already finished, so a teardown hiccup must not fail the command.
-async fn close_servers(servers: Vec<salvor_tools::mcp::McpServer>) {
+pub(crate) async fn close_servers(servers: Vec<salvor_tools::mcp::McpServer>) {
     for server in servers {
         if let Err(error) = server.close().await {
             tracing::warn!(%error, "MCP server did not shut down cleanly");

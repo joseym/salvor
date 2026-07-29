@@ -96,6 +96,14 @@ clap_complete = "4"
 # CLICOLOR, so a piped `salvor list` stays plain text.
 anstyle = "1"
 anstream = "1"
+# The real terminal's column count, for `salvor graph edit`: the editor wraps
+# its prose to the pane it is printing into, and the only way to know that
+# number is to ask the terminal. This is the crate clap itself uses for
+# `wrap_help`, and it is a thin shim over one ioctl rather than a terminal
+# library: on Unix it adds nothing to the tree, since rustix is already
+# resolved through sysinfo and tempfile, and its Windows half is gated to that
+# target.
+terminal_size = "0.4"
 toml = "0.8"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Process discovery behind `salvor serve --kill`: finding a running

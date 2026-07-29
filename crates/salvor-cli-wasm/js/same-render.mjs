@@ -70,6 +70,7 @@ const helpPaths = {
   agent: "agent",
   "agent-hash": "agent hash",
   graph: "graph",
+  "graph-edit": "graph edit",
   "graph-validate": "graph validate",
   "graph-run": "graph run",
 };

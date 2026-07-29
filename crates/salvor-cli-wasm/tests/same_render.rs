@@ -175,6 +175,7 @@ fn reference_help_paths() -> Vec<(&'static str, &'static str)> {
         ("agent", "agent"),
         ("agent-hash", "agent hash"),
         ("graph", "graph"),
+        ("graph-edit", "graph edit"),
         ("graph-validate", "graph validate"),
         ("graph-run", "graph run"),
     ]
@@ -336,6 +337,21 @@ fn reference_argvs() -> Vec<(&'static str, Vec<&'static str>)> {
                 "hash",
                 "agents/writer.toml",
                 "agents/reviewer.toml",
+            ],
+        ),
+        // The verb with no required argument at all, and the same verb with
+        // both of its optional ones: the two ends of an argument list that is
+        // entirely optional, which no other verb here has.
+        ("graph_edit", vec!["salvor", "graph", "edit"]),
+        (
+            "graph_edit_opened",
+            vec![
+                "salvor",
+                "graph",
+                "edit",
+                "flow.json",
+                "--script",
+                "session.salvor",
             ],
         ),
         (

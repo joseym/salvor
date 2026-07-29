@@ -62,8 +62,8 @@
 
 use salvor_cli_core::cli::{
     AbandonArgs, AgentCommand, AgentHashArgs, BuildArgs, Cli, Command, CompletionsArgs, ForkArgs,
-    GraphCommand, GraphRunArgs, GraphValidateArgs, HistoryArgs, ListArgs, ReplayArgs, ResolveArgs,
-    ResumeArgs, RunArgs, ServeArgs,
+    GraphCommand, GraphEditArgs, GraphRunArgs, GraphValidateArgs, HistoryArgs, ListArgs,
+    ReplayArgs, ResolveArgs, ResumeArgs, RunArgs, ServeArgs,
 };
 use salvor_cli_core::render;
 use salvor_replay::RunSummary;
@@ -241,6 +241,12 @@ enum AgentCommandDto {
 #[derive(Serialize)]
 #[serde(tag = "graph_verb", rename_all = "kebab-case")]
 enum GraphCommandDto {
+    Edit {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        script: Option<String>,
+    },
     Validate {
         path: String,
     },
@@ -379,6 +385,10 @@ impl From<&AgentCommand> for AgentCommandDto {
 impl From<&GraphCommand> for GraphCommandDto {
     fn from(command: &GraphCommand) -> Self {
         match command {
+            GraphCommand::Edit(GraphEditArgs { path: file, script }) => GraphCommandDto::Edit {
+                path: file.as_deref().map(path),
+                script: script.as_deref().map(path),
+            },
             GraphCommand::Validate(GraphValidateArgs { path: file }) => {
                 GraphCommandDto::Validate { path: path(file) }
             }

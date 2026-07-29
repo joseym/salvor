@@ -145,6 +145,9 @@ clap.workspace = true
 clap_complete.workspace = true
 anstyle.workspace = true
 anstream.workspace = true
+# The pane width `salvor graph edit` wraps the editor's prose to; see the
+# workspace Cargo.toml for why this crate rather than a terminal library.
+terminal_size.workspace = true
 toml.workspace = true
 # Process discovery + termination for `salvor serve --kill`; see the
 # workspace Cargo.toml for the version/feature-weight justification.

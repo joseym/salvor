@@ -481,10 +481,38 @@
       },
       {
         "name": "graph",
-        "about": "Author-time graph document tools: validate a document, or print its JSON Schema. These read no store and drive no run",
+        "about": "Graph document tools. `edit`, `validate` and `schema` are author-time: they read no store and drive no run. `run` drives a document over the store, exactly as `salvor run` drives an agent run",
         "hidden": false,
         "args": [],
         "subcommands": [
+          {
+            "name": "edit",
+            "about": "Build a graph document one line at a time, reading commands from stdin",
+            "hidden": false,
+            "args": [
+              {
+                "long": null,
+                "short": null,
+                "value_name": "FILE",
+                "required": false,
+                "repeatable": false,
+                "global": false,
+                "help": "An existing graph document (JSON) to open. Applied as the `read <FILE>` line the author would otherwise type first, so it is recorded in the history like any other command and `undo` steps back across it. Omit to start from an empty document",
+                "possible_values": null
+              },
+              {
+                "long": "--script",
+                "short": null,
+                "value_name": "FILE",
+                "required": false,
+                "repeatable": false,
+                "global": false,
+                "help": "A file of editor commands to apply before reading stdin, in the form `history` dumps",
+                "possible_values": null
+              }
+            ],
+            "subcommands": []
+          },
           {
             "name": "validate",
             "about": "Validate a graph document JSON file: parse it strictly and run every check, printing a summary on success or the precise node/edge errors on failure",

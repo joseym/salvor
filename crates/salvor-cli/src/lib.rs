@@ -18,6 +18,10 @@
 //! - [`fixture`] is `salvor run --fixture <DIR>`: the offline, self-contained
 //!   fixture directory (agent, input, and a recorded model conversation) and
 //!   the in-process scripted model that serves it.
+//! - [`graph_edit`] is the prompt loop behind `salvor graph edit`: the terminal
+//!   and the filesystem around
+//!   [`salvor_cli_core::graph_editor`], which is the editor itself and performs
+//!   no IO.
 //! - [`render`] is pure value-to-text formatting, shared by the commands.
 //! - [`manifest`] walks clap's own `Command` tree into the machine-readable
 //!   description checked in at `docs/cli-manifest.json`, for a consumer
@@ -53,6 +57,7 @@ pub mod demo_script;
 pub mod demo_tools;
 pub mod dev_server;
 pub mod fixture;
+pub mod graph_edit;
 pub mod manifest;
 pub mod render;
 pub mod serve_kill;
@@ -112,9 +117,13 @@ pub async fn dispatch(cli: Cli) -> Result<u8> {
             crate::cli::AgentCommand::Hash(args) => commands::agent_hash(args).await,
         },
         Command::Graph { command } => match command {
-            // `validate` and `schema` read no store and drive no run, so they
-            // are synchronous and ignore the store path; `run` drives a graph
-            // over the store, exactly as `salvor run` drives an agent run.
+            // `edit`, `validate` and `schema` read no store and drive no run,
+            // so they ignore the store path; `run` drives a graph over the
+            // store, exactly as `salvor run` drives an agent run. Only `edit`
+            // is awaited among the three, because resolving an agent node's
+            // `--file` builds the definition and that connects to whatever MCP
+            // servers it declares.
+            crate::cli::GraphCommand::Edit(args) => commands::graph_edit(args).await,
             crate::cli::GraphCommand::Validate(args) => commands::graph_validate(args),
             crate::cli::GraphCommand::Schema => commands::graph_schema(),
             crate::cli::GraphCommand::Run(args) => commands::graph_run(store, args).await,

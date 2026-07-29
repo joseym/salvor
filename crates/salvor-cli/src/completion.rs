@@ -719,6 +719,7 @@ mod tests {
     #[test]
     fn nested_verbs_complete_under_graph() {
         let offered = complete(&["salvor", "graph", ""], 2);
+        assert!(offered.contains(&"edit".to_owned()), "{offered:?}");
         assert!(offered.contains(&"validate".to_owned()), "{offered:?}");
         assert!(offered.contains(&"run".to_owned()), "{offered:?}");
     }
