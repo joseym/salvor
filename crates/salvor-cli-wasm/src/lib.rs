@@ -61,9 +61,9 @@
 #![warn(missing_docs)]
 
 use salvor_cli_core::cli::{
-    AbandonArgs, BuildArgs, Cli, Command, CompletionsArgs, ForkArgs, GraphCommand, GraphRunArgs,
-    GraphValidateArgs, HistoryArgs, ListArgs, ReplayArgs, ResolveArgs, ResumeArgs, RunArgs,
-    ServeArgs,
+    AbandonArgs, AgentCommand, AgentHashArgs, BuildArgs, Cli, Command, CompletionsArgs, ForkArgs,
+    GraphCommand, GraphRunArgs, GraphValidateArgs, HistoryArgs, ListArgs, ReplayArgs, ResolveArgs,
+    ResumeArgs, RunArgs, ServeArgs,
 };
 use salvor_cli_core::render;
 use salvor_replay::RunSummary;
@@ -222,9 +222,19 @@ enum CommandDto {
     Build {
         install: bool,
     },
+    Agent {
+        command: AgentCommandDto,
+    },
     Graph {
         command: GraphCommandDto,
     },
+}
+
+/// The verbs under `salvor agent`, tagged like their parent.
+#[derive(Serialize)]
+#[serde(tag = "agent_verb", rename_all = "kebab-case")]
+enum AgentCommandDto {
+    Hash { agents: Vec<String> },
 }
 
 /// The verbs under `salvor graph`, tagged like their parent.
@@ -346,8 +356,21 @@ impl From<&Command> for CommandDto {
                 demo_tools: *demo_tools,
             },
             Command::Build(BuildArgs { install }) => CommandDto::Build { install: *install },
+            Command::Agent { command } => CommandDto::Agent {
+                command: command.into(),
+            },
             Command::Graph { command } => CommandDto::Graph {
                 command: command.into(),
+            },
+        }
+    }
+}
+
+impl From<&AgentCommand> for AgentCommandDto {
+    fn from(command: &AgentCommand) -> Self {
+        match command {
+            AgentCommand::Hash(AgentHashArgs { agents }) => AgentCommandDto::Hash {
+                agents: paths(agents),
             },
         }
     }

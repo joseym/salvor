@@ -54,8 +54,9 @@ use uuid::Uuid;
 use crate::agent_config::{self, AgentConfig};
 use crate::checkout;
 use crate::cli::{
-    AbandonArgs, BuildArgs, CompletionsArgs, ForkArgs, GraphRunArgs, GraphValidateArgs,
-    HistoryArgs, ListArgs, ReplayArgs, ResolveArgs, ResumeArgs, RunArgs, ServeArgs,
+    AbandonArgs, AgentHashArgs, BuildArgs, CompletionsArgs, ForkArgs, GraphRunArgs,
+    GraphValidateArgs, HistoryArgs, ListArgs, ReplayArgs, ResolveArgs, ResumeArgs, RunArgs,
+    ServeArgs,
 };
 use crate::dev_server::DevServer;
 use crate::render;
@@ -831,6 +832,38 @@ fn install_dir() -> PathBuf {
     }
 }
 
+/// `salvor agent hash <FILE>...`: print each agent definition's content hash.
+///
+/// The value printed is [`Agent::def_hash`], the same string a run records in
+/// `RunStarted` and the same key [`graph_run`] resolves an `agent` node
+/// against. It is produced by BUILDING each definition through
+/// [`build_agents`], the way every other verb that takes `--agent` does, rather
+/// than by hashing the file's bytes: tool schemas are part of the definition
+/// and an MCP server supplies its own, so a byte hash of the TOML would be a
+/// number no graph node could ever resolve.
+///
+/// One file prints the bare hash and nothing else, so `$(salvor agent hash
+/// a.toml)` is usable as a value. Several print `<path>: <hash>` a line, in the
+/// order given, since the question several files ask is which hash belongs to
+/// which file.
+///
+/// This reads no store and starts no run. The MCP sessions the build opened are
+/// closed before anything is printed, so stdout carries the hashes alone.
+pub async fn agent_hash(args: AgentHashArgs) -> Result<u8> {
+    let (agents, servers) = build_agents(&args.agents).await?;
+    close_servers(servers).await;
+
+    let bare = agents.len() == 1;
+    for (path, agent) in args.agents.iter().zip(&agents) {
+        if bare {
+            println!("{}", agent.def_hash());
+        } else {
+            println!("{}: {}", path.display(), agent.def_hash());
+        }
+    }
+    Ok(0)
+}
+
 /// `salvor graph validate <path>`: parse a graph document strictly and run
 /// every validation check.
 ///
@@ -1033,17 +1066,32 @@ fn load_and_validate_graph(path: &Path) -> Result<Graph> {
     }
 }
 
-/// Builds every provided agent file, keyed by its computed definition hash, and
-/// collects their MCP sessions for the caller to keep alive and close.
-async fn build_graph_agents(paths: &[PathBuf]) -> Result<(HashMap<String, Agent>, Vec<McpServer>)> {
-    let mut agents: HashMap<String, Agent> = HashMap::new();
+/// Builds every provided agent file, in the order given, and collects their MCP
+/// sessions for the caller to keep alive and close.
+///
+/// The one place a `--agent` path becomes a live [`Agent`], so what
+/// [`agent_hash`] prints and what [`build_graph_agents`] keys a graph node
+/// against cannot be two different numbers.
+async fn build_agents(paths: &[PathBuf]) -> Result<(Vec<Agent>, Vec<McpServer>)> {
+    let mut agents: Vec<Agent> = Vec::with_capacity(paths.len());
     let mut servers: Vec<McpServer> = Vec::new();
     for path in paths {
         let config = AgentConfig::load(path)?;
         let (agent, agent_servers) = agent_config::build_agent(&config, path).await?;
-        agents.insert(agent.def_hash().to_owned(), agent);
+        agents.push(agent);
         servers.extend(agent_servers);
     }
+    Ok((agents, servers))
+}
+
+/// Builds every provided agent file, keyed by its computed definition hash, and
+/// collects their MCP sessions for the caller to keep alive and close.
+async fn build_graph_agents(paths: &[PathBuf]) -> Result<(HashMap<String, Agent>, Vec<McpServer>)> {
+    let (built, servers) = build_agents(paths).await?;
+    let agents = built
+        .into_iter()
+        .map(|agent| (agent.def_hash().to_owned(), agent))
+        .collect();
     Ok((agents, servers))
 }
 

@@ -1,0 +1,25 @@
+Print an agent definition's content hash, the `sha256:<64 hex>` string a graph `agent` node references.
+
+A graph names an agent by hash and never by path, because a run's log records only the hash and a replay has to mean the same agent. This is how an author learns that hash before writing the node.
+
+The hash covers the BUILT definition (model, system prompt, tool schemas, budgets, pricing), not the file's bytes, so any MCP server the file declares is connected to collect its tool schemas, exactly as a run would. Nothing is written and no run is started.
+
+[1m[4mUsage:[0m [1msalvor agent hash[0m [OPTIONS] <FILE>...
+
+[1m[4mArguments:[0m
+  <FILE>...
+          An agent definition (TOML) to hash. Repeatable.
+          
+          One file prints the bare hash and nothing else, so it reads straight into a shell substitution: `--arg h "$(salvor agent hash a.toml)"`. Several files print `<path>: <hash>` per line, in the order given, because then the question being asked is which file carries which hash.
+
+[1m[4mOptions:[0m
+      [1m--store[0m <PATH>
+          Path to the SQLite event store.
+          
+          The precedence is flag, then the `SALVOR_STORE` environment variable, then the default: an explicit `--store` wins, else `SALVOR_STORE`, else `./salvor.db`.
+          
+          [env: SALVOR_STORE=]
+          [default: ./salvor.db]
+
+  [1m-h[0m, [1m--help[0m
+          Print help (see a summary with '-h')

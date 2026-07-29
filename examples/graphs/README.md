@@ -31,6 +31,40 @@ ignored.
 | [`invalid-dangling-edge.json`](invalid-dangling-edge.json) | An edge whose target `aprove` is a typo of the node `approve`. Produces a precise dangling-edge error with a nearest-name suggestion. |
 | [`invalid-cycle.json`](invalid-cycle.json) | Two agents pointing at each other. Produces a precise cycle error naming the path. |
 
+## Learning an agent's hash first
+
+An `agent` node names its agent by content hash and never by path, so writing
+one by hand starts with asking a definition file what its hash is:
+
+```
+$ salvor agent hash examples/local-model/agent.toml
+sha256:dfaed5fd736c1463e9a9e8cd01f9dea26efafbe97f5cb29c94e5d51f7d2ab222
+```
+
+One file prints the bare hash and nothing else, so it reads straight into the
+document being authored:
+
+```
+$ jq --arg h "$(salvor agent hash examples/local-model/agent.toml)" \
+    '.nodes[0].payload.agent_hash = $h' skeleton.json > flow.json
+```
+
+Several files each carry their path, since then the question is which hash
+belongs to which file:
+
+```
+$ salvor agent hash agents/research.toml agents/review.toml
+agents/research.toml: sha256:8f...
+agents/review.toml: sha256:2c...
+```
+
+The hash covers the built definition (model, system prompt, tool schemas,
+budgets, pricing), not the file's bytes, which is why an MCP server the file
+declares is connected to collect its tool schemas. It is the same string the
+run's log records and the same key `graph run` resolves a node against: pass
+the file to `graph run --agent` and a node carrying this hash resolves, while
+any other hash is refused with the list of hashes the `--agent` files supplied.
+
 ## Validating and inspecting
 
 Validate a document (parse strictly, run every check, print a summary or the

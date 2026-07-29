@@ -340,7 +340,7 @@ fn candidates(words: &[String], index: usize) -> Vec<String> {
             .map(|sub| sub.get_name().to_owned())
             .filter(|name| name.starts_with(current))
             .collect();
-        if let Some(arg) = walk.command.get_positionals().nth(walk.positionals) {
+        if let Some(arg) = positional_at(walk.command, walk.positionals) {
             out.extend(value_candidates(walk.command, arg, current, &store));
         }
         out
@@ -426,6 +426,24 @@ fn walk<'a>(command: &'a clap::Command, preceding: &[String]) -> Walk<'a> {
     }
 
     walk
+}
+
+/// The positional argument the cursor sits on, given how many positional values
+/// the command has already been handed.
+///
+/// Past the last declared positional the answer is normally nothing. The
+/// exception is a REPEATABLE positional (`salvor agent hash a.toml b.toml`),
+/// which keeps accepting values at its own slot: the cursor stays on it however
+/// many have been typed, so the second file completes exactly like the first.
+fn positional_at(command: &clap::Command, index: usize) -> Option<&clap::Arg> {
+    let positionals: Vec<&clap::Arg> = command.get_positionals().collect();
+    if let Some(arg) = positionals.get(index) {
+        return Some(arg);
+    }
+    positionals.last().copied().filter(|arg| {
+        arg.get_num_args()
+            .is_some_and(|range| range.max_values() > 1)
+    })
 }
 
 /// Splits `--flag=value` into its two halves, or `None` for anything else.
@@ -703,6 +721,78 @@ mod tests {
         let offered = complete(&["salvor", "graph", ""], 2);
         assert!(offered.contains(&"validate".to_owned()), "{offered:?}");
         assert!(offered.contains(&"run".to_owned()), "{offered:?}");
+    }
+
+    /// The built tree the parser itself runs on, for the tests that ask a
+    /// question about an argument rather than about a candidate list.
+    fn built_command() -> clap::Command {
+        let mut command = <crate::cli::Cli as CommandFactory>::command();
+        command.build();
+        command
+    }
+
+    /// A file positional that repeats has to keep completing: `salvor agent
+    /// hash` takes any number of definitions, so the cursor past the first is
+    /// still on the same argument. A positional that takes exactly one value
+    /// (every run id in the CLI) must NOT behave that way, or a stray extra
+    /// word would be offered completions it can never accept.
+    #[test]
+    fn a_repeatable_positional_keeps_completing_past_the_first_value() {
+        let command = built_command();
+
+        let hash = command
+            .find_subcommand("agent")
+            .and_then(|agent| agent.find_subcommand("hash"))
+            .expect("`agent hash` is in the tree");
+        let first = positional_at(hash, 0).expect("the first file is a positional");
+        assert_eq!(value_name(first), Some("FILE"));
+        for already_typed in [1, 2, 7] {
+            assert_eq!(
+                positional_at(hash, already_typed).map(clap::Arg::get_id),
+                Some(first.get_id()),
+                "the file positional repeats, so {already_typed} values in the cursor is still on it"
+            );
+        }
+
+        let history = command
+            .find_subcommand("history")
+            .expect("`history` is in the tree");
+        assert!(positional_at(history, 0).is_some(), "the run id");
+        assert!(
+            positional_at(history, 1).is_none(),
+            "a run id takes exactly one value, so there is no second positional to complete"
+        );
+    }
+
+    /// A FILE positional gets path completion from its value name alone, which
+    /// is the whole reason the new verb needed nothing added here.
+    #[test]
+    fn an_agent_definition_path_completes_from_the_filesystem() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        std::fs::write(directory.path().join("research.toml"), "model = \"m\"").expect("write");
+        std::fs::create_dir(directory.path().join("agents")).expect("mkdir");
+        let prefix = format!("{}/", directory.path().display());
+
+        let command = built_command();
+        let hash = command
+            .find_subcommand("agent")
+            .and_then(|agent| agent.find_subcommand("hash"))
+            .expect("`agent hash` is in the tree");
+        let arg = positional_at(hash, 0).expect("the file positional");
+        let offered = value_candidates(hash, arg, &format!("{prefix}re"), Path::new("nothing.db"));
+
+        assert_eq!(
+            offered,
+            vec![format!("{prefix}research.toml")],
+            "{offered:?}"
+        );
+        // A directory is offered with a trailing slash so the next Tab
+        // descends into it, and a FILE position offers directories too.
+        let offered = value_candidates(hash, arg, &prefix, Path::new("nothing.db"));
+        assert!(
+            offered.contains(&format!("{prefix}agents/")),
+            "a directory on the way to a file: {offered:?}"
+        );
     }
 
     #[test]

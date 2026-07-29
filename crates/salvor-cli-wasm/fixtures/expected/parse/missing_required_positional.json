@@ -1,0 +1,10 @@
+{
+  "message": {
+    "ansi": "\u001b[1m\u001b[31merror:\u001b[0m the following required arguments were not provided:\n  \u001b[32m<FILE>...\u001b[0m\n\n\u001b[1m\u001b[4mUsage:\u001b[0m \u001b[1msalvor agent hash\u001b[0m <FILE>...\n\nFor more information, try '\u001b[1m--help\u001b[0m'.\n",
+    "exit_code": 2,
+    "is_error": true,
+    "kind": "MissingRequiredArgument",
+    "plain": "error: the following required arguments were not provided:\n  <FILE>...\n\nUsage: salvor agent hash <FILE>...\n\nFor more information, try '--help'.\n"
+  },
+  "ok": false
+}

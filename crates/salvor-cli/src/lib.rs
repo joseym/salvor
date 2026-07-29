@@ -106,6 +106,11 @@ pub async fn dispatch(cli: Cli) -> Result<u8> {
         Command::Serve(args) => commands::serve(store, args).await,
         // `build` produces the product from a checkout; it reads no store.
         Command::Build(args) => commands::build(args).await,
+        // `agent hash` reads no store and starts no run: it builds the
+        // definitions it is given and prints what a run would record them as.
+        Command::Agent { command } => match command {
+            crate::cli::AgentCommand::Hash(args) => commands::agent_hash(args).await,
+        },
         Command::Graph { command } => match command {
             // `validate` and `schema` read no store and drive no run, so they
             // are synchronous and ignore the store path; `run` drives a graph

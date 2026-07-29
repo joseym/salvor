@@ -75,6 +75,13 @@ pub enum Command {
     /// Build the whole product from a salvor checkout: the web dashboard, then
     /// the release binary that embeds it.
     Build(BuildArgs),
+    /// Author-time agent definition tools: print the content hash a graph
+    /// `agent` node has to reference. Reads no store and drives no run.
+    Agent {
+        /// The agent subcommand to run.
+        #[command(subcommand)]
+        command: AgentCommand,
+    },
     /// Author-time graph document tools: validate a document, or print its
     /// JSON Schema. These read no store and drive no run.
     Graph {
@@ -82,6 +89,41 @@ pub enum Command {
         #[command(subcommand)]
         command: GraphCommand,
     },
+}
+
+/// The verbs under `salvor agent`.
+//
+// Grouped by the document a verb reads, matching `salvor graph`: a hash is a
+// fact about an agent definition, so it belongs beside the agent file rather
+// than under a verb-first `salvor hash` that would then have to house the graph
+// document's own hash too.
+#[derive(Debug, Subcommand)]
+pub enum AgentCommand {
+    /// Print an agent definition's content hash, the `sha256:<64 hex>` string a
+    /// graph `agent` node references.
+    ///
+    /// A graph names an agent by hash and never by path, because a run's log
+    /// records only the hash and a replay has to mean the same agent. This is
+    /// how an author learns that hash before writing the node.
+    ///
+    /// The hash covers the BUILT definition (model, system prompt, tool
+    /// schemas, budgets, pricing), not the file's bytes, so any MCP server the
+    /// file declares is connected to collect its tool schemas, exactly as a run
+    /// would. Nothing is written and no run is started.
+    Hash(AgentHashArgs),
+}
+
+/// Arguments to `agent hash`.
+#[derive(Debug, Args)]
+pub struct AgentHashArgs {
+    /// An agent definition (TOML) to hash. Repeatable.
+    ///
+    /// One file prints the bare hash and nothing else, so it reads straight
+    /// into a shell substitution: `--arg h "$(salvor agent hash a.toml)"`.
+    /// Several files print `<path>: <hash>` per line, in the order given,
+    /// because then the question being asked is which file carries which hash.
+    #[arg(value_name = "FILE", required = true)]
+    pub agents: Vec<PathBuf>,
 }
 
 /// The verbs under `salvor graph`.
