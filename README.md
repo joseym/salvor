@@ -2,15 +2,12 @@
 
 **A durable execution runtime for AI agents, in Rust.** `kill -9` a run mid-flight, resume it, and nothing happens twice.
 
-> **sal·vor** *(noun)* — the one who goes out after the wreck and brings the ship and its cargo back.
-> Not the storm. Not the insurance. The crew that shows up when it's already on the rocks.
-
-That's the job here. Your process is the ship, the run is the cargo, and the durable log is how it gets recovered: a dead run comes back and finishes from exactly where it stopped.
+A salvor is whoever goes out after the wreck and brings the ship back, which is roughly the job here: a dead run comes back and finishes from exactly where it stopped.
 
 ![Salvor kills a research agent mid-run and resumes it to completion with no duplicate side effects](docs/demo.gif)
 
 - **Crash-exact resume.** Every event is written before the runtime acts on it, so a resume replays what already happened and re-executes none of it.
-- **No duplicate side effects.** Tools declare an effect — read, write, or idempotent — and a write is never replayed blind. A write left dangling by a crash blocks the resume until a human reconciles it.
+- **No duplicate side effects.** Tools declare an effect (read, write, or idempotent) and a write is never replayed blind. A write left dangling by a crash blocks the resume until a human reconciles it.
 - **The log is the run.** State is a pure fold over events: the same code in the runtime, in `salvor replay`, and in the browser via wasm.
 - **Hard budgets.** Ceilings on steps, tokens, dollars, and wall time, enforced by the runtime rather than suggested to the model. Wall time is measured between recorded clock observations, never against the ambient clock.
 - **One static binary.** The event store and the web UI ship inside it.
@@ -70,7 +67,7 @@ kill -9 $!
 salvor resume <run-id> --agent demo/agent.toml
 ```
 
-The demo's MCP server appends one line per real write, so `wc -l` on that file before the kill and after the resume is the zero-duplicate proof. [`demo/README.md`](demo/README.md) has the full walkthrough, including an offline mock-model mode that needs no key and no network — the same mode that records the GIF above.
+The demo's MCP server appends one line per real write, so `wc -l` on that file before the kill and after the resume is the zero-duplicate proof. [`demo/README.md`](demo/README.md) has the full walkthrough, including an offline mock-model mode that needs no key and no network, the same mode that records the GIF above.
 
 For the same story against real tools, [`examples/web-research/`](examples/web-research/) runs an agent over the official fetch and filesystem MCP servers, killing it between real HTTP fetches and a real file write.
 
@@ -89,7 +86,7 @@ every verb, flag, and fixed value set:
 salvor completions zsh > ~/.zfunc/_salvor      # or bash, fish, elvish, powershell
 ```
 
-The dynamic one adds the values only your store knows — the run ids for
+The dynamic one adds the values only your store knows: the run ids for
 `history`, `replay`, `resume`, `abandon`, `resolve` and `fork`, and the agent
 identities for `salvor list --agent`. It works by calling `salvor` back on each
 Tab, so add one line to your shell's rc file rather than writing a script to disk:
@@ -109,8 +106,8 @@ the one the command would use: a `--store` already typed on the line, else
 `SALVOR_STORE`, else `./salvor.db`.
 
 It is deliberately unable to interrupt you. No store, an unreadable store, or a
-store busy under another writer all produce no candidates and no message — never
-an error in your prompt — and every lookup runs under a 150 ms deadline with a
+store busy under another writer all produce no candidates and no message, never
+an error in your prompt, and every lookup runs under a 150 ms deadline with a
 cap of 50 runs inspected, so Tab never blocks on a database. Enable both: the
 static script covers five shells and needs no store, and the dynamic one adds
 the values to it for zsh and bash.
@@ -123,11 +120,11 @@ the values to it for zsh and bash.
 salvor serve --bind 127.0.0.1:8080
 ```
 
-The inspector reads one run from its log. Drag the scrubber and the state re-derives in the browser from a prefix of the log — the real `salvor-replay` crate compiled to wasm, the same fold the runtime runs, not a JavaScript reimplementation of it.
+The inspector reads one run from its log. Drag the scrubber and the state re-derives in the browser from a prefix of the log. That is the real `salvor-replay` crate compiled to wasm, the same fold the runtime runs, not a JavaScript reimplementation of it.
 
 ![The run inspector: a 222-event graph run, its tick strip, and the event timeline with per-tool effect badges](docs/bridge-inspector.png)
 
-The ledger sorts runs that need a human to the top, and the inbox states the one action that unblocks each one — raise a budget ceiling, answer a gate, reconcile a write the crash left dangling.
+The ledger sorts runs that need a human to the top, and the inbox states the one action that unblocks each one: raise a budget ceiling, answer a gate, reconcile a write the crash left dangling.
 
 <p align="center">
   <img src="docs/bridge-runs.png" width="49%" alt="The runs ledger, grouped by agent, with a run-health strip and a detail panel">
@@ -155,9 +152,9 @@ An agent is data: `POST /v1/agents` hashes the definition and returns the hash, 
 
 Every guarantee the CLI has holds over HTTP, because the same runtime enforces it. A second surface under `/v1/client-runs` inverts ownership: your client drives the agent loop and appends its own events, and the server re-folds the log on each append to confirm the event is a legal next one. Model and tool calls stay server-side, since the server holds the key and the binaries.
 
-Full contract — every route, status code, and event shape — in [`crates/salvor-server/API.md`](crates/salvor-server/API.md). Prompt recording is off by default and writes request bodies to the durable log when enabled; see the API doc before turning it on.
+Full contract, every route, status code, and event shape, in [`crates/salvor-server/API.md`](crates/salvor-server/API.md). Prompt recording is off by default and writes request bodies to the durable log when enabled; see the API doc before turning it on.
 
-A container image is published to `ghcr.io/joseym/salvor` on tagged releases — API-only, no bundled UI. See [`docs/CONTAINER.md`](docs/CONTAINER.md) for the `docker run` command and why the store volume is mandatory.
+A container image is published to `ghcr.io/joseym/salvor` on tagged releases, API-only with no bundled UI. See [`docs/CONTAINER.md`](docs/CONTAINER.md) for the `docker run` command and why the store volume is mandatory.
 
 ### Clients
 
