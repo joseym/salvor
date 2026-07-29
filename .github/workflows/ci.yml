@@ -69,6 +69,20 @@ jobs:
       - name: Build salvor-replay for wasm32 (purity proof)
         run: cargo build -p salvor-replay --target wasm32-unknown-unknown --no-default-features
 
+      # Proves the CLI's pure half and its wasm wrapper stay pure too: salvor-cli-core
+      # is the clap tree and renderer the landing page runs instead of a reimplementation,
+      # and salvor-cli-wasm is the wasm-bindgen shell around it that the page actually
+      # loads. Neither declares a features table of its own, so --no-default-features
+      # would be a no-op here; each pins default-features = false on its salvor-replay
+      # path dependency instead, and this is what proves that pin still holds. A
+      # dependency added to either crate that needs a randomness backend or anything
+      # else wasm32-unknown-unknown lacks compiles fine natively and fails only here.
+      - name: Build salvor-cli-core for wasm32 (purity proof)
+        run: cargo build -p salvor-cli-core --target wasm32-unknown-unknown
+
+      - name: Build salvor-cli-wasm for wasm32 (purity proof)
+        run: cargo build -p salvor-cli-wasm --target wasm32-unknown-unknown
+
   # The Bridge's fold package: salvor-replay-wasm compiled to an npm
   # package, plus the same-fold proof that the wasm fold is byte-identical to the
   # native fold at every prefix of every fixture log. Additive to the purity
