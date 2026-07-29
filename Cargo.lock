@@ -2457,6 +2457,7 @@ dependencies = [
  "salvor-graph",
  "salvor-replay",
  "serde_json",
+ "thiserror",
  "time",
 ]
 

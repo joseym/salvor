@@ -6,6 +6,9 @@
 //!   string, and the two [`clap::builder::TypedValueParser`] implementations
 //!   behind `salvor list --status` and `--group`.
 //! - [`render`] turns runtime and store values into the text the CLI prints.
+//! - [`graph_editor`] is a line-oriented editor for a graph document, built as
+//!   an event fold so its state is a pure function of the commands typed at
+//!   it.
 //!
 //! The two belong together because they already agree with each other: the
 //! `--status` parser offers exactly the labels [`render::status_label`] can
@@ -29,4 +32,5 @@
 #![warn(missing_docs)]
 
 pub mod cli;
+pub mod graph_editor;
 pub mod render;
