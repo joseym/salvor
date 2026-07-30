@@ -1,5 +1,6 @@
-import type { Graph } from '@salvor-run/client';
+import { SCHEMA_VERSION, type Graph } from '@salvor-run/client';
 
+import { WF_KIND_LIST } from './wf-kinds';
 import { type WfGraph, documentBody } from './wf-model';
 import { type WfError, validateGraph } from './wf-validate';
 
@@ -53,12 +54,13 @@ export type WfOpenOutcome =
   | { readonly ok: true; readonly graph: WfGraph }
   | { readonly ok: false; readonly refusal: WfOpenRefusal };
 
-/** The six node kinds the canvas model holds, in the graph format's own order. */
-const KINDS = ['agent', 'tool', 'gate', 'branch', 'map', 'fold'] as const;
-
-/** The schema version this canvas reads. A document that declares another one may mean something
- * different by the same field names, and guessing is worse than saying so. */
-const SCHEMA_VERSION = 1;
+/** The node kinds a document may declare, in the graph format's own order: the same derived list the
+ * palette adds from (see wf-kinds.ts), so what this refuses to read is exactly what cannot be drawn.
+ *
+ * The schema version comes from the SDK's own `SCHEMA_VERSION`, the constant the builder stamps onto
+ * every document it writes: a document declaring another version may mean something different by the
+ * same field names, and guessing is worse than saying so. */
+const KINDS = WF_KIND_LIST;
 
 /** The ceiling on a derived draft name, in characters: long enough for a real file name, short
  * enough that the picker stays readable. */

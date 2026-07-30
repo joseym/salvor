@@ -39,7 +39,8 @@
 #wf-forked,
 #wf-published,
 #wf-started,
-#wf-opened {
+#wf-opened,
+#wf-edited {
   min-height: 0;
   color: var(--amber-ink);
   font-size: var(--text-sm);
@@ -47,7 +48,8 @@
 #wf-forked:empty,
 #wf-published:empty,
 #wf-started:empty,
-#wf-opened:empty {
+#wf-opened:empty,
+#wf-edited:empty {
   display: none;
 }
 
@@ -72,7 +74,7 @@
 
 /* FULL-BLEED CANVAS. The workflows canvas is the product's headline surface; it should own the
    screen rather than sit in a fixed letterbox with a page of dead space below it. The view becomes
-   a flex column that breaks the centered well, and the canvas fills to the bottom of the viewport —
+   a flex column that breaks the centered well, and the canvas fills to the bottom of the viewport:
    the exact height is set from JS (--wf-h) because only the runtime knows how much chrome sits
    above it (the topbar wraps). Ported from the prototype's #view-workflows full-bleed rules. */
 #view-workflows.is-active {
@@ -80,7 +82,7 @@
   flex-direction: column;
   max-width: none;
   margin-inline: 0;
-  /* the shared .view's 72px bottom padding would fight the measured fill height — trade it for the
+  /* the shared .view's 72px bottom padding would fight the measured fill height: trade it for the
      prototype's tighter frame so the canvas bottom lands where --wf-h expects it. */
   padding: var(--space-4) var(--space-6) var(--space-5);
 }
@@ -114,7 +116,7 @@
   height: var(--wf-h, 560px);
   min-height: 360px;
   /* `clip`, NOT `hidden`. Both clip; only `hidden` makes this a SCROLL CONTAINER, and the browser
-     scrolls a scroll container to reveal a focused descendant — Tab must PAN instead. */
+     scrolls a scroll container to reveal a focused descendant: Tab must PAN instead. */
   overflow: clip;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -199,7 +201,7 @@
   text-anchor: middle;
   dominant-baseline: central;
 }
-/* THE EXECUTED PATH — derived from the log, never chosen by a designer. */
+/* THE EXECUTED PATH: derived from the log, never chosen by a designer. */
 .wf-edge.is-inked {
   stroke: var(--accent);
   stroke-width: 2.5;
@@ -211,7 +213,7 @@
   fill: var(--accent);
   font-weight: 600;
 }
-/* the road not taken. Not absent — we did not go that way, and that is information. */
+/* the road not taken. Not absent: we did not go that way, and that is information. */
 .wf-edge.is-ghost {
   stroke: var(--border-soft);
   stroke-width: 1;
@@ -347,7 +349,7 @@
   color: var(--success);
   background: color-mix(in oklab, var(--success), var(--bg) 90%);
 }
-/* the error marker on a node card — a FILLED corner dot hung off the top-right corner, clear of the
+/* the error marker on a node card: a FILLED corner dot hung off the top-right corner, clear of the
    .wf-eff effect badge that sits INSIDE that same corner. The two must never share a lane: at
    `right: 30px` this dot printed straight over the effect word ("idemp!ent", "!ite"). Ported from
    the prototype's `.wf-node.is-bad .wf-badge` (top/right -8px, solid danger, accent-on glyph). */
@@ -368,7 +370,7 @@
   border-radius: 50%;
 }
 /* THE DUPLICATE-ID STACK CAPTION. A stack of same-id cards is drawn deliberately (each nudged by
-   DUP_STACK_OFFSET), and this chip on the top card SAYS so — `id n_charge ×2` in the danger ink of
+   DUP_STACK_OFFSET), and this chip on the top card SAYS so: `id n_charge ×2` in the danger ink of
    the error dot, so the overlap reads as a named collision, never a rendering glitch. It is a real
    button: Tab reaches it, Enter opens the validator's duplicate-id error (its rename fix included).
    Anchored to the top card's top-left and lifted to sit just above it, clear of the card content. */
@@ -431,7 +433,7 @@
   color: var(--muted);
   white-space: nowrap;
 }
-/* the per-node action menu affordance — always hit-testable (never hover-gated to zero, which
+/* the per-node action menu affordance: always hit-testable (never hover-gated to zero, which
    would make it flaky to reach), a touch stronger on hover/focus. */
 .wf-more {
   position: absolute;
@@ -465,7 +467,7 @@
 }
 /* FORK DISCOVERABILITY (review fix 2a): in Run mode the ⋯ IS the fork door, and a fork can only
    start from a node the run entered. So on a reached / current / exited node the affordance stays
-   fully visible, not the dim 0.55 hover cue — the operator can see where a fork can begin. */
+   fully visible, not the dim 0.55 hover cue: the operator can see where a fork can begin. */
 .wf-node.is-reached .wf-more,
 .wf-node.is-current .wf-more,
 .wf-node.is-exited .wf-more {
@@ -474,7 +476,7 @@
 }
 
 /* RUN-MODE NODE STATUS. The two kinds of "nothing" are NOT the same: not-reached is dimmed (the run
-   may still get here); skipped is struck through and hatched (the branch went the other way — it
+   may still get here); skipped is struck through and hatched (the branch went the other way; it
    never will). The build's projection vocabulary, styled to the prototype's treatment. */
 .wf-node.is-current {
   border-color: var(--accent);
@@ -609,14 +611,14 @@
   letter-spacing: 0.06em;
   min-width: 0;
   /* the legend is furniture: never let it crush into a vertical column of single words when the
-     run picker crowds the bar — it clips at the edge instead, and the controls keep their room. */
+     run picker crowds the bar: it clips at the edge instead, and the controls keep their room. */
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   flex: 0 1 auto;
 }
 /* On a narrow canvas (the panel column takes 340px of the work area) the legend would push the
-   floating bar under the minimap and swallow its right-hand controls — the exact captured-control
+   floating bar under the minimap and swallow its right-hand controls: the exact captured-control
    defect the chrome gate exists to catch. The legend is furniture; the controls are not. */
 .wf-canvas {
   container-type: inline-size;
@@ -641,7 +643,7 @@
   font-size: var(--text-xs);
   color: var(--muted);
   z-index: 2;
-  /* a passive note ON the paper — it must never intercept a click meant for a node beneath it */
+  /* a passive note ON the paper: it must never intercept a click meant for a node beneath it */
   pointer-events: none;
 }
 
@@ -729,7 +731,7 @@
   color: var(--muted);
 }
 
-/* THE FORK DIALOG — the app's one modal. Amber, never danger/red: acknowledged is not the same as
+/* THE FORK DIALOG: the app's one modal. Amber, never danger/red: acknowledged is not the same as
    safe, so the review reads as caution, not alarm. */
 .fork {
   border: 1px solid var(--faint);
@@ -829,7 +831,7 @@
   color: var(--muted);
 }
 
-/* ABOUT — a popover panel, not a modal. */
+/* ABOUT: a popover panel, not a modal. */
 .wf-about {
   border: 1px solid var(--faint);
   border-radius: var(--radius-lg);
@@ -928,7 +930,7 @@
   margin-top: 10px;
 }
 
-/* Publish speaks the toolbar's hairline language — same .fold-all family as its siblings, one
+/* Publish speaks the toolbar's hairline language: same .fold-all family as its siblings, one
    register stronger: full ink and 600 weight, never the filled-accent .btn. */
 .fold-all.strong {
   font-weight: 600;
@@ -993,6 +995,137 @@
   font-size: var(--text-sm);
   color: var(--muted);
 }
+
+/* A draft with nothing in it: the paper says so, rather than reading as a canvas that failed. */
+.wf-blank {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  margin: 0;
+  padding: 0 24px;
+  text-align: center;
+  font-size: var(--text-sm);
+  color: var(--muted);
+  pointer-events: none;
+}
+
+/* ── authoring: the palette, the edge list, the case list, the delete ──
+   All of it lives in the inspector rather than floating on the canvas, so it is reachable in the
+   narrow layout too, where the canvas yields to the linear list and a canvas-anchored control would
+   simply be gone. */
+.wf-add {
+  margin: 0 0 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--faint);
+}
+.wf-add > .k {
+  display: block;
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.wf-add-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+.wf-add-b {
+  font: inherit;
+  font-size: var(--text-xs);
+  padding: 4px 9px;
+  border: 1px solid var(--faint);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--fg);
+  cursor: pointer;
+}
+.wf-add-b:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.wf-edgelist,
+.wf-cases {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+}
+.wf-edgerow,
+.wf-case-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--faint);
+  font-size: var(--text-xs);
+}
+.wf-edge-d,
+.wf-case-n {
+  flex: 0 0 auto;
+  color: var(--fg);
+}
+.wf-edge-c,
+.wf-case-e {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.wf-case-w {
+  flex: 1 1 auto;
+  color: var(--muted);
+}
+/* Realized or not, said on the row itself, next to the control that changes it. The validator
+   reports the same fact; this is where the author is already looking. */
+.wf-case-r {
+  flex: 0 0 auto;
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+.wf-case-r.is-un {
+  color: var(--danger);
+}
+.wf-case-x {
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: var(--text-xs);
+  padding: 2px 7px;
+  border: 1px solid var(--faint);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+}
+.wf-case-x:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+.wf-newcase input {
+  margin-bottom: 4px;
+}
+.wf-danger {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--faint);
+}
+.wf-del-b {
+  font: inherit;
+  font-size: var(--text-xs);
+  padding: 4px 9px;
+  border: 1px solid var(--faint);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--danger);
+  cursor: pointer;
+}
+.wf-del-b:hover {
+  border-color: var(--danger);
+}
+/* The edge count a delete would orphan, inside the node menu's own entry. */
+.wf-menu-n {
+  color: var(--muted);
+}
 .wf-errs h5 {
   margin: 0 0 8px;
   font-size: var(--text-sm);
@@ -1034,8 +1167,9 @@
   color: var(--success);
 }
 
-/* ── the node-picking banner ── */
-#wf-forkpick:empty {
+/* ── the node-picking banner, and the armed connect, which is the same shape of live state ── */
+#wf-forkpick:empty,
+#wf-linking:empty {
   display: none;
 }
 .wf-forkpick-line {

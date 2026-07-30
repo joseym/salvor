@@ -28,6 +28,17 @@ import { jsonHi } from '../../shared/json-hi';
 import { agentIdentity, toRunRow } from '../runs/run-model';
 import { loadDrafts, removeDraft, saveDraft } from './wf-draft';
 import {
+  addEdge,
+  addNode,
+  deleteNode,
+  edgesTouching,
+  freeNodeId,
+  removeCase,
+  removeEdgeAt,
+  setCase,
+  setEdgeCase,
+} from './wf-edit';
+import {
   DUP_STACK_OFFSET,
   NODE_H,
   NODE_W,
@@ -42,17 +53,22 @@ import {
   zoomPercent,
 } from './wf-geometry';
 import { type HazardReview, type HazardRow, forkReady, reviewOf } from './wf-hazard';
+import { WF_KINDS, WF_KIND_LIST } from './wf-kinds';
 import {
   type WfEdge,
   type WfGraph,
   type WfNode,
+  type WfNodeKind,
   type WfPickOption,
+  branchCases,
   fromServerGraph,
   nodeDoes,
   pickOptions,
   shortHash,
+  toServerDocument,
+  withDocFields,
 } from './wf-model';
-import { type WfOpenRefusal, openGraphDocument } from './wf-open';
+import { type WfOpenRefusal, freeDraftName, openGraphDocument } from './wf-open';
 import {
   type WfNodeProjection,
   edgeWalked,
@@ -77,7 +93,7 @@ interface PositionedNode extends WfNode {
   readonly y: number;
   readonly does: string;
   readonly bad: boolean;
-  /** The mono field strip — the input keys this node reads, the way a form shows its fields. */
+  /** The mono field strip: the input keys this node reads, the way a form shows its fields. */
   readonly fields: readonly string[];
   /** The effect class shown on a tool/map's face (read | write | idempotent), when it has one. */
   readonly eff?: string;
@@ -92,7 +108,7 @@ interface PositionedEdge {
   readonly d: string;
   /** The single fine arrowhead at the target port, as its own filled triangle path. */
   readonly arrow: string;
-  /** Where the case label sits — ON the straight run, or riding the vertical of an elbow. */
+  /** Where the case label sits: ON the straight run, or riding the vertical of an elbow. */
   readonly lx: number;
   readonly ly: number;
   /** An edge out of a branch is a case; it draws in the firmer case ink. */
@@ -104,7 +120,7 @@ interface PositionedEdge {
 
 /** A canvas caption for a duplicate-id stack: the shared id, how many cards claim it, and where the
  * chip sits (anchored to the top card of the nudged stack). Derived from the validator's
- * `duplicate_id` errors — the one source of truth — so the cue can never disagree with the panel. */
+ * `duplicate_id` errors (the one source of truth) so the cue can never disagree with the panel. */
 interface DupStack {
   readonly id: string;
   readonly count: number;
@@ -140,22 +156,43 @@ interface MapRect {
   readonly id?: string;
 }
 
-const KIND_BLURB: Record<string, string> = {
-  agent: 'a full agent loop, referenced by hash',
-  tool: 'one direct tool invocation',
-  gate: 'a human approval that suspends the run',
-  branch: 'routes on a recorded decision',
-  map: 'fans out a sub-run per element of a list',
-  fold: 'iterates a body until it converges, then joins the passes',
-};
+/** One edge the selected node is an end of, as the inspector renders it: its position in the
+ * document's edge list (which is what a validator error addresses an edge by), which way it runs,
+ * the node at the other end, and the case it realizes when its source is a branch. */
+interface EdgeRow {
+  readonly index: number;
+  readonly out: boolean;
+  readonly other: string;
+  readonly label?: string;
+  /** The cases the SOURCE branch declares, when the source is one: the options a case select offers.
+   * Empty for every other edge, which is how the template knows not to offer one. */
+  readonly cases: readonly string[];
+}
 
-/** The minimap's drawing units — its viewBox. The CSS box is 160x100, so the CTM (not the CSS
+/** One case of the selected branch: its name and the condition that selects it, in the two forms the
+ * format has (an expression over the routed value, or a decision the branch's agent makes). */
+interface CaseRow {
+  readonly name: string;
+  readonly model: boolean;
+  readonly expression: string;
+  /** Whether an edge out of this branch realizes it. The validator says so too; this is what lets the
+   * row itself read as realized or not, next to the control that would fix it. */
+  readonly realized: boolean;
+}
+
+/** One entry of the palette: a kind, and what a node of it is. */
+interface PaletteEntry {
+  readonly kind: WfNodeKind;
+  readonly blurb: string;
+}
+
+/** The minimap's drawing units: its viewBox. The CSS box is 160x100, so the CTM (not the CSS
  * rect) converts a pointer to these units; letterboxing would otherwise put the view off. */
 const MAP_W = 156;
 const MAP_H = 92;
 
 /**
- * THE WORKFLOWS CANVAS — the graph authoring + fork surface. Builder and Run modes; a picker over
+ * THE WORKFLOWS CANVAS: the graph authoring + fork surface. Builder and Run modes; a picker over
  * server graphs AND in-browser drafts; pan/zoom with the {@link wfFit} legibility floor; a live
  * minimap (field click jumps, viewport rectangle drags); per-node ⋯ menus; a docked node
  * inspector whose head is the validator's verdict; a narrow-viewport linear list; and the app's
@@ -188,6 +225,8 @@ export class Workflows implements AfterViewInit {
   @ViewChild('wfOpenFile') private openFileRef?: ElementRef<HTMLInputElement>;
   @ViewChild('wfPasteText') private pasteTextRef?: ElementRef<HTMLTextAreaElement>;
   @ViewChild('wfPasteBox') private pasteBoxRef?: ElementRef<HTMLElement>;
+  @ViewChild('wfCaseName') private caseNameRef?: ElementRef<HTMLInputElement>;
+  @ViewChild('wfCaseExpr') private caseExprRef?: ElementRef<HTMLInputElement>;
 
   readonly MAP_W = MAP_W;
   readonly MAP_H = MAP_H;
@@ -225,6 +264,13 @@ export class Workflows implements AfterViewInit {
   /** The node-picking state: a fork was requested from a surface that names no node (a Runs list
    * row), so the operator picks the fork point here rather than the app guessing one. */
   readonly pickRun = signal<string | undefined>(undefined);
+  /** THE ARMED CONNECT. An edge needs two nodes and one click cannot name both, so the first click
+   * arms this and the second lands the edge. A live state the author is standing in, not a receipt:
+   * the banner says whose edge is pending and Escape (or Cancel) drops it. */
+  readonly linkFrom = signal<string | undefined>(undefined);
+  /** What the last structural edit did, said plainly: a node added, a node deleted with the count of
+   * edges it left pointing at nothing, an edge drawn or cut. */
+  readonly edited = signal<string>('');
   /** The canvas's viewport size, published by a ResizeObserver so the minimap math is reactive. */
   private readonly canvasSize = signal<{ width: number; height: number }>({ width: 0, height: 0 });
 
@@ -250,7 +296,7 @@ export class Workflows implements AfterViewInit {
     pickOptions(this.drafts(), this.serverGraphs()),
   );
 
-  readonly graphName = computed(() => this.currentGraph()?.name ?? '—');
+  readonly graphName = computed(() => this.currentGraph()?.name ?? '-');
   readonly graphState = computed(() => this.currentGraph()?.state ?? 'draft');
   readonly graphHash = computed(() => this.currentGraph()?.hash ?? null);
 
@@ -263,7 +309,7 @@ export class Workflows implements AfterViewInit {
   });
   readonly zoomLabel = computed(() => zoomPercent(this.view().k));
 
-  /** ONE error list per render — the canvas, the list, the panel and the publish gate all read
+  /** ONE error list per render: the canvas, the list, the panel and the publish gate all read
    * this, so they can never disagree about an offender. */
   readonly errors = computed<readonly WfError[]>(() => {
     const g = this.currentGraph();
@@ -274,8 +320,13 @@ export class Workflows implements AfterViewInit {
     () => new Set(this.errors().filter((e) => e.node !== undefined).map((e) => e.node)),
   );
 
+  /** An empty document is not a graph: the same rule {@link openGraphDocument} refuses a nodeless
+   * document by. It is a gate on the button rather than an error in the list because a draft that has
+   * not been drawn yet is not a MISTAKE, it is a blank sheet; the validator names mistakes. */
+  readonly emptyDraft = computed(() => (this.currentGraph()?.nodes.length ?? 0) === 0);
+
   readonly publishDisabled = computed(
-    () => this.errors().length > 0 || this.graphState() === 'published',
+    () => this.errors().length > 0 || this.graphState() === 'published' || this.emptyDraft(),
   );
   readonly publishLabel = computed(() => (this.graphState() === 'published' ? 'Published' : 'Publish'));
 
@@ -314,7 +365,7 @@ export class Workflows implements AfterViewInit {
     const layout = this.layout();
     const states = this.nodeStates();
     const bad = this.badNodes();
-    // Two nodes claiming the SAME id cannot be placed apart by an id-keyed layout — that is the
+    // Two nodes claiming the SAME id cannot be placed apart by an id-keyed layout; that is the
     // duplicate showing its consequence. Nudge the second so both are visible.
     const dupSeen: Record<string, number> = {};
     return g.nodes.map((n) => {
@@ -335,7 +386,7 @@ export class Workflows implements AfterViewInit {
 
   /**
    * THE DUPLICATE-ID STACK CAPTIONS. When two or more nodes claim one id the layout can only place
-   * them at one slot, so the renderer nudges each down-and-right into a small stack — and this chip
+   * them at one slot, so the renderer nudges each down-and-right into a small stack, and this chip
    * sits on the top card to SAY so, `id n_charge × 2`, in the same danger ink as the error dot, so
    * the overlap reads as a named collision rather than a rendering glitch. Derived straight from the
    * validator's `duplicate_id` errors (the one detection), so it appears only when ids actually
@@ -376,7 +427,7 @@ export class Workflows implements AfterViewInit {
       .map(({ e, path }) => {
         const isBranch = branchSources.has(e.from);
         const walked = inRun && edgeWalked(e.from, e.to, e.label, isBranch, states);
-        // The road not taken: a decided branch's OTHER arm. Ghosted, never deleted — "we did not
+        // The road not taken: a decided branch's OTHER arm. Ghosted, never deleted: "we did not
         // go that way" is information the canvas keeps rather than a route it quietly drops.
         const s = states[e.from];
         const decided = isBranch && !!s && s.branchCase !== undefined;
@@ -396,7 +447,7 @@ export class Workflows implements AfterViewInit {
       });
   });
 
-  /** The narrow viewport's one-dimensional rendering — the same graph, the same error list, the
+  /** The narrow viewport's one-dimensional rendering: the same graph, the same error list, the
    * same selection, in topological reading order with every incoming edge named. */
   readonly listRows = computed<ListRow[]>(() => {
     const g = this.currentGraph();
@@ -427,6 +478,57 @@ export class Workflows implements AfterViewInit {
 
   readonly readOnly = computed(() => this.graphState() === 'published');
 
+  /**
+   * THE PALETTE, read off the derived kind table (wf-kinds.ts) rather than listed here: the canvas
+   * offers exactly the kinds the format declares, in the format's own order, because it is the same
+   * list the document reader accepts and the same one the SDK's node union defines.
+   */
+  readonly palette = computed<PaletteEntry[]>(() =>
+    WF_KIND_LIST.map((kind) => ({ kind, blurb: WF_KINDS[kind].blurb })),
+  );
+
+  /** Every node id in the document: the options a map's or fold's body picks its target from. */
+  readonly nodeIds = computed<readonly string[]>(() => this.currentGraph()?.nodes.map((n) => n.id) ?? []);
+
+  /** The edges the selected node is an end of, in document order. Both directions, because an edge
+   * INTO a node is as much a fact about it as one out, and cutting either is the same operation. */
+  readonly selectedEdges = computed<EdgeRow[]>(() => {
+    const g = this.currentGraph();
+    const id = this.selectedNode();
+    if (!g || id === undefined) return [];
+    const caseNamesOf = (from: string): readonly string[] => {
+      const src = g.nodes.find((n) => n.id === from);
+      return src?.kind === 'branch' ? (src.cases ?? []) : [];
+    };
+    const rows: EdgeRow[] = [];
+    g.edges.forEach((e, index) => {
+      if (e.from !== id && e.to !== id) return;
+      const out = e.from === id;
+      rows.push({
+        index,
+        out,
+        other: out ? e.to : e.from,
+        ...(e.label !== undefined ? { label: e.label } : {}),
+        cases: caseNamesOf(e.from),
+      });
+    });
+    return rows;
+  });
+
+  /** The selected branch's cases, with the condition each carries and whether an edge realizes it. */
+  readonly selectedCases = computed<CaseRow[]>(() => {
+    const g = this.currentGraph();
+    const n = this.selectedNodeObj();
+    if (!g || !n || n.kind !== 'branch') return [];
+    const realized = new Set(g.edges.filter((e) => e.from === n.id).map((e) => e.label));
+    return branchCases(n).map((c) => ({
+      name: c.name,
+      model: c.when.kind === 'model_decision',
+      expression: c.when.kind === 'expression' ? c.when.value : '',
+      realized: realized.has(c.name),
+    }));
+  });
+
   readonly panelTitle = computed(() => this.selectedNodeObj()?.name ?? 'Inspector');
   readonly panelSub = computed(() => {
     const n = this.selectedNodeObj();
@@ -434,11 +536,11 @@ export class Workflows implements AfterViewInit {
     return `${n.kind} · ${
       this.readOnly()
         ? 'published, so this graph is frozen'
-        : 'draft — edits change the bytes, and the bytes are the identity'
+        : 'draft: edits change the bytes, and the bytes are the identity'
     }`;
   });
 
-  /** The runs of the CURRENTLY shown graph — a graph run whose projection names this graph. A
+  /** The runs of the CURRENTLY shown graph: a graph run whose projection names this graph. A
    * hashless draft has none, so its picker is empty and Run mode has nothing to ink (honest). */
   private readonly runsOfGraph = computed<string[]>(() => {
     const g = this.currentGraph();
@@ -448,7 +550,7 @@ export class Workflows implements AfterViewInit {
     return out;
   });
 
-  /** The run picker's options — the runs OF THE SHOWN GRAPH only, each with its derived status,
+  /** The run picker's options: the runs OF THE SHOWN GRAPH only, each with its derived status,
    * newest-first as the projection cache holds them. Ported from the prototype's `renderWfRuns`,
    * which lists `runsOfGraph(wfHash)`, NOT every graph run in the system: a run of a DIFFERENT
    * graph could never project onto this one, so offering it is the "Run does nothing" defect. */
@@ -457,7 +559,7 @@ export class Workflows implements AfterViewInit {
     return this.runsOfGraph().map((id) => ({
       id,
       label: id.slice(0, 8),
-      status: byId.get(id)?.status ?? '—',
+      status: byId.get(id)?.status ?? '-',
     }));
   });
 
@@ -525,14 +627,14 @@ export class Workflows implements AfterViewInit {
 
   constructor() {
     // The canvas is MOUNTED from boot (its dialog, and fork intents, need it present), but its
-    // data is loaded on first genuine need — entering the view, or a fork intent — so every other
+    // data is loaded on first genuine need (entering the view, or a fork intent) so every other
     // view's page load is not taxed with graph documents and run projections it never shows.
     effect(() => {
       if (this.viewService.view() !== 'workflows') return;
       untracked(() => {
         this.ensureLoaded();
         // The canvas fills the viewport, and only the runtime knows how much chrome sits above it
-        // (the topbar wraps), so its height is measured after the view is on screen — then fit.
+        // (the topbar wraps), so its height is measured after the view is on screen, then fit.
         requestAnimationFrame(() => {
           this.sizeCanvas();
           this.fit();
@@ -553,6 +655,28 @@ export class Workflows implements AfterViewInit {
       s.setProperty('--wf-oy', `${v.y}px`);
       s.setProperty('--wf-rule-1', `color-mix(in oklab, var(--fg), transparent ${100 - 6 * fade}%)`);
       s.setProperty('--wf-rule-5', `color-mix(in oklab, var(--fg), transparent ${100 - 14 * fade}%)`);
+    });
+    // THE FILL HEIGHT IS MEASURED FROM THE CANVAS'S TOP, and everything drawn above the canvas moves
+    // that top: the run note that appears once a stored graph is selected, every banner, the picking
+    // and connecting lines. Measuring once on entry catches the chrome that happened to be there at
+    // that instant and leaves the canvas overhanging the viewport (or short of it) the moment the
+    // rest arrives. So the facts that put chrome above the canvas are READ here, and the measurement
+    // is retaken after the frame that renders them.
+    effect(() => {
+      const chrome = [
+        this.graphHash(),
+        this.forked(),
+        this.published(),
+        this.started(),
+        this.opened(),
+        this.edited(),
+        this.pickRun(),
+        this.linkFrom(),
+        this.openRefusal(),
+      ];
+      void chrome;
+      if (this.viewService.view() !== 'workflows') return;
+      untracked(() => requestAnimationFrame(() => this.sizeCanvas()));
     });
     // Fork requests from the Inspector or the Runs panel land whenever their view fires them;
     // consuming is untracked so acting on one never re-runs under its own signal writes.
@@ -583,7 +707,7 @@ export class Workflows implements AfterViewInit {
     }
     // The fill height is a function of the window, not of the canvas box, so a window resize
     // (which the ResizeObserver above does not see until AFTER the reflow) re-measures it. Keep
-    // the current zoom — a resize is not a request to refit — exactly as the prototype's listener.
+    // the current zoom (a resize is not a request to refit) exactly as the prototype's listener.
     const onResize = (): void => this.sizeCanvas();
     window.addEventListener('resize', onResize);
     this.destroyRef.onDestroy(() => window.removeEventListener('resize', onResize));
@@ -619,7 +743,7 @@ export class Workflows implements AfterViewInit {
       );
       this.serverGraphs.set(docs.filter((g): g is WfGraph => g !== undefined));
     } catch {
-      /* no server graphs reachable — the picker still offers the local drafts */
+      /* no server graphs reachable; the picker still offers the local drafts */
     }
     // Default selection: a server graph if any (it has runs to project), else the first draft.
     if (!this.currentKey()) {
@@ -628,7 +752,7 @@ export class Workflows implements AfterViewInit {
     }
     // Entry fit NOW, before the slower projection reads: the microtask runs before the first
     // paint of the drawn nodes, so the operator (or a real pointer) can never slip a zoom in
-    // between the nodes appearing and the fit landing — a fit that arrived after the projections
+    // between the nodes appearing and the fit landing: a fit that arrived after the projections
     // would quietly reset a zoom they had already chosen.
     queueMicrotask(() => this.fit());
     // Graph-run projections (a handful), so Run mode and the node menu know which runs are real.
@@ -650,7 +774,7 @@ export class Workflows implements AfterViewInit {
       );
       this.projections.set(map);
     } catch {
-      /* runs unreachable — Run mode has nothing to project, which the empty picker states */
+      /* runs unreachable; Run mode has nothing to project, which the empty picker states */
     }
   }
 
@@ -668,10 +792,18 @@ export class Workflows implements AfterViewInit {
     this.published.set('');
     this.started.set('');
     this.opened.set('');
+    this.edited.set('');
     this.openRefusal.set(undefined);
+    // An armed connect names a node in the graph being left; it cannot mean anything in the next one.
+    this.linkFrom.set(undefined);
+    // UNDO BELONGS TO ONE DOCUMENT. Every step in the history is a whole graph under its own key, so
+    // stepping back while looking at a DIFFERENT document would write that other document back to its
+    // own key: an edit to something not on screen. Changing what you are looking at ends the walk.
+    this.past.set([]);
+    this.future.set([]);
     // A run only projects onto the graph it ran. Leaving Run mode on a graph with no runs keeps
     // the canvas honest; on a graph that HAS runs, re-anchor to one of ITS runs rather than
-    // inking the previous graph's — the exact `if (!runs.includes(wfRunId)) wfRunId = runs[0]`
+    // inking the previous graph's: the exact `if (!runs.includes(wfRunId)) wfRunId = runs[0]`
     // the prototype's renderWfRuns does, so the picker can never point at a foreign run.
     if (this.mode() === 'run') {
       const runs = this.runsOfGraph();
@@ -683,6 +815,21 @@ export class Workflows implements AfterViewInit {
 
   onPick(event: Event): void {
     this.pick((event.target as HTMLSelectElement).value);
+  }
+
+  /**
+   * A BLANK SHEET. Every other way into this canvas starts from a document that already exists (the
+   * seeded draft, a file, a paste, a published graph read from the server), so drawing a graph from
+   * nothing had nowhere to start. This makes one: no nodes, no edges, no hash, under a free name
+   * through the same anti-clobber rule an opened file goes through, so it can never land on work the
+   * author already has.
+   */
+  newDraft(): void {
+    const name = freeDraftName('untitled', this.drafts().map((d) => d.name));
+    const draft: WfGraph = { key: `draft:${name}`, hash: null, name, state: 'draft', nodes: [], edges: [] };
+    this.drafts.set(saveDraft(draft));
+    this.pick(draft.key);
+    this.edited.set(`${name} is a new draft with nothing in it yet`);
   }
 
   // ── opening a document from outside (the file picker, a drop, the paste box) ──
@@ -709,10 +856,7 @@ export class Workflows implements AfterViewInit {
       return;
     }
     this.drafts.set(saveDraft(outcome.graph));
-    // Undo/redo is a walk over edits to the graph on screen; a different document is a different
-    // walk, and offering the previous one's steps here would put its bytes under this draft's key.
-    this.past.set([]);
-    this.future.set([]);
+    // The walk over this document's edits starts here: `pick` ends the previous document's.
     this.pick(outcome.graph.key);
     this.opened.set(
       `opened ${outcome.graph.name} · ${outcome.graph.nodes.length} node${outcome.graph.nodes.length === 1 ? '' : 's'} · a draft, with no hash until it is published`,
@@ -800,7 +944,7 @@ export class Workflows implements AfterViewInit {
     this.mode.set(mode);
     this.menu.set(undefined);
     // Run mode projects a run OF THIS GRAPH. Anchor to one of its own runs (the newest), never a
-    // run left selected from another graph — the source of the "Run does nothing" report, where
+    // run left selected from another graph: the source of the "Run does nothing" report, where
     // the picker offered a foreign run whose projection could never match this graph.
     if (mode === 'run') {
       const runs = this.runsOfGraph();
@@ -830,27 +974,29 @@ export class Workflows implements AfterViewInit {
   fit(): void {
     const g = this.currentGraph();
     const box = this.canvasEl()?.getBoundingClientRect();
-    if (!g || !box || box.width === 0) return;
+    // A blank sheet has no bounds to fit to: every number the fit computes from an empty node list
+    // is a measurement of nothing, and the view it would set is NaN.
+    if (!g || g.nodes.length === 0 || !box || box.width === 0) return;
     this.view.set(wfFit(g, this.layout(), { width: box.width, height: box.height }));
   }
   reset(): void {
     const g = this.currentGraph();
     const box = this.canvasEl()?.getBoundingClientRect();
-    if (!g || !box) return;
+    if (!g || g.nodes.length === 0 || !box) return;
     this.view.set(wfReset(g, this.layout(), { width: box.width, height: box.height }));
   }
 
   /**
    * Bring a node to the middle at a legible zoom (k in [1, 1.4], a deeper operator-chosen zoom
    * left alone). Centres against the width the canvas SETTLES to once the panel column finishes
-   * animating open (340px + the grid gap), never the transient mid-animation width — measuring
+   * animating open (340px + the grid gap), never the transient mid-animation width: measuring
    * the live box would leave the node ~150px off when the panel lands.
    */
   private centerOn(id: string): void {
     const at = this.layout()[id];
     const canvas = this.canvasEl();
     if (!at || !canvas) return;
-    // Below the breakpoint the canvas is display:none — its box is 0x0 and every number computed
+    // Below the breakpoint the canvas is display:none; its box is 0x0 and every number computed
     // from it would be a measurement of nothing. The narrow list still opens the panel.
     if (getComputedStyle(canvas).display === 'none') return;
     const box = canvas.getBoundingClientRect();
@@ -896,7 +1042,7 @@ export class Workflows implements AfterViewInit {
   onCanvasPointerdown(event: PointerEvent): void {
     const target = event.target as HTMLElement;
     if (target.closest(Workflows.PAN_BLOCK)) return; // a control: never pan
-    // Dragging the empty paper pans in BOTH tools — the prototype's pan handler never consults
+    // Dragging the empty paper pans in BOTH tools: the prototype's pan handler never consults
     // the tool. Select is a cursor affordance (the arrow says "click to select" where Pan's grab
     // says "drag the ground"); it does not disable the pan gesture. Gating pan on the tool was the
     // build's own divergence, and the "Select does nothing" the operator felt from it.
@@ -916,10 +1062,10 @@ export class Workflows implements AfterViewInit {
     this.panStart = undefined;
   }
 
-  // ── minimap: the field jumps, the viewport rectangle drags — one gesture, one path ──
+  // ── minimap: the field jumps, the viewport rectangle drags (one gesture, one path) ──
   private mapDrag?: { gx: number; gy: number };
 
-  /** The pointer in the map's own drawing units, through the CTM — the svg's viewBox and CSS box
+  /** The pointer in the map's own drawing units, through the CTM: the svg's viewBox and CSS box
    * have different aspect ratios, so a rect-relative read would be off by the letterbox. */
   private mapPoint(event: PointerEvent): { x: number; y: number } | undefined {
     const svg = this.mapSvgRef?.nativeElement;
@@ -980,10 +1126,16 @@ export class Workflows implements AfterViewInit {
       void this.openFork(origin, id);
       return;
     }
+    const from = this.linkFrom();
+    if (from !== undefined) {
+      this.linkFrom.set(undefined);
+      this.landEdge(from, id);
+      return;
+    }
     this.selectNode(id);
   }
 
-  /** Select a node: one selection, both surfaces. Selecting REVEALS — the panel may have been
+  /** Select a node: one selection, both surfaces. Selecting REVEALS. The panel may have been
    * dismissed, and a selection is a request to see the thing, so it comes back. */
   selectNode(id: string): void {
     this.selectedNode.set(id);
@@ -995,7 +1147,7 @@ export class Workflows implements AfterViewInit {
   }
 
   /** Activate a duplicate-stack caption: select the shared node, open the inspector, and focus the
-   * validator's own `duplicate_id` error for it — the same error, with its rename fix, that gates
+   * validator's own `duplicate_id` error for it: the same error, with its rename fix, that gates
    * publish. The chip is a shortcut INTO the one error list, never a second explanation of it. */
   openDupError(stack: DupStack): void {
     this.selectNode(stack.id);
@@ -1006,7 +1158,7 @@ export class Workflows implements AfterViewInit {
   }
 
   /** Tab can move focus to a node that is off-screen. The browser would normally scroll it into
-   * view — but this stage is transformed and the canvas is `overflow: clip` (never a scroll
+   * view, but this stage is transformed and the canvas is `overflow: clip` (never a scroll
    * container), so panning is the right instrument. */
   onNodesFocusin(event: FocusEvent): void {
     const el = (event.target as HTMLElement).closest<HTMLElement>('.wf-node');
@@ -1063,7 +1215,7 @@ export class Workflows implements AfterViewInit {
   private hasRun(): boolean {
     return this.runsOfGraph().length > 0;
   }
-  /** The fork menu entry's state — acts, switches, or explains. Mirrors the prototype's wfOpenMenu. */
+  /** The fork menu entry's state: acts, switches, or explains. Mirrors the prototype's wfOpenMenu. */
   forkMenuState(): 'act' | 'switch' | 'disabled' {
     if (this.inRun()) return 'act';
     if (this.hasRun()) return 'switch';
@@ -1094,6 +1246,20 @@ export class Workflows implements AfterViewInit {
     if (id !== undefined && navigator.clipboard) void navigator.clipboard.writeText(id);
     this.closeMenu();
   }
+  /** Arm a connect from the node the menu is open on: the direct-manipulation route to an edge, for
+   * an author working on the canvas rather than in the inspector. Both end in the same armed state. */
+  menuConnect(): void {
+    const id = this.menu()?.nodeId;
+    if (id !== undefined) this.armLink(id);
+  }
+  menuDelete(): void {
+    const id = this.menu()?.nodeId;
+    if (id !== undefined) this.removeNode(id);
+  }
+  /** The id of the node the menu is open on, for the menu's own copy. */
+  menuNodeId(): string {
+    return this.menu()?.nodeId ?? '';
+  }
 
   // ── the app-wide fork door: Inspector + Runs requests land here ──
   private async consumeIntent(intent: ForkIntent): Promise<void> {
@@ -1106,7 +1272,7 @@ export class Workflows implements AfterViewInit {
         const got = proj;
         this.projections.update((m) => new Map(m).set(intent.runId, got));
       } catch {
-        /* not a graph run, or its projection is unreadable — openFork below reports the refusal */
+        /* not a graph run, or its projection is unreadable; openFork below reports the refusal */
       }
     }
     if (proj) {
@@ -1116,14 +1282,14 @@ export class Workflows implements AfterViewInit {
       }
       this.runId.set(intent.runId);
       this.setMode('run');
-      // The canonical URL — byte-identical to where a canvas fork leaves you.
+      // The canonical URL: byte-identical to where a canvas fork leaves you.
       void this.router.navigate(['/workflows', hash.replace(/^sha256:/, '').slice(0, 12)]);
     }
     if (intent.nodeId !== undefined) {
       this.selectNode(intent.nodeId);
       void this.openFork(intent.runId, intent.nodeId);
     } else {
-      // The caller names no node, so the operator picks one — never guessed for them.
+      // The caller names no node, so the operator picks one, never guessed for them.
       this.pickRun.set(intent.runId);
     }
   }
@@ -1224,14 +1390,14 @@ export class Workflows implements AfterViewInit {
   }
 
   kindBlurb(kind: string): string {
-    return KIND_BLURB[kind] ?? '';
+    return WF_KINDS[kind as WfNodeKind]?.blurb ?? '';
   }
   /** A run-state class rendered as its label: `not-reached` reads as `not reached`. */
   runLabel(state: string): string {
     return state.replace(/-/g, ' ');
   }
   /** The run-mode iteration progress a fold node shows from its recorded projection: how many
-   * passes have joined of those started, and — once the loop settled — which pass won. Empty
+   * passes have joined of those started, and (once the loop settled) which pass won. Empty
    * string when the node is not a fold, or the walk has not reached it. */
   foldRun(n: PositionedNode): string {
     const fold = n.run?.fold;
@@ -1266,19 +1432,225 @@ export class Workflows implements AfterViewInit {
   }
   editName(event: Event): void {
     const v = (event.target as HTMLInputElement).value;
-    this.editSelected((n) => ({ ...n, name: v }));
+    this.editSelected((n) => withDocFields({ ...n, name: v }, { name: v }));
   }
   editHash(event: Event): void {
     const v = (event.target as HTMLInputElement).value.trim();
-    this.editSelected((n) => ({ ...n, agentHash: v }));
+    this.editSelected((n) => withDocFields({ ...n, agentHash: v }, { agent_hash: v }));
   }
+  /** The effect class is the one field here that is NOT part of the document. A graph's tool node
+   * carries no effect: a tool's effect comes from the tool's own contract in the runtime's registry,
+   * and the hazard review reads what a run RECORDED, not what a document claimed. So this edits the
+   * draft's own note about the tool and is deliberately not written into the payload publish emits. */
   editEffect(event: Event): void {
     const v = (event.target as HTMLSelectElement).value;
     this.editSelected((n) => ({ ...n, effect: v }));
   }
   editConcurrency(event: Event): void {
     const v = Number((event.target as HTMLInputElement).value);
-    this.editSelected((n) => ({ ...n, concurrency: v }));
+    this.editSelected((n) => withDocFields({ ...n, concurrency: v }, { concurrency: v }));
+  }
+  editTool(event: Event): void {
+    const v = (event.target as HTMLInputElement).value.trim();
+    this.editSelected((n) => withDocFields({ ...n, tool: v }, { tool: v }));
+  }
+  editOver(event: Event): void {
+    const v = (event.target as HTMLInputElement).value;
+    this.editSelected((n) => withDocFields({ ...n, over: v }, { over: v }));
+  }
+  editPrompt(event: Event): void {
+    const v = (event.target as HTMLInputElement).value;
+    // The format's `prompt` is absent or real text, so an emptied field OMITS it rather than
+    // publishing an approval that prompts with nothing.
+    this.editSelected((n) => withDocFields({ ...n, prompt: v }, { prompt: v || undefined }));
+  }
+  editMaxIterations(event: Event): void {
+    const v = Number((event.target as HTMLInputElement).value);
+    this.editSelected((n) => withDocFields({ ...n, maxIterations: v }, { max_iterations: v }));
+  }
+  editStopWhen(event: Event): void {
+    const v = (event.target as HTMLInputElement).value;
+    this.editSelected((n) => withDocFields({ ...n, stopWhen: v }, { stop_when: v }));
+  }
+  /** The node a map maps each element through, or a fold runs each pass. A body names a node in this
+   * same document, so this is a choice among the ids the document has, never free text. */
+  editBody(event: Event): void {
+    const v = (event.target as HTMLSelectElement).value;
+    this.editSelected((n) =>
+      withDocFields({ ...n, body: { ...(n.body ?? {}), node: v } }, { body: { kind: 'node', value: v } }),
+    );
+  }
+  /** A branch's own agent hash: which agent decides its model-decided cases. Named on the node, by
+   * hash, exactly as an agent node names one. */
+  editBranchHash(event: Event): void {
+    const v = (event.target as HTMLInputElement).value.trim();
+    this.editSelected((n) => withDocFields({ ...n, agentHash: v }, { agent_hash: v || undefined }));
+  }
+
+  // ── structural authoring: nodes, edges, branch cases ──
+
+  /**
+   * Add a node of `kind` and select it, so the inspector is already on the thing that was just made
+   * and the fields it still needs are in front of the author. The id is computed BEFORE the mutation
+   * from the same function the mutation uses, which is what lets the selection name it.
+   */
+  addKind(kind: WfNodeKind): void {
+    const g = this.currentGraph();
+    if (!g || g.state !== 'draft') return;
+    const id = freeNodeId(g, kind);
+    this.updateDraft((cur) => addNode(cur, kind).graph);
+    this.edited.set(`added the ${kind} ${id}`);
+    this.selectNode(id);
+  }
+
+  /**
+   * Delete a node, and ONLY the node: every edge that named it stays in the document and becomes a
+   * validator error pointing at what it used to reach. The banner says how many, so the errors that
+   * appear are the announced consequence of the delete rather than a surprise.
+   */
+  removeNode(id: string): void {
+    const g = this.currentGraph();
+    if (!g || g.state !== 'draft') return;
+    const orphaned = edgesTouching(g, id);
+    this.updateDraft((cur) => deleteNode(cur, id));
+    this.closeMenu();
+    if (this.selectedNode() === id) this.selectedNode.set(undefined);
+    this.edited.set(
+      orphaned
+        ? `deleted ${id} · ${orphaned} edge${orphaned === 1 ? '' : 's'} still named it, and each one is now an error naming what it pointed at`
+        : `deleted ${id} · no edge referenced it`,
+    );
+  }
+
+  /** Delete whatever is selected: the inspector's own copy of the node menu's entry. */
+  removeSelected(): void {
+    const id = this.selectedNode();
+    if (id !== undefined) this.removeNode(id);
+  }
+
+  /** How many edges a delete of `id` would leave pointing at nothing: said on the button, before it
+   * is pressed, so the consequence is offered rather than discovered. */
+  orphanCount(id: string): number {
+    const g = this.currentGraph();
+    return g ? edgesTouching(g, id) : 0;
+  }
+
+  /** Arm the connect: the next node activated becomes the far end of an edge out of `id`. */
+  armLink(id: string): void {
+    if (this.readOnly()) return;
+    this.linkFrom.set(id);
+    this.closeMenu();
+    this.edited.set('');
+  }
+  cancelLink(): void {
+    this.linkFrom.set(undefined);
+  }
+  /** Escape drops an armed connect. Nothing else on the canvas takes the key, and a pending edge is
+   * the only thing here that a keystroke should be able to take back. */
+  onCanvasKeydown(event: KeyboardEvent): void {
+    if (event.key !== 'Escape' || this.linkFrom() === undefined) return;
+    event.preventDefault();
+    this.cancelLink();
+  }
+
+  /** Land the armed edge. A branch's edge is created WITHOUT a case, so the validator asks for one
+   * rather than the canvas picking a case the author did not choose. */
+  private landEdge(from: string, to: string): void {
+    const g = this.currentGraph();
+    if (!g || g.state !== 'draft') return;
+    const already = g.edges.some((e) => e.from === from && e.to === to && e.label === undefined);
+    this.updateDraft((cur) => addEdge(cur, from, to));
+    this.selectNode(to);
+    this.edited.set(
+      already
+        ? `${from} → ${to} is already an edge in this document, so nothing was added`
+        : `drew ${from} → ${to}`,
+    );
+  }
+
+  /** Cut one edge, by its position in the document's edge list. */
+  cutEdgeAt(index: number): void {
+    const g = this.currentGraph();
+    const e = g?.edges[index];
+    if (!e) return;
+    this.updateDraft((cur) => removeEdgeAt(cur, index));
+    this.edited.set(`cut ${e.from} → ${e.to}`);
+  }
+
+  /** Set the case one edge out of a branch realizes, or clear it back to no case. */
+  onEdgeCase(index: number, event: Event): void {
+    const value = (event.target as HTMLSelectElement).value;
+    this.updateDraft((cur) => setEdgeCase(cur, index, value || undefined));
+  }
+
+  /** Add a case to the selected branch, in the condition form the author chose: an expression over
+   * the routed value, or a decision the branch's agent makes at run time. */
+  addBranchCase(model: boolean): void {
+    const id = this.selectedNode();
+    const nameEl = this.caseNameRef?.nativeElement;
+    const exprEl = this.caseExprRef?.nativeElement;
+    const name = (nameEl?.value ?? '').trim();
+    if (id === undefined || !name) return;
+    const when = model
+      ? ({ kind: 'model_decision' } as const)
+      : ({ kind: 'expression', value: exprEl?.value ?? '' } as const);
+    this.updateDraft((cur) => setCase(cur, id, name, when));
+    if (nameEl) nameEl.value = '';
+    if (exprEl) exprEl.value = '';
+    this.edited.set(
+      model
+        ? `${id} declares the case "${name}", decided by its agent at run time`
+        : `${id} declares the case "${name}"`,
+    );
+  }
+
+  /** Change the expression behind a case that already exists. */
+  onCaseExpression(name: string, event: Event): void {
+    const id = this.selectedNode();
+    if (id === undefined) return;
+    const value = (event.target as HTMLInputElement).value;
+    this.updateDraft((cur) => setCase(cur, id, name, { kind: 'expression', value }));
+  }
+
+  /** Drop a case. An edge labelled with it stays, and says so through the validator. */
+  dropBranchCase(name: string): void {
+    const id = this.selectedNode();
+    if (id === undefined) return;
+    this.updateDraft((cur) => removeCase(cur, id, name));
+    this.edited.set(`${id} no longer declares the case "${name}"`);
+  }
+
+  /**
+   * EDIT A PUBLISHED GRAPH, WITHOUT EDITING IT. A published graph is immutable: existing runs
+   * reference it by hash, and the hash is computed from the bytes, so changing the bytes would change
+   * what a recorded run replays against. There is no way to make that safe and no reason to try, so
+   * editing one does not happen at all: this copies its nodes and edges into a NEW draft with no
+   * hash, leaves the published document exactly where it was, and publishing the draft mints a hash
+   * of its own. The `readOnly` gate on every field stays in force on the published graph; this is the
+   * door out of it, not a way through it.
+   */
+  editAsDraft(): void {
+    const g = this.currentGraph();
+    if (!g || g.state !== 'published' || g.hash === null) return;
+    // Named after the hash it came from, so the picker says which published document this draft is a
+    // copy of, and through the same anti-clobber rule an opened file goes through: a free name, so a
+    // second copy is a second draft rather than a write over the first.
+    const stem = `${g.hash.replace(/^sha256:/, '').slice(0, 12)}-edit`;
+    const name = freeDraftName(stem, this.drafts().map((d) => d.name));
+    const draft: WfGraph = {
+      key: `draft:${name}`,
+      hash: null,
+      name,
+      state: 'draft',
+      nodes: g.nodes,
+      edges: g.edges,
+    };
+    this.drafts.set(saveDraft(draft));
+    const from = this.hashShort(g.hash);
+    this.pick(draft.key);
+    this.edited.set(
+      `${name} is a draft copy of ${from} · the published document is untouched, and publishing this one mints a new hash`,
+    );
   }
 
   // ── save (local draft) / publish (POST /v1/graphs) ──
@@ -1294,14 +1666,21 @@ export class Workflows implements AfterViewInit {
     if (!g || g.state !== 'draft' || this.errors().length > 0) return;
     // A start banner belongs to the graph it was made on; publishing moves the canvas to a new one.
     this.started.set('');
+    this.edited.set('');
     try {
       const hash = await this.graphsService.submit(toServerDocument(g));
       this.drafts.set(removeDraft(g.key));
       await this.load();
       this.currentKey.set(hash);
-      this.published.set('published');
+      // The draft this history walked is gone, promoted into a document that cannot be edited at all.
+      // Stepping back into it would write a draft the store no longer holds.
+      this.past.set([]);
+      this.future.set([]);
+      // The hash IS the version, so the hash it minted is the whole receipt: this document now has an
+      // identity, and it is the one every run of it will replay against.
+      this.published.set(`published ${g.name} · minted ${hash}`);
     } catch (err) {
-      this.published.set(`publish refused — ${err instanceof Error ? err.message : String(err)}`);
+      this.published.set(`publish refused: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -1377,7 +1756,7 @@ export class Workflows implements AfterViewInit {
   isAcked(seq: number): boolean {
     return this.forkAck().has(seq);
   }
-  /** Escaped + token-highlighted JSON for the hazard review and the panel pres — one helper
+  /** Escaped + token-highlighted JSON for the hazard review and the panel pres: one helper
    * (`jsonHi`) across the whole app, copy-faithful at indent 1. */
   jsonHtml(value: unknown): string {
     return jsonHi(value, 1);
@@ -1399,7 +1778,7 @@ function errWhereIn(g: WfGraph | undefined, er: WfError): string {
   return `edge ${(er.edge ?? 0) + 1} · ${e?.from ?? '?'} → ${e?.to ?? '?'}`;
 }
 
-/** The mono field strip a node card carries — the keys it actually reads, the way a form shows its
+/** The mono field strip a node card carries: the keys it actually reads, the way a form shows its
  * fields. Ported from the prototype's per-kind `fields` derivation; an agent has none inline. */
 function nodeFields(n: WfNode): string[] {
   switch (n.kind) {
@@ -1418,64 +1797,4 @@ function nodeFields(n: WfNode): string[] {
     default:
       return [];
   }
-}
-
-/** Convert a canvas draft back to a server document for publish — `{ kind, payload }` per node,
- * carrying every field the draft genuinely holds and the minimum each kind requires. */
-function toServerDocument(g: WfGraph): import('@salvor-run/client').Graph {
-  const nodes = g.nodes.map((n) => {
-    switch (n.kind) {
-      case 'agent':
-        return {
-          kind: 'agent' as const,
-          payload: {
-            id: n.id,
-            agent_hash:
-              n.agentHash ?? 'sha256:0000000000000000000000000000000000000000000000000000000000000000',
-          },
-        };
-      case 'tool':
-        return { kind: 'tool' as const, payload: { id: n.id, tool: n.tool ?? 'unnamed_tool' } };
-      case 'gate':
-        return {
-          kind: 'gate' as const,
-          payload: {
-            id: n.id,
-            approval_schema: (n.inputSchema as import('@salvor-run/client').JsonValue) ?? { type: 'object' },
-            ...(n.prompt !== undefined ? { prompt: n.prompt } : {}),
-          },
-        };
-      case 'branch':
-        return {
-          kind: 'branch' as const,
-          payload: {
-            id: n.id,
-            cases: (n.cases ?? []).map((name) => ({ name, when: { kind: 'model_decision' as const } })),
-          },
-        };
-      case 'map':
-        return {
-          kind: 'map' as const,
-          payload: {
-            id: n.id,
-            over: n.over ?? '${input}',
-            concurrency: n.concurrency ?? 1,
-            body: { kind: 'node' as const, value: n.body?.node ?? n.id },
-          },
-        };
-      case 'fold':
-        return {
-          kind: 'fold' as const,
-          payload: {
-            id: n.id,
-            body: { kind: 'node' as const, value: n.body?.node ?? n.id },
-            max_iterations: n.maxIterations ?? 1,
-            stop_when: n.stopWhen ?? 'false',
-            join: { kind: 'last' as const },
-          },
-        };
-    }
-  });
-  const edges = g.edges.map((e) => (e.label !== undefined ? { from: e.from, to: e.to, label: e.label } : { from: e.from, to: e.to }));
-  return { schema_version: 1, nodes, edges };
 }
