@@ -178,6 +178,10 @@ schemars = { workspace = true, optional = true }
 # deps above.
 async-trait = { workspace = true, optional = true }
 
+[[example]]
+name = "graph_clients"
+path = "../../examples/graph-clients/rust/main.rs"
+
 [dev-dependencies]
 assert_cmd.workspace = true
 predicates.workspace = true

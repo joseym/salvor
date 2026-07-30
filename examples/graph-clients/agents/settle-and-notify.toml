@@ -1,0 +1,85 @@
+# The settle-and-notify agent: the last node on the escalated arm of the graph.
+#
+# This agent both moves the money and tells the customer. That is a deliberate
+# difference from `examples/graph-service/`, where a `settle` tool node issued
+# the refund and an agent only wrote the notice. This graph is driven over HTTP,
+# and over HTTP a `tool` node resolves against the SERVER's compiled-in tool
+# registry, which a stock `salvor serve` wires empty. An agent's MCP tools are
+# reachable, a tool node's are not, so the side effect lives here.
+#
+# The agent's input is the approver's answer, passed through the gate verbatim:
+# `{"dispute_id": ..., "amount_usd": ..., "approver": ..., "note": ...}`. The
+# human already decided whether to pay and how much; this agent executes that
+# decision and does not revisit it.
+#
+# Paths below are relative to the DIRECTORY SALVOR IS INVOKED FROM, not to this
+# file, so run everything from the repository root (`run.sh` does).
+#
+# The graph references this agent by content hash, never by path. Learn it with:
+#     salvor agent hash examples/graph-clients/agents/settle-and-notify.toml
+
+name = "settle-and-notify"
+
+model = "claude-opus-4-8"
+
+# The first line names this agent, and that name is load-bearing offline: the
+# scripted model in `model-script.json` selects a conversation by finding its
+# name as a substring of the system prompt it was sent. Both agent nodes make
+# their first model call carrying exactly one message, so the message count
+# alone cannot tell them apart; the system prompt can. Keep the phrase
+# `settle-and-notify` here and out of the other agent's prompt, and keep the
+# other agent's name out of this one, or the script server refuses the request
+# rather than guessing which conversation to serve. Neither name is a substring
+# of the other, which is the condition that makes the match unambiguous.
+system_prompt = """
+You are the settle-and-notify clerk on an invoice disputes desk.
+
+Your input is an approval a human already signed: the dispute id, the amount to
+refund, who approved it, and an optional note. The decision is made. Execute it,
+one tool call per turn:
+
+1. Call `issue_refund` once, with the dispute id, the amount, and the approver
+   exactly as the approval gives them, and the note if there is one.
+2. Call `send_notice` once, telling the customer the refund was approved and
+   issued.
+3. Reply with one sentence confirming what you did, and stop.
+
+Never change the amount and never call `issue_refund` twice. One approval, one
+refund.
+"""
+
+[llm]
+# SALVOR_DEMO_BASE_URL, when exported and non-empty, overrides the endpoint;
+# unset means the public Anthropic endpoint. The API key is read from
+# ANTHROPIC_API_KEY and is optional for a mock or local endpoint, which is what
+# lets this same file run offline against the scripted model and against a real
+# one with nothing changed but that variable. `salvor serve` passes its own
+# environment down to the MCP child processes and reads this variable itself, so
+# exporting it before starting the server is all the wiring there is.
+base_url_env = "SALVOR_DEMO_BASE_URL"
+
+[budgets]
+# A refund, a notice, and a confirmation is three model calls. Twelve steps
+# leaves room for a retry or a clarifying turn against a real model while still
+# parking a run that has clearly gone in circles. A budget in Salvor suspends a
+# run rather than killing it, so crossing this rail costs nothing already
+# recorded, and the park resumes over HTTP like any other.
+steps = 12
+tokens = 100000
+
+[[mcp_servers]]
+# The disputes-desk tools, reused from the sibling example rather than copied:
+# the same three-tool Python MCP server, standard library only. Both agents here
+# declare it, so both carry all three tools.
+command = "python3"
+args = ["examples/graph-service/server.py"]
+# `issue_refund` carries no MCP annotation, so the conservative default already
+# reads it as a Write. Pinning it records the operator's own decision instead of
+# inheriting one: an interrupted refund surfaces for a human to reconcile rather
+# than being retried blind. That matters more here than in the sibling example,
+# because here the refund happens inside an agent loop rather than at a tool node
+# the graph controls, and the write-ahead record is what keeps the guarantee the
+# same either way. `send_notice` is left alone on purpose, because its
+# `idempotentHint` is honest (it upserts one key), and `lookup_dispute` is left
+# alone because `readOnlyHint` is honest too.
+effect_overrides = { issue_refund = "write" }

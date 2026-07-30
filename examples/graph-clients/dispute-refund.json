@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "nodes": [
+    {
+      "kind": "branch",
+      "payload": {
+        "id": "route_by_amount",
+        "cases": [
+          {
+            "name": "escalate",
+            "when": {
+              "kind": "expression",
+              "value": "amount_usd >= 250.0"
+            }
+          },
+          {
+            "name": "auto_settle",
+            "when": {
+              "kind": "expression",
+              "value": "amount_usd < 250.0"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "gate",
+      "payload": {
+        "id": "approve_refund",
+        "prompt": "This dispute is at or above the review threshold. Answer with the refund to issue: dispute_id, amount_usd, approver, and an optional note. The run stays parked until you do.",
+        "approval_schema": {
+          "type": "object",
+          "properties": {
+            "dispute_id": { "type": "string" },
+            "amount_usd": { "type": "number" },
+            "approver": { "type": "string" },
+            "note": { "type": "string" }
+          },
+          "required": ["dispute_id", "amount_usd", "approver"]
+        }
+      }
+    },
+    {
+      "kind": "agent",
+      "payload": {
+        "id": "settle_and_notify",
+        "agent_hash": "sha256:4cb91b34c7644e8ea7639080204ee292b7920a113b5763ca27a2dfca37b15673"
+      }
+    },
+    {
+      "kind": "agent",
+      "payload": {
+        "id": "small_claims",
+        "agent_hash": "sha256:dd0c6e4fc3dc17f26a24010fda401f4bc93ce24c140f07ea9fd7fdda71602bcd"
+      }
+    }
+  ],
+  "edges": [
+    { "from": "route_by_amount", "to": "approve_refund", "label": "escalate" },
+    { "from": "approve_refund", "to": "settle_and_notify" },
+    { "from": "route_by_amount", "to": "small_claims", "label": "auto_settle" }
+  ]
+}

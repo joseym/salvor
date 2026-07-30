@@ -1,13 +1,16 @@
 # Examples
 
-Twelve worked examples, one per directory. Each shows Salvor from a different
-entry point: the no-key local-model path, the CLI over real MCP-backed agents,
-the durability guarantees on their own, the two library tiers, the polyglot
-control plane over HTTP, and the v0.4 graph authoring surface. The ones marked
-"no key" run for free against a local or scripted model.
+Worked examples, one per directory. Each shows Salvor from a different entry
+point: the smallest fixture there is, the no-key local-model path, the CLI
+over real MCP-backed agents, the durability guarantees on their own, the two
+library tiers, the polyglot control plane over HTTP in both its server-driven
+and client-driven modes, and the v0.4 graph authoring surface driven from the
+CLI and from application code. The ones marked "no key" run for free against a
+local or scripted model.
 
 | Directory | Shows | Run it |
 |---|---|---|
+| [`hero/`](hero/) | The smallest agent that still shows the whole shape: one model call decides a write, one tool call records it before it runs, one more model call closes the run out. It is the exact run behind the terminal on salvor.run, checked in so a `kill -9` and a `salvor resume` reproduce the write-ahead story on your own disk. | `salvor run --fixture examples/hero`; no key |
 | [`local-model/`](local-model/) | The no-key path: a config agent talking to a local model (Ollama or LM Studio) through `base_url`, so durability, replay, and budgets all work with no API key and no cost. | `salvor --store /tmp/salvor-local-model.db run --agent examples/local-model/agent.toml --input @examples/local-model/input.json` (needs a local model; see the README); no key |
 | [`web-research/`](web-research/) | The `salvor` CLI driving a config-driven agent over real MCP servers (fetch + filesystem), with the kill/resume story against real HTTP fetches and a real file write. | `salvor --store /tmp/salvor-web.db run --agent examples/web-research/agent.toml --input @examples/web-research/input.json` (see [`web-research/README.md`](web-research/README.md)) |
 | [`python-tools/`](python-tools/) | Polyglot tools, no Salvor code: a Python MCP server (an expense tracker) is the agent's whole tool layer, reached over stdio. The polyglot story from Python. | `salvor --store /tmp/salvor-python.db run --agent examples/python-tools/agent.toml --input @examples/python-tools/input.json` (see [`python-tools/README.md`](python-tools/README.md)) |
@@ -19,7 +22,10 @@ control plane over HTTP, and the v0.4 graph authoring surface. The ones marked
 | [`todo-agent/`](todo-agent/) | The batteries-included library tier: `Agent::builder()` plus a `Runtime`, with typed native tools and the built-in loop driving them. | To depend on the library: `cargo add salvor`; to run the sample: `cargo run -p salvor-runtime --example todo_agent` |
 | [`approval-loop/`](approval-loop/) | The library-first tier: a hand-written async function over the public `RunCtx`, with no built-in loop, and with the same durability, replay, and human-in-the-loop suspension. | To depend on the library: `cargo add salvor`; to run the sample: `cargo run -p salvor-runtime --example approval_loop` |
 | [`polyglot-service/`](polyglot-service/) | The control plane over HTTP: a Python service and a TypeScript service each drive `salvor serve` through its SDK. Register an agent, start a run, stream events live, and resume a human-in-the-loop suspension, all against one durable Rust process. | `bash examples/polyglot-service/run.sh`; no key |
+| [`browser-client-run/`](browser-client-run/) | The other Salvor mode: the client owns the agent loop and streams the events it produces, while the server just re-folds the log on every append to confirm each is the legal next event. A browser page opens a client-driven run, re-opens and replays it from the fetched log with zero live calls, drives a streaming model step, and attempts a tool step against the server's empty registry. | Bring up the scripted model and `salvor serve` (see the README), then `node examples/browser-client-run/headless.mjs http://127.0.0.1:8080` runs the logic headless; no key (a real `ANTHROPIC_API_KEY` unlocks live token streaming) |
 | [`graphs/`](graphs/) | The v0.4 graph authoring surface: canonical graph documents plus typed builders in Rust, TypeScript, and Python, all reducing to the same document that `salvor graph validate` checks. | `salvor graph validate examples/graphs/research-review-publish.json`; no key |
+| [`graph-service/`](graph-service/) | The authoring surface driven end to end: `salvor graph run` walks a refund-dispute graph document from the CLI, resolving its tool nodes from the `--agent` files it is handed. A kill mid-flight and a recover prove the refund executes exactly once across the crash, the write-ahead guarantee `reconciliation/` proves in isolation. | `bash examples/graph-service/run.sh`; no key |
+| [`graph-clients/`](graph-clients/) | The same refund desk as `graph-service/`, driven by application code instead of the CLI, against a stock `salvor serve` with no flags. Python and TypeScript drive it over HTTP through their SDKs; Rust embeds the engine in process and speaks no HTTP at all. It has no tool nodes, deliberately: over HTTP a tool node can only reach tools compiled into the server binary, so the side effects live in agent nodes where real MCP tools are reachable. | `bash examples/graph-clients/run.sh`; no key |
 
 Every `[[mcp_servers]]` entry above spawns a local child process over stdio; an
 entry can instead reach a server hosted elsewhere with `url` (plus
@@ -29,8 +35,11 @@ entry can instead reach a server hosted elsewhere with `url` (plus
 
 `todo-agent`, `approval-loop`, and `compliance` are ordinary Rust files
 (`main.rs`) wired into `crates/salvor-runtime/Cargo.toml` as out-of-package
-`[[example]]` targets, so `cargo build`/`cargo test --workspace` still
-compile-gate them without running anything.
+`[[example]]` targets. `graph-clients`' Rust app follows the same pattern one
+crate over: an `[[example]]` target named `graph_clients`, wired into
+`crates/salvor-cli/Cargo.toml`, with its source at
+`examples/graph-clients/rust/main.rs`. `cargo build`/`cargo test --workspace`
+compile-gates all four without running anything.
 
 The thin Python and TypeScript client SDKs under [`../sdks/`](../sdks/) each also
 ship a runnable model-only example against a `salvor serve` control plane;
