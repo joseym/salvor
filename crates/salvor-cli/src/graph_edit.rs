@@ -47,6 +47,16 @@
 //! candidates come from there and the keypress is handled here, and there is no
 //! second list of commands or options anywhere for the grammar to drift from.
 //!
+//! The one candidate the editor cannot produce is a FILE, and it says so rather
+//! than guessing: a position its forms give a `<PATH>` comes back as
+//! [`Candidates::Path`], and all this module does with that is list the
+//! directory, through the line editor's own filename completer. So `read`,
+//! `write`, and a node's `--file` complete to real files while WHICH positions
+//! those are stays a fact about the grammar, in the crate that holds it. This
+//! module could not offer a path in the wrong place if it tried, which is the
+//! same guarantee the three [`HostRequest`]s give: the host serves a file, it
+//! never decides where one goes.
+//!
 //! Completion is a terminal's alone. Off a terminal this loop is the plain read
 //! it always was, down to the first-failure-ends-the-session rule, because a
 //! script has no cursor to complete at.
@@ -81,7 +91,7 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use rustyline::completion::Completer;
+use rustyline::completion::{Completer, FilenameCompleter, Pair};
 use rustyline::config::{Behavior, BellStyle, CompletionType, Config};
 use rustyline::error::ReadlineError;
 use rustyline::highlight::Highlighter;
@@ -92,7 +102,7 @@ use rustyline::validate::Validator;
 // by anyhow's trait, which every host-side failure in this module goes through.
 use rustyline::Helper;
 use salvor_cli_core::graph_editor::{
-    Command, Editor, HashDraft, HostRequest, Line, Outcome, Status, parse,
+    Candidates, Command, Editor, HashDraft, HostRequest, Line, Outcome, Status, parse,
 };
 
 use crate::cli::GraphEditArgs;
@@ -290,6 +300,7 @@ fn line_editor() -> Option<LineReader> {
     let mut reader = LineReader::with_history(config, MemHistory::new()).ok()?;
     reader.set_helper(Some(Grammar {
         editor: Editor::new(),
+        paths: FilenameCompleter::new(),
     }));
     Some(reader)
 }
@@ -305,10 +316,18 @@ type LineReader = rustyline::Editor<Grammar, MemHistory>;
 struct Grammar {
     /// The document being built, refreshed before every read.
     editor: Editor,
+    /// The line editor's own filename completer, for the positions the editor
+    /// reports as paths. Listing a directory is all it is asked for: the
+    /// question of WHERE a path belongs is answered in the editor's crate,
+    /// beside the forms that say so.
+    paths: FilenameCompleter,
 }
 
 impl Completer for Grammar {
-    type Candidate = String;
+    // A pair rather than a bare word because a path is listed and inserted
+    // differently: the list shows the entry's own name while the line takes the
+    // whole path leading to it. A word candidate is both at once.
+    type Candidate = Pair;
 
     /// Asks the editor what can go in the place of the word the cursor is in.
     ///
@@ -321,18 +340,37 @@ impl Completer for Grammar {
     /// disagree where it matters: a word that contains whitespace is a quoted
     /// string or a JSON argument, and the editor offers nothing for either, so
     /// the start is never used.
+    ///
+    /// A path is spanned by the filename completer instead, from its own reading
+    /// of where the path being typed starts: a path may hold characters a word
+    /// may not, and the span has to match the candidates it comes back with.
     fn complete(
         &self,
         line: &str,
         pos: usize,
         _context: &rustyline::Context<'_>,
-    ) -> rustyline::Result<(usize, Vec<String>)> {
+    ) -> rustyline::Result<(usize, Vec<Pair>)> {
         let partial = &line[..pos];
-        let candidates = self.editor.candidates(partial);
-        if candidates.is_empty() {
+        let words = match self.editor.candidates(partial) {
+            // The editor says a file goes here, so the directory is listed and
+            // nothing else is consulted. A directory comes back with its
+            // trailing separator, which is what lets the next Tab carry on
+            // INTO it rather than stopping at its name.
+            Candidates::Path => return self.paths.complete_path(line, pos),
+            Candidates::Words(words) => words,
+        };
+        if words.is_empty() {
             // Nothing to offer, so nothing is replaced and nothing is said.
             return Ok((pos, Vec::new()));
         }
+        // A word is inserted exactly as it is listed.
+        let candidates = words
+            .into_iter()
+            .map(|word| Pair {
+                display: word.clone(),
+                replacement: word,
+            })
+            .collect();
         Ok((word_start(partial), candidates))
     }
 }
@@ -592,11 +630,8 @@ mod tests {
         assert_eq!(word_start("show \u{e9}tape ne"), 12);
     }
 
-    /// The seam, driven the way the line editor drives it: a document, a partial
-    /// line, and the span plus candidates that come back. The completer holds a
-    /// copy of the editor, so the ids it offers are the ids that document has.
-    #[test]
-    fn the_completer_answers_from_the_document_it_holds() {
+    /// A completer over a two-node document, for the tests below.
+    fn grammar() -> Grammar {
         let hash = format!("sha256:{}", "1".repeat(64));
         let mut editor = Editor::new();
         for line in [
@@ -609,7 +644,26 @@ mod tests {
             let (next, _) = editor.apply(command, DEFAULT_REPORT_WIDTH);
             editor = next;
         }
-        let grammar = Grammar { editor };
+        Grammar {
+            editor,
+            paths: FilenameCompleter::new(),
+        }
+    }
+
+    /// What each candidate would put on the line.
+    fn inserted(candidates: &[Pair]) -> Vec<&str> {
+        candidates
+            .iter()
+            .map(|pair| pair.replacement.as_str())
+            .collect()
+    }
+
+    /// The seam, driven the way the line editor drives it: a document, a partial
+    /// line, and the span plus candidates that come back. The completer holds a
+    /// copy of the editor, so the ids it offers are the ids that document has.
+    #[test]
+    fn the_completer_answers_from_the_document_it_holds() {
+        let grammar = grammar();
         let history = MemHistory::new();
         let context = rustyline::Context::new(&history);
 
@@ -619,7 +673,7 @@ mod tests {
             .complete(line, line.len(), &context)
             .expect("completing never fails");
         assert_eq!(&line[start..], "rese");
-        assert_eq!(offered, ["research"]);
+        assert_eq!(inserted(&offered), ["research"]);
 
         // At a boundary: the span is empty and every id is offered.
         let line = "edge research ";
@@ -627,7 +681,7 @@ mod tests {
             .complete(line, line.len(), &context)
             .expect("completing never fails");
         assert_eq!(start, line.len());
-        assert_eq!(offered, ["research", "approve"]);
+        assert_eq!(inserted(&offered), ["research", "approve"]);
 
         // Only the text left of the cursor is read, so completing in the middle
         // of a line leaves the rest of it alone.
@@ -636,7 +690,7 @@ mod tests {
             .complete(line, 9, &context)
             .expect("completing never fails");
         assert_eq!(&line[start..9], "rese");
-        assert_eq!(offered, ["research"]);
+        assert_eq!(inserted(&offered), ["research"]);
 
         // Nothing to offer replaces nothing and says nothing.
         let line = "add agent ";
@@ -645,5 +699,53 @@ mod tests {
             .expect("completing never fails");
         assert_eq!(start, line.len());
         assert!(offered.is_empty());
+    }
+
+    /// The other half of the seam: where the editor reports a path, real
+    /// directory entries come back. The editor named the position and this
+    /// module listed the directory, which is the whole of the split.
+    #[test]
+    fn a_path_position_completes_to_what_the_directory_holds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("flow.json"), "{}").expect("write");
+        std::fs::create_dir(dir.path().join("drafts")).expect("mkdir");
+        let here = dir.path().display().to_string();
+
+        let grammar = grammar();
+        let history = MemHistory::new();
+        let context = rustyline::Context::new(&history);
+
+        // Every entry, at the boundary after `read`.
+        let line = format!("read {here}/");
+        let (start, offered) = grammar
+            .complete(&line, line.len(), &context)
+            .expect("completing never fails");
+        assert_eq!(&line[start..], format!("{here}/"));
+        let mut names = inserted(&offered);
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [format!("{here}/drafts/"), format!("{here}/flow.json")]
+        );
+
+        // Mid-word, narrowed by the listing rather than by the editor. A
+        // directory keeps its separator, so the next Tab carries on inside it.
+        let line = format!("read {here}/dra");
+        let (_, offered) = grammar
+            .complete(&line, line.len(), &context)
+            .expect("completing never fails");
+        assert_eq!(inserted(&offered), [format!("{here}/drafts/")]);
+
+        // The same at the two other positions the grammar gives a path: an
+        // option's value and the one `write` takes.
+        for line in [
+            format!("add agent draft --file {here}/fl"),
+            format!("write {here}/fl"),
+        ] {
+            let (_, offered) = grammar
+                .complete(&line, line.len(), &context)
+                .expect("completing never fails");
+            assert_eq!(inserted(&offered), [format!("{here}/flow.json")], "{line}");
+        }
     }
 }
