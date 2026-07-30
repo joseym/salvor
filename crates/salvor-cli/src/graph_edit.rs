@@ -35,12 +35,34 @@
 //! redirected session's stdout is the transcript alone while the failures are
 //! still on screen.
 //!
+//! # Line editing, and where Tab's answers come from
+//!
+//! A terminal session reads through a line editor, so an author gets arrow
+//! keys, a history of the lines they typed, and Tab. What Tab OFFERS is not
+//! decided here: [`Editor::candidates`] answers it, from the document being
+//! built and from the same table of forms `help` prints. That split is forced
+//! rather than chosen. The interesting candidates are node ids and branch case
+//! names, which only the editor's own state knows, and raw mode is IO, which
+//! the editor's crate cannot have and still compile for the browser. So the
+//! candidates come from there and the keypress is handled here, and there is no
+//! second list of commands or options anywhere for the grammar to drift from.
+//!
+//! Completion is a terminal's alone. Off a terminal this loop is the plain read
+//! it always was, down to the first-failure-ends-the-session rule, because a
+//! script has no cursor to complete at.
+//!
 //! # How a session ends
 //!
 //! At end of input, and only there: `Ctrl-D` at a terminal, the last line of a
 //! redirected script. There is deliberately no `quit` command, because the
 //! grammar belongs to the editor and the editor has no loop to leave; a word
 //! this module intercepted would be a word that works here and nowhere else.
+//!
+//! `Ctrl-C` at a terminal throws away the line being typed and prompts again,
+//! which is the only thing it CAN mean once there is a line to throw away. A
+//! session holds a document that has not been written yet, so the reading that
+//! ends it on a keystroke people press to mean "not that line" is the reading
+//! that loses work.
 //!
 //! The exit code is 0 unless a line was refused, did not parse, or named a file
 //! the host could not use. A `validate` that reports an invalid document is NOT
@@ -59,6 +81,16 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use rustyline::completion::Completer;
+use rustyline::config::{Behavior, BellStyle, CompletionType, Config};
+use rustyline::error::ReadlineError;
+use rustyline::highlight::Highlighter;
+use rustyline::hint::Hinter;
+use rustyline::history::MemHistory;
+use rustyline::validate::Validator;
+// `Context` is spelled out at its one use below: the name is already taken here
+// by anyhow's trait, which every host-side failure in this module goes through.
+use rustyline::Helper;
 use salvor_cli_core::graph_editor::{
     Command, Editor, HashDraft, HostRequest, Line, Outcome, Status, parse,
 };
@@ -77,7 +109,7 @@ const PROMPT: &str = "graph> ";
 /// the only text this loop prints that is not the editor's own: every line fits
 /// inside [`MIN_PANE_WIDTH`], so there is no width to consult.
 const BANNER: &str = "A graph document, one line at a time.\n\
-                      `help` lists the commands.\n\
+                      `help` lists the commands; Tab completes.\n\
                       `write <PATH>` saves; Ctrl-D leaves.";
 
 /// The narrowest pane the editor's prose is wrapped to.
@@ -128,8 +160,28 @@ pub async fn edit(args: GraphEditArgs) -> Result<u8> {
 
     if interactive {
         eprintln!("{BANNER}");
+        match line_editor() {
+            Some(reader) => read_with_line_editing(&mut session, reader).await?,
+            // A terminal the line editor will not open on (no controlling
+            // terminal, a TERM it refuses) is still a terminal someone is
+            // typing at, so the session falls back to the plain read rather
+            // than to no session at all. They lose Tab, not their document.
+            None => read_a_line_at_a_time(&mut session, true).await?,
+        }
+    } else {
+        read_a_line_at_a_time(&mut session, false).await?;
     }
 
+    Ok(u8::from(session.refused))
+}
+
+/// Reads the session's lines one at a time, with no editing of any kind.
+///
+/// This is the whole loop off a terminal, and the fallback on one: a plain
+/// `read_line`, a prompt only when someone is there to read it, and a script's
+/// first failure ending it, because the lines after a failed one were written
+/// expecting it to have taken.
+async fn read_a_line_at_a_time(session: &mut Session, interactive: bool) -> Result<()> {
     // One locked handle for the session, so a person and a redirected script
     // drive the identical loop a line at a time.
     let stdin = std::io::stdin();
@@ -163,8 +215,150 @@ pub async fn edit(args: GraphEditArgs) -> Result<u8> {
         }
     }
 
-    Ok(u8::from(session.refused))
+    Ok(())
 }
+
+/// Reads the session's lines through the line editor, so Tab completes and the
+/// arrow keys walk back through what was typed.
+///
+/// A refusal does not end this loop, exactly as it did not before: the person
+/// who typed the line is right there to retype it.
+async fn read_with_line_editing(session: &mut Session, mut reader: LineReader) -> Result<()> {
+    loop {
+        // Tab is answered from the document as it stands, so the completer's
+        // copy of the editor is refreshed before every read. A document is a
+        // handful of nodes, and this is once per typed line, so the clone costs
+        // nothing worth avoiding to share one.
+        if let Some(grammar) = reader.helper_mut() {
+            grammar.editor = session.editor.clone();
+        }
+        match reader.readline(PROMPT) {
+            Ok(line) => {
+                // Only a line with something on it is worth recalling. A
+                // failure to record one is not worth mentioning to anyone: the
+                // line still runs.
+                if !line.trim().is_empty() {
+                    let _ = reader.add_history_entry(line.as_str());
+                }
+                session.feed(line.trim_end_matches(['\n', '\r'])).await;
+            }
+            // Ctrl-D on an empty line: end of input, exactly as it is for a
+            // script that ran out of lines. The newline closes the line the
+            // prompt is sitting on.
+            Err(ReadlineError::Eof) => {
+                eprintln!();
+                break;
+            }
+            // Ctrl-C: the line being typed is abandoned and the next one asked
+            // for. See the module docs for why this does not end the session.
+            Err(ReadlineError::Interrupted) => eprintln!(),
+            Err(error) => {
+                return Err(anyhow::Error::new(error).context("reading a line of editor input"));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// The line editor for a terminal session, or `None` when one cannot be opened.
+///
+/// Three settings, each of them load-bearing:
+///
+/// - [`Behavior::PreferTerm`] draws the prompt and the line being edited on
+///   `/dev/tty` rather than on stdout, which is what keeps this module's stream
+///   split intact: stdout stays the transcript alone even while someone is
+///   typing at it, so `salvor graph edit > flow.log` records what the editor
+///   produced and nothing of the conversation around it.
+/// - [`CompletionType::List`] means one candidate is inserted on the first Tab
+///   and several insert as much as they agree on, with the list printed on a
+///   second Tab. The alternative, `Circular`, would offer the six node kinds one
+///   keypress at a time.
+/// - [`BellStyle::None`] because a position with nothing to offer must do
+///   nothing, and the library's answer to no candidates is otherwise to beep.
+///
+/// The history is [`MemHistory`]: it lasts the session and is never written
+/// anywhere. A file would mean choosing a directory in someone's home and
+/// leaving a document's worth of ids in it, which is not a thing to start doing
+/// as a side effect of Tab working.
+fn line_editor() -> Option<LineReader> {
+    let config = Config::builder()
+        .behavior(Behavior::PreferTerm)
+        .completion_type(CompletionType::List)
+        .bell_style(BellStyle::None)
+        .build();
+    let mut reader = LineReader::with_history(config, MemHistory::new()).ok()?;
+    reader.set_helper(Some(Grammar {
+        editor: Editor::new(),
+    }));
+    Some(reader)
+}
+
+/// The line editor, with the completer this module gives it.
+type LineReader = rustyline::Editor<Grammar, MemHistory>;
+
+/// What answers Tab: a copy of the editor as the session last left it.
+///
+/// The state is the whole point. `add`, `--join`, and `--label` could be
+/// completed from a fixed list, but a node id and a branch case name could not,
+/// and those are the words an author actually has to get right.
+struct Grammar {
+    /// The document being built, refreshed before every read.
+    editor: Editor,
+}
+
+impl Completer for Grammar {
+    type Candidate = String;
+
+    /// Asks the editor what can go in the place of the word the cursor is in.
+    ///
+    /// Only the text LEFT of the cursor is offered up, and the replacement spans
+    /// from the start of that word to the cursor, so completing in the middle of
+    /// a line leaves the rest of it alone.
+    ///
+    /// The word starts after the last whitespace before the cursor. That is the
+    /// same boundary [`Editor::candidates`] filters on, and the two cannot
+    /// disagree where it matters: a word that contains whitespace is a quoted
+    /// string or a JSON argument, and the editor offers nothing for either, so
+    /// the start is never used.
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _context: &rustyline::Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<String>)> {
+        let partial = &line[..pos];
+        let candidates = self.editor.candidates(partial);
+        if candidates.is_empty() {
+            // Nothing to offer, so nothing is replaced and nothing is said.
+            return Ok((pos, Vec::new()));
+        }
+        Ok((word_start(partial), candidates))
+    }
+}
+
+/// The byte offset the word at the end of `partial` starts at.
+fn word_start(partial: &str) -> usize {
+    match partial
+        .char_indices()
+        .rev()
+        .find(|(_, c)| c.is_whitespace())
+    {
+        Some((at, c)) => at + c.len_utf8(),
+        None => 0,
+    }
+}
+
+// The rest of what the line editor asks of a helper, none of which this loop
+// wants: no inline hint, no syntax colouring, and no line the editor would
+// refuse to hand over, since judging a line is `parse`'s job and a refusal is
+// something the session prints rather than something the prompt withholds.
+impl Hinter for Grammar {
+    type Hint = String;
+}
+impl Highlighter for Grammar {}
+impl Validator for Grammar {}
+impl Helper for Grammar {}
 
 /// One editing session: the editor, the pane it prints into, and whether
 /// anything in it was refused.
@@ -378,5 +572,78 @@ mod tests {
     fn an_absurdly_narrow_terminal_is_floored() {
         assert_eq!(pane(Some(12)), MIN_PANE_WIDTH);
         assert_eq!(pane(Some(0)), MIN_PANE_WIDTH);
+    }
+
+    /// The word a completion replaces starts after the last whitespace before
+    /// the cursor, and the offset is in BYTES because that is what the line
+    /// editor splices on.
+    #[test]
+    fn a_completion_replaces_the_word_the_cursor_is_in() {
+        assert_eq!(word_start(""), 0);
+        assert_eq!(word_start("ad"), 0);
+        // At a boundary the word is empty, so it starts where the cursor is and
+        // the candidate is inserted rather than replacing anything.
+        assert_eq!(word_start("add "), 4);
+        assert_eq!(word_start("add ag"), 4);
+        assert_eq!(word_start("  edge  res"), 8);
+        // A multi-byte character before the word does not shift the offset onto
+        // a byte that is not a character boundary.
+        assert_eq!(word_start("show \u{e9}tape"), 5);
+        assert_eq!(word_start("show \u{e9}tape ne"), 12);
+    }
+
+    /// The seam, driven the way the line editor drives it: a document, a partial
+    /// line, and the span plus candidates that come back. The completer holds a
+    /// copy of the editor, so the ids it offers are the ids that document has.
+    #[test]
+    fn the_completer_answers_from_the_document_it_holds() {
+        let hash = format!("sha256:{}", "1".repeat(64));
+        let mut editor = Editor::new();
+        for line in [
+            format!("add agent research --hash {hash}"),
+            "add gate approve --approval-schema {\"type\":\"object\"}".to_owned(),
+        ] {
+            let Ok(Some(Line::Command(command))) = parse(&line) else {
+                panic!("`{line}` is a command");
+            };
+            let (next, _) = editor.apply(command, DEFAULT_REPORT_WIDTH);
+            editor = next;
+        }
+        let grammar = Grammar { editor };
+        let history = MemHistory::new();
+        let context = rustyline::Context::new(&history);
+
+        // Mid-word: the span starts at the word, so the candidate replaces it.
+        let line = "edge rese";
+        let (start, offered) = grammar
+            .complete(line, line.len(), &context)
+            .expect("completing never fails");
+        assert_eq!(&line[start..], "rese");
+        assert_eq!(offered, ["research"]);
+
+        // At a boundary: the span is empty and every id is offered.
+        let line = "edge research ";
+        let (start, offered) = grammar
+            .complete(line, line.len(), &context)
+            .expect("completing never fails");
+        assert_eq!(start, line.len());
+        assert_eq!(offered, ["research", "approve"]);
+
+        // Only the text left of the cursor is read, so completing in the middle
+        // of a line leaves the rest of it alone.
+        let line = "edge rese route";
+        let (start, offered) = grammar
+            .complete(line, 9, &context)
+            .expect("completing never fails");
+        assert_eq!(&line[start..9], "rese");
+        assert_eq!(offered, ["research"]);
+
+        // Nothing to offer replaces nothing and says nothing.
+        let line = "add agent ";
+        let (start, offered) = grammar
+            .complete(line, line.len(), &context)
+            .expect("completing never fails");
+        assert_eq!(start, line.len());
+        assert!(offered.is_empty());
     }
 }

@@ -62,6 +62,16 @@
 //! `--prompt`, and `--accumulator-schema` follow the model's own field names,
 //! so a line names exactly what the document names.
 //!
+//! # Completing a half-typed line
+//!
+//! [`Editor::candidates`] answers "what can go here" for a line as far as the
+//! cursor. It lives in this crate rather than in whatever is reading the line
+//! because the answers worth having are facts about the DOCUMENT: the node ids
+//! an `edge` can join, the cases a branch actually has. Everything else is read
+//! off the very table of forms below, so a candidate cannot drift from the
+//! grammar `help` prints and [`parse`] enforces. Turning a candidate list into
+//! a keypress is the host's half; nothing here touches a terminal.
+//!
 //! # A session, with no terminal involved
 //!
 //! ```
@@ -103,7 +113,7 @@
 //! and it delegates entirely to [`salvor_graph::validate`] so there is exactly
 //! one validator in the codebase.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use salvor_graph::{
     AgentNode, BranchCase, BranchCondition, BranchNode, Edge, FoldBody, FoldJoin, FoldNode,
@@ -2282,6 +2292,556 @@ fn help(topic: Option<&str>, width: usize) -> Result<String, String> {
     Ok(out)
 }
 
+// --- completing a half-typed line -------------------------------------------
+
+/// One grammar form, read as the shape of the line it describes.
+///
+/// Every field is derived from a [`Topic::forms`] string. Nothing about the
+/// grammar is written down a second time, so a form that gains an option gains
+/// it in what `help` prints and in what Tab offers at the same moment, and the
+/// tests at the bottom of this file pin the derivation against the words the
+/// parser's own error messages use.
+struct FormShape {
+    /// The literal word the form takes after the command (`agent` in `add agent
+    /// <ID>`, `edge` in `rm edge <FROM> <TO>`), when it has one.
+    literal: Option<&'static str>,
+    /// The positional placeholders, in the order the form names them.
+    positionals: Vec<&'static str>,
+    /// The options, grouped: one group's members are alternatives, so an option
+    /// already on the line rules out its siblings along with itself.
+    groups: Vec<Vec<FormOption>>,
+}
+
+/// One option, as a form spells it.
+struct FormOption {
+    /// The option, `--` included.
+    name: &'static str,
+    /// The placeholder for its value, or `None` for the one option that takes
+    /// none.
+    value: Option<&'static str>,
+    /// Whether the form marks the option repeatable with a trailing `...`.
+    repeats: bool,
+}
+
+/// Splits a form into its top-level chunks: a bare word, or a bracketed group
+/// with any trailing `...` still attached.
+///
+/// The forms never nest one group inside another, so the scan reads to the
+/// first closer rather than counting depth. They are also pure ASCII, which is
+/// what makes indexing by byte safe here.
+fn form_chunks(form: &'static str) -> Vec<&'static str> {
+    let bytes = form.as_bytes();
+    let mut chunks = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at].is_ascii_whitespace() {
+            at += 1;
+            continue;
+        }
+        let start = at;
+        if bytes[at] == b'(' || bytes[at] == b'[' {
+            let closer = if bytes[at] == b'(' { b')' } else { b']' };
+            at += 1;
+            while at < bytes.len() && bytes[at] != closer {
+                at += 1;
+            }
+            // Past the closer, then over a `...` repeat marker if one follows.
+            at = (at + 1).min(bytes.len());
+            while at < bytes.len() && bytes[at] == b'.' {
+                at += 1;
+            }
+        } else {
+            while at < bytes.len() && !bytes[at].is_ascii_whitespace() {
+                at += 1;
+            }
+        }
+        chunks.push(&form[start..at]);
+    }
+    chunks
+}
+
+/// Reads one form into the shape of the line it describes.
+fn shape(form: &'static str) -> FormShape {
+    let mut shape = FormShape {
+        literal: None,
+        positionals: Vec::new(),
+        groups: Vec::new(),
+    };
+    // The group holding the option whose value has not been read yet. Only a
+    // bare `--option` chunk can be waiting: a bracketed group carries its
+    // options' values inside its own text.
+    let mut awaiting: Option<usize> = None;
+
+    // Chunk zero is the command word, which the caller has already matched.
+    for chunk in form_chunks(form).into_iter().skip(1) {
+        if let Some(group) = awaiting.take() {
+            // The chunk after an option is that option's value, unless it is
+            // another option or a bracketed group of them. `--model` is the
+            // only option in the grammar that takes no value, and it is the
+            // last word of its form.
+            if !chunk.starts_with("--") && option_group(chunk).is_none() {
+                shape.groups[group][0].value = Some(chunk);
+                continue;
+            }
+        }
+        if let Some(options) = option_group(chunk) {
+            shape.groups.push(options);
+            continue;
+        }
+        if chunk.starts_with("--") {
+            shape.groups.push(vec![FormOption {
+                name: chunk,
+                value: None,
+                repeats: false,
+            }]);
+            awaiting = Some(shape.groups.len() - 1);
+            continue;
+        }
+        if is_literal(chunk) {
+            shape.literal = Some(chunk);
+            continue;
+        }
+        shape.positionals.push(chunk);
+    }
+
+    shape
+}
+
+/// The options a bracketed group offers, or `None` when the chunk is not one.
+///
+/// A bare word and a bare option are not groups, and neither is a group of
+/// VALUES: `--join`'s `(last | all | best-by:REF)` carries no `--`, which is
+/// exactly how the two are told apart.
+fn option_group(chunk: &'static str) -> Option<Vec<FormOption>> {
+    let inner = chunk
+        .strip_prefix('(')
+        .and_then(|rest| rest.split(')').next())
+        .or_else(|| {
+            chunk
+                .strip_prefix('[')
+                .and_then(|rest| rest.split(']').next())
+        })?;
+    if !inner.contains("--") {
+        return None;
+    }
+    let repeats = chunk.ends_with("...");
+    Some(
+        inner
+            .split('|')
+            .filter_map(|alternative| {
+                let mut words = alternative.split_whitespace();
+                let name = words.next()?;
+                if !name.starts_with("--") {
+                    return None;
+                }
+                Some(FormOption {
+                    name,
+                    value: words.next(),
+                    repeats,
+                })
+            })
+            .collect(),
+    )
+}
+
+/// Whether a form word is a literal to be typed as it stands, as opposed to a
+/// placeholder.
+///
+/// A placeholder is `<ANGLED>` or bare capitals (`TEXT`, `JSON`,
+/// `FIELD=SOURCE`); a literal is the lowercase word `add` and `rm` dispatch on.
+fn is_literal(chunk: &str) -> bool {
+    !chunk.starts_with('<') && chunk.chars().any(char::is_lowercase)
+}
+
+/// The insertable values of a fixed set as a form writes it: `(last | all |
+/// best-by:REF)` offers `last`, `all`, and `best-by:`.
+///
+/// An alternative that ends in a placeholder is cut back to the literal in
+/// front of it, because `best-by:REF` is not something anyone types. What is
+/// offered is exactly as much of the value as the grammar fixes, which is the
+/// same courtesy a directory's trailing slash pays.
+fn fixed_values(group: &str) -> Vec<String> {
+    let inner = group.trim_start_matches('(').trim_end_matches(')');
+    inner
+        .split('|')
+        .filter_map(|alternative| {
+            let alternative = alternative.trim();
+            let literal = match alternative.find(|c: char| c.is_ascii_uppercase() || c == '<') {
+                Some(at) => &alternative[..at],
+                None => alternative,
+            };
+            (!literal.is_empty()).then(|| literal.to_owned())
+        })
+        .collect()
+}
+
+/// The placeholders any applicable form names at positional `index`, or `None`
+/// when none of them has a positional that far along.
+fn placeholders_at(shapes: &[FormShape], index: usize) -> Option<Vec<&'static str>> {
+    let found: Vec<&'static str> = shapes
+        .iter()
+        .filter_map(|shape| shape.positionals.get(index).copied())
+        .collect();
+    if found.is_empty() { None } else { Some(found) }
+}
+
+/// Whether an option takes a value, which is what decides whether the word
+/// after it on the line is that value or a fresh option.
+fn takes_a_value(shapes: &[FormShape], name: &str) -> bool {
+    every_option(shapes).any(|option| option.name == name && option.value.is_some())
+}
+
+/// Every option any applicable form allows.
+fn every_option(shapes: &[FormShape]) -> impl Iterator<Item = &FormOption> {
+    shapes
+        .iter()
+        .flat_map(|shape| shape.groups.iter().flatten())
+}
+
+/// The options a command can still be given.
+///
+/// Three rules, all of them read off the forms rather than listed. An option
+/// already on the line is not offered again unless its form marks it
+/// repeatable. Neither are the alternatives it was written beside, since
+/// `(--hash <sha256:HASH> | --file <PATH>)` means one of the two. And a form
+/// that does not allow an option that IS on the line is not the form being
+/// typed, so `case <BRANCH-ID> <CASE-NAME> --when EXPR` stops offering
+/// `--model`.
+fn option_candidates(shapes: &[FormShape], given: &[&str]) -> Vec<String> {
+    let mut out = Vec::new();
+    for shape in shapes {
+        let allows = |name: &&str| {
+            shape
+                .groups
+                .iter()
+                .flatten()
+                .any(|option| option.name == *name)
+        };
+        if !given.iter().all(allows) {
+            continue;
+        }
+        for group in &shape.groups {
+            let spent = group
+                .iter()
+                .any(|option| given.contains(&option.name) && !option.repeats);
+            if spent {
+                continue;
+            }
+            out.extend(group.iter().map(|option| option.name.to_owned()));
+        }
+    }
+    out
+}
+
+/// Splits a partial line into the words already finished and the word the
+/// cursor is in.
+///
+/// Deliberately lenient where [`tokenize`] is strict, and separate from it for
+/// that reason: a half-typed line ends inside a token more often than not, and
+/// an unterminated quote or an unbalanced brace is what someone in the middle
+/// of typing one looks like rather than a mistake to report. Unfinished text
+/// comes back as the current word, and [`Editor::candidates`] offers nothing
+/// for it.
+///
+/// A line ending in whitespace sits at a word boundary, so the current word is
+/// empty and everything the next position allows is offered. A line ending
+/// anywhere else is inside its last token, whether or not that token happens to
+/// be complete: the cursor being hard against the end of a quoted string is not
+/// a boundary, and treating it as one would append a candidate to it with no
+/// space between.
+fn split_partial(partial_line: &str) -> (Vec<String>, String) {
+    let chars: Vec<char> = partial_line.chars().collect();
+    let mut done: Vec<String> = Vec::new();
+    let mut at = 0;
+
+    while at < chars.len() {
+        if chars[at].is_whitespace() {
+            at += 1;
+            continue;
+        }
+        let start = at;
+        if chars[at] == '"' {
+            at += 1;
+            let mut text = String::new();
+            let mut closed = false;
+            while at < chars.len() {
+                let c = chars[at];
+                at += 1;
+                match c {
+                    '"' => {
+                        closed = true;
+                        break;
+                    }
+                    '\\' => {
+                        let Some(escaped) = chars.get(at) else { break };
+                        at += 1;
+                        text.push(match escaped {
+                            'n' => '\n',
+                            't' => '\t',
+                            other => *other,
+                        });
+                    }
+                    other => text.push(other),
+                }
+            }
+            if !closed || at == chars.len() {
+                return (done, chars[start..].iter().collect());
+            }
+            done.push(text);
+        } else if chars[at] == '{' || chars[at] == '[' {
+            let mut depth = 0usize;
+            let mut in_string = false;
+            let mut escaped = false;
+            while at < chars.len() {
+                let c = chars[at];
+                at += 1;
+                if in_string {
+                    if escaped {
+                        escaped = false;
+                    } else if c == '\\' {
+                        escaped = true;
+                    } else if c == '"' {
+                        in_string = false;
+                    }
+                    continue;
+                }
+                match c {
+                    '"' => in_string = true,
+                    '{' | '[' => depth += 1,
+                    '}' | ']' => {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if depth != 0 || at == chars.len() {
+                return (done, chars[start..].iter().collect());
+            }
+            done.push(chars[start..at].iter().collect());
+        } else {
+            while at < chars.len() && !chars[at].is_whitespace() {
+                at += 1;
+            }
+            if at == chars.len() {
+                return (done, chars[start..].iter().collect());
+            }
+            done.push(chars[start..at].iter().collect());
+        }
+    }
+
+    (done, String::new())
+}
+
+impl Editor {
+    /// What can go in the place of the word at the end of `partial_line`.
+    ///
+    /// `partial_line` is the line as far as the cursor, and its last word is the
+    /// one being completed. A line ending in whitespace is at a word boundary,
+    /// so every candidate the next position allows comes back; a line ending
+    /// mid-word comes back filtered to the candidates that start with it. Every
+    /// candidate is the WHOLE word to put in that position, never the missing
+    /// suffix, so a caller replaces the word rather than appending to it.
+    ///
+    /// Candidates arrive in the grammar's own order, which is the order `help`
+    /// lists them in, and de-duplicated: two forms of one command can allow the
+    /// same option.
+    ///
+    /// An unknown command, a value that is free text, a position with nothing to
+    /// say: every one of those is the empty vector. Nothing here is an error,
+    /// and nothing here refuses a line, because completion runs on a line that
+    /// is by definition not finished.
+    #[must_use]
+    pub fn candidates(&self, partial_line: &str) -> Vec<String> {
+        let (done, current) = split_partial(partial_line);
+        // A quoted string holds prose and a JSON argument holds a schema.
+        // Neither is a word the document can name, so a cursor inside one is
+        // offered nothing.
+        if current.starts_with(['"', '{', '[']) {
+            return Vec::new();
+        }
+
+        let mut out = self.offered(&done, &current);
+        out.retain(|candidate| candidate.starts_with(&current));
+        let mut seen = BTreeSet::new();
+        out.retain(|candidate| seen.insert(candidate.clone()));
+        out
+    }
+
+    /// Everything the position allows, before it is narrowed to what has already
+    /// been typed of the word.
+    fn offered(&self, done: &[String], current: &str) -> Vec<String> {
+        let Some(head) = done.first() else {
+            // Nothing finished yet, so the line can only be starting a command.
+            return TOPICS.iter().map(|topic| topic.name.to_owned()).collect();
+        };
+        let Some(topic) = TOPICS.iter().find(|topic| topic.name == *head) else {
+            return Vec::new();
+        };
+        let mut shapes: Vec<FormShape> = topic.forms.iter().copied().map(shape).collect();
+
+        // `add` and `rm` dispatch on a literal word every one of their forms
+        // names, and that word is the one after the command.
+        let mut skip = 1;
+        if shapes.iter().all(|shape| shape.literal.is_some()) {
+            if done.len() == 1 {
+                return shapes
+                    .iter()
+                    .filter_map(|shape| shape.literal)
+                    .map(str::to_owned)
+                    .collect();
+            }
+            let chosen = done[1].as_str();
+            shapes.retain(|shape| shape.literal == Some(chosen));
+            skip = 2;
+        }
+        if shapes.is_empty() {
+            return Vec::new();
+        }
+
+        // A shallow reading of what is already on the line: which options were
+        // given, which positionals were filled, and whether the cursor is
+        // sitting on an option's value. It never validates and never refuses,
+        // for the same reason `crate::completion`'s walk of a half-typed argv
+        // does not.
+        let mut given: Vec<&str> = Vec::new();
+        let mut positionals: Vec<&str> = Vec::new();
+        let mut awaiting: Option<&str> = None;
+        for word in done.iter().skip(skip) {
+            if awaiting.take().is_some() {
+                continue;
+            }
+            if word.starts_with("--") {
+                given.push(word.as_str());
+                if takes_a_value(&shapes, word) {
+                    awaiting = Some(word.as_str());
+                }
+                continue;
+            }
+            positionals.push(word.as_str());
+        }
+
+        if let Some(option) = awaiting {
+            return self.value_candidates(&shapes, option, &positionals);
+        }
+        // Options are offered once the author types a `-`, or once the form's
+        // positionals are used up. Before that a boundary belongs to the
+        // positional, which is the rule `crate::completion` follows too: a flag
+        // is offered when a flag is being typed.
+        if current.starts_with('-') {
+            return option_candidates(&shapes, &given);
+        }
+        match placeholders_at(&shapes, positionals.len()) {
+            Some(placeholders) => {
+                self.positional_candidates(topic.name, &placeholders, &positionals)
+            }
+            None => option_candidates(&shapes, &given),
+        }
+    }
+
+    /// The candidates for an option's value, from the placeholder its form gives
+    /// it.
+    fn value_candidates(
+        &self,
+        shapes: &[FormShape],
+        option: &str,
+        positionals: &[&str],
+    ) -> Vec<String> {
+        let Some(value) = every_option(shapes)
+            .find(|entry| entry.name == option)
+            .and_then(|entry| entry.value)
+        else {
+            return Vec::new();
+        };
+        // A group of alternatives IS a fixed value set, and it is the form that
+        // says so: `--join (last | all | best-by:REF)`.
+        if value.starts_with('(') {
+            return fixed_values(value);
+        }
+        match value {
+            // A map or fold body names a node that is already in the document.
+            "ID" => self.node_ids(),
+            // An edge out of a branch is labeled with the case it realizes, so
+            // the source node's cases are what a label means.
+            "NAME" if option == "--label" => {
+                self.case_names(positionals.first().copied().unwrap_or_default())
+            }
+            // A path, a hash, a schema, a reference, a number, a prompt, a name:
+            // each is either free text or outside a crate with no filesystem's
+            // reach.
+            _ => Vec::new(),
+        }
+    }
+
+    /// The candidates for a positional, from the placeholder its form gives it.
+    fn positional_candidates(
+        &self,
+        topic: &str,
+        placeholders: &[&str],
+        positionals: &[&str],
+    ) -> Vec<String> {
+        // `add` is the one command that INTRODUCES an id, so its `<ID>` names a
+        // node the document must not already have and there is nothing to
+        // offer. Every other command refers to an id that is already there.
+        // Staying quiet also keeps an option out of a slot a required
+        // positional owns, which is what `offered` falls through to when a
+        // position has no candidates of its own.
+        if topic == "add" {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for placeholder in placeholders {
+            match *placeholder {
+                "<ID>" | "<FROM>" | "<TO>" => out.extend(self.node_ids()),
+                // Only a branch node has cases, and every command that takes a
+                // `<BRANCH-ID>` refuses any other kind, so offering another
+                // kind would be offering a refusal.
+                "<BRANCH-ID>" => out.extend(self.branch_ids()),
+                // `rm case` names a case the branch has. `case` is creating
+                // one, so there the name is the author's to invent and an
+                // existing name is the one thing it cannot be.
+                "<CASE-NAME>" if topic == "rm" => {
+                    out.extend(self.case_names(positionals.first().copied().unwrap_or_default()));
+                }
+                "<COMMAND>" => out.extend(TOPICS.iter().map(|entry| entry.name.to_owned())),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// Every node id in the document, in document order.
+    fn node_ids(&self) -> Vec<String> {
+        self.document
+            .nodes
+            .iter()
+            .map(|node| node.id().to_owned())
+            .collect()
+    }
+
+    /// The ids of the document's `branch` nodes.
+    fn branch_ids(&self) -> Vec<String> {
+        self.document
+            .nodes
+            .iter()
+            .filter(|node| matches!(node, Node::Branch(_)))
+            .map(|node| node.id().to_owned())
+            .collect()
+    }
+
+    /// The case names on a branch node, or nothing when `id` names no branch.
+    fn case_names(&self, id: &str) -> Vec<String> {
+        match self.node(id) {
+            Some(Node::Branch(branch)) => {
+                branch.cases.iter().map(|case| case.name.clone()).collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3325,6 +3885,299 @@ mod tests {
                 line.len() <= WIDTH || is_command,
                 "the editor wrote a line over width {WIDTH} that is not a command: {line:?}"
             );
+        }
+    }
+
+    // --- completing a half-typed line ---------------------------------------
+    //
+    // Every test here runs with no terminal, no keypress, and no host, which is
+    // the payoff of `candidates` living in this crate: what Tab offers is
+    // decided by the same code a plain `cargo test` exercises.
+
+    /// A document with something of every shape completion has to read: nodes
+    /// of several kinds, a branch carrying two cases, and edges.
+    fn populated() -> Editor {
+        run(&format!(
+            "add agent research --hash {HASH_A}\n\
+             add agent review --hash {HASH_B}\n\
+             add branch route --on research.score --hash {HASH_A}\n\
+             case route high --when \"score > 0.8\"\n\
+             case route ask --model\n\
+             add gate approve --approval-schema {{\"type\":\"object\"}}\n\
+             edge research route\n"
+        ))
+    }
+
+    /// The first word of a line can only be a command, and the list is every
+    /// command in the grammar, narrowing as the word is typed.
+    #[test]
+    fn a_line_starts_with_a_command() {
+        let editor = Editor::new();
+        assert_eq!(
+            editor.candidates(""),
+            [
+                "add", "edge", "case", "rm", "show", "validate", "read", "write", "undo",
+                "history", "help",
+            ]
+        );
+        // Mid-word, only the commands that start with what is typed, and the
+        // leading whitespace a pasted line may carry is no obstacle.
+        assert_eq!(editor.candidates("h"), ["history", "help"]);
+        assert_eq!(editor.candidates("   hi"), ["history"]);
+        // A word that is already a whole command still completes to itself,
+        // which is what makes a unique candidate a no-op rather than a mistake.
+        assert_eq!(editor.candidates("validate"), ["validate"]);
+    }
+
+    /// `add` takes one of six node kinds, and `rm` one of three targets. Both
+    /// lists are read off the same forms `help` prints, so neither can drift
+    /// from the words the parser dispatches on.
+    #[test]
+    fn a_kind_word_completes_after_add_and_rm() {
+        let editor = Editor::new();
+        assert_eq!(
+            editor.candidates("add "),
+            ["agent", "tool", "gate", "branch", "map", "fold"]
+        );
+        assert_eq!(editor.candidates("add b"), ["branch"]);
+        assert_eq!(editor.candidates("rm "), ["node", "edge", "case"]);
+        assert_eq!(editor.candidates("rm c"), ["case"]);
+    }
+
+    /// The kinds and the commands completion offers are exactly the words the
+    /// parser's own error messages name. This is the guard on the derivation:
+    /// a seventh node kind or a twelfth command that reached only one of the
+    /// two lists fails here.
+    #[test]
+    fn the_derived_words_are_the_words_the_parser_names() {
+        let editor = Editor::new();
+        let mut offered = editor.candidates("");
+        offered.sort();
+        let mut declared: Vec<&str> = COMMAND_WORDS.split(", ").collect();
+        declared.sort_unstable();
+        assert_eq!(offered, declared, "the commands");
+
+        let mut offered = editor.candidates("add ");
+        offered.sort();
+        let mut declared: Vec<&str> = KIND_WORDS.split(", ").collect();
+        declared.sort_unstable();
+        assert_eq!(offered, declared, "the node kinds");
+    }
+
+    /// The one thing no static list could answer: the ids in THIS document,
+    /// wherever the grammar expects a node id.
+    #[test]
+    fn a_node_id_completes_from_the_document() {
+        let editor = populated();
+        let all = ["research", "review", "route", "approve"];
+
+        // Both endpoints of an edge, and both of a removal.
+        assert_eq!(editor.candidates("edge "), all);
+        assert_eq!(editor.candidates("edge research "), all);
+        assert_eq!(editor.candidates("rm node "), all);
+        assert_eq!(editor.candidates("rm edge research "), all);
+        // The node `show` prints in full.
+        assert_eq!(editor.candidates("show "), all);
+        // A map or fold body names a node too, and that is an option's value
+        // rather than a positional.
+        assert_eq!(editor.candidates("add map fanout --body "), all);
+        // Narrowed mid-word.
+        assert_eq!(editor.candidates("edge re"), ["research", "review"]);
+        assert_eq!(editor.candidates("show rou"), ["route"]);
+
+        // Only a branch node has cases, so only a branch is offered where a
+        // branch id belongs.
+        assert_eq!(editor.candidates("case "), ["route"]);
+        assert_eq!(editor.candidates("rm case "), ["route"]);
+
+        // `add` is the one command that introduces an id, and an id the
+        // document already has is the one thing it cannot be.
+        assert!(editor.candidates("add agent ").is_empty());
+        assert!(editor.candidates("add agent re").is_empty());
+    }
+
+    /// Options are the command's own, and an option already on the line is not
+    /// offered twice. The alternatives it was written beside go with it.
+    #[test]
+    fn options_are_the_command_s_own_and_never_repeat_themselves() {
+        let editor = populated();
+
+        // Every option of one form, at the boundary past its positionals.
+        assert_eq!(
+            editor.candidates("add agent draft "),
+            [
+                "--hash",
+                "--file",
+                "--name",
+                "--input-schema",
+                "--output-schema"
+            ]
+        );
+        // `--hash` and `--file` are alternatives, so giving one drops both.
+        assert_eq!(
+            editor.candidates(&format!("add agent draft --hash {HASH_A} ")),
+            ["--name", "--input-schema", "--output-schema"]
+        );
+        // And the one already given never comes back.
+        assert_eq!(
+            editor.candidates(&format!("add agent draft --hash {HASH_A} --name x --")),
+            ["--input-schema", "--output-schema"]
+        );
+        // A repeatable option does come back: a tool maps as many inputs as it
+        // has fields.
+        let offered = editor.candidates("add tool publish http_post --input body=approve.draft --");
+        assert!(offered.contains(&"--input".to_owned()), "{offered:?}");
+
+        // An option no other command has stays with the command that has it.
+        assert_eq!(editor.candidates("edge research route --"), ["--label"]);
+        assert!(!editor.candidates("show --").contains(&"--label".to_owned()));
+
+        // Two forms, two options, and choosing one rules out the other: the
+        // form carrying `--when` is not the form carrying `--model`.
+        assert_eq!(
+            editor.candidates("case route sure --"),
+            ["--when", "--model"]
+        );
+        assert!(
+            editor
+                .candidates("case route sure --when \"score > 0.8\" --")
+                .is_empty()
+        );
+    }
+
+    /// A fixed value set, read off the form that declares it. `best-by:REF`
+    /// is offered as far as the grammar fixes it and no further.
+    #[test]
+    fn a_fixed_value_set_completes_from_its_form() {
+        let editor = populated();
+        assert_eq!(
+            editor.candidates("add fold refine --body research --join "),
+            ["last", "all", "best-by:"]
+        );
+        assert_eq!(
+            editor.candidates("add fold refine --body research --join b"),
+            ["best-by:"]
+        );
+        // The parser accepts exactly these three shapes, so what is offered has
+        // to be what it accepts.
+        for offered in ["last", "all", "best-by:score"] {
+            assert!(parse_join(offered).is_ok(), "{offered}");
+        }
+    }
+
+    /// The case names a branch actually carries, for the one command that names
+    /// an existing case. `case` is creating one, so there a name that already
+    /// exists is the one thing it must not be.
+    #[test]
+    fn a_branch_s_case_names_complete_where_one_is_expected() {
+        let editor = populated();
+        assert_eq!(editor.candidates("rm case route "), ["high", "ask"]);
+        assert_eq!(editor.candidates("rm case route a"), ["ask"]);
+        // An edge out of a branch is labeled with the case it realizes, which
+        // is what the grammar means that value to be.
+        assert_eq!(
+            editor.candidates("edge route approve --label "),
+            ["high", "ask"]
+        );
+
+        // A new case name has nothing to complete from.
+        assert!(editor.candidates("case route ").is_empty());
+        // Neither has a node that is not a branch, or one that is not there.
+        assert!(editor.candidates("rm case research ").is_empty());
+        assert!(editor.candidates("rm case nowhere ").is_empty());
+    }
+
+    /// Nothing to offer is the empty vector, never an error and never a guess.
+    /// Every one of these is a position a person passes through while typing.
+    #[test]
+    fn a_position_with_nothing_to_say_offers_nothing() {
+        let editor = populated();
+        for partial in [
+            // Not a command at all, and a command word half-typed into
+            // something no command starts with.
+            "frobnicate ",
+            "zz",
+            // An empty document has no ids to offer.
+            "edge zzz",
+            // Free text and values this crate cannot see: a prompt, a path, a
+            // hash, a reference, a count, an expression, a tool name.
+            "add gate approve --prompt ",
+            "read ",
+            "write ",
+            "add agent draft --file ",
+            "add agent draft --hash ",
+            "add branch route2 --on ",
+            "add map fanout --over items --concurrency ",
+            "add fold refine --body research --stop-when ",
+            "add tool publish ",
+            // Inside a quoted string and inside a JSON argument, including the
+            // moment the cursor is hard against the end of a finished one.
+            "case route sure --when \"score > ",
+            "add gate g --approval-schema {\"type\":\"obj",
+            "add gate g --approval-schema {\"type\":\"object\"}",
+            // A command that takes nothing takes nothing.
+            "validate ",
+            "undo ",
+            "history ",
+            // Past the last thing a form names.
+            "rm node research ",
+            "show research ",
+            "help edge ",
+        ] {
+            assert!(
+                editor.candidates(partial).is_empty(),
+                "{partial:?} must offer nothing, offered {:?}",
+                editor.candidates(partial)
+            );
+        }
+    }
+
+    /// `help <COMMAND>` completes to the topics `help` itself can explain, which
+    /// is the same list the overview prints.
+    #[test]
+    fn a_help_topic_completes_to_a_command() {
+        let editor = Editor::new();
+        assert_eq!(editor.candidates("help h"), ["history", "help"]);
+        for topic in editor.candidates("help ") {
+            assert!(
+                help(Some(&topic), WIDTH).is_ok(),
+                "help offered `{topic}`, which it cannot explain"
+            );
+        }
+    }
+
+    /// Every candidate offered at a position that FINISHES a line has to finish
+    /// it into a line the parser reads. This is the property the derivation
+    /// buys, stated as a test: a candidate that completed a line into one the
+    /// parser refuses would be worse than no candidate at all.
+    ///
+    /// The positions here are the ones where a candidate is the last word the
+    /// line needs. A candidate that only opens the next word (`add`, `--when`,
+    /// `best-by:`) is covered by the tests above, which check it against the
+    /// exact thing the parser dispatches on.
+    #[test]
+    fn a_completed_line_is_a_line_the_parser_reads() {
+        let editor = populated();
+        for partial in [
+            "edge research ",
+            "rm node ",
+            "rm edge research ",
+            "show ",
+            "rm case route ",
+            "help ",
+            "edge route approve --label ",
+        ] {
+            let offered = editor.candidates(partial);
+            assert!(!offered.is_empty(), "{partial:?} offered nothing");
+            for candidate in offered {
+                let line = format!("{partial}{candidate}");
+                assert!(
+                    matches!(parse(&line), Ok(Some(Line::Command(_)))),
+                    "completing {partial:?} with {candidate:?} gave a line the parser does not \
+                     read: {line:?} -> {:?}",
+                    parse(&line)
+                );
+            }
         }
     }
 }
