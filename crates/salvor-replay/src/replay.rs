@@ -995,6 +995,7 @@ impl ReplayCursor {
                     input: recorded_input,
                     effect: recorded_effect,
                     idempotency_key: recorded_key,
+                    ..
                 } if recorded_tool == tool
                     && recorded_input == input
                     && *recorded_effect == effect
@@ -1052,6 +1053,7 @@ impl ReplayCursor {
                 input: input.clone(),
                 effect,
                 idempotency_key: key.clone(),
+                performed_by: None,
             },
         };
         Ok(Outcome::Live(ToolCallPermit {

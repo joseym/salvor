@@ -92,7 +92,7 @@ mod validate;
 
 pub use effect::Effect;
 pub use event::{
-    Budget, BudgetKind, Event, EventEnvelope, ForkOrigin, SCHEMA_VERSION, TokenUsage,
+    Budget, BudgetKind, Event, EventEnvelope, ForkOrigin, Performer, SCHEMA_VERSION, TokenUsage,
     UnresolvedWrite,
 };
 pub use graph_state::{

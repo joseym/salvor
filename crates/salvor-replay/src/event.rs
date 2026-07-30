@@ -74,6 +74,35 @@ use crate::id::{RunId, SequenceNumber};
 /// forbids.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// Who performed a tool call: the trust distinction a reader of the log needs
+/// to tell "salvor witnessed this" apart from "the client says this happened".
+///
+/// A [`ToolCallRequested`](Event::ToolCallRequested) with no [`Performer`]
+/// recorded (the field is `None`) is the default and, until this variant's
+/// client side is wired to any endpoint, the only case that exists: salvor
+/// made the call itself, in its own process, so the log entry is direct
+/// evidence. A recorded [`Performer::Client`] is different in kind, not just
+/// in origin: it is the client's own claim that it ran the call in its
+/// process and is now telling salvor it happened. Salvor did not witness that
+/// execution; it is trusting the report. The log keeps that distinction
+/// explicit rather than flattening both into "a tool call happened", so a
+/// later reader (a human auditing the log, or code deciding how much to trust
+/// an entry) can tell a witnessed fact from an asserted one.
+///
+/// Serializes lowercase (`"server"`, `"client"`), matching the wire style
+/// [`Effect`] uses.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Performer {
+    /// Salvor performed the call itself, in its own process. The log entry is
+    /// direct evidence: salvor witnessed the call because it made it.
+    Server,
+    /// The client performed the call in its own process and reported back
+    /// that it happened. The log entry is the client's claim, not something
+    /// salvor witnessed directly.
+    Client,
+}
+
 /// One record in a run's append-only log.
 ///
 /// The envelope carries run identity, the event's position in the log, the
@@ -225,6 +254,26 @@ pub enum Event {
         /// A [`Effect::Read`] call needs none; an [`Effect::Idempotent`] retry
         /// reuses this exact key so the provider collapses duplicates.
         idempotency_key: Option<String>,
+        /// Who performed this call: see [`Performer`] for what the
+        /// distinction means. Absent means salvor performed the call itself,
+        /// which is every [`Event::ToolCallRequested`] ever recorded before
+        /// this field existed.
+        ///
+        /// `#[serde(default, skip_serializing_if = "Option::is_none")]` under
+        /// the identical additive-optional contract `request_body` on
+        /// [`Event::ModelCallRequested`] set (see that field's doc and the
+        /// [`SCHEMA_VERSION`] docs for the full argument): with no performer
+        /// recorded, the field is omitted from the wire form entirely, so a
+        /// server-performed call serializes byte for byte as it did before
+        /// this field existed, and a log written before this field
+        /// deserializes with it defaulted to `None`. The pinned-JSON tests in
+        /// this module's test suite (`tool_call_requested_without_performer_
+        /// serializes_to_pinned_json` and its sibling with a performer
+        /// present) check this directly, the same way
+        /// `model_call_requested_without_body_omits_the_key` checks
+        /// `request_body`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        performed_by: Option<Performer>,
     },
     /// A tool call completed. Once recorded, replay reads the output from here
     /// and never calls the tool again, whatever its effect class.
@@ -681,6 +730,15 @@ mod tests {
             input: serde_json::json!({"title": "bug"}),
             effect: Effect::Write,
             idempotency_key: Some("key-123".into()),
+            performed_by: None,
+        });
+        assert_round_trips(Event::ToolCallRequested {
+            seq: SequenceNumber::new(2),
+            tool: "create_ticket".into(),
+            input: serde_json::json!({"title": "bug"}),
+            effect: Effect::Write,
+            idempotency_key: Some("key-123".into()),
+            performed_by: Some(Performer::Client),
         });
         assert_round_trips(Event::ToolCallCompleted {
             seq: SequenceNumber::new(2),
@@ -833,6 +891,111 @@ mod tests {
         });
         let json = serde_json::to_string(&env).expect("serialize");
         assert!(json.contains(r#""request_body":{"model":"m"}"#), "{json}");
+    }
+
+    /// With no performer recorded, `ToolCallRequested` serializes with no
+    /// `performed_by` key at all: byte for byte what it produced before the
+    /// field existed. This is the additive-optional contract the
+    /// [`SCHEMA_VERSION`] docs promise, checked directly, the same way
+    /// `model_call_requested_without_body_omits_the_key` above checks
+    /// `request_body`. It is also the backward-compatibility proof: an old
+    /// log with no `performed_by` key deserializes to this exact value, with
+    /// the field defaulted to `None`.
+    #[test]
+    fn tool_call_requested_without_performer_serializes_to_pinned_json() {
+        let env = envelope(Event::ToolCallRequested {
+            seq: SequenceNumber::new(2),
+            tool: "create_ticket".into(),
+            input: serde_json::json!({"title": "bug"}),
+            effect: Effect::Write,
+            idempotency_key: Some("key-123".into()),
+            performed_by: None,
+        });
+        let json = serde_json::to_string(&env).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"ToolCallRequested","payload":{"seq":2,"tool":"create_ticket","input":{"title":"bug"},"effect":"write","idempotency_key":"key-123"}}}"#
+        );
+        assert!(
+            !json.contains("performed_by"),
+            "an unattributed call must not emit the key: {json}"
+        );
+
+        let restored: EventEnvelope = serde_json::from_str(&json).expect("deserialize");
+        let Event::ToolCallRequested { performed_by, .. } = restored.event else {
+            panic!("expected ToolCallRequested");
+        };
+        assert_eq!(
+            performed_by, None,
+            "a log with no performed_by key must deserialize to None"
+        );
+    }
+
+    /// With a performer recorded, the key rides after `idempotency_key` with
+    /// the lowercase string [`Performer`] serializes to.
+    #[test]
+    fn tool_call_requested_with_performer_serializes_to_pinned_json() {
+        let env = envelope(Event::ToolCallRequested {
+            seq: SequenceNumber::new(2),
+            tool: "create_ticket".into(),
+            input: serde_json::json!({"title": "bug"}),
+            effect: Effect::Write,
+            idempotency_key: Some("key-123".into()),
+            performed_by: Some(Performer::Client),
+        });
+        let json = serde_json::to_string(&env).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"ToolCallRequested","payload":{"seq":2,"tool":"create_ticket","input":{"title":"bug"},"effect":"write","idempotency_key":"key-123","performed_by":"client"}}}"#
+        );
+    }
+
+    /// A `ToolCallRequested` JSON that predates `performed_by` (no such key in
+    /// the payload) deserializes with the field defaulted to `None`. This is
+    /// the load-bearing backward-compatibility proof for every log recorded
+    /// before this field existed.
+    #[test]
+    fn tool_call_requested_without_performer_key_deserializes_to_none() {
+        let json = r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"ToolCallRequested","payload":{"seq":2,"tool":"create_ticket","input":{"title":"bug"},"effect":"write","idempotency_key":"key-123"}}}"#;
+        let restored: EventEnvelope = serde_json::from_str(json).expect("deserialize");
+        let Event::ToolCallRequested { performed_by, .. } = restored.event else {
+            panic!("expected ToolCallRequested");
+        };
+        assert_eq!(performed_by, None);
+    }
+
+    /// `Performer` round-trips through the envelope in both variants.
+    #[test]
+    fn performer_round_trips() {
+        assert_round_trips(Event::ToolCallRequested {
+            seq: SequenceNumber::new(2),
+            tool: "create_ticket".into(),
+            input: serde_json::json!({"title": "bug"}),
+            effect: Effect::Write,
+            idempotency_key: None,
+            performed_by: Some(Performer::Server),
+        });
+        assert_round_trips(Event::ToolCallRequested {
+            seq: SequenceNumber::new(2),
+            tool: "create_ticket".into(),
+            input: serde_json::json!({"title": "bug"}),
+            effect: Effect::Write,
+            idempotency_key: None,
+            performed_by: Some(Performer::Client),
+        });
+    }
+
+    /// `Performer` serializes lowercase, matching [`Effect`]'s wire style.
+    #[test]
+    fn performer_serializes_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&Performer::Server).unwrap(),
+            r#""server""#
+        );
+        assert_eq!(
+            serde_json::to_string(&Performer::Client).unwrap(),
+            r#""client""#
+        );
     }
 
     /// Pins `RunStarted` with no labels: byte for byte the shape `RunStarted`

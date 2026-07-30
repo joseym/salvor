@@ -94,6 +94,7 @@ fn reference_logs() -> Vec<(&'static str, Vec<EventEnvelope>)> {
                 input: json!({"q": "otters"}),
                 effect: Effect::Read,
                 idempotency_key: None,
+                performed_by: None,
             },
         ]),
     ));
@@ -108,6 +109,7 @@ fn reference_logs() -> Vec<(&'static str, Vec<EventEnvelope>)> {
                 input: json!({"doc": 7}),
                 effect: Effect::Idempotent,
                 idempotency_key: Some("key-7".into()),
+                performed_by: None,
             },
         ]),
     ));
@@ -122,6 +124,7 @@ fn reference_logs() -> Vec<(&'static str, Vec<EventEnvelope>)> {
                 input: json!({"title": "bug"}),
                 effect: Effect::Write,
                 idempotency_key: None,
+                performed_by: None,
             },
         ]),
     ));
@@ -136,6 +139,7 @@ fn reference_logs() -> Vec<(&'static str, Vec<EventEnvelope>)> {
                 input: json!({"title": "bug"}),
                 effect: Effect::Write,
                 idempotency_key: Some("idem-1".into()),
+                performed_by: None,
             },
             Event::ToolCallCompleted {
                 seq: SequenceNumber::new(1),

@@ -329,6 +329,7 @@ mod tests {
                     input: json!({"body": "draft"}),
                     effect: Effect::Write,
                     idempotency_key: None,
+                    performed_by: None,
                 },
             ),
             envelope(

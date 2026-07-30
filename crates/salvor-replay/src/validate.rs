@@ -422,6 +422,7 @@ mod tests {
             input: serde_json::json!({"src": "x"}),
             effect,
             idempotency_key: None,
+            performed_by: None,
         }
     }
 

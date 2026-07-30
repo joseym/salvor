@@ -130,6 +130,7 @@ async fn abandon_needs_reconciliation_records_the_unresolved_write() {
                 input: json!({"amount": 10}),
                 effect: Effect::Write,
                 idempotency_key: None,
+                performed_by: None,
             },
         ))
         .await

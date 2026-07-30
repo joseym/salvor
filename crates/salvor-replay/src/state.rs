@@ -193,6 +193,7 @@ pub fn derive_state(log: &[EventEnvelope]) -> RunState {
                 input,
                 effect,
                 idempotency_key,
+                ..
             } => {
                 state.pending_call = Some(PendingCall::Tool {
                     seq: *seq,
@@ -383,6 +384,7 @@ mod tests {
                 input: serde_json::json!({"q": "otters"}),
                 effect: Effect::Read,
                 idempotency_key: None,
+                performed_by: None,
             },
         ]));
         assert_eq!(state.status, RunStatus::AwaitingTool);
@@ -400,6 +402,7 @@ mod tests {
                 input: serde_json::json!({"doc": 1}),
                 effect: Effect::Idempotent,
                 idempotency_key: Some("key-7".into()),
+                performed_by: None,
             },
         ]));
         assert_eq!(state.status, RunStatus::AwaitingTool);
@@ -423,6 +426,7 @@ mod tests {
                 input: serde_json::json!({"title": "bug"}),
                 effect: Effect::Write,
                 idempotency_key: None,
+                performed_by: None,
             },
         ]));
         assert_eq!(state.status, RunStatus::NeedsReconciliation);
@@ -446,6 +450,7 @@ mod tests {
                 input: serde_json::json!({"title": "bug"}),
                 effect: Effect::Write,
                 idempotency_key: None,
+                performed_by: None,
             },
             Event::ToolCallCompleted {
                 seq: SequenceNumber::new(1),
@@ -583,6 +588,7 @@ mod tests {
                 input: serde_json::json!({"title": "bug"}),
                 effect: Effect::Write,
                 idempotency_key: None,
+                performed_by: None,
             },
             Event::RunAbandoned {
                 reason: None,

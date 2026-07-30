@@ -849,6 +849,7 @@ pub async fn tool_step(
                         input: input.clone(),
                         effect,
                         idempotency_key: exec_key.clone(),
+                        performed_by: None,
                     },
                 );
                 let mut validator = LogValidator::new(log);
@@ -991,6 +992,7 @@ fn intent_evidence(envelope: &EventEnvelope) -> Value {
         input,
         effect,
         idempotency_key,
+        ..
     } = &envelope.event
     else {
         return Value::Null;

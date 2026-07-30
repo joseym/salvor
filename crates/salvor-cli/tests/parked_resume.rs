@@ -140,6 +140,7 @@ async fn resume_refuses_a_reconciliation_run() {
                 input: json!({"amount": 4200}),
                 effect: Effect::Write,
                 idempotency_key: None,
+                performed_by: None,
             },
         );
         store.append(&started).await.expect("append started");
