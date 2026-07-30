@@ -62,6 +62,40 @@ impl ToolHandler for CreateTicket {
     }
 }
 
+// --- A tool that opts into an output schema ------------------------------
+
+struct CreateTicketWithReceipt;
+
+impl ToolMeta for CreateTicketWithReceipt {
+    const NAME: &'static str = "create_ticket_with_receipt";
+    const DESCRIPTION: &'static str = "Create a Jira ticket, requiring a verifiable receipt";
+    const EFFECT: Effect = Effect::Write;
+}
+
+#[async_trait]
+impl ToolHandler for CreateTicketWithReceipt {
+    type Input = TicketRequest;
+    type Output = TicketRef;
+
+    async fn call(
+        &self,
+        _ctx: &ToolCtx,
+        input: TicketRequest,
+    ) -> Result<ToolOutcome<TicketRef>, HandlerError> {
+        Ok(ToolOutcome::Output(TicketRef {
+            id: format!("JIRA-{}", input.summary.len()),
+            idempotency_key: None,
+        }))
+    }
+
+    // The one-line opt-in documented on `ToolHandler::output_schema`: `Output`
+    // (`TicketRef`) already derives `JsonSchema`, so the same `schema_for!`
+    // machinery `input_schema` uses covers it.
+    fn output_schema() -> Option<serde_json::Value> {
+        Some(serde_json::to_value(schemars::schema_for!(Self::Output)).unwrap())
+    }
+}
+
 // --- A human-in-the-loop tool that suspends -----------------------------
 
 struct RequestApproval;
@@ -185,6 +219,32 @@ fn descriptor_exposes_name_description_effect_and_schema() {
     assert!(
         properties.get("priority").is_some(),
         "schema names `priority`"
+    );
+
+    // A tool that never overrides `ToolHandler::output_schema` descends the
+    // default all the way through `TypedTool` to the descriptor: `None`, not
+    // an empty schema.
+    assert_eq!(
+        descriptor.output_schema, None,
+        "a tool that declares no output schema reports None, not a schema"
+    );
+}
+
+#[test]
+fn descriptor_surfaces_a_declared_output_schema() {
+    let tool = TypedTool::new(CreateTicketWithReceipt);
+    let descriptor = tool.descriptor();
+
+    let schema = descriptor
+        .output_schema
+        .expect("the tool opted into an output schema");
+    let properties = schema
+        .get("properties")
+        .expect("object schema has properties");
+    assert!(properties.get("id").is_some(), "schema names `id`");
+    assert!(
+        properties.get("idempotency_key").is_some(),
+        "schema names `idempotency_key`"
     );
 }
 

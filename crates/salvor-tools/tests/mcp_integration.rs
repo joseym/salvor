@@ -75,6 +75,36 @@ async fn connecting_lists_tools_with_server_reported_metadata() {
     server.close().await.expect("clean shutdown");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tool_with_an_advertised_output_schema_surfaces_it() {
+    let server = connect().await;
+
+    // `stamp_receipt` returns structured output, so the fixture's SDK
+    // publishes an `outputSchema` for it; `DynTool::output_schema` must carry
+    // that through unchanged.
+    let stamp = find(&server, "stamp_receipt");
+    let schema = stamp
+        .output_schema()
+        .expect("the server advertised an outputSchema for stamp_receipt");
+    let properties = schema
+        .get("properties")
+        .expect("the schema names its properties");
+    assert!(
+        properties.get("settlement_id").is_some(),
+        "schema exposes the `settlement_id` field, got: {schema}"
+    );
+
+    // A tool the server never declared an output schema for reports None,
+    // not an empty schema.
+    assert_eq!(
+        find(&server, "append_note").output_schema(),
+        None,
+        "append_note declares no outputSchema"
+    );
+
+    server.close().await.expect("clean shutdown");
+}
+
 // --- Criterion 2: effect mapping and overrides ---------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

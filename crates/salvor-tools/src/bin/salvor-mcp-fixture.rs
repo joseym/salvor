@@ -23,6 +23,9 @@
 //! - `explode` returns a tool-reported error result (`isError == true`), which
 //!   must surface on the client as
 //!   [`ToolError::Handler`](salvor_tools::ToolError::Handler).
+//! - `stamp_receipt` returns structured output (`rmcp::Json<T>`), so the SDK
+//!   publishes an `outputSchema` for it; this is what the
+//!   `output_schema`-surfacing test connects to.
 //!
 //! [`McpServer`]: salvor_tools::mcp::McpServer
 
@@ -31,9 +34,9 @@ use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerInfo};
 use rmcp::transport::stdio;
-use rmcp::{ErrorData, ServerHandler, tool, tool_handler, tool_router};
+use rmcp::{ErrorData, Json, ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// The single argument `append_note` takes. Deriving `JsonSchema` lets the
 /// `#[tool]` macro publish an input schema for it; deriving `Deserialize` lets
@@ -43,6 +46,14 @@ struct AppendArgs {
     /// The line to append. Echoed back in the result so the round-trip test can
     /// see its own input come through the server.
     line: String,
+}
+
+/// The structured result `stamp_receipt` returns. Deriving `JsonSchema` is
+/// what makes the SDK publish an `outputSchema` for the tool that returns it.
+#[derive(Debug, Serialize, JsonSchema)]
+struct Receipt {
+    /// A settlement id standing in for a verifiable provider reference.
+    settlement_id: String,
 }
 
 /// The fixture server. It holds nothing but the generated tool router.
@@ -99,6 +110,15 @@ impl Fixture {
         Ok(CallToolResult::error(vec![ContentBlock::text(
             "boom: the explode tool always fails",
         )]))
+    }
+
+    /// A tool that returns structured output: the SDK derives its
+    /// `outputSchema` from `Receipt`'s `JsonSchema` impl.
+    #[tool(description = "Stamp a settlement receipt.")]
+    async fn stamp_receipt(&self) -> Result<Json<Receipt>, ErrorData> {
+        Ok(Json(Receipt {
+            settlement_id: "settlement-123".to_owned(),
+        }))
     }
 }
 

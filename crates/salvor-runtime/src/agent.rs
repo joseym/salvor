@@ -23,6 +23,13 @@
 //! }
 //! ```
 //!
+//! A tool that declares an `output_schema` (see
+//! [`ToolHandler::output_schema`](salvor_tools::ToolHandler::output_schema))
+//! carries that key too, alongside `description`/`effect`/`input_schema`/
+//! `name` in its entry above. A tool that declares none omits the key
+//! entirely rather than carrying it as `null`, so every tool without one
+//! hashes exactly as it did before `output_schema` existed on the contract.
+//!
 //! Tools appear sorted by name (the `ToolSet` enumerates them that way), so
 //! registration order never changes the hash; any change to the model id,
 //! prompt, a tool contract, a budget, or pricing does. The client
@@ -395,12 +402,29 @@ fn compute_def_hash(
         .descriptors()
         .into_iter()
         .map(|descriptor| {
-            json!({
+            let mut value = json!({
                 "description": descriptor.description,
                 "effect": descriptor.effect,
                 "input_schema": descriptor.input_schema,
                 "name": descriptor.name,
-            })
+            });
+            // `output_schema` is inserted only when the tool declares one,
+            // and never emitted as an explicit `null`. Most tools declare no
+            // output schema, and this key did not exist before it was added
+            // to `ToolDescriptor`; if every tool without one hashed as
+            // though it carried `"output_schema": null`, this would change
+            // the hash of every tool already in the field, and with it,
+            // every `agent_hash` already pinned in a checked-in graph
+            // document would stop resolving. Keying its presence on
+            // `Some`/`None` instead means a schema-less tool hashes exactly
+            // as it did before this field existed.
+            if let Some(output_schema) = descriptor.output_schema {
+                value
+                    .as_object_mut()
+                    .expect("the json! object literal above always builds a Value::Object")
+                    .insert("output_schema".to_owned(), output_schema);
+            }
+            value
         })
         .collect();
     let value = json!({
@@ -627,5 +651,67 @@ mod tests {
             Agent::builder().build(),
             Err(AgentBuildError::MissingModel)
         ));
+    }
+
+    /// A `DynTool` identical to `StubTool` except that it also declares an
+    /// output schema, so a test can isolate that one field's effect on the
+    /// hash.
+    struct StubToolWithOutputSchema;
+
+    #[async_trait::async_trait]
+    impl DynTool for StubToolWithOutputSchema {
+        fn name(&self) -> &str {
+            "alpha"
+        }
+        fn description(&self) -> &str {
+            "first"
+        }
+        fn effect(&self) -> Effect {
+            Effect::Read
+        }
+        fn input_schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+        fn output_schema(&self) -> Option<Value> {
+            Some(json!({"type": "object", "properties": {"receipt_id": {"type": "string"}}}))
+        }
+        async fn call_json(
+            &self,
+            _ctx: &ToolCtx,
+            input: Value,
+        ) -> Result<ToolOutcome<Value>, ToolError> {
+            Ok(ToolOutcome::Output(input))
+        }
+    }
+
+    /// A tool that declares no output schema must hash exactly as it did
+    /// before `output_schema` existed on the tool contract. This literal is
+    /// `base_builder().build().unwrap().def_hash()` captured before the
+    /// `output_schema` field was added to `ToolDescriptor`; if a change
+    /// starts emitting `"output_schema": null` (or otherwise touches a
+    /// schema-less tool's hashed shape), this test catches it, and with it,
+    /// every `agent_hash` already pinned in a checked-in graph document.
+    #[test]
+    fn a_tool_without_output_schema_hashes_unchanged() {
+        let agent = base_builder().build().unwrap();
+        assert_eq!(
+            agent.def_hash(),
+            "sha256:597a7a1f43de12e15bcaf634d2525136a7b02addbbfb2c9f5b0c095b1f02178f"
+        );
+    }
+
+    /// A declared output schema is part of the tool's contract, so it must
+    /// move the hash: the same name, description, effect, and input schema,
+    /// with only an output schema added, hashes differently.
+    #[test]
+    fn a_declared_output_schema_changes_the_hash() {
+        let without = base_builder().build().unwrap();
+        let with = Agent::builder()
+            .model(Config::new(), "test-model")
+            .system_prompt("prompt")
+            .tool_dyn(Box::new(StubToolWithOutputSchema))
+            .build()
+            .unwrap();
+        assert_ne!(without.def_hash(), with.def_hash());
     }
 }

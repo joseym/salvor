@@ -43,6 +43,7 @@ pub struct McpTool {
     name: String,
     description: String,
     input_schema: Value,
+    output_schema: Option<Value>,
     effect: Effect,
 }
 
@@ -54,6 +55,7 @@ impl McpTool {
         name: String,
         description: String,
         input_schema: Value,
+        output_schema: Option<Value>,
         effect: Effect,
     ) -> Self {
         Self {
@@ -61,6 +63,7 @@ impl McpTool {
             name,
             description,
             input_schema,
+            output_schema,
             effect,
         }
     }
@@ -82,6 +85,10 @@ impl DynTool for McpTool {
 
     fn input_schema(&self) -> Value {
         self.input_schema.clone()
+    }
+
+    fn output_schema(&self) -> Option<Value> {
+        self.output_schema.clone()
     }
 
     async fn call_json(

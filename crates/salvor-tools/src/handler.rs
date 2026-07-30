@@ -129,4 +129,37 @@ pub trait ToolHandler: ToolMeta + Send + Sync {
         serde_json::to_value(schemars::schema_for!(Self::Input))
             .expect("a schemars-generated schema always serializes to JSON")
     }
+
+    /// The JSON Schema a *completion* for this tool must satisfy, if the tool
+    /// declares one. `None` by default.
+    ///
+    /// This is not a schema for `Output`, and nothing validates against it
+    /// yet: stage one only lets a tool declare it. What it is for is the
+    /// stage that follows. A tool call performed outside the salvor process
+    /// (a client recording work it did itself, rather than salvor dispatching
+    /// it) has no handler run to trust; the only thing standing between that
+    /// and a bare unverifiable claim of "I did the work" is a schema the
+    /// completion is required to match, one shaped to demand something a
+    /// forger cannot cheaply produce, such as a provider transaction
+    /// reference or a settlement id. Declaring the schema here is what makes
+    /// that requirement expressible; nothing in this crate checks a
+    /// completion against it yet.
+    ///
+    /// `Self::Output` carries no `JsonSchema` bound (unlike `Self::Input`,
+    /// which does), so this cannot default to deriving one: adding that bound
+    /// would break every existing implementor of this trait outside this
+    /// crate, most of which have no need for an output schema at all. A tool
+    /// whose `Output` does implement `JsonSchema` can opt in with one line:
+    ///
+    /// ```ignore
+    /// fn output_schema() -> Option<Value> {
+    ///     Some(serde_json::to_value(schemars::schema_for!(Self::Output)).unwrap())
+    /// }
+    /// ```
+    fn output_schema() -> Option<Value>
+    where
+        Self: Sized,
+    {
+        None
+    }
 }
