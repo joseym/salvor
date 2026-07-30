@@ -1,11 +1,12 @@
 # Graph documents
 
-Canonical, language-neutral graph documents for the Salvor v0.4 graph API,
-plus the two commands that read them. A graph is a declarative CONTROL
-document: authored once, submitted, hashed into a run, then frozen. This layer
-is FORMAT + VALIDATION only. There is no execution engine yet: nothing here
-runs a graph, fans out a `map`, evaluates a `branch` condition, or drives a
-`gate`. That comes later.
+Canonical, language-neutral graph documents for the Salvor v0.4 graph API.
+This crate (`salvor-graph`) owns the document format, strict validation, and
+JSON Schema emission, and nothing else: it is a pure, IO-free leaf. A graph
+document authored here is driven by a separate crate, `salvor-engine`, which
+walks a frozen document's nodes and records the walk into a durable run log.
+That engine backs `salvor graph run`, `POST /v1/graphs`, and
+`POST /v1/graph-runs`; see "Running a graph" below.
 
 ## The node kinds
 
@@ -14,8 +15,9 @@ runs a graph, fans out a `map`, evaluates a `branch` condition, or drives a
 | `agent` | `agent_hash` (a `sha256:<64 hex>` string), optional `input_schema` / `output_schema` | A full agent loop, referenced BY CONTENT HASH, never an embedded definition. |
 | `tool` | `tool` name, `input` mapping (data), optional schemas | One direct tool invocation, no model in the loop. |
 | `gate` | optional `prompt`, `approval_schema` | Human approval that suspends the run. |
-| `branch` | optional `on`, `cases` (each a `name` + a `when` condition) | Routes on a typed output. Conditions are recorded as DATA and never evaluated here. |
-| `map` | `over`, `concurrency` cap, `body` (a node id or an embedded sub-graph), optional `output_schema` | Fan-out a sub-run per element of a list, joined with a concurrency cap. |
+| `branch` | optional `on`, `cases` (each a `name` + a `when` condition) | Routes on a typed output. Conditions are recorded as DATA and evaluated by the engine at run time, never by this crate. |
+| `map` | `over`, `concurrency` cap, `body` (a node id or an embedded sub-graph), optional `output_schema` | Fan-out a sub-run per element of a list. The engine runs iterations inline and sequentially; the `concurrency` cap is accepted and validated but not enforced, a deliberate choice for v0.4. A `subgraph` body, or any body node that is not an `agent` or `tool`, is refused with a typed `UnsupportedMapBody` error rather than driven. |
+| `fold` | `body` (a node id or an embedded sub-graph), `max_iterations`, `stop_when` condition, `join` strategy, optional `accumulator_schema` | A bounded iteration loop. The format, validator, and builders support it fully; the engine deliberately refuses to drive one, recording a typed `UnsupportedNode` error rather than executing it. |
 
 Edges are the topology: `{ "from": "<node id>", "to": "<node id>" }`, with an
 optional `label` (used to name the branch case an edge realizes). Every node
@@ -27,7 +29,10 @@ ignored.
 
 | File | Shows |
 |---|---|
-| [`research-review-publish.json`](research-review-publish.json) | A valid small flow: a research `agent` drafts, a review `agent` checks, a human `gate` approves, a `tool` publishes. Validates clean. |
+| [`research-review-publish.json`](research-review-publish.json) | A valid small flow: a research `agent` drafts, a review `agent` checks, a human `gate` approves, a `tool` publishes. Validates clean and runs. |
+| [`linear-research-publish.json`](linear-research-publish.json) | A simpler linear flow with no gate: a research `agent` drafts, a review `agent` checks, a `tool` publishes. |
+| [`branch-review.json`](branch-review.json) | An `agent` drafts, a `tool` scores it, a `branch` routes on the score: the high case reaches a `gate` then publishes, the low case reaches a rejection `tool` directly. |
+| [`fold-refine.json`](fold-refine.json) | A single `fold` node whose body is an `agent`, bounded to 3 iterations with a `stop_when` condition and a `best_by` join. Validates clean; the engine refuses to run it (see the `fold` row above). |
 | [`invalid-dangling-edge.json`](invalid-dangling-edge.json) | An edge whose target `aprove` is a typo of the node `approve`. Produces a precise dangling-edge error with a nearest-name suggestion. |
 | [`invalid-cycle.json`](invalid-cycle.json) | Two agents pointing at each other. Produces a precise cycle error naming the path. |
 
@@ -93,6 +98,47 @@ future builders read:
 $ salvor graph schema
 { "$defs": { ... }, "properties": { "schema_version": ..., "nodes": ..., "edges": ... } }
 ```
+
+## Running a graph
+
+`salvor graph run` drives a document locally over the store, exactly as
+`salvor run` drives a single agent: each `agent` node resolves against a
+provided `--agent` file, keyed by that file's computed definition hash, and
+each `tool` node resolves from the tools those agents carry.
+
+```
+$ salvor graph run examples/graphs/research-review-publish.json \
+    --input '{}' \
+    --agent agents/research.toml --agent agents/review.toml
+```
+
+A `gate` node parks the run the same way a tool suspension does; continue it
+with `salvor resume <RUN_ID> --graph examples/graphs/research-review-publish.json --input '{"approved": true}'`.
+`salvor fork <RUN_ID> --from-node <NODE> --graph <FILE>` re-walks a run from a
+node boundary into a new run.
+
+Over HTTP the same document is submitted with `POST /v1/graphs` and driven
+with `POST /v1/graph-runs`; see `crates/salvor-server/API.md`. A submitted
+document lives in the server's registry in memory only, so a server restart
+drops it and it must be resubmitted before a run or fork can reference it
+again; content addressing (the document is keyed by its own hash) makes that
+resubmission safe.
+
+A stock `salvor serve` wires an empty tool registry, mirroring how it wires no
+demo tools by default: a `tool` node's name resolves against nothing until a
+host registers one, so on a default server every `tool` node is refused with
+`unknown_tool`. Run `salvor serve --demo-tools` to exercise a `tool` node
+end to end, or register real tools through the same mechanism.
+
+## Editing a graph
+
+`salvor graph edit` builds a document one line at a time, reading commands
+from stdin with Tab completion. Nothing is saved until a line names a file
+(`write <PATH>`), and the only files touched are the ones a line names,
+including an agent node's `--file <PATH>`, which is resolved to a definition
+hash by building the agent exactly as `salvor agent hash` does. Type `help` at
+the prompt for the grammar, and `history` to dump the session as a script that
+replays into the identical document.
 
 ## What validation checks
 
