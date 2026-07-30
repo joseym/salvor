@@ -36,6 +36,7 @@ use tokio::task::JoinHandle;
 
 use salvor_core::{EventEnvelope, RunId};
 
+use crate::client_tools::ClientToolRegistry;
 use crate::executor::ModelExecutor;
 use crate::tool_registry::ToolRegistry;
 
@@ -121,6 +122,14 @@ struct Inner {
     // rather than dispatching. `salvor serve` wires an EMPTY registry, so any
     // tool-step there is a clean `unknown_tool` until a tool is registered.
     tool_registry: Option<Arc<ToolRegistry>>,
+    // The client-performed tool DECLARATIONS this server was started with, the
+    // declarative sibling of `tool_registry` above. Not an `Option`: an empty
+    // set is a complete, honest state (every client-tool intent is a clean
+    // `unknown_tool`), because nothing here is ever dispatched, so there is no
+    // "the host wired no mechanism" case to tell apart from "the operator
+    // declared nothing". Loaded by the operator, never over HTTP; see
+    // `crate::client_tools` for why that rule is load-bearing.
+    client_tools: Arc<ClientToolRegistry>,
     hooks: Option<(ClockFn, RandomFn)>,
     auth_token: Option<String>,
     poll_interval: Duration,
@@ -191,6 +200,7 @@ impl AppState {
                 factory,
                 model_executor: None,
                 tool_registry: None,
+                client_tools: Arc::new(ClientToolRegistry::new()),
                 hooks: None,
                 auth_token: None,
                 poll_interval: Duration::from_millis(50),
@@ -255,6 +265,24 @@ impl AppState {
         self
     }
 
+    /// Loads the client-performed tool declarations this server answers
+    /// client-tool intents against. Additive and empty by default, so no caller
+    /// that predates it changes behavior: without a declaration, every
+    /// client-tool intent is a clean `unknown_tool` and nothing is written.
+    ///
+    /// This is the ONLY way declarations enter the process. There is no
+    /// endpoint that accepts one, on purpose: a declaration fixes the effect
+    /// class, and a client that could declare its own would be choosing whether
+    /// its own write is subject to the write-ahead rule. See
+    /// [`crate::client_tools`] for the full argument.
+    #[must_use]
+    pub fn with_client_tools(mut self, decls: Arc<ClientToolRegistry>) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("with_client_tools is called before the state is shared")
+            .client_tools = decls;
+        self
+    }
+
     /// Injects the clock and random source every [`Runtime`] this state builds
     /// uses. Deterministic tests pass fixed functions so full logs compare
     /// equal across a control run and a recovered one.
@@ -307,6 +335,14 @@ impl AppState {
     #[must_use]
     pub fn tool_registry(&self) -> Option<Arc<ToolRegistry>> {
         self.inner.tool_registry.clone()
+    }
+
+    /// The client-performed tool declarations the operator loaded. Empty unless
+    /// [`with_client_tools`](Self::with_client_tools) was called, and an empty
+    /// set answers every client-tool intent with `unknown_tool`.
+    #[must_use]
+    pub fn client_tools(&self) -> Arc<ClientToolRegistry> {
+        self.inner.client_tools.clone()
     }
 
     /// Reads the current instant from this state's injected clock, or the real

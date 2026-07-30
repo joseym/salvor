@@ -424,6 +424,16 @@
             "global": false,
             "help": "Register a small set of deterministic demo tools (`lookup_invoice` read, `issue_refund` write, `send_email` idempotent) instead of the stock empty tool registry",
             "possible_values": null
+          },
+          {
+            "long": "--client-tool",
+            "short": null,
+            "value_name": "FILE",
+            "required": false,
+            "repeatable": true,
+            "global": false,
+            "help": "A client-performed tool DECLARATION (TOML) to load. Repeatable, the same way `--agent` is repeatable on `graph run`",
+            "possible_values": null
           }
         ],
         "subcommands": []

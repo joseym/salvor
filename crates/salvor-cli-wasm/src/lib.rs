@@ -218,6 +218,7 @@ enum CommandDto {
         kill: Option<String>,
         dev: bool,
         demo_tools: bool,
+        client_tools: Vec<String>,
     },
     Build {
         install: bool,
@@ -355,12 +356,14 @@ impl From<&Command> for CommandDto {
                 kill,
                 dev,
                 demo_tools,
+                client_tools,
             }) => CommandDto::Serve {
                 bind: bind.clone(),
                 auth_token: auth_token.clone(),
                 kill: kill.clone(),
                 dev: *dev,
                 demo_tools: *demo_tools,
+                client_tools: paths(client_tools),
             },
             Command::Build(BuildArgs { install }) => CommandDto::Build { install: *install },
             Command::Agent { command } => CommandDto::Agent {

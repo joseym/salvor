@@ -30,5 +30,12 @@ Run the control-plane HTTP + server-sent-events server over the store
           
           Off by default: a plain `salvor serve` ships NO tools of its own (see `salvor_server::ToolRegistry`'s own docs), so a `tool` node or a client-driven tool step is a clean `unknown_tool` until a host registers something, the honest default for a library other hosts (aarg's own render tool, for one) compose their own registry into. This flag is that one host, built in for demos and for the served end-to-end suite: with it, a graph carrying `tool` nodes can actually run against `salvor serve` with no embedding host at all. The demo tools are deterministic and hermetic (no network); see `salvor_cli::demo_tools` for what each one does and why it exists. Requires the crate's `fixture` feature (on by default; a `--no-default-features` build refuses this flag).
 
+      [1m--client-tool[0m <FILE>
+          A client-performed tool DECLARATION (TOML) to load. Repeatable, the same way `--agent` is repeatable on `graph run`.
+          
+          The tool named in the file is one the CLIENT runs, in its own process, with its own secrets; this server holds no code for it. The file says what the operator is willing to accept about such a call: its name, its effect class, the schema its input must satisfy, the schema its reported completion must satisfy, and whether the client may close the call itself (`trust_completion`, true unless the file says otherwise).
+          
+          It is a file the operator passes here, and there is no endpoint that accepts one, on purpose. The effect class fixes whether an unsettled call surfaces for a human; a client that could declare its own tool would be deciding that about its own writes. See `salvor_server::client_tools` for the argument in full.
+
   [1m-h[0m, [1m--help[0m
           Print help (see a summary with '-h')

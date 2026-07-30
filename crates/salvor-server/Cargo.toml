@@ -69,6 +69,11 @@ tempfile.workspace = true
 # prove `GET /v1/runs` degrades that one run's entry rather than the whole
 # list.
 rusqlite.workspace = true
+# A client-performed tool declaration defines its own TOML format (the
+# `Deserialize` derive on `ClientToolDecl`), so the unit tests that pin that
+# format parse real TOML. The crate itself never reads a file: the CLI owns
+# file reading and hands the bytes to `toml`, exactly as it does for agents.
+toml.workspace = true
 futures-util = "0.3"
 bytes = "1"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "time"] }

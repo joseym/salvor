@@ -42,7 +42,8 @@ use salvor_runtime::{
 };
 use salvor_server::dispatch::{Disposition, classify};
 use salvor_server::{
-    AgentDefinition, AgentFactory, AppState, BuiltAgent, DefFormat, LlmModelExecutor, ToolRegistry,
+    AgentDefinition, AgentFactory, AppState, BuiltAgent, ClientToolDecl, ClientToolRegistry,
+    DefFormat, LlmModelExecutor, ToolRegistry,
 };
 use salvor_store::{EventStore, SqliteStore};
 use salvor_tools::DynTool;
@@ -688,9 +689,33 @@ pub async fn serve(store_path: &Path, args: ServeArgs) -> Result<u8> {
     } else {
         ToolRegistry::new()
     };
+    // The client-performed tool declarations, one TOML file per `--client-tool`.
+    // These are tools the CLIENT runs in its own process; this server holds no
+    // code for any of them, only the operator's word about the effect class, the
+    // two schemas, and whether a client may close its own call. Empty without
+    // the flag, and an empty set answers every client-tool intent with a clean
+    // `unknown_tool`, exactly as an empty `ToolRegistry` does for a tool step.
+    //
+    // Loaded here and nowhere else on purpose: there is no endpoint that accepts
+    // a declaration, because a declaration fixes the effect class and a client
+    // that could write its own would be deciding whether its own writes are
+    // subject to the write-ahead rule.
+    let mut client_tools = ClientToolRegistry::new();
+    for path in &args.client_tools {
+        client_tools.declare(load_client_tool(path)?);
+    }
+    if !client_tools.is_empty() {
+        tracing::info!(
+            tools = ?client_tools.names(),
+            "client-performed tool declarations loaded; salvor records these calls, it does not \
+             perform them"
+        );
+    }
+
     let mut state = AppState::new(store, factory)
         .with_model_executor(Arc::new(LlmModelExecutor::new(model_client)))
-        .with_tool_registry(Arc::new(tool_registry));
+        .with_tool_registry(Arc::new(tool_registry))
+        .with_client_tools(Arc::new(client_tools));
     // The client-driven-run lease TTL: how long a client run reports an attached
     // driver after its last guarded operation. Default 60s (set in AppState);
     // `SALVOR_CLIENT_LEASE_TTL_SECS`, when a positive integer, shortens it so a
@@ -760,6 +785,21 @@ pub async fn serve(store_path: &Path, args: ServeArgs) -> Result<u8> {
     }
     dev.shutdown().await;
     Ok(0)
+}
+
+/// Reads one `--client-tool` file and parses the declaration it holds.
+///
+/// One file, one declaration, mirroring `--agent`. The format itself belongs to
+/// `salvor_server::ClientToolDecl` (which carries the `Deserialize` derive);
+/// this reads the bytes off disk and names the file in every failure, exactly
+/// as the agent-definition path does. A malformed or unreadable declaration
+/// stops `serve` before a port is bound, so an operator learns about a typo
+/// immediately rather than when a client's first call is refused.
+fn load_client_tool(path: &Path) -> Result<ClientToolDecl> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading the client tool declaration {}", path.display()))?;
+    toml::from_str(&text)
+        .with_context(|| format!("parsing the client tool declaration {}", path.display()))
 }
 
 /// Waits for Ctrl-C (`SIGINT`) or, on Unix, `SIGTERM` (what `salvor serve

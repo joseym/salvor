@@ -79,6 +79,19 @@ pub enum ApiError {
     /// recorded, so the write-ahead intent is left dangling (the legal crash
     /// story) and the run stays drivable-or-reconcilable per the tool's effect.
     ToolExecution(String),
+    /// A client tried to record its own completion for a client-performed tool
+    /// call this server will not take its word for: the pending intent was
+    /// performed by the server, or the declaration says
+    /// `trust_completion = false`, or the declaration carries no `output_schema`
+    /// to check the report against. HTTP 403.
+    ///
+    /// Nothing is recorded, so the log still ends at the recorded intent. For a
+    /// `Write` that is already `needs_reconciliation` to the pure fold in
+    /// `salvor-replay`, and `POST /v1/client-runs/{id}/resolve` already exists
+    /// to settle it by hand: the refusal reuses machinery rather than inventing
+    /// a state. The message names that endpoint, because it is what the caller
+    /// does next.
+    ClientCompletionRefused(String),
     /// A submitted graph document failed strict validation. HTTP 400. Carries
     /// the complete, node/edge-precise error list as evidence, because a graph
     /// is a control document validated all at once (collect-all, no
@@ -175,6 +188,9 @@ impl ApiError {
                 (StatusCode::SERVICE_UNAVAILABLE, "tool_registry_unavailable")
             }
             ApiError::ToolExecution(_) => (StatusCode::BAD_GATEWAY, "tool_execution"),
+            ApiError::ClientCompletionRefused(_) => {
+                (StatusCode::FORBIDDEN, "client_completion_refused")
+            }
             ApiError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         }
     }
@@ -198,6 +214,7 @@ impl ApiError {
             | ApiError::UnknownTool(m)
             | ApiError::ToolRegistryUnavailable(m)
             | ApiError::ToolExecution(m)
+            | ApiError::ClientCompletionRefused(m)
             | ApiError::UnknownGraph(m)
             | ApiError::NotAGraphRun(m)
             | ApiError::InvalidForkNode(m)

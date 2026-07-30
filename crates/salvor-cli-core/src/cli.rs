@@ -704,4 +704,21 @@ pub struct ServeArgs {
     /// `--no-default-features` build refuses this flag).
     #[arg(long)]
     pub demo_tools: bool,
+    /// A client-performed tool DECLARATION (TOML) to load. Repeatable, the
+    /// same way `--agent` is repeatable on `graph run`.
+    ///
+    /// The tool named in the file is one the CLIENT runs, in its own process,
+    /// with its own secrets; this server holds no code for it. The file says
+    /// what the operator is willing to accept about such a call: its name, its
+    /// effect class, the schema its input must satisfy, the schema its reported
+    /// completion must satisfy, and whether the client may close the call
+    /// itself (`trust_completion`, true unless the file says otherwise).
+    ///
+    /// It is a file the operator passes here, and there is no endpoint that
+    /// accepts one, on purpose. The effect class fixes whether an unsettled
+    /// call surfaces for a human; a client that could declare its own tool
+    /// would be deciding that about its own writes. See
+    /// `salvor_server::client_tools` for the argument in full.
+    #[arg(long = "client-tool", value_name = "FILE")]
+    pub client_tools: Vec<PathBuf>,
 }
