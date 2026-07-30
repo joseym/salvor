@@ -59,6 +59,7 @@ import {
   projectionUsable,
   reachedState,
 } from './wf-projection';
+import { startRefusal } from './wf-start';
 import { type WfError, applyFix, validateGraph, verdictOf } from './wf-validate';
 
 type WfMode = 'build' | 'run';
@@ -206,6 +207,10 @@ export class Workflows implements AfterViewInit {
   readonly menu = signal<NodeMenu | undefined>(undefined);
   readonly forked = signal<string>('');
   readonly published = signal<string>('');
+  readonly started = signal<string>('');
+  /** A start is in flight. One graph run per click: the button reads its own state rather than
+   * letting an impatient second click spawn a second run of the same document. */
+  readonly starting = signal(false);
   readonly panelOpen = signal(true);
   /** The node-picking state: a fork was requested from a surface that names no node (a Runs list
    * row), so the operator picks the fork point here rather than the app guessing one. */
@@ -263,6 +268,17 @@ export class Workflows implements AfterViewInit {
     () => this.errors().length > 0 || this.graphState() === 'published',
   );
   readonly publishLabel = computed(() => (this.graphState() === 'published' ? 'Published' : 'Publish'));
+
+  /**
+   * Starting needs a STORED graph: `POST /v1/graph-runs` takes a hash, and a draft has none until
+   * it is published. NOT gated on the `GET /v1/capabilities` probe the fork button reads, and
+   * deliberately so: the probe advertises `fork` and nothing else, so it has no honest answer about
+   * graph runs, and one is not needed: a hash in this picker came from `GET /v1/graphs`, which is
+   * itself the evidence that this server serves the graph surface. A server too old to have it
+   * lists no graphs, so there is no hash here to start and the button is disabled by that fact.
+   */
+  readonly startDisabled = computed(() => this.graphHash() === null || this.starting());
+  readonly startLabel = computed(() => (this.starting() ? 'Starting…' : 'Start run'));
 
   private readonly layout = computed(() => {
     const g = this.currentGraph();
@@ -640,6 +656,7 @@ export class Workflows implements AfterViewInit {
     // A banner belongs to the moment it was made; changing graphs changes what you look at.
     this.forked.set('');
     this.published.set('');
+    this.started.set('');
     // A run only projects onto the graph it ran. Leaving Run mode on a graph with no runs keeps
     // the canvas honest; on a graph that HAS runs, re-anchor to one of ITS runs rather than
     // inking the previous graph's — the exact `if (!runs.includes(wfRunId)) wfRunId = runs[0]`
@@ -1156,6 +1173,8 @@ export class Workflows implements AfterViewInit {
   async publish(): Promise<void> {
     const g = this.currentGraph();
     if (!g || g.state !== 'draft' || this.errors().length > 0) return;
+    // A start banner belongs to the graph it was made on; publishing moves the canvas to a new one.
+    this.started.set('');
     try {
       const hash = await this.graphsService.submit(toServerDocument(g));
       this.drafts.set(removeDraft(g.key));
@@ -1166,6 +1185,45 @@ export class Workflows implements AfterViewInit {
       this.published.set(`publish refused — ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+
+  // ── start a run of the published document (POST /v1/graph-runs) ──
+
+  /**
+   * Start a run of the graph on screen and land the canvas on it: the run id is reported at once
+   * (fire-and-return, exactly as an agent run is), then its projection is folded into the cache so
+   * the picker holds it and Run mode inks the walk instead of leaving the operator to go find it.
+   *
+   * Everything the document references is resolved server-side BEFORE the run is spawned, so a
+   * reference that cannot resolve comes back as a refusal with no run id. Those refusals are
+   * reported verbatim and then EXPLAINED (see {@link startRefusal}), because the two that a
+   * default server produces are facts about the server, not mistakes in the graph.
+   */
+  async startRun(): Promise<void> {
+    const hash = this.currentGraph()?.hash;
+    if (!hash || this.starting()) return;
+    this.starting.set(true);
+    this.started.set('');
+    this.published.set('');
+    try {
+      const start = await this.graphRuns.start(hash);
+      this.started.set(`run ${start.run.slice(0, 8)} started · ${start.status}`);
+      try {
+        const projection = await this.graphRuns.loadProjection(start.run);
+        this.projections.update((m) => new Map(m).set(start.run, projection));
+      } catch {
+        /* the run is real even if its first projection read is not; the picker refresh below still
+           finds it, and Run mode simply has nothing to ink yet */
+      }
+      void this.runsService.refresh();
+      this.runId.set(start.run);
+      this.setMode('run');
+    } catch (err) {
+      this.started.set(startRefusal(err));
+    } finally {
+      this.starting.set(false);
+    }
+  }
+
 
   // ── history ──
   canUndo(): boolean {

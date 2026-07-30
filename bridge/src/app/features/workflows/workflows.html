@@ -25,12 +25,30 @@
     <button class="fold-all strong" type="button" id="wf-publish" [disabled]="publishDisabled()"
             [attr.title]="errors().length ? errors().length + ' error' + (errors().length === 1 ? '' : 's') + ' must be resolved first.' : null"
             (click)="publish()">{{ publishLabel() }}</button>
+    <!-- a run starts from a STORED hash, so this is live only once the document is published -->
+    <button class="fold-all strong" type="button" id="wf-start" [disabled]="startDisabled()"
+            [attr.title]="graphHash() === null ? 'Publish this draft first: a run starts from a stored graph hash.' : null"
+            (click)="startRun()">{{ startLabel() }}</button>
   </div>
 </div>
 
 <!-- what the fork just made; role=status so the operator is TOLD, not left to notice a quiet change -->
 <div id="wf-forked" role="status">{{ forked() }}</div>
 <div id="wf-published" role="status">{{ published() }}</div>
+<div id="wf-started" role="status">{{ started() }}</div>
+
+<!-- THE TWO STANDING FACTS about a server-side graph run, said next to the control that hits them
+     rather than left for a refusal to teach: the graph store is in memory, and a stock server's
+     tool registry is empty. Shown only for a published graph, the only thing that can be started. -->
+@if (graphHash() !== null) {
+  <p class="wf-runnote" id="wf-runnote">A run walks the stored document, which the server keeps in
+    <strong>memory only</strong>: a restart drops it, and publishing the identical document again
+    mints the identical hash. Its <span class="mono">tool</span> nodes resolve against the server's
+    tool registry, which a stock <span class="mono">salvor serve</span> wires
+    <strong>empty</strong>: every tool node refuses with <span class="mono">unknown_tool</span> until
+    a host registers that tool, or the server was started with
+    <span class="mono">--demo-tools</span>.</p>
+}
 
 <!-- the node-picking state: a live state the operator is standing in, not a receipt — it ends
      when they pick or cancel -->

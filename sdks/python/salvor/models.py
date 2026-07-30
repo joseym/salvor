@@ -317,3 +317,338 @@ class EndFrame:
             error=obj.get("error"),
             raw=obj,
         )
+
+
+@dataclass
+class GraphShape:
+    """A graph document's shape: how many nodes and edges it holds, and the ends
+    of its walk. Sent per row by ``GET /v1/graphs``, and by
+    ``POST /v1/graphs/validate`` for a document that validates."""
+
+    node_count: int
+    edge_count: int
+    entry_nodes: list[str] = field(default_factory=list)
+    terminal_nodes: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_json(cls, obj: dict[str, Any]) -> "GraphShape":
+        return cls(
+            node_count=int(obj.get("node_count", 0)),
+            edge_count=int(obj.get("edge_count", 0)),
+            entry_nodes=list(obj.get("entry_nodes", [])),
+            terminal_nodes=list(obj.get("terminal_nodes", [])),
+        )
+
+
+@dataclass
+class GraphSubmitted:
+    """The receipt from ``POST /v1/graphs``: the document's content hash, and
+    whether this call is what stored it.
+
+    ``created`` is ``False`` when the identical document was already stored, so
+    re-submitting is idempotent rather than a conflict: the same document always
+    hashes to the same id.
+    """
+
+    graph: str
+    created: bool
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_json(cls, obj: dict[str, Any]) -> "GraphSubmitted":
+        return cls(graph=obj["graph"], created=bool(obj.get("created", False)), raw=obj)
+
+
+@dataclass
+class GraphSummary:
+    """One row of ``GET /v1/graphs``: a stored document's hash and its shape."""
+
+    graph: str
+    shape: GraphShape
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_json(cls, obj: dict[str, Any]) -> "GraphSummary":
+        return cls(graph=obj["graph"], shape=GraphShape.from_json(obj), raw=obj)
+
+
+@dataclass
+class StoredGraph:
+    """One stored document read back by hash, from ``GET /v1/graphs/{hash}``.
+
+    ``document`` is the document JSON verbatim -- the same bytes that were
+    submitted, which is why they hash to ``graph``.
+    """
+
+    graph: str
+    document: dict[str, Any]
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_json(cls, obj: dict[str, Any]) -> "StoredGraph":
+        return cls(graph=obj["graph"], document=obj.get("document", {}), raw=obj)
+
+
+@dataclass
+class GraphValidationError:
+    """One validation failure, node- or edge-precise.
+
+    ``code`` is the stable token (``dangling_edge``, ``duplicate_id``,
+    ``node_name_too_long``; a document that does not even parse is the single
+    ``malformed_document``). ``node`` or ``edge`` names where the failure is,
+    and at most one of the two is ever present.
+    """
+
+    code: str
+    message: str
+    node: Optional[str] = None
+    edge: Optional[dict[str, Any]] = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_json(cls, obj: dict[str, Any]) -> "GraphValidationError":
+        return cls(
+            code=obj.get("code", "unknown"),
+            message=obj.get("message", ""),
+            node=obj.get("node"),
+            edge=obj.get("edge"),
+            raw=obj,
+        )
+
+
+@dataclass
+class GraphValidation:
+    """The answer from ``POST /v1/graphs/validate``.
+
+    It answers the question rather than refusing the request: an invalid
+    document comes back ``valid=False`` with the complete error list instead of
+    raising, and nothing is stored either way. ``graph`` and ``shape`` are
+    present only when the document is valid; ``errors`` is empty then.
+    """
+
+    valid: bool
+    graph: Optional[str] = None
+    shape: Optional[GraphShape] = None
+    errors: list[GraphValidationError] = field(default_factory=list)
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_json(cls, obj: dict[str, Any]) -> "GraphValidation":
+        summary = obj.get("summary")
+        return cls(
+            valid=bool(obj.get("valid", False)),
+            graph=obj.get("graph"),
+            shape=GraphShape.from_json(summary) if isinstance(summary, dict) else None,
+            errors=[GraphValidationError.from_json(e) for e in obj.get("errors", [])],
+            raw=obj,
+        )
+
+
+@dataclass
+class GraphNodeProgress:
+    """One node's progress in a graph run's walk.
+
+    ``state`` is ``entered``, ``exited``, or ``skipped``; a skipped node carries
+    the ``reason``. ``branch_case`` is the case a ``branch`` fired, present only
+    once decided. A ``map`` node's fan-out is on ``raw`` verbatim. A node the
+    walk has not reached is absent from the projection entirely, which is
+    distinct from a ``skipped`` one.
+    """
+
+    node: str
+    state: str
+    reason: Optional[str] = None
+    branch_case: Optional[str] = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_json(cls, obj: dict[str, Any]) -> "GraphNodeProgress":
+        return cls(
+            node=obj["node"],
+            state=obj.get("state", "unknown"),
+            reason=obj.get("reason"),
+            branch_case=obj.get("branch_case"),
+            raw=obj,
+        )
+
+
+@dataclass
+class ForkOrigin:
+    """The origin a forked run records permanently on its seq-0
+    ``GraphRunStarted``: where it came from, how much of the origin's log it
+    opens with, and which recorded writes the operator accepted may re-fire."""
+
+    run_id: str
+    through_seq: int
+    from_node: str
+    graph_hash: str
+    acknowledged_writes: list[int] = field(default_factory=list)
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_json(cls, obj: Optional[dict[str, Any]]) -> Optional["ForkOrigin"]:
+        if not isinstance(obj, dict):
+            return None
+        return cls(
+            run_id=obj["run_id"],
+            through_seq=int(obj.get("through_seq", 0)),
+            from_node=obj["from_node"],
+            graph_hash=obj["graph_hash"],
+            acknowledged_writes=[int(s) for s in obj.get("acknowledged_writes", [])],
+            raw=obj,
+        )
+
+
+@dataclass
+class GraphProjection:
+    """A graph run's per-node projection, from ``GET /v1/runs/{id}/graph``:
+    which nodes the walk has reached, and the graph it is walking.
+
+    ``current_node`` is present only while a node is entered and not yet exited;
+    ``forked_from`` only on a run that was forked.
+    """
+
+    graph_hash: str
+    current_node: Optional[str] = None
+    nodes: list[GraphNodeProgress] = field(default_factory=list)
+    forked_from: Optional[ForkOrigin] = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_json(cls, obj: dict[str, Any]) -> "GraphProjection":
+        return cls(
+            graph_hash=obj["graph_hash"],
+            current_node=obj.get("current_node"),
+            nodes=[GraphNodeProgress.from_json(n) for n in obj.get("nodes", [])],
+            forked_from=ForkOrigin.from_json(obj.get("forked_from")),
+            raw=obj,
+        )
+
+
+@dataclass
+class ForkResult:
+    """The receipt from a real fork: the new child run, and the origin it
+    records."""
+
+    run: str
+    status: str
+    forked_from: Optional[ForkOrigin] = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_json(cls, obj: dict[str, Any]) -> "ForkResult":
+        return cls(
+            run=obj["run"],
+            status=obj.get("status", "unknown"),
+            forked_from=ForkOrigin.from_json(obj.get("forked_from")),
+            raw=obj,
+        )
+
+
+@dataclass
+class RecordedWrite:
+    """One recorded write in the segment a fork would re-walk.
+
+    A write with an ``idempotency_key`` is not a hazard (the provider collapses
+    the duplicate); one without needs acknowledging by ``seq`` before the fork
+    may proceed. The server sends an explicit ``null`` key for a write that has
+    none, which is absence rather than a value.
+    """
+
+    seq: int
+    tool: str
+    input: Any = None
+    idempotency_key: Optional[str] = None
+    recorded_at: Optional[str] = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_json(cls, obj: dict[str, Any]) -> "RecordedWrite":
+        return cls(
+            seq=int(obj.get("seq", 0)),
+            tool=obj.get("tool", ""),
+            input=obj.get("input"),
+            idempotency_key=obj.get("idempotency_key"),
+            recorded_at=obj.get("recorded_at"),
+            raw=obj,
+        )
+
+
+@dataclass
+class ForkPreview:
+    """A fork's dry-run preview, from ``POST /v1/runs/{id}/fork`` with
+    ``dry_run: true``. Nothing is created.
+
+    ``unacknowledged_writes`` is exactly the set of ``seq`` values a real fork
+    would refuse over, and ``would_proceed`` says whether the fork as previewed
+    could go ahead.
+    """
+
+    origin: str
+    from_node: str
+    through_seq: int
+    graph_hash: str
+    prefix_event_count: int
+    writes: list[RecordedWrite] = field(default_factory=list)
+    unacknowledged_writes: list[int] = field(default_factory=list)
+    would_proceed: bool = False
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_json(cls, obj: dict[str, Any]) -> "ForkPreview":
+        return cls(
+            origin=obj["origin"],
+            from_node=obj["from_node"],
+            through_seq=int(obj.get("through_seq", 0)),
+            graph_hash=obj["graph_hash"],
+            prefix_event_count=int(obj.get("prefix_event_count", 0)),
+            writes=[RecordedWrite.from_json(w) for w in obj.get("writes", [])],
+            unacknowledged_writes=[int(s) for s in obj.get("unacknowledged_writes", [])],
+            would_proceed=bool(obj.get("would_proceed", False)),
+            raw=obj,
+        )
+
+
+@dataclass
+class ForkEntry:
+    """One row of the forks index: a child run and the boundary it forked at."""
+
+    run: str
+    from_node: str
+    through_seq: int
+    acknowledged_writes: list[int] = field(default_factory=list)
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_json(cls, obj: dict[str, Any]) -> "ForkEntry":
+        return cls(
+            run=obj["run"],
+            from_node=obj["from_node"],
+            through_seq=int(obj.get("through_seq", 0)),
+            acknowledged_writes=[int(s) for s in obj.get("acknowledged_writes", [])],
+            raw=obj,
+        )
+
+
+@dataclass
+class ForksIndex:
+    """The forks of a run, from ``GET /v1/runs/{id}/forks``.
+
+    ``derived`` is the server saying so out loud: an origin is immutable and
+    never points forward at its children, so this index is a scan of every run's
+    recorded origin rather than a fact the origin holds.
+    """
+
+    run: str
+    derived: bool = False
+    forks: list[ForkEntry] = field(default_factory=list)
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_json(cls, obj: dict[str, Any]) -> "ForksIndex":
+        return cls(
+            run=obj["run"],
+            derived=bool(obj.get("derived", False)),
+            forks=[ForkEntry.from_json(f) for f in obj.get("forks", [])],
+            raw=obj,
+        )

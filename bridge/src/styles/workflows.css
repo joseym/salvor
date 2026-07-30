@@ -37,14 +37,30 @@
 }
 
 #wf-forked,
-#wf-published {
+#wf-published,
+#wf-started {
   min-height: 0;
   color: var(--amber-ink);
   font-size: var(--text-sm);
 }
 #wf-forked:empty,
-#wf-published:empty {
+#wf-published:empty,
+#wf-started:empty {
   display: none;
+}
+
+/* The two standing facts about a server-side graph run. Quiet ink: it is context for the Start
+   button, not a warning: the refusals it forewarns are ordinary, recoverable, and named. */
+.wf-runnote {
+  margin: 4px 0 0;
+  max-width: 88ch;
+  font-size: var(--text-xs);
+  color: var(--muted);
+  line-height: 1.5;
+}
+.wf-runnote strong {
+  font-weight: 600;
+  color: var(--fg);
 }
 
 /* .wf-work rides the shared .view-work dock grid (canvas column + 340px cpanel). */

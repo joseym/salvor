@@ -21,5 +21,5 @@ node_modules/
 # has to live somewhere, and the alternative is every reader configuring it by
 # hand. Negated here rather than force-added so `git status` keeps reporting
 # edits to it.
-!.vscode/
-!.vscode/settings.json
+!/.vscode/
+!/.vscode/settings.json
