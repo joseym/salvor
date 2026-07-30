@@ -3,8 +3,9 @@ Author-time agent definition tools: print the content hash a graph `agent` node 
 Usage: salvor agent [OPTIONS] <COMMAND>
 
 Commands:
-  hash  Print an agent definition's content hash, the `sha256:<64 hex>` string a graph `agent` node references
-  help  Print this message or the help of the given subcommand(s)
+  hash      Print an agent definition's content hash, the `sha256:<64 hex>` string a graph `agent` node references
+  validate  Build an agent definition and report what it declares, or the precise field-level error that stops it from building
+  help      Print this message or the help of the given subcommand(s)
 
 Options:
       --store <PATH>

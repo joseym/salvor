@@ -1,0 +1,23 @@
+Build an agent definition and report what it declares, or the precise field-level error that stops it from building.
+
+This runs the exact build every other verb that takes `--agent` runs: a strict parse (an unknown field, a missing `model`, or a wrong type names the offending field) followed by a connection to every declared MCP server to collect its tool contracts, so a server that will not start is caught here rather than at run time. Nothing about the check differs from `salvor agent hash`; this verb only exists to be asked for by name and to report more than a hash.
+
+[1m[4mUsage:[0m [1msalvor agent validate[0m [OPTIONS] <FILE>...
+
+[1m[4mArguments:[0m
+  <FILE>...
+          An agent definition (TOML) to validate. Repeatable.
+          
+          Each file is built independently: one file that fails to build does not stop the rest from being checked. Every file is reported, in the order given, and the command exits non-zero if any one of them fails.
+
+[1m[4mOptions:[0m
+      [1m--store[0m <PATH>
+          Path to the SQLite event store.
+          
+          The precedence is flag, then the `SALVOR_STORE` environment variable, then the default: an explicit `--store` wins, else `SALVOR_STORE`, else `./salvor.db`.
+          
+          [env: SALVOR_STORE=]
+          [default: ./salvor.db]
+
+  [1m-h[0m, [1m--help[0m
+          Print help (see a summary with '-h')

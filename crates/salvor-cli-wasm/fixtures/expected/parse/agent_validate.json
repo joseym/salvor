@@ -1,0 +1,15 @@
+{
+  "command": {
+    "command": {
+      "command": {
+        "agent_verb": "validate",
+        "agents": [
+          "agents/writer.toml"
+        ]
+      },
+      "verb": "agent"
+    },
+    "store": "./salvor.db"
+  },
+  "ok": true
+}

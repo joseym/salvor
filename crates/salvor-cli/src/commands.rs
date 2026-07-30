@@ -54,9 +54,9 @@ use uuid::Uuid;
 use crate::agent_config::{self, AgentConfig};
 use crate::checkout;
 use crate::cli::{
-    AbandonArgs, AgentHashArgs, BuildArgs, CompletionsArgs, ForkArgs, GraphRunArgs,
-    GraphValidateArgs, HistoryArgs, ListArgs, ReplayArgs, ResolveArgs, ResumeArgs, RunArgs,
-    ServeArgs,
+    AbandonArgs, AgentHashArgs, AgentValidateArgs, BuildArgs, CompletionsArgs, ForkArgs,
+    GraphRunArgs, GraphValidateArgs, HistoryArgs, ListArgs, ReplayArgs, ResolveArgs, ResumeArgs,
+    RunArgs, ServeArgs,
 };
 use crate::dev_server::DevServer;
 use crate::render;
@@ -862,6 +862,57 @@ pub async fn agent_hash(args: AgentHashArgs) -> Result<u8> {
         }
     }
     Ok(0)
+}
+
+/// `salvor agent validate <FILE>...`: build each agent definition and report
+/// what it declares, or the precise error that stopped it from building.
+///
+/// This is the same build [`agent_hash`] runs, named for what it is worth
+/// asking on its own: is this file good, and what does it commit an operator
+/// to. Each file is built through [`build_agents`] one at a time, rather than
+/// all at once, so a file that fails to build does not stop the rest from
+/// being checked, matching `graph validate`'s exit-code contract at the
+/// per-file level: `Ok(0)` only when every file built, `Ok(1)` when any one
+/// of them did not. A single file's report carries no path prefix, since
+/// there is nothing to disambiguate; several files each get one, on both the
+/// success line and the error line, for the same reason `agent hash` prefixes
+/// its multi-file output.
+///
+/// The MCP sessions each build opens are closed before the next file starts,
+/// so no session outlives the file it was opened to validate, let alone the
+/// command.
+///
+/// This reads no store and starts no run.
+pub async fn agent_validate(args: AgentValidateArgs) -> Result<u8> {
+    let bare = args.agents.len() == 1;
+    let mut any_failed = false;
+
+    for path in &args.agents {
+        match build_agents(std::slice::from_ref(path)).await {
+            Ok((agents, servers)) => {
+                let agent = agents
+                    .first()
+                    .expect("build_agents built exactly one agent");
+                let report = render::agent_summary(agent, servers.len());
+                close_servers(servers).await;
+                if bare {
+                    print!("{report}");
+                } else {
+                    print!("{}: {report}", path.display());
+                }
+            }
+            Err(error) => {
+                any_failed = true;
+                if bare {
+                    eprintln!("{error:#}");
+                } else {
+                    eprintln!("{}: {error:#}", path.display());
+                }
+            }
+        }
+    }
+
+    Ok(u8::from(any_failed))
 }
 
 /// `salvor graph edit`: fold typed lines into a graph document.

@@ -115,6 +115,7 @@ pub async fn dispatch(cli: Cli) -> Result<u8> {
         // definitions it is given and prints what a run would record them as.
         Command::Agent { command } => match command {
             crate::cli::AgentCommand::Hash(args) => commands::agent_hash(args).await,
+            crate::cli::AgentCommand::Validate(args) => commands::agent_validate(args).await,
         },
         Command::Graph { command } => match command {
             // `edit`, `validate` and `schema` read no store and drive no run,

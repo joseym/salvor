@@ -174,6 +174,7 @@ fn reference_help_paths() -> Vec<(&'static str, &'static str)> {
         ("serve", "serve"),
         ("agent", "agent"),
         ("agent-hash", "agent hash"),
+        ("agent-validate", "agent validate"),
         ("graph", "graph"),
         ("graph-edit", "graph edit"),
         ("graph-validate", "graph validate"),
@@ -338,6 +339,10 @@ fn reference_argvs() -> Vec<(&'static str, Vec<&'static str>)> {
                 "agents/writer.toml",
                 "agents/reviewer.toml",
             ],
+        ),
+        (
+            "agent_validate",
+            vec!["salvor", "agent", "validate", "agents/writer.toml"],
         ),
         // The verb with no required argument at all, and the same verb with
         // both of its optional ones: the two ends of an argument list that is

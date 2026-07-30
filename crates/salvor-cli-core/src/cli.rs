@@ -112,6 +112,17 @@ pub enum AgentCommand {
     /// file declares is connected to collect its tool schemas, exactly as a run
     /// would. Nothing is written and no run is started.
     Hash(AgentHashArgs),
+    /// Build an agent definition and report what it declares, or the precise
+    /// field-level error that stops it from building.
+    ///
+    /// This runs the exact build every other verb that takes `--agent` runs:
+    /// a strict parse (an unknown field, a missing `model`, or a wrong type
+    /// names the offending field) followed by a connection to every declared
+    /// MCP server to collect its tool contracts, so a server that will not
+    /// start is caught here rather than at run time. Nothing about the check
+    /// differs from `salvor agent hash`; this verb only exists to be asked
+    /// for by name and to report more than a hash.
+    Validate(AgentValidateArgs),
 }
 
 /// Arguments to `agent hash`.
@@ -123,6 +134,18 @@ pub struct AgentHashArgs {
     /// into a shell substitution: `--arg h "$(salvor agent hash a.toml)"`.
     /// Several files print `<path>: <hash>` per line, in the order given,
     /// because then the question being asked is which file carries which hash.
+    #[arg(value_name = "FILE", required = true)]
+    pub agents: Vec<PathBuf>,
+}
+
+/// Arguments to `agent validate`.
+#[derive(Debug, Args)]
+pub struct AgentValidateArgs {
+    /// An agent definition (TOML) to validate. Repeatable.
+    ///
+    /// Each file is built independently: one file that fails to build does
+    /// not stop the rest from being checked. Every file is reported, in the
+    /// order given, and the command exits non-zero if any one of them fails.
     #[arg(value_name = "FILE", required = true)]
     pub agents: Vec<PathBuf>,
 }

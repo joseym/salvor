@@ -61,9 +61,9 @@
 #![warn(missing_docs)]
 
 use salvor_cli_core::cli::{
-    AbandonArgs, AgentCommand, AgentHashArgs, BuildArgs, Cli, Command, CompletionsArgs, ForkArgs,
-    GraphCommand, GraphEditArgs, GraphRunArgs, GraphValidateArgs, HistoryArgs, ListArgs,
-    ReplayArgs, ResolveArgs, ResumeArgs, RunArgs, ServeArgs,
+    AbandonArgs, AgentCommand, AgentHashArgs, AgentValidateArgs, BuildArgs, Cli, Command,
+    CompletionsArgs, ForkArgs, GraphCommand, GraphEditArgs, GraphRunArgs, GraphValidateArgs,
+    HistoryArgs, ListArgs, ReplayArgs, ResolveArgs, ResumeArgs, RunArgs, ServeArgs,
 };
 use salvor_cli_core::render;
 use salvor_replay::RunSummary;
@@ -235,6 +235,7 @@ enum CommandDto {
 #[serde(tag = "agent_verb", rename_all = "kebab-case")]
 enum AgentCommandDto {
     Hash { agents: Vec<String> },
+    Validate { agents: Vec<String> },
 }
 
 /// The verbs under `salvor graph`, tagged like their parent.
@@ -376,6 +377,9 @@ impl From<&AgentCommand> for AgentCommandDto {
     fn from(command: &AgentCommand) -> Self {
         match command {
             AgentCommand::Hash(AgentHashArgs { agents }) => AgentCommandDto::Hash {
+                agents: paths(agents),
+            },
+            AgentCommand::Validate(AgentValidateArgs { agents }) => AgentCommandDto::Validate {
                 agents: paths(agents),
             },
         }
