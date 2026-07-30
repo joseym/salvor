@@ -71,8 +71,7 @@ examples/graph-service/agents/small-claims.toml: sha256:e08f574704bad055401cba7f
 
 A graph names an agent by hash and never by path, because the run's log records
 only the hash and a replay has to mean the same agent. Edit either TOML and the
-hash changes, and the document stops resolving until you update it: that is the
-mechanism working, not a nuisance.
+hash changes, and the document stops resolving until you update it.
 
 ## Running it
 
@@ -81,7 +80,16 @@ Build the binaries once, from the repository root:
 ```sh
 # This example spawns the demo fixture binaries, which ship with the cargo
 # install but not with the npm package:
-cargo install salvor-cli            # or, from a checkout: cargo build
+cargo build
+```
+
+`run.sh` looks for `target/debug/salvor` and `target/debug/salvor-demo-model`
+and stops if either is missing. If you would rather install than build, point it
+at what you installed:
+
+```sh
+export SALVOR_BIN="$(command -v salvor)"
+export SALVOR_DEMO_MODEL_BIN="$(command -v salvor-demo-model)"
 ```
 
 Then, from anywhere:
@@ -219,8 +227,7 @@ instead of guessing.
 
 ## Driving this same document over HTTP
 
-The document is portable; the tools are not, and it is worth knowing why before
-building a client against it.
+The document is portable; the tools are not.
 
 `salvor graph run` has no standalone tool inventory. A `tool` node resolves
 against the tools the supplied `--agent` files carry, which is exactly how
