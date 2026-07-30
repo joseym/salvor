@@ -7,7 +7,7 @@ import { provideSalvorApi } from './core/api';
 /**
  * The control plane's base URL. Default is SAME-ORIGIN (''), so a deployment that serves the
  * built app and proxies `/v1` to `salvor serve` on one origin needs no CORS (the server ships
- * none — see e2e-serve.sh, which sets exactly this shape up for the Playwright suite). A page can
+ * none; see e2e-serve.sh, which sets exactly this shape up for the Playwright suite). A page can
  * override it at runtime by setting `window.__SALVOR_API_BASE__` before the app boots.
  */
 declare global {

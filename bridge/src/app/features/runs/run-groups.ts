@@ -1,14 +1,14 @@
 import { agentIdentity, isWaiting, type RunRow } from './run-model';
 
 /**
- * The Runs ledger's GROUPING mode — clustering the same rows the flat
+ * The Runs ledger's GROUPING mode: clustering the same rows the flat
  * table shows, keyed by what the run actually recorded, never a guess.
  *
  * Key priority: `labels.build_id` when the run was tagged with one, else the run's own agent
  * identity, else the literal `"Unlabelled"` bucket. Both `labels` and `agent_def_hash` are
- * recorded once on `RunStarted` — a build clusters the several agents a caller ran for one build
+ * recorded once on `RunStarted`. A build clusters the several agents a caller ran for one build
  * (AARG's "several agents … for one resume build"); a run with no build clusters by its own
- * agent (still real, recorded data); only a run missing BOTH lands in `"Unlabelled"` — it is never
+ * agent (still real, recorded data); only a run missing BOTH lands in `"Unlabelled"`: it is never
  * guessed into a build or an agent it wasn't tagged with.
  *
  * This is a DIFFERENT axis from {@link groupOf}/{@link Group} in `run-model.ts`, which classifies
@@ -25,7 +25,7 @@ export interface RunClusterKey {
   readonly name: string;
 }
 
-/** Which cluster one run belongs to, honestly — see the module doc for the priority order. */
+/** Which cluster one run belongs to, honestly: see the module doc for the priority order. */
 export function clusterOf(r: RunRow, names: ReadonlyMap<string, string> = new Map()): RunClusterKey {
   const build = r.labels?.['build_id'];
   if (build) return { key: `build:${build}`, kind: 'build', name: build };
@@ -44,13 +44,13 @@ export function attentionRank(status: string): number {
   return isWaiting(status) ? 2 : status === 'failed' ? 1 : 0;
 }
 
-/** One header's worth of aggregate facts, plus the runs it holds (in the caller's given order —
+/** One header's worth of aggregate facts, plus the runs it holds (in the caller's given order:
  * pass already attention-sorted rows in and each group's own runs keep that order). */
 export interface RunGroup extends RunClusterKey {
   readonly runs: readonly RunRow[];
   /** worst-first, like {@link attentionRank} over the group's own runs */
   readonly rank: number;
-  /** count of runs in this group that are WAITING ON A HUMAN — never hidden, see runs.ts */
+  /** count of runs in this group that are WAITING ON A HUMAN; never hidden, see runs.ts */
   readonly waiting: number;
   /** most recent `last` timestamp in the group, as epoch ms (tiebreaker after rank) */
   readonly latest: number;
@@ -60,7 +60,7 @@ export interface RunGroup extends RunClusterKey {
 
 /**
  * Cluster `visible` rows into groups and sort the groups worst-first (any group holding a waiting
- * run lands at the top exactly as a waiting run would in the flat list — ATTENTION SURVIVES
+ * run lands at the top exactly as a waiting run would in the flat list: ATTENTION SURVIVES
  * GROUPING). Ties break by most-recent activity.
  */
 export function buildRunGroups(
@@ -93,7 +93,7 @@ export function buildRunGroups(
 
 /**
  * WAITING RUNS MUST NOT HIDE: a group holding any waiting run may never collapse (its toggle is
- * disabled in the template, with a title saying why) — this is the one predicate both the
+ * disabled in the template, with a title saying why); this is the one predicate both the
  * template and the click handler consult, so the guarantee cannot drift between the two.
  */
 export function canCollapse(g: RunGroup): boolean {

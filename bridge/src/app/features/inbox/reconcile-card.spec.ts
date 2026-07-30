@@ -16,7 +16,7 @@ const RECONCILE_ROW: RunSummary = {
   raw: {},
 };
 
-/* The evidence load is two plain 200 reads — never a 409 (a browser logs any non-2xx fetch to the
+/* The evidence load is two plain 200 reads, never a 409 (a browser logs any non-2xx fetch to the
  * console unconditionally, which the suite's zero-console-errors gate treats as a failure; see
  * inbox-model.ts's reconcileIntentFrom doc comment for the full story). */
 function pendingRunResponse(): Response {
@@ -50,7 +50,7 @@ function pendingEventSse(): Response {
   );
 }
 
-describe('ReconcileCard — the [hidden]-trap lesson: branch visibility by state machine (item 14 / spec 14)', () => {
+describe('ReconcileCard, the [hidden]-trap lesson: branch visibility by state machine (item 14 / spec 14)', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
@@ -94,7 +94,7 @@ describe('ReconcileCard — the [hidden]-trap lesson: branch visibility by state
     expect(el.querySelector('.badge.e-write')).toBeTruthy();
   });
 
-  it('before any choice, BOTH branches carry [hidden] — never both rendered', async () => {
+  it('before any choice, BOTH branches carry [hidden], never both rendered', async () => {
     const fixture = await mountCard();
     const el = fixture.nativeElement as HTMLElement;
     const reached = el.querySelector('[data-when="reached"]') as HTMLElement;
@@ -103,7 +103,7 @@ describe('ReconcileCard — the [hidden]-trap lesson: branch visibility by state
     expect(notReached.hidden).toBe(true);
   });
 
-  it('choosing "reached" reveals the output field and hides the lock block — exclusively', async () => {
+  it('choosing "reached" reveals the output field and hides the lock block, exclusively', async () => {
     const fixture = await mountCard();
     const el = fixture.nativeElement as HTMLElement;
     const reachedRadio = el.querySelector('input[type="radio"][value="reached"]') as HTMLInputElement;
@@ -130,7 +130,7 @@ describe('ReconcileCard — the [hidden]-trap lesson: branch visibility by state
     expect(reached.hidden, 'the output branch must be gone once "not_reached" is chosen').toBe(true);
   });
 
-  it('the "not_reached" off-ramp offers the exact call to copy and says where a tool runs — without weakening the refusal', async () => {
+  it('the "not_reached" off-ramp offers the exact call to copy and says where a tool runs, without weakening the refusal', async () => {
     const fixture = await mountCard();
     const el = fixture.nativeElement as HTMLElement;
     (el.querySelector('input[type="radio"][value="not_reached"]') as HTMLInputElement).click();
@@ -146,7 +146,7 @@ describe('ReconcileCard — the [hidden]-trap lesson: branch visibility by state
     expect(offramp.querySelector('.copy-call')).toBeTruthy();
     // one truthful mechanism sentence on where such a tool executes
     expect(offramp.textContent).toContain('the host that registered it');
-    // the refusal itself is untouched — resolve still cannot record an absence
+    // the refusal itself is untouched; resolve still cannot record an absence
     expect(el.querySelector('.readonly')!.textContent).toContain('Resolve cannot record');
 
     // Copy lifts the tool + input verbatim, formatted for reuse.
@@ -165,13 +165,13 @@ describe('ReconcileCard — the [hidden]-trap lesson: branch visibility by state
 
     (el.querySelector('input[type="radio"][value="reached"]') as HTMLInputElement).click();
     fixture.detectChanges();
-    expect(submit.disabled, 'a choice alone is not enough — the confirmation is required too').toBe(true);
+    expect(submit.disabled, 'a choice alone is not enough; the confirmation is required too').toBe(true);
 
     (el.querySelector('input[type="checkbox"]') as HTMLInputElement).click();
     fixture.detectChanges();
     expect(submit.disabled).toBe(false);
 
-    // switching to "not_reached" must re-disable it — there is no submit path for that branch
+    // switching to "not_reached" must re-disable it: there is no submit path for that branch
     (el.querySelector('input[type="radio"][value="not_reached"]') as HTMLInputElement).click();
     fixture.detectChanges();
     expect(submit.disabled).toBe(true);

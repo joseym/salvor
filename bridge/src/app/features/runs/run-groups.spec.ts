@@ -7,7 +7,7 @@ function row(over: Partial<RunRow> & { id: string; status: string }): RunRow {
   return { eventCount: 1, last: '2026-07-12T09:00:00Z', ...over };
 }
 
-describe('clusterOf — key priority: build_id label, then agent identity, then Unlabelled', () => {
+describe('clusterOf, key priority: build_id label, then agent identity, then Unlabelled', () => {
   it('a run tagged with labels.build_id clusters by build, named after the build id', () => {
     const r = row({ id: 'r1', status: 'completed', agentDefHash: 'sha256:abc', labels: { build_id: 'bld_7f3a2c' } });
     expect(clusterOf(r)).toEqual({ key: 'build:bld_7f3a2c', kind: 'build', name: 'bld_7f3a2c' });
@@ -34,13 +34,13 @@ describe('clusterOf — key priority: build_id label, then agent identity, then 
     expect(clusterOf(r)).toEqual({ key: 'agent:aarg_jd_parser_v1', kind: 'agent', name: 'aarg_jd_parser_v1' });
   });
 
-  it('neither a build label nor an agent hash: the literal Unlabelled bucket — never guessed into a build', () => {
+  it('neither a build label nor an agent hash: the literal Unlabelled bucket, never guessed into a build', () => {
     const r = row({ id: 'r6', status: 'completed' });
     expect(clusterOf(r)).toEqual({ key: 'unlabelled', kind: 'unlabelled', name: 'Unlabelled' });
   });
 });
 
-describe('attentionRank — the same worst-first scale the flat sort uses', () => {
+describe('attentionRank: the same worst-first scale the flat sort uses', () => {
   it('waiting > failed > everything else', () => {
     expect(attentionRank('suspended')).toBe(2);
     expect(attentionRank('budget_exceeded')).toBe(2);
@@ -51,7 +51,7 @@ describe('attentionRank — the same worst-first scale the flat sort uses', () =
   });
 });
 
-describe('buildRunGroups — plural clustering, worst-first, attention survives grouping', () => {
+describe('buildRunGroups: plural clustering, worst-first, attention survives grouping', () => {
   const rows: RunRow[] = [
     row({ id: 'a1', status: 'completed', agentDefHash: 'aarg_jd_parser_v1', labels: { build_id: 'bld_1' }, last: '2026-07-12T08:10:00Z' }),
     row({ id: 'a2', status: 'running', agentDefHash: 'aarg_durable_retailor_v1', labels: { build_id: 'bld_1' }, last: '2026-07-12T08:11:00Z' }),
@@ -60,7 +60,7 @@ describe('buildRunGroups — plural clustering, worst-first, attention survives 
     row({ id: 'u1', status: 'completed', last: '2026-07-12T07:00:00Z' }),
   ];
 
-  it('produces one group per distinct key — plural, not degenerate', () => {
+  it('produces one group per distinct key: plural, not degenerate', () => {
     const groups = buildRunGroups(rows);
     expect(groups.map((g) => g.key).sort()).toEqual(
       ['agent:sha256:triage', 'build:bld_1', 'build:bld_2', 'unlabelled'].sort(),

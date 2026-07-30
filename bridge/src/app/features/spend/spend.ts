@@ -41,7 +41,7 @@ interface MeterRow {
   readonly over: boolean;
   readonly pct: number;
   readonly pctText: string;
-  /** How many model calls this run's log completed — 0 for a run that died before any call
+  /** How many model calls this run's log completed: 0 for a run that died before any call
    *  landed (a stalled run). The row reads honestly as "no model calls yet" rather than a
    *  fabricated `$0.0000`, matching the page-wide {@link allUnpriced} exclusion (see cost-fold.ts). */
   readonly calls: number;
@@ -67,12 +67,12 @@ interface DayRow {
 const WHY_CROSSED =
   'The ceiling that was actually in force, read from the run’s own BudgetExceeded event.';
 const WHY_UNKNOWN =
-  'This build has no agent registry to read a declared ceiling from — only a ceiling a run ' +
+  'This build has no agent registry to read a declared ceiling from: only a ceiling a run ' +
   'actually crossed enters the log, so an uncrossed ceiling reads unknown here.';
 
 /**
  * Spend: the burn-down against declared budgets, by-agent and by-day ledgers, and the activity
- * histogram — all of it folded from the real log, deliberately. `GET /v1/runs` carries usage and
+ * histogram: all of it folded from the real log, deliberately. `GET /v1/runs` carries usage and
  * step counts now, but never the per-call model id a dollar figure needs, so every figure here
  * reads a run's full log through {@link CostFoldService} (the shared wasm fold) and prices it
  * through the shared table. A model absent from that table degrades the whole figure to
@@ -90,11 +90,11 @@ export class Spend implements AfterViewInit {
   private readonly costFold = inject(CostFoldService);
 
   /** The histogram is generated markup ({@link renderActivityHtml}), written straight to the
-   * `<svg>` element's own `.innerHTML` — an Angular `[innerHTML]` TEMPLATE BINDING goes through
+   * `<svg>` element's own `.innerHTML`: an Angular `[innerHTML]` TEMPLATE BINDING goes through
    * `DomSanitizer`, which sanitizes as HTML, not SVG: it parses the fragment outside any `<svg>`
    * context and strips or mis-namespaces `<g>`/`<rect>`/`<title>` on the way back out, so the
    * chart would sanitize itself into nothing. Writing to the real element's `.innerHTML` via
-   * `ElementRef` bypasses the template binding (and its sanitizer) entirely — the same split
+   * `ElementRef` bypasses the template binding (and its sanitizer) entirely, the same split
    * `event-model.ts`'s renderer and the Inspector's own timeline/strip wiring already use. */
   @ViewChild('activityEl') private activityEl?: ElementRef<SVGSVGElement>;
 
@@ -119,7 +119,7 @@ export class Spend implements AfterViewInit {
       const over = known && spent !== null && spent >= (ceiling.usd as number);
       const pct = known && spent !== null ? Math.min(100, (spent / (ceiling.usd as number)) * 100) : 0;
       const pctText =
-        known && spent !== null ? (pct < 1 && spent > 0 ? '<1%' : Math.round(pct) + '%') : '—';
+        known && spent !== null ? (pct < 1 && spent > 0 ? '<1%' : Math.round(pct) + '%') : '-';
       return { row, folded, ceiling, spent, known, over, pct, pctText, calls: folded?.calls ?? 0 };
     });
   });
@@ -128,16 +128,16 @@ export class Spend implements AfterViewInit {
    * call's model absent from the price table, the dollar column is uniformly empty and the reason
    * is one page-wide fact, not a per-row footnote to repeat. Stated once, prominently, only when it
    * is genuinely true: at least one such run, and NONE of them priced. When any run IS priced, this
-   * is false and no banner shows (zero-vs-absent — a real $0.00 is a figure, not an absence).
+   * is false and no banner shows (zero-vs-absent: a real $0.00 is a figure, not an absence).
    *
-   * Delegates to the pure {@link allUnpriced} in cost-fold.ts, which — critically — EXCLUDES a run
+   * Delegates to the pure {@link allUnpriced} in cost-fold.ts, which, critically, EXCLUDES a run
    * that made zero model calls (a stalled run that died before any call completed) from the check
    * either way: on the owner's real instance, 6 driverless non-terminal runs carry no usage at all,
    * and `CostTotal.complete` reads `true` VACUOUSLY for a zero-call run (no calls means no unpriced
    * model to report), so without the exclusion a single such run wrongly flipped this to `false`
    * and the banner never rendered despite the other 29 runs being genuinely, uniformly unpriced. */
   readonly allUnpriced = computed<boolean>(() => allUnpricedOf([...this.folded().values()]));
-  /** Total tokens folded across every readable run — the exact figure the unpriced lede leads with,
+  /** Total tokens folded across every readable run: the exact figure the unpriced lede leads with,
    * since it is the one number that is not degraded when the models are unpriced. */
   readonly totalTokens = computed<number>(() => {
     let t = 0;
@@ -147,7 +147,7 @@ export class Spend implements AfterViewInit {
   /** The distinct unpriced model ids across the page, for the lede to name what a price table needs. */
   readonly unpricedModels = computed<string[]>(() => {
     const s = new Set<string>();
-    // A completion can record no model id at all (the demo model does not stamp one) — an empty id
+    // A completion can record no model id at all (the demo model does not stamp one); an empty id
     // is not a nameable model, so it is dropped and the lede falls back to naming none by name.
     for (const f of this.folded().values()) for (const m of f.cost.unpriced) if (m) s.add(m);
     return [...s].sort();
@@ -209,7 +209,7 @@ export class Spend implements AfterViewInit {
     bucketEvents([...this.folded().values()].map((f) => f.events)),
   );
 
-  /** The `hour:` value currently applied on Runs, if any — read from the one shared `?q=` signal,
+  /** The `hour:` value currently applied on Runs, if any: read from the one shared `?q=` signal,
    * so a bucket that is the live selection washes without a second filter state. */
   readonly selectedHourTerm = computed<string | undefined>(() => {
     const m = this.viewService.query().match(/(?:^|\s)hour:(\S+)/i);
@@ -221,7 +221,7 @@ export class Spend implements AfterViewInit {
     return win ? activityDescText(win, (hr) => this.lastActiveCount(hr)) : '';
   });
   /** Disclose-and-exclude: events whose `recorded_at` was too implausible to place on the
-   * timeline (see `activity.ts`'s `PLAUSIBLE_FLOOR_MS`), said in words next to the chart —
+   * timeline (see `activity.ts`'s `PLAUSIBLE_FLOOR_MS`), said in words next to the chart:
    * undefined, not an empty string, when nothing was excluded, so no note renders at all. */
   readonly activityExclusion = computed(() => activityExclusionNote(this.activityWindow()));
   readonly pickableHours = computed(() => {
@@ -238,8 +238,8 @@ export class Spend implements AfterViewInit {
   constructor() {
     void this.load();
     // Every view section is mounted for the app's whole life (the shell toggles `hidden`, never
-    // destroys), so a plain `effect` over `runsService.runs()` would pay the fold cost — a full
-    // log read per run — on EVERY page load, for every view, whether or not anyone ever looks at
+    // destroys), so a plain `effect` over `runsService.runs()` would pay the fold cost, a full
+    // log read per run, on EVERY page load, for every view, whether or not anyone ever looks at
     // Spend. Gate it on Spend actually being the active view: the same "earn the cost on request"
     // rule the collapsed cpanel default already states for this view.
     effect(() => {
@@ -257,7 +257,7 @@ export class Spend implements AfterViewInit {
 
   ngAfterViewInit(): void {
     // first paint of whatever the fold has already produced, matching the Inspector's own
-    // ngAfterViewInit — the constructor's effect may have run before the view existed
+    // ngAfterViewInit: the constructor's effect may have run before the view existed
     this.renderActivity(this.activityWindow());
   }
 
@@ -291,7 +291,7 @@ export class Spend implements AfterViewInit {
         try {
           return [r.id, await this.costFold.foldRun(r.id, r.eventCount)] as const;
         } catch {
-          return [r.id, undefined] as const; // a genuinely unreadable log — honestly absent
+          return [r.id, undefined] as const; // a genuinely unreadable log, honestly absent
         }
       }),
     );
@@ -325,12 +325,12 @@ export class Spend implements AfterViewInit {
   }
 
   pickBucket(hourTerm: string): void {
-    if (this.lastActiveCount(hourTerm) === 0) return; // nothing to land on — say nothing
+    if (this.lastActiveCount(hourTerm) === 0) return; // nothing to land on; say nothing
     this.viewService.filterRuns('hour:' + hourTerm);
   }
 
   /** The buckets are generated markup ({@link renderActivityHtml}), so their click/Enter/Space
-   * handling is delegated from the `<svg>` element the binding lives on — the same split
+   * handling is delegated from the `<svg>` element the binding lives on, the same split
    * `event-model.ts`'s renderer and the Inspector's wiring use. */
   onActivityClick(e: Event): void {
     const g = (e.target as Element).closest('.hbucket');
@@ -360,7 +360,7 @@ export class Spend implements AfterViewInit {
     try {
       await navigator.clipboard.writeText(value);
     } catch {
-      /* clipboard blocked — no fallback theater */
+      /* clipboard blocked: no fallback theater */
     }
   }
 }

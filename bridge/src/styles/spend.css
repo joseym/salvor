@@ -4,7 +4,7 @@
    Scope discipline, same rule as inbox.css: `app.css` already carries
    `.btn`/`.btn.ghost`, `.ledger`/`.tscroll`-shaped table chrome, `.cpanel`/
    `.view-work`, `.notes`/`.caption`, `.status`, `.tokens-only`, `.dpanel`,
-   and `.gloss` — this file reuses all of those AS SHIPPED and adds only
+   and `.gloss`: this file reuses all of those AS SHIPPED and adds only
    what Spend itself introduces: the burn-down bands, the by-agent/by-day
    band layout, and the activity histogram. Every value routes through the
    tokens in tokens.css.
@@ -36,7 +36,7 @@
 }
 
 /* ── THE UNPRICED LEDE: the page-wide "every run is unpriced" fact, stated once, with the exact
-   token burn lifted to the front. Not an alarm (unpriced is honest, not broken) — a firm, quiet
+   token burn lifted to the front. Not an alarm (unpriced is honest, not broken), a firm, quiet
    banner in the tokens-only vocabulary. ── */
 .spend-lede {
   max-width: 780px;
@@ -166,7 +166,7 @@
 .meter.over .meter-fill {
   background: var(--warn);
 }
-/* a meter with no known ceiling gets no fill — an empty, hatched track is the honest rendering of
+/* a meter with no known ceiling gets no fill: an empty, hatched track is the honest rendering of
    "no denominator", not a zero-width bar */
 .meter-none {
   height: 100%;
@@ -182,7 +182,7 @@
 }
 
 /* ── the activity histogram ── */
-/* `.pick` is the hour the run list can actually name — only it is a control, so only it takes the
+/* `.pick` is the hour the run list can actually name: only it is a control, so only it takes the
    pointer, the hover and the focus ring. */
 .hist .hbucket.pick {
   cursor: pointer;
@@ -237,7 +237,7 @@
   letter-spacing: 0;
 }
 
-/* chart legend — shape carries the meaning as well as colour, so the encoding is never colour-only
+/* chart legend: shape carries the meaning as well as colour, so the encoding is never colour-only
    (WCAG 1.4.1) */
 .legend {
   display: flex;

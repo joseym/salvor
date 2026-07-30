@@ -21,7 +21,7 @@ describe('isGeneratableSchema', () => {
     expect(isGeneratableSchema(APPROVAL_SCHEMA)).toBe(true);
   });
 
-  it('rejects a schema with no properties, an array, or a non-object value — the raw-JSON fallback trigger', () => {
+  it('rejects a schema with no properties, an array, or a non-object value: the raw-JSON fallback trigger', () => {
     expect(isGeneratableSchema({ type: 'string' })).toBe(false);
     expect(isGeneratableSchema(undefined)).toBe(false);
     expect(isGeneratableSchema(null)).toBe(false);
@@ -70,7 +70,7 @@ describe('schemaFields', () => {
       },
     };
     const [pct, note] = schemaFields(schema, 'ns');
-    expect(pct!.bounds).toBe('0–100');
+    expect(pct!.bounds).toBe('0-100');
     expect(note!.bounds).toBe('≤ 240 characters');
   });
 

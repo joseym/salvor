@@ -4,8 +4,8 @@ import type { SalvorApiConfig } from './client';
 
 /**
  * A minimal raw-fetch primitive for the graph control-plane endpoints (`API.md`, "Graphs and
- * graph runs"). `@salvor-run/client` does not wrap these yet — the Bridge's typed graph API layer
- * ships ahead of the SDK gaining this surface — so `graphs.ts`, `graph-run.ts`, and
+ * graph runs"). `@salvor-run/client` does not wrap these yet (the Bridge's typed graph API layer
+ * ships ahead of the SDK gaining this surface), so `graphs.ts`, `graph-run.ts`, and
  * `capabilities.ts` talk to them directly over `fetch`, mirroring `SalvorClient`'s own private
  * `request()` byte-for-byte (same header/timeout/error-envelope handling) so a future SDK release
  * can absorb this without changing any call site's behavior.

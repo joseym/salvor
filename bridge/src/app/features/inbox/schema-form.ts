@@ -1,8 +1,8 @@
 /**
- * Suspension forms are GENERATED from a run's own recorded `Suspended.input_schema` — never
+ * Suspension forms are GENERATED from a run's own recorded `Suspended.input_schema`, never
  * hand-written per agent, since a hand-written form drifts from whatever schema an agent actually
  * declares. This module is the generator: a pure, unit-tested mapping from a JSON Schema object to
- * the field descriptors the suspension-card template renders, plus the inverse — reading the
+ * the field descriptors the suspension-card template renders, plus the inverse: reading the
  * submitted control values back into the typed input object `resume` expects.
  */
 
@@ -26,7 +26,7 @@ export interface JsonSchemaObject {
 }
 
 /** True when `schema` has an object shape this generator can turn into real fields. A schema that
- * fails this check (no `properties`, or not an object at all) falls back to a raw-JSON textarea —
+ * fails this check (no `properties`, or not an object at all) falls back to a raw-JSON textarea;
  * the form is never fabricated from a schema the generator cannot actually read. */
 export function isGeneratableSchema(schema: unknown): schema is JsonSchemaObject {
   if (!schema || typeof schema !== 'object') return false;
@@ -47,7 +47,7 @@ export interface SchemaField {
   readonly min?: number;
   readonly max?: number;
   readonly maxLength?: number;
-  /** A schema default is not a neutral default — it is what the RUN proposed. Confirming it is
+  /** A schema default is not a neutral default: it is what the RUN proposed. Confirming it is
    * part of the approval, not a blank being accepted; the template marks these "proposed by the
    * run" rather than silently prefilling them as if they were the form's own idea. */
   readonly defaultValue?: unknown;
@@ -65,12 +65,12 @@ function fieldKind(f: JsonSchemaProperty): FieldKind {
 }
 
 function fieldBounds(f: JsonSchemaProperty): string | undefined {
-  if (f.maximum != null) return `${f.minimum ?? 0}–${f.maximum}`;
+  if (f.maximum != null) return `${f.minimum ?? 0}-${f.maximum}`;
   if (f.maxLength != null) return `≤ ${f.maxLength} characters`;
   return undefined;
 }
 
-/** Every field the schema's `properties` declares, in the schema's own key order — the same order
+/** Every field the schema's `properties` declares, in the schema's own key order: the same order
  * `Object.entries` walks, so field order in the rendered form always matches the schema's own. */
 export function schemaFields(schema: JsonSchemaObject, ns: string): SchemaField[] {
   const required = schema.required ?? [];
@@ -91,7 +91,7 @@ export function schemaFields(schema: JsonSchemaObject, ns: string): SchemaField[
   }));
 }
 
-/** True when at least one field in the schema carries a run-proposed default — the provenance
+/** True when at least one field in the schema carries a run-proposed default: the provenance
  * notice ("Prefilled values were proposed by this run…") only renders when this is true. */
 export function hasProposedValues(fields: readonly SchemaField[]): boolean {
   return fields.some((f) => f.proposed);
@@ -104,10 +104,10 @@ export function defaultControlValue(f: SchemaField): string {
 }
 
 /**
- * Reads submitted control values (every control keyed by its field's plain `key`, string-typed —
+ * Reads submitted control values (every control keyed by its field's plain `key`, string-typed:
  * the shape Angular's reactive forms give a text/number/select/radio control) back into the typed
  * `input` object `resume` expects: booleans and numbers are coerced, everything else stays a
- * string. A field left blank (and not required) is OMITTED, not sent as `""` — the schema never
+ * string. A field left blank (and not required) is OMITTED, not sent as `""`; the schema never
  * hears about a field nobody touched.
  */
 export function extractSchemaInput(

@@ -16,7 +16,7 @@ import type { RunSummary } from '@salvor-run/client';
 function row(agentDefHash: string | undefined): RunRow {
   return { id: 'r1', status: 'completed', eventCount: 1, agentDefHash };
 }
-/** A run whose log the server folded (usage/step_count present) — the "graph run" signal when it
+/** A run whose log the server folded (usage/step_count present): the "graph run" signal when it
  * also carries no agent_def_hash. */
 function foldedRow(agentDefHash: string | undefined): RunRow {
   return { id: 'r1', status: 'completed', eventCount: 1, stepCount: 3, agentDefHash };
@@ -31,10 +31,10 @@ describe('isHash', () => {
   });
 });
 
-describe('agentIdentity — the honest renderings', () => {
-  it('no agent_def_hash AND an unfolded log: kind "none", an em dash (nothing recorded to show)', () => {
+describe('agentIdentity: the honest renderings', () => {
+  it('no agent_def_hash AND an unfolded log: kind "none", a hyphen (nothing recorded to show)', () => {
     const id = agentIdentity(row(undefined));
-    expect(id).toEqual({ text: '—', kind: 'none' });
+    expect(id).toEqual({ text: '-', kind: 'none' });
   });
 
   it('no agent_def_hash but the log DID fold: kind "graph", "graph run" (a GraphRunStarted head)', () => {
@@ -42,7 +42,7 @@ describe('agentIdentity — the honest renderings', () => {
     expect(id).toEqual({ text: 'graph run', kind: 'graph' });
   });
 
-  it('the graph rendering carries no hash — GET /v1/runs carries nothing graph-shaped on the row', () => {
+  it('the graph rendering carries no hash: GET /v1/runs carries nothing graph-shaped on the row', () => {
     const id = agentIdentity(foldedRow(undefined));
     expect(id.hash).toBeUndefined();
   });
@@ -76,7 +76,7 @@ describe('agentIdentity — the honest renderings', () => {
   });
 });
 
-describe('derivedStatus — in-progress + driverless + stale ⟹ stalled (the one derivation rule)', () => {
+describe('derivedStatus: in-progress + driverless + stale ⟹ stalled (the one derivation rule)', () => {
   const NOW = 1_000_000_000_000;
   const stale = new Date(NOW - STALL_GRACE_MS - 1).toISOString();
   const fresh = new Date(NOW - 1_000).toISOString();
@@ -93,13 +93,13 @@ describe('derivedStatus — in-progress + driverless + stale ⟹ stalled (the on
     expect(derivedStatus('running', 'none', fresh, NOW)).toBe('running');
   });
 
-  it('an ABSENT driver field is not evidence of a stall — never derived as one (honesty over a guess)', () => {
+  it('an ABSENT driver field is not evidence of a stall; never derived as one (honesty over a guess)', () => {
     expect(derivedStatus('running', undefined, stale, NOW)).toBe('running');
   });
 
   // THE REAL-WORLD SHAPE (defect A): the owner's abandoned client-runs died mid model-call, so
-  // they fold to `awaiting_model`, never literal `running`. The whole IN-PROGRESS family — every
-  // non-terminal resting state where a driver SHOULD be attached — must stall the same way.
+  // they fold to `awaiting_model`, never literal `running`. The whole IN-PROGRESS family (every
+  // non-terminal resting state where a driver SHOULD be attached) must stall the same way.
   it('the entire in-progress family stalls the same way: running, awaiting_model, awaiting_tool, not_started', () => {
     for (const s of ['running', 'awaiting_model', 'awaiting_tool', 'not_started']) {
       expect(derivedStatus(s, 'none', stale, NOW)).toBe('stalled');
@@ -107,9 +107,9 @@ describe('derivedStatus — in-progress + driverless + stale ⟹ stalled (the on
   });
 
   // This is the failing-first proof: against the OLD rule (`state !== 'running'`), every one of
-  // these — except plain `running` — passed straight through unchanged, so the owner's real
+  // these, except plain `running`, passed straight through unchanged, so the owner's real
   // `awaiting_model` stalls never fired.
-  it('a human-waiting state or a terminal state never stalls, however driverless and stale — it is a normal, honest wait', () => {
+  it('a human-waiting state or a terminal state never stalls, however driverless and stale: it is a normal, honest wait', () => {
     for (const s of ['suspended', 'budget_exceeded', 'needs_reconciliation', 'completed', 'failed']) {
       expect(derivedStatus(s, 'none', stale, NOW)).toBe(s);
     }
@@ -119,14 +119,14 @@ describe('derivedStatus — in-progress + driverless + stale ⟹ stalled (the on
     expect(derivedStatus('running', 'none', undefined, NOW)).toBe('stalled');
   });
 
-  it('stalled is in the WAITING group and labelled "stalled" — it sorts with waiting-on-you', () => {
+  it('stalled is in the WAITING group and labelled "stalled": it sorts with waiting-on-you', () => {
     expect(groupOf('stalled')).toBe('waiting');
     expect(isWaiting('stalled')).toBe(true);
     expect(labelOf('stalled')).toBe('stalled');
   });
 });
 
-describe('toRunRow — bakes the derived status and carries driver evidence', () => {
+describe('toRunRow: bakes the derived status and carries driver evidence', () => {
   const NOW = 1_000_000_000_000;
   const stale = new Date(NOW - STALL_GRACE_MS - 1).toISOString();
 
@@ -148,10 +148,10 @@ describe('toRunRow — bakes the derived status and carries driver evidence', ()
     expect(r.driver).toBe('attached');
   });
 
-  // THE REAL-WORLD SHAPE (defect A): the owner's 6 abandoned client-runs died mid model-call — a
-  // RunStarted then a ModelCallRequested with no completion — so they fold to `awaiting_model`,
+  // THE REAL-WORLD SHAPE (defect A): the owner's 6 abandoned client-runs died mid model-call: a
+  // RunStarted then a ModelCallRequested with no completion, so they fold to `awaiting_model`,
   // never literal `running`. This must derive to `stalled` exactly like the `running` case above.
-  it('an awaiting_model run the server reports driverless-and-stale becomes stalled too — a run that died mid model-call', () => {
+  it('an awaiting_model run the server reports driverless-and-stale becomes stalled too: a run that died mid model-call', () => {
     const r = toRunRow(
       {
         run: 'r1',
@@ -168,7 +168,7 @@ describe('toRunRow — bakes the derived status and carries driver evidence', ()
   });
 });
 
-describe('toRunRow — labels pass through honestly (absent, never a fabricated {})', () => {
+describe('toRunRow: labels pass through honestly (absent, never a fabricated {})', () => {
   function summary(over: Partial<RunSummary>): RunSummary {
     return {
       run: 'r1',
@@ -197,7 +197,7 @@ describe('toRunRow — labels pass through honestly (absent, never a fabricated 
   });
 });
 
-describe('abandoned — the operator-retired terminal (state-not-status vocabulary)', () => {
+describe('abandoned: the operator-retired terminal (state-not-status vocabulary)', () => {
   it('groups with the TERMINAL family, never waiting: the health strip counts it terminal, never attention', () => {
     expect(groupOf('abandoned')).toBe('terminal');
   });

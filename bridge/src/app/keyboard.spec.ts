@@ -26,7 +26,7 @@ describe('shell keyboard layer', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
-    // A fresh Response per call — the app may refresh at bootstrap and again explicitly below, and
+    // A fresh Response per call: the app may refresh at bootstrap and again explicitly below, and
     // a Response body can only be read once.
     fetchMock = vi.fn().mockImplementation(async () =>
       jsonResponse({

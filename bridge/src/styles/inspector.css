@@ -5,11 +5,11 @@
    ============================================================ */
 
 /* Screen-reader-only text. This utility was never defined in the token/app layers, so every
-   `<span class="sr">` across the app (the Inspector emits many — per-row payload/fold labels, the
+   `<span class="sr">` across the app (the Inspector emits many: per-row payload/fold labels, the
    strip's tick labels, copy-button names) rendered as VISIBLE inline text, and in the Runs table a
    copy button's "Copy <uuid>" label even sat over a cell and intercepted its clicks. This is the
    standard visually-hidden clip: present for assistive tech, zero-size and non-interactive for
-   sighted users. Global on purpose — the class is used everywhere. */
+   sighted users. Global on purpose: the class is used everywhere. */
 .sr {
   position: absolute;
   width: 1px;
@@ -163,7 +163,7 @@
   background: var(--red-wash);
   color: color-mix(in oklab, var(--danger), var(--fg) 45%);
 }
-/* STALLED band — the amber attention family (base .band), marked DISTINCT from the fresh-decision
+/* STALLED band: the amber attention family (base .band), marked DISTINCT from the fresh-decision
    waiting bands by a dashed left rule that reads as "interrupted / stopped", never danger red. */
 .band.is-stalled {
   border-left-width: 3px;
@@ -173,7 +173,7 @@
 .band.is-fail .mono {
   color: color-mix(in oklab, var(--danger), var(--fg) 45%);
 }
-/* ABANDONED band — a TERMINAL, operator-retired run: muted and neutral, never the amber attention of
+/* ABANDONED band: a TERMINAL, operator-retired run: muted and neutral, never the amber attention of
    the base .band nor the danger red of .is-fail. Abandonment is a deliberate retirement, not an
    error, so it takes muted ink (state-not-status). */
 .band.is-abandoned {
@@ -261,7 +261,7 @@
 }
 
 /* ── log rows. VIRTUALIZED with content-visibility: off-screen rows are not painted or laid out,
-   but every .levent stays in the DOM — scrub-and-keyboard reachable, and folded identically. The
+   but every .levent stays in the DOM: scrub-and-keyboard reachable, and folded identically. The
    invariant holds: virtualization changes what is PAINTED, never the addressable set. ── */
 .levent {
   border-bottom: 1px solid var(--border);
@@ -273,16 +273,16 @@
   display: none;
 }
 
-/* THE FOLD BOUNDARY — the event under the playhead, the LAST one inside
+/* THE FOLD BOUNDARY: the event under the playhead, the LAST one inside
    the derived prefix (seq n-1). The old treatment put a lone 1px top-accent border on the FIRST
    row beyond the fold: a near-invisible hairline that accented the wrong event (the first
    EXCLUDED one, not the one in focus). It now marks the right row with the app's own selection
-   vocabulary — blue = state, never status: an accent left rail (the same inset-3px channel the
+   vocabulary; blue = state, never status: an accent left rail (the same inset-3px channel the
    status rails use), an accent wash, an accent-bold seq, a fold line on the lower edge, and a
    knob that echoes the scrub playhead. The wash is a colour TINT, not an opacity drop, so text
    underneath keeps its contrast ratio. `content-visibility: visible` takes the boundary row out
-   of the timeline's off-screen layout/paint skip (`.levent` below) so its geometry — read by the
-   follow-scroll below — and its paint are never subject to the virtualization estimate. */
+   of the timeline's off-screen layout/paint skip (`.levent` below) so its geometry (read by the
+   follow-scroll below) and its paint are never subject to the virtualization estimate. */
 .levent.boundary {
   content-visibility: visible;
   border-bottom: 1px solid var(--accent);
@@ -488,9 +488,9 @@
   max-width: 72ch;
 }
 
-/* THE BEYOND ZONE — past the scrubber prefix: in the log, not yet
+/* THE BEYOND ZONE: past the scrubber prefix: in the log, not yet
    folded. Text is recoloured, never opacity-dimmed (an opacity drop takes it under 4.5:1). The
-   row also carries a faint RECESSED wash — a 4% fg tint UNDER the text, not on it — so folded /
+   row also carries a faint RECESSED wash (a 4% fg tint UNDER the text, not on it) so folded /
    boundary / beyond read as three distinct bands from across the room, which a pure text-colour
    change alone could not do. */
 .levent.dim .lrow {
@@ -618,7 +618,7 @@
   --estrip-h: 44px;
   display: flex;
   align-items: flex-end;
-  /* `gap` is set inline, per render (Inspector#renderStrip), to `estripGapPct(eventCount)` —
+  /* `gap` is set inline, per render (Inspector#renderStrip), to `estripGapPct(eventCount)`:
      a PERCENT of the strip's own width, never a fixed px. A fixed 2px gap times 205 seams (a
      206-event run) alone demanded ~410px against a strip only ~316px wide; see event-model.ts. */
   height: var(--estrip-h);
@@ -631,7 +631,7 @@
   /* NO min-width floor. The old `min-width: 3px` was the other half of the overflow: with it,
      206 ticks demanded >= 618px of un-shrinkable width alone, so flexbox let the row overflow its
      container rather than violate the floor. Equal `flex: 1 1 0%` items with no floor always sum
-     to exactly the strip's own width (100%) minus its gaps, at any event count — wide when there
+     to exactly the strip's own width (100%) minus its gaps, at any event count: wide when there
      is room, compressed only once density genuinely leaves no choice (the spend histogram's own
      precedent for its `.hhit` click targets, commit f63a7f0). */
   min-width: 0;
@@ -682,7 +682,7 @@
   outline: 1px solid var(--fg);
   outline-offset: 1px;
 }
-/* on a coarse pointer each tick's hit area becomes its full COLUMN of the strip — one axis is
+/* on a coarse pointer each tick's hit area becomes its full COLUMN of the strip: one axis is
    what a fingertip needs, and the tick→seq mapping stays 1:1. Painted nothing. */
 @media (pointer: coarse) {
   .etick {
@@ -841,7 +841,7 @@
    live truth. It carries a tint + a diagonal hatch so it reads as a preview at a glance, a pinned
    banner names the run's TRUE resting state, and the status line gets an outlined "at seq N" pill.
    Neutral hatch ground + amber ink on the note, the same ink the live bar's own "Held at seq N"
-   already uses — extending the timeline's boundary/dimmed vocabulary rather than a new colour.
+   already uses, extending the timeline's boundary/dimmed vocabulary rather than a new colour.
    AA in both themes (text stays --fg / --amber-ink over the wash); no motion introduced, so
    reduced-motion needs nothing extra. */
 .derived.preview {
@@ -925,7 +925,7 @@
   margin-left: auto;
 }
 
-/* a plain text button — used by the band and the live bar */
+/* a plain text button: used by the band and the live bar */
 .link-btn {
   appearance: none;
   -webkit-appearance: none;
@@ -975,10 +975,10 @@
   font-style: italic;
 }
 
-/* ── PANEL MOTION (design-queue item 6). The panel and its restore tab fade + rise in and out —
+/* ── PANEL MOTION (design-queue item 6). The panel and its restore tab fade + rise in and out:
    opacity + a 4px lift on --motion-base, display transitioned with allow-discrete so each can
    animate up from display:none, with @starting-style supplying the entry from-state. The global
-   reduced-motion blanket makes all of this instant. Opacity and translate only — never width. ── */
+   reduced-motion blanket makes all of this instant. Opacity and translate only, never width. ── */
 .cpanel,
 .cpanel-tab {
   transition:

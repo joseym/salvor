@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { REFUND_SWEEP_DRAFT, loadDrafts, removeDraft, saveDraft } from './wf-draft';
 import type { WfGraph } from './wf-model';
 
-/** An in-memory localStorage stand-in — the vitest node env has none by default. */
+/** An in-memory localStorage stand-in: the vitest node env has none by default. */
 function installStorage(): Record<string, string> {
   const store: Record<string, string> = {};
   vi.stubGlobal('localStorage', {

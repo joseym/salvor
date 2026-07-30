@@ -45,7 +45,7 @@ describe('budgetKindLabel', () => {
   });
 });
 
-describe('budget floor and proposal — the honest math', () => {
+describe('budget floor and proposal: the honest math', () => {
   it('cost_usd: floor is the max of observed/limit rounded up to the cent', () => {
     const floor = budgetFloor({ kind: 'cost_usd', limit: 0.5, observed: 0.4999 });
     expect(floor).toBeCloseTo(0.5, 5);
@@ -55,7 +55,7 @@ describe('budget floor and proposal — the honest math', () => {
     expect(budgetFloor({ kind: 'cost_usd', limit: 1, observed: 2 })).toBeCloseTo(2, 5);
   });
 
-  it('steps/tokens: floor rounds up to a whole unit — the real seeded fixture is a steps budget', () => {
+  it('steps/tokens: floor rounds up to a whole unit; the real seeded fixture is a steps budget', () => {
     expect(budgetFloor({ kind: 'steps', limit: 1, observed: 1 })).toBe(1);
     expect(budgetFloor({ kind: 'tokens', limit: 100, observed: 100.4 })).toBe(101);
   });
@@ -83,7 +83,7 @@ describe('usd', () => {
 });
 
 describe('reconcileIntentFrom', () => {
-  it('builds the evidence from a plain pending call + the recorded_at read off its own envelope — never a 409', () => {
+  it('builds the evidence from a plain pending call + the recorded_at read off its own envelope, never a 409', () => {
     const intent = reconcileIntentFrom(
       {
         kind: 'tool',
@@ -115,7 +115,7 @@ describe('reconcileIntentFrom', () => {
     expect(intent?.recordedAt).toBe('');
   });
 
-  it('returns undefined for a non-tool pending call — the only shape needs_reconciliation derives from', () => {
+  it('returns undefined for a non-tool pending call, the only shape needs_reconciliation derives from', () => {
     expect(reconcileIntentFrom({ kind: 'model', seq: 1, raw: {} }, '2026-01-01T00:00:00Z')).toBeUndefined();
   });
 });

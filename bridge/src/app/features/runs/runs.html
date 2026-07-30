@@ -1,11 +1,11 @@
-<!-- THE MINUTE-ONE STRIP — the three facts a newcomer needs before any wire detail: what a run is,
+<!-- THE MINUTE-ONE STRIP, the three facts a newcomer needs before any wire detail: what a run is,
      that every screen is reading one append-only log, and what a yellow row means. Dismissible, and
      the dismissal persists (localStorage). When folded away it leaves an honest "i" reopen path, so
      it is a fold-away and never a one-way door. Teaching in mechanism voice, not chrome. -->
 @if (introOpen()) {
   <aside class="intro-strip" id="intro-strip" data-od-id="run-intro" aria-label="What you are looking at">
     <p class="intro-copy">
-      <b>A run is one execution of an agent.</b> Everything it did is recorded as a numbered log —
+      <b>A run is one execution of an agent.</b> Everything it did is recorded as a numbered log;
       every screen here just reads that log. A <span class="intro-amber">yellow</span> row is waiting
       on a person: open it and the Inbox shows the one action that unblocks it.
     </p>
@@ -17,7 +17,7 @@
   </button>
 }
 
-<!-- RUN HEALTH — counted from the same list projection the table and chips read. NOT live: the
+<!-- RUN HEALTH: counted from the same list projection the table and chips read. NOT live: the
      connection pill says Snapshot, and this carries an as-of, because Runs reads a page it already
      fetched. Each figure is a real filter term. -->
 <div class="health" id="run-health" data-od-id="run-health" [attr.data-health]="healthState()">
@@ -139,7 +139,7 @@
     </button>
   </div>
   <!-- GROUP BY (item 15b): cluster the runs by build (then agent) or show the flat list. A
-       persisted MODE, not a filter — it reorders and headers the same rows, it never hides any. -->
+       persisted MODE, not a filter: it reorders and headers the same rows, it never hides any. -->
   <span class="flabel flabel-grp">Group</span>
   <div class="grpmode" role="group" aria-label="Group the runs">
     <button class="gmode" type="button" [attr.aria-pressed]="groupModePressed('grouped')" (click)="setGroupMode('grouped')">Grouped</button>
@@ -151,13 +151,13 @@
 <div class="view-work" data-panel-dock [attr.data-panel]="panelOpen() ? 'open' : 'closed'">
   <div>
     <p class="qhint" id="runs-lede">
-      Runs waiting on you sort to the top — start there. Open any row to read its log.
+      Runs waiting on you sort to the top; start there. Open any row to read its log.
     </p>
-    <!-- ONE row template, used by both the flat list and every group's runs — grouped and flat
+    <!-- ONE row template, used by both the flat list and every group's runs: grouped and flat
          modes cannot drift apart because there is only one place a row is written (item 15b). Kept
          OUTSIDE <table> deliberately: an <ng-template> emits no DOM node of its own (the compiler
          never renders it in place), but keeping it a sibling of <table> rather than a child of
-         <thead>/<tbody> sidesteps any HTML table-content-model surprise entirely — the reference
+         <thead>/<tbody> sidesteps any HTML table-content-model surprise entirely; the reference
          variable #rowTpl is still reachable from *ngTemplateOutlet anywhere in this template. -->
     <ng-template #rowTpl let-r let-i="i">
       <tr
@@ -212,7 +212,7 @@
         </td>
         <td class="num c-events">{{ r.eventCount }}</td>
         <td class="num c-age">{{ age(r.last) }}</td>
-        <!-- AGENT CELL (item 15a) — agentIdentity's three honest renderings. A registry-resolved
+        <!-- AGENT CELL (item 15a): agentIdentity's three honest renderings. A registry-resolved
              NAME or a caller-supplied LABEL read in the body face (identity, not wire data) and
              truncate with the CSS ellipsis (max-width, see styles); a resolved name's title
              reveals its hash + provenance, a label's title reveals its full string. An
@@ -232,7 +232,7 @@
               </span>
             } @else if (id.kind === 'graph') {
               <!-- a folded run with no agent_def_hash is a GRAPH run (GraphRunStarted head); an
-                   honest distinct marker, never the em-dash the 'none' case renders -->
+                   honest distinct marker, never the hyphen the 'none' case renders -->
               <span class="agent-id is-graph" [attr.title]="agentCellTitle(id)">{{ id.text }}</span>
             } @else if (id.kind === 'none') {
               <span class="unavail" [attr.title]="agentCellTitle(id)">{{ id.text }}</span>
@@ -266,7 +266,7 @@
             <th scope="col" class="num" data-sort="age" [attr.aria-sort]="ariaSort('age') === 'none' ? null : ariaSort('age')">
               <button type="button" (click)="sortBy('age')">Last activity</button>
             </th>
-            <!-- AGENT (item 15a) replaces the old "Last event" column — six columns kept, the
+            <!-- AGENT (item 15a) replaces the old "Last event" column: six columns kept, the
                  EVENTS anchor kept. Sortable, like every other header. -->
             <th scope="col" data-sort="agent" [attr.aria-sort]="ariaSort('agent') === 'none' ? null : ariaSort('agent')">
               <button type="button" (click)="sortBy('agent')">Agent</button>
@@ -280,7 +280,7 @@
               <tr class="skel-row"><td colspan="6"><span class="skel-bar"></span></td></tr>
             }
           } @else if (loadError()) {
-            <tr><td colspan="6" class="empty">{{ loadError() }} — <span class="mono">GET /v1/runs</span> did not answer.</td></tr>
+            <tr><td colspan="6" class="empty">{{ loadError() }}: <span class="mono">GET /v1/runs</span> did not answer.</td></tr>
           } @else if (!totalCount()) {
             <tr><td colspan="6" class="empty">
               <div class="empty-state">
@@ -291,7 +291,7 @@
           } @else if (!visible().length) {
             <tr><td class="empty" colspan="6">
               No run matches <span class="mono">{{ getQuery() }}</span>. The filter narrows the page this list
-              already fetched from <code>GET /v1/runs</code> — clear it to see all {{ totalCount() }}.
+              already fetched from <code>GET /v1/runs</code>; clear it to see all {{ totalCount() }}.
             </td></tr>
           } @else if (groupMode() === 'flat') {
             @for (r of visible(); track r.id; let i = $index) {
@@ -300,7 +300,7 @@
           } @else {
             @for (g of groups(); track g.key) {
               <!-- GROUP HEADER (item 15b): name, kind tag (build/agent), run count, worst-first
-                   aggregate. WAITING RUNS MUST NOT HIDE — a group holding one has its toggle
+                   aggregate. WAITING RUNS MUST NOT HIDE: a group holding one has its toggle
                    disabled (with a title saying why), enforced at the control, not by convention. -->
               <tr class="grp-head" [ngClass]="groupRowClasses(g)" [attr.data-grp-row]="g.key">
                 <td colspan="6">
@@ -310,7 +310,7 @@
                     [attr.aria-expanded]="!groupCollapsed(g)"
                     [disabled]="!groupCanCollapse(g)"
                     [attr.aria-disabled]="!groupCanCollapse(g) ? 'true' : null"
-                    [attr.title]="!groupCanCollapse(g) ? 'Holds runs waiting on you — it cannot be collapsed, so those runs are never hidden' : null"
+                    [attr.title]="!groupCanCollapse(g) ? 'Holds runs waiting on you; it cannot be collapsed, so those runs are never hidden' : null"
                     (click)="toggleGroupCollapse(g)"
                   >
                     <span class="grp-chev" aria-hidden="true">{{ groupCollapsed(g) ? '▸' : '▾' }}</span>
@@ -321,7 +321,7 @@
                     @if (g.kind === 'unlabelled') {
                       <!-- point-of-use gloss for the one bucket name that is jargon: it is defined
                            here, where it appears, following the idempotency-key precedent -->
-                      <span class="grp-gloss">— tagged with no build and no agent, so grouped by nothing but itself</span>
+                      <span class="grp-gloss">(tagged with no build and no agent, so grouped by nothing but itself)</span>
                     }
                     <span class="grp-meta"
                       >{{ g.runs.length }} run{{ g.runs.length === 1 ? '' : 's' }} ·
@@ -356,22 +356,22 @@
           <div class="f-id"><dt>run_id</dt><dd>{{ r.id }}</dd></div>
           <div><dt>status.state</dt><dd>{{ label(r.status) }}</dd></div>
           <div><dt>event_count</dt><dd>{{ r.eventCount }}</dd></div>
-          <div><dt>first_recorded_at</dt><dd>{{ r.first ?? '—' }}</dd></div>
-          <div><dt>last_recorded_at</dt><dd>{{ r.last ?? '—' }}</dd></div>
-          <!-- Liveness evidence, verbatim from GET /v1/runs. Absent (—) for a terminal run: the
+          <div><dt>first_recorded_at</dt><dd>{{ r.first ?? '-' }}</dd></div>
+          <div><dt>last_recorded_at</dt><dd>{{ r.last ?? '-' }}</dd></div>
+          <!-- Liveness evidence, verbatim from GET /v1/runs. Absent (-) for a terminal run: the
                server omits it, and this shows the absence honestly rather than inventing "none". -->
-          <div><dt>driver</dt><dd>{{ r.driver ?? '—' }}</dd></div>
+          <div><dt>driver</dt><dd>{{ r.driver ?? '-' }}</dd></div>
           <div>
             <dt>agent_def_hash</dt>
             <dd>
               @if (has(r.agentDefHash)) {
                 {{ hashShort(r.agentDefHash!) }}
               } @else if (identity(r).kind === 'graph') {
-                <!-- a graph run has no single agent_def_hash — genuinely N/A, not unreadable; the
+                <!-- a graph run has no single agent_def_hash: genuinely N/A, not unreadable; the
                      graph it ran is shown as graph_hash below, from GET /v1/runs/{id}/graph -->
                 <span class="agent-id is-graph">graph run</span>
               } @else {
-                <span class="unavail" tabindex="0" [attr.title]="whyUnreadable" [attr.aria-label]="'Unavailable. ' + whyUnreadable">—</span>
+                <span class="unavail" tabindex="0" [attr.title]="whyUnreadable" [attr.aria-label]="'Unavailable. ' + whyUnreadable">-</span>
               }
             </dd>
           </div>
@@ -391,7 +391,7 @@
             <dt>usage.input</dt>
             <dd>
               @if (has(r.usage)) { {{ int(r.usage!.inputTokens) }} } @else {
-                <span class="unavail" tabindex="0" [attr.title]="whyUnreadable" [attr.aria-label]="'Unavailable. ' + whyUnreadable">—</span>
+                <span class="unavail" tabindex="0" [attr.title]="whyUnreadable" [attr.aria-label]="'Unavailable. ' + whyUnreadable">-</span>
               }
             </dd>
           </div>
@@ -399,22 +399,22 @@
             <dt>usage.output</dt>
             <dd>
               @if (has(r.usage)) { {{ int(r.usage!.outputTokens) }} } @else {
-                <span class="unavail" tabindex="0" [attr.title]="whyUnreadable" [attr.aria-label]="'Unavailable. ' + whyUnreadable">—</span>
+                <span class="unavail" tabindex="0" [attr.title]="whyUnreadable" [attr.aria-label]="'Unavailable. ' + whyUnreadable">-</span>
               }
             </dd>
           </div>
           <div>
             <dt>step_count</dt>
             <!-- value rendered tight against the cell so the dd's text is the bare number -->
-            <dd>@if (has(r.stepCount)) {<span class="mono">{{ r.stepCount }}</span>} @else {<span class="unavail" tabindex="0" [attr.title]="whyUnreadable" [attr.aria-label]="'Unavailable. ' + whyUnreadable">—</span>}</dd>
+            <dd>@if (has(r.stepCount)) {<span class="mono">{{ r.stepCount }}</span>} @else {<span class="unavail" tabindex="0" [attr.title]="whyUnreadable" [attr.aria-label]="'Unavailable. ' + whyUnreadable">-</span>}</dd>
           </div>
           <div>
             <dt>cost</dt>
-            <dd><span class="unavail" tabindex="0" [attr.title]="whyCost" [attr.aria-label]="'Unavailable. ' + whyCost">—</span></dd>
+            <dd><span class="unavail" tabindex="0" [attr.title]="whyCost" [attr.aria-label]="'Unavailable. ' + whyCost">-</span></dd>
           </div>
           <div class="wide">
             <p class="no-log">
-              That is the whole list row — <code>GET /v1/runs</code> returns nothing else. It carries
+              That is the whole list row; <code>GET /v1/runs</code> returns nothing else. It carries
               <code>usage</code>, <code>step_count</code> and <code>agent_def_hash</code>, folded server-side in the
               same pass as <code>status</code>, so they are values here. The one dash left is <code>cost</code>.
               @if (identity(r).kind === 'graph') {
@@ -446,9 +446,9 @@
 </div>
 
 <p class="caption" id="runs-caption">
-  <b>Agent, usage, and steps stopped being an API demand — the list folds them now.</b>
+  <b>Agent, usage, and steps stopped being an API demand. The list folds them now.</b>
   <code>GET /v1/runs</code> returns <code>usage</code>, <code>step_count</code> and <code>agent_def_hash</code> in the
   same server-side pass as <code>status</code>, so expand any row to read them. <code>cost</code> is the one that did
-  not come back — the row carries the tokens but not the model each call used, and the price table is keyed by model.
+  not come back: the row carries the tokens but not the model each call used, and the price table is keyed by model.
   The list itself is a snapshot from <code>GET /v1/runs</code>, not a stream; a run is actually read from its log.
 </p>

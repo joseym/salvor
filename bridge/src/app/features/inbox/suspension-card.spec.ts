@@ -35,7 +35,7 @@ const UNGENERATABLE_ROW: RunSummary = {
   status: {
     state: 'suspended',
     reason: 'needs a free-form decision',
-    inputSchema: { type: 'string' }, // no `properties` — the raw-JSON fallback trigger
+    inputSchema: { type: 'string' }, // no `properties`: the raw-JSON fallback trigger
     raw: {},
   },
   eventCount: 2,
@@ -57,7 +57,7 @@ describe('SuspensionCard', () => {
     vi.unstubAllGlobals();
   });
 
-  it('generates one field per schema property — never hand-written — and marks the run-proposed default', () => {
+  it('generates one field per schema property, never hand-written, and marks the run-proposed default', () => {
     const fixture = TestBed.createComponent(SuspensionCard);
     fixture.componentRef.setInput('row', SUSPENDED_ROW);
     fixture.detectChanges();

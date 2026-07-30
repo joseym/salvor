@@ -5,7 +5,7 @@
 // the design audit, which found and deleted duplicate/dead token layers
 // TWICE) into a script that runs before every build. Wire point: this is
 // invoked from `npm run build` (see package.json's "build" script, which
-// runs this before `ng build`) — a CI workflow gains the same coverage for
+// runs this before `ng build`); a CI workflow gains the same coverage for
 // free by running `npm run build` or `npm run gate:tokens` directly. There
 // is no bridge/-specific CI job yet (see ../../.github/workflows/ci.yml,
 // which is Rust-workspace-only); this comment marks where a future
@@ -14,11 +14,11 @@
 // Rules enforced:
 //   1. No literal `white`/`black` keyword or #fff.../#000... hex used as a
 //      color-mix() component. The design system's whole premise is warm
-//      paper/ink, never a cold literal — two exceptions are load-bearing
+//      paper/ink, never a cold literal; two exceptions are load-bearing
 //      (see styles/tokens.css) and are allowlisted by an inline
 //      `ANCHOR-EXCEPTION` marker comment on the line itself or the two
 //      lines above it; anything else fails.
-//   2. No `transition: all` (or `transition-property: all`) anywhere —
+//   2. No `transition: all` (or `transition-property: all`) anywhere:
 //      broad transitions silently animate properties nobody asked for.
 //   3. Each of the six --anchor-* custom properties is DEFINED exactly
 //      once across the whole src tree. Everything else must be a var()
@@ -50,9 +50,9 @@ const ANCHOR_EXCEPTION_MARKER = 'ANCHOR-EXCEPTION';
 const ANCHOR_EXCEPTION_LOOKBACK = 6; // lines; the marker sits in the comment above the declaration
 const LITERAL_MIX_RE = /\b(white|black)\b|#(?:fff+|000+)\b/i;
 const TRANSITION_ALL_RE = /\btransition(?:-property)?\s*:\s*all\b/i;
-// Matches an --anchor-* DEFINITION (`--anchor-foo:`) anywhere on the line —
+// Matches an --anchor-* DEFINITION (`--anchor-foo:`) anywhere on the line:
 // not anchored to line start, so `:root { --anchor-foo: ... }` on one line
-// is still caught — while a negative lookbehind excludes `var(--anchor-foo)`
+// is still caught, while a negative lookbehind excludes `var(--anchor-foo)`
 // USAGES, which are not definitions.
 const ANCHOR_DEF_RE = /(?<!var\()(--anchor-[a-z0-9-]+)\s*:/gi;
 
@@ -98,7 +98,7 @@ function checkFile(path, originalLines, codeLines, violations, anchorDefs) {
         const context = originalLines.slice(windowStart, idx + 1).join('\n');
         if (!context.includes(ANCHOR_EXCEPTION_MARKER)) {
           violations.push(
-            `${path}:${idx + 1}: literal white/black inside color-mix() — ${span.trim()}`,
+            `${path}:${idx + 1}: literal white/black inside color-mix(): ${span.trim()}`,
           );
         }
       }
@@ -106,7 +106,7 @@ function checkFile(path, originalLines, codeLines, violations, anchorDefs) {
 
     // Rule 2: transition: all
     if (TRANSITION_ALL_RE.test(line)) {
-      violations.push(`${path}:${idx + 1}: \`transition: all\` is banned — ${originalLines[idx].trim()}`);
+      violations.push(`${path}:${idx + 1}: \`transition: all\` is banned: ${originalLines[idx].trim()}`);
     }
 
     // Rule 3: anchor definition sites
@@ -156,12 +156,12 @@ function main() {
   console.log(`anchor definition sites: ${[...anchorDefs.entries()].map(([n, s]) => `${n} (${s.length})`).join(', ')}`);
 
   if (violations.length) {
-    console.error(`\ntoken gate FAILED — ${violations.length} violation(s):`);
+    console.error(`\ntoken gate FAILED (${violations.length} violation(s)):`);
     for (const v of violations) console.error(`  - ${v}`);
     process.exit(1);
   }
 
-  console.log('\ntoken gate PASSED — no literal white/black in color-mix(), no transition: all, one definition site per anchor.');
+  console.log('\ntoken gate PASSED: no literal white/black in color-mix(), no transition: all, one definition site per anchor.');
 }
 
 main();

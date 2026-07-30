@@ -13,7 +13,7 @@ const MEDIA_QUERY = '(prefers-color-scheme: dark)';
  *   - The chosen theme is applied as `data-theme` on <html>, matching the
  *     CSS remap selectors in styles/tokens.css.
  *
- * Signal-based, no NgZone dependency — safe under zoneless change detection.
+ * Signal-based, no NgZone dependency; safe under zoneless change detection.
  */
 @Injectable({ providedIn: 'root' })
 export class ThemeService {
@@ -67,7 +67,7 @@ export class ThemeService {
     try {
       localStorage.setItem(STORAGE_KEY, mode);
     } catch {
-      /* storage blocked (private browsing, sandboxed preview) — no fallback theater */
+      /* storage blocked (private browsing, sandboxed preview): no fallback theater */
     }
   }
 

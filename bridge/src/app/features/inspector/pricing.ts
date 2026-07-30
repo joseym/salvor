@@ -1,9 +1,9 @@
 /**
  * The price table and per-call pricing.
  *
- * In the Inspector we HAVE the run's log — every `ModelCallCompleted` carries its model id and
- * token usage — so cost is REAL here (unlike the Runs list, where the model ids are not returned
- * and cost degrades to an em-dash). The table is a maintained snapshot, not a live feed: a model
+ * In the Inspector we HAVE the run's log (every `ModelCallCompleted` carries its model id and
+ * token usage), so cost is REAL here (unlike the Runs list, where the model ids are not returned
+ * and cost degrades to a hyphen). The table is a maintained snapshot, not a live feed: a model
  * absent from it does not contribute a zero, it makes the whole figure INCOMPLETE, and the UI
  * degrades to tokens-only. That honesty is the point of the {@link CostTotal.complete} flag.
  */
@@ -22,7 +22,7 @@ export function priceOf(model: string): { in: number; out: number } | null {
  * Money, formatted by the platform rather than by string concatenation. Two-tier precision: a
  * per-call cost is fractions of a cent, so under a dollar it needs four places or it reads as
  * $0.00; at a dollar or more, cents are what anyone reconciles against. Magnitude, not
- * sign, picks the tier. Two cached formatters — constructing an `Intl.NumberFormat` per cell is
+ * sign, picks the tier. Two cached formatters: constructing an `Intl.NumberFormat` per cell is
  * the expensive part, and these render in tables.
  */
 const USD_4 = new Intl.NumberFormat('en-US', {
@@ -42,7 +42,7 @@ export function usd(n: number): string {
   return (Math.abs(n) < 1 ? USD_4 : USD_2).format(n);
 }
 
-/** `1234` → `1,234` — grouped integers, the platform's way. */
+/** `1234` → `1,234`: grouped integers, the platform's way. */
 export function int(n: number): string {
   return n.toLocaleString('en-US');
 }
@@ -73,7 +73,7 @@ export interface CompletedCall {
 
 /**
  * Fold a sequence of completed model calls into a {@link CostTotal}. A model absent from the price
- * table does NOT add zero — it flips `complete` to false and is recorded in `unpriced`, so the
+ * table does NOT add zero: it flips `complete` to false and is recorded in `unpriced`, so the
  * figure is reported as incomplete rather than silently wrong.
  */
 export function costOf(calls: readonly CompletedCall[]): CostTotal {

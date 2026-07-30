@@ -76,7 +76,7 @@ describe('wfTopo', () => {
   });
 });
 
-describe('layeredLayout — columns follow the edges, rightward', () => {
+describe('layeredLayout: columns follow the edges, rightward', () => {
   it('places every edge target in a strictly later column than its source', () => {
     const layout = layeredLayout(chain);
     expect(layout['b'].x).toBeGreaterThan(layout['a'].x);
@@ -91,7 +91,7 @@ describe('layeredLayout — columns follow the edges, rightward', () => {
   });
 });
 
-describe('layoutFor — hand-authored sidecar vs computed, and non-overlap', () => {
+describe('layoutFor: hand-authored sidecar vs computed, and non-overlap', () => {
   it('returns the ported sidecar for the refund-sweep draft, verbatim', () => {
     expect(layoutFor(REFUND_SWEEP_DRAFT)).toBe(LAYOUTS['draft:refund-sweep']);
     // the clean left-to-right spine the operator should see
@@ -108,7 +108,7 @@ describe('layoutFor — hand-authored sidecar vs computed, and non-overlap', () 
 
   it('THE OVERLAP DEFECT: the computed layout scrambles the draft, the sidecar fixes it', () => {
     // The draft's cycle (n_fan -> n_fetch) and dangling edge push n_fetch PAST the nodes it
-    // feeds under the computed longest-path layout — the scrambled drawing the operator reported.
+    // feeds under the computed longest-path layout: the scrambled drawing the operator reported.
     const computed = layeredLayout(REFUND_SWEEP_DRAFT);
     expect(computed['n_fetch'].x).toBeGreaterThan(computed['n_charge'].x);
     // the ported sidecar restores the honest spine: fetch sits BEFORE charge.
@@ -116,13 +116,13 @@ describe('layoutFor — hand-authored sidecar vs computed, and non-overlap', () 
     expect(sidecar['n_fetch'].x).toBeLessThan(sidecar['n_charge'].x);
   });
 
-  it('a laid-out graph never overlaps two DISTINCT nodes — draft and computed alike', () => {
+  it('a laid-out graph never overlaps two DISTINCT nodes: draft and computed alike', () => {
     expect(noDistinctBoxesOverlap(layoutFor(REFUND_SWEEP_DRAFT))).toBe(true);
     expect(noDistinctBoxesOverlap(layeredLayout(chain))).toBe(true);
   });
 });
 
-describe('wfPath — orthogonal elbows with one fine arrowhead', () => {
+describe('wfPath: orthogonal elbows with one fine arrowhead', () => {
   it('draws a same-rank edge as a straight rule (no cubic, no elbow)', () => {
     const path = wfPath({ x: 0, y: 0 }, { x: 300, y: 0 });
     expect(path.d).toMatch(/^M .* L [^Q]*$/);
@@ -144,7 +144,7 @@ describe('wfPath — orthogonal elbows with one fine arrowhead', () => {
   });
 });
 
-/** Every coordinate pair in a path `d`, in order, as consecutive segments — the drawn polyline
+/** Every coordinate pair in a path `d`, in order, as consecutive segments: the drawn polyline
  * (corner chords included). What the router draws is exactly what this walks for clearance. */
 function pathSegments(d: string): [readonly [number, number], readonly [number, number]][] {
   const nums = (d.match(/-?\d+(?:\.\d+)?/g) ?? []).map(Number);
@@ -175,7 +175,7 @@ function routeFouls(g: WfGraph, layout: WfLayout, pad: number): string[] {
   return fouls;
 }
 
-describe('wfRoutes — no trace runs through a card', () => {
+describe('wfRoutes: no trace runs through a card', () => {
   it('DEFECT 2: the direct elbow cut through cards; the router reroutes those and clears them', () => {
     const layout = layoutFor(REFUND_SWEEP_DRAFT);
     const boxes = REFUND_SWEEP_DRAFT.nodes.map((n) => ({ id: n.id, ...layout[n.id] }));
@@ -192,8 +192,8 @@ describe('wfRoutes — no trace runs through a card', () => {
 
   it('a computed layout with a column-skip AND a back-edge routes both clear of every card', () => {
     // a seeded server graph carries no sidecar, so it is drawn by layeredLayout. This shape has a
-    // forward edge that skips a column (a->d, past c) and a back-edge (d->b) — the two cases the
-    // router must reroute — so the assertion bites on a computed layout, not only the draft.
+    // forward edge that skips a column (a->d, past c) and a back-edge (d->b): the two cases the
+    // router must reroute, so the assertion bites on a computed layout, not only the draft.
     const seeded: WfGraph = {
       key: 'sha256:seed',
       hash: 'sha256:seed',
@@ -228,14 +228,14 @@ describe('wfRoutes — no trace runs through a card', () => {
 
 describe('a back-edge routes the designed below-band shape (DEFECT 2)', () => {
   const a: WfBox = { x: 1200, y: 30 }; // source, far right / top
-  const b: WfBox = { x: 300, y: 180 }; // target, to the LEFT — a back-edge
+  const b: WfBox = { x: 300, y: 180 }; // target, to the LEFT: a back-edge
   const channelY = 474;
 
   it('leaves the source LEFT port and never doubles back across its own card', () => {
     const pts = edgePoints(a, b, { channelY });
     // exits at the source's left edge (x = a.x), NOT the right port (a.x + NODE_W) the old elbow used
     expect(pts[0][0]).toBe(a.x);
-    // every x on the route is <= the source's left edge — the trace flows leftward toward the
+    // every x on the route is <= the source's left edge: the trace flows leftward toward the
     // target and never crosses back over the source (the old bracket's defect).
     for (const [x] of pts) expect(x).toBeLessThanOrEqual(a.x);
   });
@@ -283,13 +283,13 @@ describe('a back-edge routes the designed below-band shape (DEFECT 2)', () => {
   });
 });
 
-describe('DUP_STACK_OFFSET — the intentional stack nudge', () => {
+describe('DUP_STACK_OFFSET: the intentional stack nudge', () => {
   it('is larger than the prototype 16px, so the under-card title stays readable', () => {
     expect(DUP_STACK_OFFSET).toBeGreaterThan(16);
   });
 });
 
-describe('wfFit — the WF_MIN_K legibility floor', () => {
+describe('wfFit: the WF_MIN_K legibility floor', () => {
   it('centres the whole graph when it fits above the floor', () => {
     const layout = layeredLayout(chain);
     const view = wfFit(chain, layout, { width: 4000, height: 4000 });
@@ -311,7 +311,7 @@ describe('wfFit — the WF_MIN_K legibility floor', () => {
   });
 });
 
-describe('wfZoom — clamps and keeps the cursor point fixed', () => {
+describe('wfZoom: clamps and keeps the cursor point fixed', () => {
   it('keeps the point under the cursor stationary', () => {
     const start = { k: 1, x: 0, y: 0 };
     const cx = 400;

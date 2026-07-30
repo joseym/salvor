@@ -41,7 +41,7 @@ const NAV_LINKS: readonly NavLink[] = [
 ];
 
 const SUBS: Readonly<Record<ViewName, string>> = {
-  runs: 'Waiting-first — the runs that need you sort to the top.',
+  runs: 'Waiting-first: the runs that need you sort to the top.',
   inspector: 'One run, read from its log.',
   inbox: 'Runs waiting on a human decision.',
   workflows: 'Author graphs; project and fork real runs.',
@@ -80,7 +80,7 @@ export class App implements AfterViewInit {
 
   /**
    * The topbar honesty chip must not lie: "no graph engine" was true before the v0.4 server and
-   * is FALSE the moment the capability probe sees a fork API — so the clause is derived from the
+   * is FALSE the moment the capability probe sees a fork API, so the clause is derived from the
    * probe, never hardcoded. An unreachable or pre-v0.4 control plane degrades to fork:false and
    * keeps the old sentence honestly.
    */
@@ -97,21 +97,21 @@ export class App implements AfterViewInit {
 
   /**
    * The exact build answering this dashboard's requests, read straight off the same capability
-   * probe the honesty chip above reads (`GET /v1/capabilities`'s sibling `server` object) — so the
-   * About panel can never name a build the server has not itself confirmed. An em dash, never a
-   * fabricated version, before the probe resolves or against a server built before this field
-   * existed.
+   * probe the honesty chip above reads (`GET /v1/capabilities`'s sibling `server` object), so the
+   * About panel can never name a build the server has not itself confirmed. A placeholder dash,
+   * never a fabricated version, before the probe resolves or against a server built before this
+   * field existed.
    */
   readonly serverMetaText = computed(() => {
     const server = this.capabilityProbe.capabilities().server;
-    if (!server) return '—';
+    if (!server) return '-';
     return server.commit ? `server v${server.version} (${server.commit})` : `server v${server.version}`;
   });
 
   readonly navCollapsed = signal(false);
   readonly dotKeyOpen = signal(false);
 
-  /** The Inbox badge is the count of runs waiting on a human — the same fold the health strip and
+  /** The Inbox badge is the count of runs waiting on a human, the same fold the health strip and
    * chips read, so the number can never disagree. */
   readonly inboxCount = computed(
     () => this.runsService.runs().filter((r) => groupOf(r.status.state) === 'waiting').length,
@@ -122,7 +122,7 @@ export class App implements AfterViewInit {
     this.applyNav();
     // one probe at boot; the chip and every fork offer read the same signal
     void this.capabilityProbe.probe();
-    // the ⌘K palette offers stored graphs from anywhere, so the catalog SUMMARIES load at boot —
+    // the ⌘K palette offers stored graphs from anywhere, so the catalog SUMMARIES load at boot:
     // one cheap call; the canvas loads full documents only when genuinely entered
     void this.graphsService.refresh().catch(() => undefined);
   }
@@ -189,12 +189,12 @@ export class App implements AfterViewInit {
   readonly paletteQuery = signal('');
   readonly paletteActive = signal(0);
   /** Whether the palette popover is open. A closed palette holds no rows, no query and no active
-   * descendant — the list is genuinely empty, so nothing lingers behind the dismissed dialog. */
+   * descendant: the list is genuinely empty, so nothing lingers behind the dismissed dialog. */
   readonly paletteOpen = signal(false);
 
   /** The visible palette rows: the named views that match, then stored graphs, then live runs
-   * whose id starts with the query. An empty query offers every KIND of destination — views,
-   * graphs AND runs — so ⌘K then Enter is useful before a single key is typed, and no kind falls
+   * whose id starts with the query. An empty query offers every KIND of destination: views,
+   * graphs AND runs, so ⌘K then Enter is useful before a single key is typed, and no kind falls
    * off the end of a flat cap. Empty while the palette is closed. */
   readonly paletteItems = computed<readonly PaletteItem[]>(() => {
     if (!this.paletteOpen()) return [];
@@ -248,7 +248,7 @@ export class App implements AfterViewInit {
     (document.getElementById('palette') as HTMLElement & { hidePopover?: () => void })?.hidePopover?.();
   }
 
-  /** The popover's own toggle event is the authority on open/closed — it fires for the light-dismiss
+  /** The popover's own toggle event is the authority on open/closed; it fires for the light-dismiss
    * (Escape, click-away) that never routes through {@link closePalette}. Closing clears the query,
    * the active row and the open flag together, so the list empties and no state survives. */
   onPaletteToggle(e: Event): void {
@@ -263,7 +263,7 @@ export class App implements AfterViewInit {
     (document.getElementById('keys') as HTMLElement & { showPopover?: () => void })?.showPopover?.();
   }
 
-  /** Expand the First Receipts checklist — the reopen path from the "?" shortcuts popover and the
+  /** Expand the First Receipts checklist: the reopen path from the "?" shortcuts popover and the
    * About panel. Closes whichever popover invoked it first, then expands the dock. */
   openFirstReceipts(): void {
     (document.getElementById('keys') as HTMLElement & { hidePopover?: () => void })?.hidePopover?.();

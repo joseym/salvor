@@ -3,12 +3,12 @@ import type { SalvorEvent } from '@salvor-run/client';
 import init, { deriveState as wasmDeriveState, eventCount as wasmEventCount } from 'salvor-replay-wasm';
 
 /**
- * The scrubber's fold, on the REAL wasm module (`salvor-replay-wasm`) — the same pure
+ * The scrubber's fold, on the REAL wasm module (`salvor-replay-wasm`): the same pure
  * `derive_state` the runtime runs, compiled to wasm32. No TypeScript reimplementation: the whole
  * architectural payoff is same-fold-no-drift, so the Inspector folds prefixes through this and
  * never through a hand-written copy. Cost is the one thing computed in the UI (the price table is
- * a UI concern the fold does not carry); everything else — status, usage, next_seq, the dangling
- * call — is the wasm's answer verbatim.
+ * a UI concern the fold does not carry); everything else (status, usage, next_seq, the dangling
+ * call) is the wasm's answer verbatim.
  */
 
 /** Effect class of a tool call. Mirrors `salvor_replay::Effect`'s wire form. */
@@ -105,7 +105,7 @@ export class FoldService {
     return JSON.parse(wasmDeriveState(logJson, prefixLen)) as RunStateJson;
   }
 
-  /** The number of events in a wire log — for enumerating scrub positions. */
+  /** The number of events in a wire log, for enumerating scrub positions. */
   eventCount(logJson: string): number {
     if (!this.inited) throw new Error('FoldService.eventCount called before ready()');
     return wasmEventCount(logJson);

@@ -16,10 +16,10 @@
    direct use in plain CSS, exactly as the design spec does). Re-declaring
    those same names inside @theme would self-reference and break, so only
    COLOR is bridged into Tailwind's utility-generating namespace here,
-   under the distinct --color-* prefix — every value is a var() onto the
+   under the distinct --color-* prefix: every value is a var() onto the
    real token in tokens.css, never a duplicated hex. Typography, radius,
    and motion stay plain CSS custom properties, consumed the same way the
-   design spec consumes them (`font-family: var(--font-mono)`, etc.) —
+   design spec consumes them (`font-family: var(--font-mono)`, etc.):
    nothing here hand-rolls a second copy of any value.
    ============================================================ */
 @theme {
@@ -117,5 +117,5 @@ button {
 }
 
 /* square corners: everything in this app is square by default. The only
-   round elements are status dots and count/state pills — see
-   --radius-pill in tokens.css — which opt in explicitly per component. */
+   round elements are status dots and count/state pills (see
+   --radius-pill in tokens.css) which opt in explicitly per component. */

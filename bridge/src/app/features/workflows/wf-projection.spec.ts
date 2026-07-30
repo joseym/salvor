@@ -64,7 +64,7 @@ describe('projectNodeStates', () => {
   });
 });
 
-describe('edgeWalked — a branch inks only the arm the run took', () => {
+describe('edgeWalked: a branch inks only the arm the run took', () => {
   it('inks the taken branch arm and not the other', () => {
     const states = projectNodeStates(graph, projection);
     expect(edgeWalked('b', 'c', 'yes', true, states)).toBe(true);

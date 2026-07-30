@@ -24,7 +24,7 @@ function routeFetch(byPath: Record<string, unknown>): ReturnType<typeof vi.fn> {
   });
 }
 
-describe('Runs — agent column + grouping', () => {
+describe('Runs: agent column + grouping', () => {
   beforeEach(() => {
     TestBed.configureTestingModule({
       providers: [provideRouter(routes), provideSalvorApi({ baseUrl: 'http://test.local' })],
@@ -36,7 +36,7 @@ describe('Runs — agent column + grouping', () => {
     try {
       localStorage.clear();
     } catch {
-      /* jsdom localStorage may be unavailable in some CI sandboxes — not this test's concern */
+      /* jsdom localStorage may be unavailable in some CI sandboxes: not this test's concern */
     }
   });
 
@@ -138,12 +138,12 @@ describe('Runs — agent column + grouping', () => {
 
     expect(el.querySelector('.grpmode .gmode[aria-pressed="true"]')?.textContent?.trim()).toBe('Grouped');
     const headers = el.querySelectorAll('tr.grp-head');
-    expect(headers.length).toBe(2); // bld_1, bld_2 — plural, not degenerate
+    expect(headers.length).toBe(2); // bld_1, bld_2: plural, not degenerate
     const bld1 = [...headers].find((h) => h.textContent?.includes('bld_1'))!;
     expect(bld1.textContent).toContain('2 runs');
     expect(bld1.querySelector('.grp-kind')?.textContent?.trim()).toBe('build');
 
-    // flip to Flat — same 6-column row template, no group headers
+    // flip to Flat: same 6-column row template, no group headers
     const flatBtn = [...el.querySelectorAll('.grpmode .gmode')].find((b) => b.textContent?.trim() === 'Flat') as HTMLButtonElement;
     flatBtn.click();
     fixture.detectChanges();
@@ -179,7 +179,7 @@ describe('Runs — agent column + grouping', () => {
     expect(toggle.getAttribute('aria-expanded')).toBe('true');
     expect(toggle.getAttribute('title')).toMatch(/never hidden/);
 
-    // both of its runs stay in the DOM — never hidden, even without clicking anything
+    // both of its runs stay in the DOM: never hidden, even without clicking anything
     expect(el.querySelector('tr[data-id="w1"]')).toBeTruthy();
     expect(el.querySelector('tr[data-id="w2"]')).toBeTruthy();
 

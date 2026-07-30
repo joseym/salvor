@@ -45,7 +45,7 @@ export class ViewService {
   readonly runId: Signal<string | undefined> = this._runId.asReadonly();
   /** The filter query carried in `?q=` on the Runs view. */
   readonly query: Signal<string> = this._query.asReadonly();
-  /** A filter applied from OUTSIDE the Runs view (Spend's hour-bucket click today) — Runs reads
+  /** A filter applied from OUTSIDE the Runs view (Spend's hour-bucket click today): Runs reads
    * `query()` only once, at construction, since the Runs section is mounted for the app's whole
    * life and a later `?q=` change is otherwise never re-read. This is the one other channel: a
    * fresh object every call (the `nonce`), so clicking the same hour twice still re-applies it. */
@@ -63,7 +63,7 @@ export class ViewService {
     typeof location !== 'undefined' ? location.hash : null;
 
   /** False until the router's first NavigationEnd. A mounted-at-boot view (Runs) can call
-   * {@link setQuery} while this is still false — before the initial navigation has committed — when
+   * {@link setQuery} while this is still false (before the initial navigation has committed), when
    * the router's current route is still the default `/`, not the deep link being resolved. See
    * {@link setQuery} for how the reflection is aimed at the real path until this flips true. */
   private _navigationSettled = false;
@@ -74,7 +74,7 @@ export class ViewService {
       .pipe(filter((e): e is NavigationEnd => e instanceof NavigationEnd))
       .subscribe(() => {
         // The router has now committed its initial navigation, so a deep link's own URL is in
-        // place — only from here may the app reflect the Runs filter back into the URL. Reflecting
+        // place: only from here may the app reflect the Runs filter back into the URL. Reflecting
         // it any earlier (a mounted-at-boot Runs writing `?q=` before this fires) issues a
         // navigate([]) against the pre-navigation `/`, which clobbers the very deep link the router
         // is mid-way to resolving. See {@link setQuery}.
@@ -110,18 +110,18 @@ export class ViewService {
   }
 
   /** Open the Inbox landed on a run's action card. Navigates to `/inbox` (the single action
-   * surface) and flags which run's card to focus — the Runs side panel's signpost for a waiting run. */
+   * surface) and flags which run's card to focus: the Runs side panel's signpost for a waiting run. */
   openInboxCard(runId: string): void {
     this._inboxFocus.set({ runId, nonce: Date.now() });
     void this.router.navigate(['/inbox']);
   }
 
-  /** Open the canvas on a stored graph — the same `/workflows/<hashPrefix>` door a fork lands on. */
+  /** Open the canvas on a stored graph: the same `/workflows/<hashPrefix>` door a fork lands on. */
   openGraph(hash: string): void {
     void this.router.navigate(['/workflows', hash.replace(/^sha256:/, '').slice(0, 12)]);
   }
 
-  /** Navigate to Runs with `q` applied — the same filter mechanism Runs' own pills write, reached
+  /** Navigate to Runs with `q` applied: the same filter mechanism Runs' own pills write, reached
    * from another view (Spend's activity chart). */
   filterRuns(q: string): void {
     this._externalFilter.set({ q, nonce: Date.now() });
@@ -130,7 +130,7 @@ export class ViewService {
 
   /** Reflect the Runs filter into `?q=` without adding a history entry.
    *
-   * A mounted-at-boot Runs reflects its (empty) query at construction — BEFORE the router has
+   * A mounted-at-boot Runs reflects its (empty) query at construction, BEFORE the router has
    * committed its initial navigation, so `navigate([])` there resolves against the pre-navigation
    * default `/` and, with `replaceUrl`, overwrites the very deep link the router is still resolving
    * (`/inspector/<id>` cold-loads bounced to `/runs`). Until the first NavigationEnd, target the

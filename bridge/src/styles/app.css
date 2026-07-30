@@ -5,7 +5,7 @@
    selectorText (`.qfield:focus-within`, `.qinput:focus`, the a11y
    remediation group) and computed styles across the whole document.
    Angular component-scoped styles rewrite selectors with [_ngcontent-*]
-   attributes, which would break those exact-match reads — so the app's
+   attributes, which would break those exact-match reads, so the app's
    structural CSS lives here, in the global cascade, not scoped to a
    component.
 
@@ -78,7 +78,7 @@
 }
 .nav-btn:hover { background: var(--border-soft); color: var(--fg); }
 
-/* connection indicator (AppShell) — the pill is the only freshness authority */
+/* connection indicator (AppShell): the pill is the only freshness authority */
 .conn { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-xs); color: var(--fg-2); letter-spacing: 0.16px; }
 .conn-dot { width: 7px; height: 7px; border-radius: var(--radius-pill); background: var(--faint); flex: none; }
 .conn[data-state="idle"] .conn-dot { background: var(--faint); }
@@ -139,7 +139,7 @@
 #view-title:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 
 .caption { margin: var(--space-3) 0 0; font-size: var(--text-xs); color: var(--muted); max-width: 78ch; text-wrap: pretty; letter-spacing: 0.16px; line-height: 1.5; }
-/* a lone caption is its own one-point apparatus, labelled once — the eyebrow that groups several
+/* a lone caption is its own one-point apparatus, labelled once: the eyebrow that groups several
    points into one .notes block (inspector.css) has the same job here, for a single point. */
 .caption::before { content: 'Note'; display: block; margin-bottom: var(--space-1); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--faint); }
 .caption code, .dpanel code, .empty-state code {
@@ -152,7 +152,7 @@
    body size (the one place teaching outranks chrome), carries a dismiss, and folds down to a quiet
    "i" reopen affordance. A subtle amber tie on the word "yellow" links the sentence to the waiting
    rows it describes without shouting. */
-/* both carry their own display, so the UA's [hidden]{display:none} must be restored explicitly —
+/* both carry their own display, so the UA's [hidden]{display:none} must be restored explicitly:
    the same trap the Inspector body's `.inspector[hidden]` rule guards against. */
 .intro-strip[hidden], .intro-reopen[hidden] { display: none; }
 .intro-strip {
@@ -208,7 +208,7 @@
 .health-n:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
 .health-n.is-attn b { color: var(--amber-ink); }
 .health-n.is-fail b { color: var(--danger); }
-/* a zero count carries no alarm colour — the gestalt marker speaks for the census, not a soothing 0 */
+/* a zero count carries no alarm colour: the gestalt marker speaks for the census, not a soothing 0 */
 .health-n.is-zero b { color: var(--muted); }
 /* THE GESTALT MARKER: the strip's honest one-word state, in the status-pill vocabulary (amber wash
    for attention, success wash for all-clear). It must never say all-clear while attention is due. */
@@ -247,7 +247,7 @@
 .qword { font-size: 13px; color: var(--fg); padding: 2px 0; }
 .qinput { flex: 1 1 8ch; min-width: 8ch; border: 0; background: none; padding: 2px 0; outline: none; color: var(--fg); font-family: var(--font-mono); font-size: 13px; letter-spacing: 0; }
 .qinput::placeholder { color: var(--faint); }
-/* THE INPUT CARRIES NO FOCUS RING — the wrapper's :focus-within is the single indicator. This is
+/* THE INPUT CARRIES NO FOCUS RING: the wrapper's :focus-within is the single indicator. This is
    the ONE authoritative statement, suppressing outline AND box-shadow for both :focus and
    :focus-visible so no later group can decorate the caret box by winning on source order. */
 .qinput:focus, .qinput:focus-visible { outline: none; box-shadow: none; }
@@ -320,7 +320,7 @@
 .ledger tbody td { padding: var(--space-3); border-bottom: 1px solid var(--border-soft); vertical-align: middle; }
 .ledger tbody tr { cursor: pointer; }
 
-/* THE STATE RAIL — box-shadow on td:first-child, keyed to the fold's group */
+/* THE STATE RAIL: box-shadow on td:first-child, keyed to the fold's group */
 .ledger tbody tr > td:first-child { box-shadow: inset 3px 0 0 0 transparent; }
 .ledger tbody tr.g-progress > td:first-child { box-shadow: inset 3px 0 0 0 var(--border); }
 .ledger tbody tr.attention  > td:first-child { box-shadow: inset 3px 0 0 0 var(--warn); }
@@ -336,7 +336,7 @@
 .ledger td.empty { padding: var(--space-8) var(--space-3); text-align: center; color: var(--muted); font-size: var(--text-xs); }
 .ledger td.c-caret { padding: 0 0 0 var(--space-1); width: 32px; }
 
-/* SELECTION owns OUTLINE on tr — one shape around one box, no per-cell seam, the anchor blue */
+/* SELECTION owns OUTLINE on tr: one shape around one box, no per-cell seam, the anchor blue */
 .ledger tr.is-sel { outline: 1px solid var(--accent); outline-offset: -1px; }
 
 /* one load-bearing figure per row: EVENTS takes the ink, the timestamp recedes */
@@ -346,17 +346,17 @@
 /* ── AGENT COLUMN (item 15a). Replaces the old "Last event" cell. A readable name/label reads in
    the body face (identity, not wire data); an unregistered hash comes through the runref markup,
    already mono. Truncate long identities with an ellipsis rather than letting them push EVENTS
-   around — the column earns the row, it does not take it over. ── */
+   around: the column earns the row, it does not take it over. ── */
 .ledger td.c-agent { max-width: 168px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-id { font-size: var(--text-sm); color: var(--fg-2); letter-spacing: 0.08px; }
 .agent-id.is-name  { color: var(--fg); }                 /* registry-resolved: the most trusted identity */
 .agent-id.is-label { font-family: var(--font-mono); font-size: 12px; color: var(--fg-2); }  /* caller string */
 
 /* ── GROUP HEADERS (item 15b). A ruled band spanning the row. `g-waiting`/`g-failed` are the
-   header's OWN rail classes — deliberately NOT the run row's `attention`/`is-failed` (several
+   header's OWN rail classes: deliberately NOT the run row's `attention`/`is-failed` (several
    existing specs scope those to mean "a waiting/failed RUN row", and a header row carries no
    `data-id` at all, so reusing them would silently break that query). Same amber/red rail meaning,
-   disjoint vocabulary. No card, no shadow — ledger identity: a hairline above, the group's ink
+   disjoint vocabulary. No card, no shadow; ledger identity: a hairline above, the group's ink
    below. ── */
 .ledger tr.grp-head > td { padding: 0; border-top: 1px solid var(--rule-firm); background: var(--wash); }
 .ledger tr.grp-head:first-child > td { border-top: 0; }
@@ -400,7 +400,7 @@
 .iact:hover { border-color: var(--edge-strong); color: var(--fg); }
 .iact svg { width: 13px; height: 13px; }
 .iact.panel-open[aria-pressed="true"] { color: var(--accent); }
-/* NOT .expand — a docked-panel icon that swung 90° would re-tell the "expand" lie */
+/* NOT .expand: a docked-panel icon that swung 90° would re-tell the "expand" lie */
 .iact.panel-open svg { transform: none; transition: none; }
 
 /* ── status pills ──────────────────────────────────────────── */
@@ -431,7 +431,7 @@
 .status.s-completed::before { content: "✓"; color: var(--success); }
 .status.s-failed { color: var(--danger); background: color-mix(in oklab, var(--danger), var(--bg) 90%); border-color: color-mix(in oklab, var(--danger), var(--bg) 72%); }
 .status.s-failed::before { content: "✕"; color: var(--danger); }
-/* ABANDONED — an operator-retired terminal. It is TERMINAL, never attention, so it takes the muted
+/* ABANDONED: an operator-retired terminal. It is TERMINAL, never attention, so it takes the muted
    ink of its group, never the danger red of a failure: abandonment is a deliberate retirement, not
    an error (state-not-status ink). A hollow-slash glyph sets it apart from completed's ✓ and
    failed's ✕ without borrowing either's colour. */
@@ -439,9 +439,9 @@
 .status.s-abandoned::before { content: "⊘"; width: auto; height: auto; border-radius: 0; background: none; font-size: 11px; font-weight: 700; line-height: 1; color: var(--muted); }
 .status.s-awaiting_model::before, .status.s-awaiting_tool::before { background: transparent; box-shadow: inset 0 0 0 2px var(--fg-2); }
 .status.s-not_started::before { background: transparent; box-shadow: inset 0 0 0 1px var(--faint); }
-/* STALLED — a `running` run with no driver attached, gone stale (a DERIVED state; the server never
+/* STALLED: a `running` run with no driver attached, gone stale (a DERIVED state; the server never
    sends it, the dashboard folds it from driver + last_event). It sits in the WAITING group, so it
-   inherits the amber attention text/background above — never danger red, which is reserved for real
+   inherits the amber attention text/background above, never danger red, which is reserved for real
    errors. The DISTINCTION from the other waiting states (suspended/budget/reconcile, each a solid
    amber dot for a fresh human decision) is a HOLLOW amber ring: this run is not asking for a
    decision, it has quietly stopped moving and someone must restart or retire it. */
@@ -513,7 +513,7 @@
 .palette-opt-label { font-family: var(--font-mono); font-size: 13px; color: var(--fg); }
 .palette-opt-hint { font-size: 11px; color: var(--faint); text-transform: lowercase; white-space: nowrap; }
 .qac-kind { margin-left: auto; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); border: 1px solid var(--border-soft); border-radius: var(--radius-pill); padding: 0 6px; flex: none; }
-/* The highlight is aria-activedescendant's visual twin — the input keeps DOM focus, so the active
+/* The highlight is aria-activedescendant's visual twin: the input keeps DOM focus, so the active
    row cannot rely on :focus and is driven from [aria-selected] / .is-active instead. */
 .palette-opt.is-active, .palette-opt[aria-selected="true"] { background: var(--wash); }
 .palette-opt.is-active .palette-opt-label { color: var(--accent); }
@@ -568,7 +568,7 @@
   .cpanel-tab[data-drawer] { position: fixed; right: 0; top: 50%; translate: 0 -50%; z-index: 59; writing-mode: vertical-rl; width: auto; margin: 0; padding: var(--space-3) 5px; border-radius: var(--radius-sm) 0 0 var(--radius-sm); box-shadow: var(--elev-raised); }
 }
 
-/* ── FOCUS: a11y remediation group. .qinput is DELIBERATELY EXCLUDED — its
+/* ── FOCUS: a11y remediation group. .qinput is DELIBERATELY EXCLUDED: its
    wrapper's :focus-within is the single ring (see .qinput:focus above). ─── */
 .f-field input:focus-visible, .f-field select:focus-visible, .f-field textarea:focus-visible,
 .filters select:focus-visible {

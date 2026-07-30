@@ -30,14 +30,14 @@ describe('App', () => {
     expect(compiled.querySelector('#app-nav')).toBeTruthy();
     expect(compiled.textContent).toContain('Salvor');
     expect(compiled.textContent).toContain('bridge');
-    // All five views are nav destinations — Workflows joined when the graph engine shipped.
+    // All five views are nav destinations: Workflows joined when the graph engine shipped.
     expect(compiled.querySelectorAll('.nav-link').length).toBe(5);
     const labels = Array.from(compiled.querySelectorAll('.nav-link .nav-text')).map((n) => n.textContent?.trim());
     expect(labels).toEqual(['Runs', 'Inspector', 'Inbox', 'Workflows', 'Spend']);
     expect(compiled.querySelector('#theme-toggle')).toBeTruthy();
   });
 
-  describe('the About panel build colophon (#wf-server-note) — reads the same capability probe as the honesty chip', () => {
+  describe('the About panel build colophon (#wf-server-note): reads the same capability probe as the honesty chip', () => {
     let fetchMock: ReturnType<typeof vi.fn>;
 
     beforeEach(() => {
@@ -55,7 +55,7 @@ describe('App', () => {
       fixture.detectChanges();
       await fixture.whenStable();
       const note = fixture.nativeElement.querySelector('#wf-server-version') as HTMLElement;
-      expect(note.textContent?.trim()).toBe('—');
+      expect(note.textContent?.trim()).toBe('-');
     });
 
     it('renders the real version and commit once the probe resolves', async () => {

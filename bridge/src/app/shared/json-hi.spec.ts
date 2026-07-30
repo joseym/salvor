@@ -52,7 +52,7 @@ describe('jsonHi tokenizer', () => {
     expect(html).toContain('<span class="j-null">null</span>');
   });
 
-  it('leaves structural punctuation bare — only j-* spans exist in the render', () => {
+  it('leaves structural punctuation bare: only j-* spans exist in the render', () => {
     const audit = render(pretty({ a: [1, 2], b: { c: 'x' } }));
     expect(audit.foreign).toHaveLength(0);
     expect(audit.jSpans).toBeGreaterThan(0);

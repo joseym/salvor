@@ -28,14 +28,14 @@ export interface ForkRequest {
 /**
  * A graph run's server-side surface, past `POST /v1/graph-runs`: the per-node projection the
  * canvas will render (`GET /v1/runs/{id}/graph`), and the fork verbs (`POST /v1/runs/{id}/fork`,
- * `GET /v1/runs/{id}/forks`). Every OTHER run surface — status, events, resume — is already
+ * `GET /v1/runs/{id}/forks`). Every OTHER run surface (status, events, resume) is already
  * served by the ordinary run services (`RunDetailService`, `RunEventsService`) unchanged, because
  * a graph run is an ordinary run with a richer log (`API.md`, "Graphs and graph runs": "all work
  * on it through their existing code"). This service exists only for what those cannot answer: the
  * graph-shaped facts.
  *
  * {@link fork} surfaces the `409 write_replay_hazard` refusal as a TYPED {@link ForkOutcome}
- * (`kind: 'hazard'`), never a thrown string — a hazard-review dialog (not yet built) needs
+ * (`kind: 'hazard'`), never a thrown string: a hazard-review dialog (not yet built) needs
  * `details.writes` verbatim, not a caught exception's message. Every OTHER fork refusal
  * (`invalid_fork_node`, `origin_needs_reconciliation`, `not_a_graph_run`, `unknown_graph`) is not
  * given that treatment; it throws `SalvorApiError` uncaught, exactly this API layer's existing

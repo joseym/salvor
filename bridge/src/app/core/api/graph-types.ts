@@ -9,7 +9,7 @@ import type { Graph } from '@salvor-run/client';
  * Absent-vs-null throughout, matching the server's own documented contract: a key the server
  * genuinely omits decodes to `undefined` (never a fabricated default), and the one field the
  * server sends as an EXPLICIT `null` (`ForkHazardWrite.idempotencyKey`, when a write recorded no
- * idempotency key) decodes to `null`, not `undefined` — the two are different facts on the wire
+ * idempotency key) decodes to `null`, not `undefined`: the two are different facts on the wire
  * and stay different here.
  */
 
@@ -78,7 +78,7 @@ export interface GraphValidationError {
   readonly edge?: { readonly from: string; readonly to: string };
   readonly missing?: string;
   /** The server sends this as an explicit `null` when it has no suggestion to offer (see the
-   * module doc's absent-vs-null note) — never simply omitted once a `suggestion` key is relevant. */
+   * module doc's absent-vs-null note), never simply omitted once a `suggestion` key is relevant. */
   readonly suggestion?: string | null;
   readonly raw: Record<string, unknown>;
 }
@@ -230,7 +230,7 @@ export function parseGraphProjection(obj: Record<string, unknown>): GraphProject
 // -- POST /v1/runs/{id}/fork ------------------------------------------------------------------------
 
 /** One recorded write the re-walked segment would re-execute. `idempotencyKey` is an EXPLICIT
- * `null` on the wire when the write recorded none — see the module doc's absent-vs-null note. */
+ * `null` on the wire when the write recorded none: see the module doc's absent-vs-null note. */
 export interface ForkHazardWrite {
   readonly seq: number;
   readonly tool: string;
@@ -337,7 +337,7 @@ function parseForkListEntry(obj: Record<string, unknown>): ForkListEntry {
   };
 }
 
-/** The forks of a run, as the server's own DERIVED index — `derived: true` always, per `API.md`:
+/** The forks of a run, as the server's own DERIVED index: `derived: true` always, per `API.md`:
  * "It is not a fact the origin recorded." */
 export interface ForksIndex {
   readonly run: string;
@@ -359,7 +359,7 @@ export function parseForksIndex(obj: Record<string, unknown>): ForksIndex {
 
 /** The exact build serving the response (`API.md`, "GET /v1/capabilities"): `version` is the
  * server's own `CARGO_PKG_VERSION`, always present; `commit` is the short git hash the build was
- * compiled from, present only when that build had a `.git` history to read — absent, never a
+ * compiled from, present only when that build had a `.git` history to read; absent, never a
  * fabricated placeholder, for a source-tarball or no-git build. */
 export interface ServerBuildInfo {
   readonly version: string;

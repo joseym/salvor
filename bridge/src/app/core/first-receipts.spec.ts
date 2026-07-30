@@ -24,7 +24,7 @@ describe('first-receipts predicates', () => {
 
   it('scrubbedEarlier is true only when the playhead sits before the end of a non-empty log', () => {
     expect(scrubbedEarlier(3, 8)).toBe(true);
-    expect(scrubbedEarlier(8, 8)).toBe(false); // at the head — following live, not scrubbed back
+    expect(scrubbedEarlier(8, 8)).toBe(false); // at the head, following live, not scrubbed back
     expect(scrubbedEarlier(0, 0)).toBe(false); // empty log
   });
 
@@ -88,7 +88,7 @@ describe('first-receipts persistence', () => {
     expect(state.steps['bogus']).toBeUndefined();
   });
 
-  it('READ FAILURE defaults to SHOWN/teaching — an expanded dock, never suppression', () => {
+  it('READ FAILURE defaults to SHOWN/teaching: an expanded dock, never suppression', () => {
     vi.stubGlobal('localStorage', {
       getItem: () => {
         throw new Error('storage unavailable');
@@ -106,7 +106,7 @@ describe('first-receipts persistence', () => {
   });
 });
 
-describe('FirstReceiptsService — ticks', () => {
+describe('FirstReceiptsService: ticks', () => {
   beforeEach(() => {
     stubStorage();
     TestBed.configureTestingModule({
@@ -115,13 +115,13 @@ describe('FirstReceiptsService — ticks', () => {
   });
   afterEach(() => vi.unstubAllGlobals());
 
-  it('tick is first-write-wins — a second trigger never rewrites the recorded time (silent pre-ticking)', () => {
+  it('tick is first-write-wins: a second trigger never rewrites the recorded time (silent pre-ticking)', () => {
     const svc = TestBed.inject(FirstReceiptsService);
     svc.tick('inbox', 'you resumed run abcd');
     const first = svc.receiptOf('inbox');
     expect(first?.detail).toBe('you resumed run abcd');
     svc.tick('inbox', 'you resumed run abcd AGAIN');
-    expect(svc.receiptOf('inbox')).toEqual(first); // unchanged — the first occurrence is the truth
+    expect(svc.receiptOf('inbox')).toEqual(first); // unchanged: the first occurrence is the truth
     expect(svc.count()).toBe(1);
   });
 

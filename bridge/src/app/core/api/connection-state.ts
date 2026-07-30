@@ -4,13 +4,13 @@ import { type Signal, signal } from '@angular/core';
  * The connection pill's state, and its ONLY authority.
  *
  * Ported invariant (design-audit-2026-07-16.md, "Ended/Live/Snapshot pill driven by real
- * transport state" — mislabeling was already a fixed regression once). Two transport
+ * transport state": mislabeling was already a fixed regression once). Two transport
  * surfaces exist in the API layer, each honest about what it actually is:
  *
  *   - The SSE event stream (`run-events.ts`) is either not yet subscribed (`Snapshot`,
  *     a static REST read), actively receiving frames over an open connection (`Live`),
  *     or has reached its terminal `end` frame (`Ended`).
- *   - The client-driven open-by-id fallback (`client-run.ts`) has NO server push at all —
+ *   - The client-driven open-by-id fallback (`client-run.ts`) has NO server push at all:
  *     it can only poll `log(fromSeq)` on an interval, so it is never honestly `Live`;
  *     while it is actively polling that is labeled `Polling`, not faked as `Live`.
  *
@@ -41,7 +41,7 @@ function snapshotState(asOf?: string): ConnectionState {
 
 /**
  * The transition surface for one connection state machine instance. This interface is
- * deliberately never exposed on a public class field — see {@link createConnectionStateMachine}.
+ * deliberately never exposed on a public class field: see {@link createConnectionStateMachine}.
  * Every method name is a specific, evidenced transition (not a generic setter), and every
  * call site of a `ConnectionDriver` in this codebase is a line that just observed real
  * transport activity (a frame arrived, the terminal frame closed the stream, a poll
@@ -62,7 +62,7 @@ export interface ConnectionDriver {
  * Construct one connection state machine: a readonly {@link Signal} for every reader, and a
  * {@link ConnectionDriver} held ONLY by the one channel that owns this instance
  * (`RunEventsChannel` or `ClientRunChannel`). There is no public setter anywhere in this
- * module — `state` is typed `Signal<ConnectionState>`, which has no `.set`/`.update` at
+ * module: `state` is typed `Signal<ConnectionState>`, which has no `.set`/`.update` at
  * the type level, and `driver` is never re-exported by the owning channel. The two are
  * returned together, once, at construction, specifically so nothing outside the owning
  * channel can ever hold both halves.

@@ -1,6 +1,6 @@
 /**
- * THE ONE JSON HIGHLIGHTER. Every pretty-printed JSON site in the app — the Inspector timeline
- * payloads, the Inbox reconciliation evidence, the Spend disclosure blocks — routes through this,
+ * THE ONE JSON HIGHLIGHTER. Every pretty-printed JSON site in the app (the Inspector timeline
+ * payloads, the Inbox reconciliation evidence, the Spend disclosure blocks) routes through this,
  * so highlighting is everywhere or nowhere.
  *
  * It is a string→string function: it stringifies a value at a given indent and wraps each JSON
@@ -12,7 +12,7 @@
  *      JSON's structural punctuation (`{}[],:` and whitespace), none of which is HTML-special.
  *   2. It NEVER changes text content. Tokens are esc'd (which the browser decodes back on read),
  *      so the rendered block's `textContent` is byte-identical to `JSON.stringify(value, null,
- *      indent)` — select-and-copy yields the same JSON as before highlighting existed.
+ *      indent)`: select-and-copy yields the same JSON as before highlighting existed.
  *
  * The output is HTML: bind it with `[innerHTML]` into a dedicated pre/dd, never concatenate it
  * into user-facing prose. Angular's `[innerHTML]` sanitizer is a second, independent layer on top
@@ -28,7 +28,7 @@ export function esc(s: unknown): string {
 }
 
 /** Matches a JSON string (a key when immediately followed by `:`), a number, or a `true`/`false`/
- * `null` literal — everything else (structural punctuation, whitespace) passes through untouched. */
+ * `null` literal; everything else (structural punctuation, whitespace) passes through untouched. */
 const JSON_TOKEN_RE =
   /"(?:\\.|[^"\\])*"(\s*:)?|\b(?:true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
 
@@ -39,7 +39,7 @@ const JSON_TOKEN_RE =
  */
 export function jsonHi(value: unknown, indent?: number): string {
   const json = JSON.stringify(value, null, indent);
-  if (json === undefined) return ''; // value was undefined — nothing to show
+  if (json === undefined) return ''; // value was undefined: nothing to show
   return json.replace(JSON_TOKEN_RE, (m: string, keyColon: string | undefined) => {
     let cls: string;
     if (m[0] === '"') cls = keyColon !== undefined ? 'j-key' : 'j-str';

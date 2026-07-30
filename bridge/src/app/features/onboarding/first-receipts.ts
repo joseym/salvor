@@ -14,10 +14,10 @@ import { ForkIntentService } from '../../core/fork-intent';
 import { ViewService } from '../../core/view';
 
 const LEDE =
-  'Salvor keeps a running record. Each time something happens in a run — one job an agent ' +
-  'carried out — Salvor writes a line for it. That line is a receipt: a fact added to the run’s ' +
+  'Salvor keeps a running record. Each time something happens in a run (one job an agent ' +
+  'carried out), Salvor writes a line for it. That line is a receipt: a fact added to the run’s ' +
   'log, never edited later, only added to. That is the whole idea, so the five steps below are ' +
-  'not a rehearsal — each one ticks the moment you do the real thing, logged exactly like ' +
+  'not a rehearsal: each one ticks the moment you do the real thing, logged exactly like ' +
   'everything else.';
 
 /**
@@ -26,7 +26,7 @@ const LEDE =
  * operator's OWN firsts, each ticked step rendered as a receipt line in the app's receipt voice.
  *
  * COACH-MARK. The front-most unticked step earns a ring on its REAL target element plus a
- * `popover=auto` callout beside it — NO scrim (the fork hazard review is the app's one modal),
+ * `popover=auto` callout beside it: NO scrim (the fork hazard review is the app's one modal),
  * native light-dismiss, Escape closes, no focus trap, and it never gates the page. It shows only
  * while the panel is expanded, so a collapsed dock adds nothing over the rest of the app. When a
  * fork is requested the fork step ticks and the callout light-dismisses with it, giving the fork
@@ -46,7 +46,7 @@ export class FirstReceipts {
 
   @ViewChild('callout') private callout?: ElementRef<HTMLElement>;
 
-  /** The active step's target rect, in viewport (fixed) coordinates — null when there is no active
+  /** The active step's target rect, in viewport (fixed) coordinates: null when there is no active
    * step, the panel is collapsed, or the target is not currently painted. */
   private readonly rect = signal<{ top: number; left: number; width: number; height: number } | null>(null);
 
@@ -164,7 +164,7 @@ export class FirstReceipts {
       if (show && !open) el.showPopover?.();
       else if (!show && open) el.hidePopover?.();
     } catch {
-      /* the popover was mid-transition to the state we asked for — nothing to do */
+      /* the popover was mid-transition to the state we asked for: nothing to do */
     }
   }
 

@@ -5,7 +5,7 @@ import type { WfGraph } from './wf-model';
  * PROJECTION → PER-NODE STATE. In Run mode the canvas inks the route a run ACTUALLY took, folded
  * from the server's projection (`GET /v1/runs/{id}/graph`), never a designer's "happy path". The
  * projection lists only nodes the walk touched, each `entered | exited | skipped`, plus the
- * `current_node` (entered and not yet exited). A node the walk has not reached is simply absent —
+ * `current_node` (entered and not yet exited). A node the walk has not reached is simply absent,
  * and "absent" is NOT "skipped": the road not taken is information the brief refuses to drop.
  *
  * The canvas vocabulary the prototype used, derived here from the typed projection:
@@ -34,7 +34,7 @@ export interface WfFoldProgress {
   readonly converged?: { readonly winner_index: number; readonly reason: string };
 }
 
-/** Was this node genuinely entered — reached and possibly moved on from — as opposed to skipped or
+/** Was this node genuinely entered, reached and possibly moved on from, as opposed to skipped or
  * never reached? The predicate an edge's ink and a branch's ghosted arm both turn on. */
 export function reachedState(state: WfNodeRunState | undefined): boolean {
   return state === 'reached' || state === 'exited' || state === 'current';
@@ -51,7 +51,7 @@ function stateOf(p: NodeProgress, currentNode: string | undefined): WfNodeRunSta
  * Map a run's projection onto every node of the graph it ran. Nodes present in the projection carry
  * their recorded state; every other node is `not-reached` (honest: the walk has not been there).
  * Returns a map keyed by node id. Guards graph mismatch by the caller (a projection whose
- * `graphHash` differs from the shown graph should not be inked) — see {@link projectionUsable}.
+ * `graphHash` differs from the shown graph should not be inked): see {@link projectionUsable}.
  */
 export function projectNodeStates(
   g: WfGraph,
@@ -80,7 +80,7 @@ export function projectNodeStates(
 /**
  * An edge is inked as WALKED only when the run genuinely took it: for an ordinary edge, both ends
  * were reached; for a branch's outgoing edge, its label must equal the recorded case. An undecided
- * branch inks neither arm — nothing is decided, and drawing a guess is the lie this refuses.
+ * branch inks neither arm: nothing is decided, and drawing a guess is the lie this refuses.
  */
 export function edgeWalked(
   from: string,
@@ -98,7 +98,7 @@ export function edgeWalked(
   return reached(t.state);
 }
 
-/** Whether a projection describes the graph currently shown — its `graphHash` must match. A fork's
+/** Whether a projection describes the graph currently shown: its `graphHash` must match. A fork's
  * projection names its own graph in the same field, so this works for forks unchanged. */
 export function projectionUsable(g: WfGraph, projection: GraphProjection | undefined): boolean {
   return !!projection && !!g.hash && projection.graphHash === g.hash;

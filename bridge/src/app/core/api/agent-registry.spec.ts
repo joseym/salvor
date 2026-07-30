@@ -71,7 +71,7 @@ describe('AgentRegistryService', () => {
     expect(service.names().has('sha256:aaa111')).toBe(false);
   });
 
-  it('an unregistered hash (404) fails silently — no name, no thrown error', async () => {
+  it('an unregistered hash (404) fails silently: no name, no thrown error', async () => {
     fetchMock.mockResolvedValueOnce(
       new Response(JSON.stringify({ error: { code: 'unknown_agent', message: 'no agent registered' } }), {
         status: 404,

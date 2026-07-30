@@ -2,14 +2,14 @@
    BRIDGE INBOX
 
    Scope discipline: `app.css` already carries `.btn`/`.btn.ghost` (plain,
-   unfilled — no feature has yet spent the filled-accent treatment the
+   unfilled: no feature has yet spent the filled-accent treatment the
    design intends for a view's ONE primary action), `.mechanism`/`.caption`/
    `.empty-state` (the Inspector's empty state already uses the first two;
    redefining them here would silently change that screen, which this
    file must not touch). So this file reuses those AS SHIPPED rather than
    overriding them, and gives the Inbox's OWN primary actions (Resume run /
    Raise limit and resume / Record outcome) the filled-accent treatment
-   scoped to `.acard .actions .btn`, never the bare `.btn` — nothing outside
+   scoped to `.acard .actions .btn`, never the bare `.btn`: nothing outside
    `#inbox-cards` is touched by this file. Same discipline as `app.css`:
    every value routes through the tokens in tokens.css.
    ============================================================ */
@@ -34,9 +34,9 @@
   background: var(--surface);
 }
 .acard.committed { border-color: var(--edge-strong); border-left-color: var(--success); background: var(--surface); }
-/* STALLED card — attention family (the amber left rule the base .acard already carries), marked
+/* STALLED card: attention family (the amber left rule the base .acard already carries), marked
    DISTINCT by a dashed left rule: this run is not asking for a decision, it has quietly stopped
-   moving. Never danger red — that is reserved for real errors. */
+   moving. Never danger red: that is reserved for real errors. */
 .acard.is-stalled { border-left-style: dashed; }
 .acard.committed .evidence dd { color: var(--fg); }
 .acard-head { display: flex; align-items: baseline; gap: var(--space-3); flex-wrap: wrap; margin-bottom: var(--space-1); }
@@ -133,7 +133,7 @@
 .offramp-why { margin: var(--space-2) 0 0; font-size: 12px; color: var(--muted); text-wrap: pretty; letter-spacing: 0.08px; }
 
 /* ── GATE DECISION EVIDENCE: the run's recent substance carried to the decision point. Reads as
-   evidence, not a data dump — a bounded excerpt each, an honest provenance line, expandable. ── */
+   evidence, not a data dump: a bounded excerpt each, an honest provenance line, expandable. ── */
 .gate-evidence {
   margin: 0 0 var(--space-4); padding: var(--space-3) var(--space-4);
   border: 1px solid var(--border-soft); border-left: 3px solid var(--edge-strong);
@@ -166,7 +166,7 @@ summary.gate-ev-body:focus-visible { outline: 2px solid var(--accent); outline-o
 .confirm { display: flex; align-items: flex-start; gap: var(--space-2); margin-top: var(--space-4); font-size: 13px; color: var(--fg-2); letter-spacing: 0.08px; }
 .confirm input { accent-color: var(--accent); margin-top: 2px; }
 
-/* a resolve writes durable, immutable history — not a casual primary */
+/* a resolve writes durable, immutable history: not a casual primary */
 .btn.serious { background: var(--surface); color: var(--fg); border-color: var(--fg); box-shadow: none; }
 .btn.serious:hover:not(:disabled) { background: var(--border-soft); }
 
@@ -174,20 +174,20 @@ summary.gate-ev-body:focus-visible { outline: 2px solid var(--accent); outline-o
    The SECONDARY trigger (on the reconcile / budget / suspension cards) is deliberately subordinate
    to that card's own primary unblock: quieter than a plain .btn.serious, a muted hairline the eye
    reaches only after the primary action. Those cards' own primary lives in `.actions`, so the
-   secondary trigger sits apart from that row, below it, as a separate, lesser line — never sharing
+   secondary trigger sits apart from that row, below it, as a separate, lesser line, never sharing
    the row with the real primary.
-   On the Stalled card, abandon IS the primary — there is no other in-app action to be subordinate
-   to — so it takes the full .btn.serious weight AND joins `.actions` directly, first, exactly where
+   On the Stalled card, abandon IS the primary (there is no other in-app action to be subordinate
+   to), so it takes the full .btn.serious weight AND joins `.actions` directly, first, exactly where
    every other card's primary sits. `display: contents` unwraps the component host so the trigger
    button AND the confirm/receipt slot below it (see the STABLE SLOT comment further down) are real
    flex items of that row rather than a nested box fighting its layout.
 
-   DESTRUCTIVE (owner call, 2026-07-20 — see tokens.css's --anchor-danger comment, the invariant
+   DESTRUCTIVE (owner call, 2026-07-20; see tokens.css's --anchor-danger comment, the invariant
    this extends): abandon is the one deliberately destructive action in this app, so every render
-   site of it reads danger at a glance — both trigger weights below, and the confirm step's final
+   site of it reads danger at a glance: both trigger weights below, and the confirm step's final
    button further down. Hooked on the component's own `data-abandon`/`data-abandon-submit`
-   attributes rather than a new class, so plain `.btn.serious` — also worn by reconcile's ordinary,
-   non-destructive "Record outcome" — is untouched. */
+   attributes rather than a new class, so plain `.btn.serious` (also worn by reconcile's ordinary,
+   non-destructive "Record outcome") is untouched. */
 .btn.serious[data-abandon] { color: var(--danger); border-color: var(--danger); }
 .btn.serious[data-abandon]:hover:not(:disabled) { background: var(--red-wash); }
 /* the subordinate trigger: a quieter danger tint (still AA-passing as a component boundary, still
@@ -196,11 +196,11 @@ summary.gate-ev-body:focus-visible { outline: 2px solid var(--accent); outline-o
 .btn.serious[data-abandon].abandon-secondary:hover:not(:disabled) { border-color: var(--danger); background: var(--red-wash); }
 /* the HELD look, once the slot below is open (or the receipt landed): still the same red trigger,
    in the same place, never disabled (a disabled `.btn` would fall into the generic dashed/faint
-   rule further down and lose the destructive red entirely) — just quietly receded so the eye reads
+   rule further down and lose the destructive red entirely), just quietly receded so the eye reads
    "already engaged" without the geometry, weight, or copy moving at all. */
 .btn.serious[data-abandon].is-held { opacity: 0.72; }
 
-/* the confirm step's final button, behind the "I understand" gate — the point of no return, so it
+/* the confirm step's final button, behind the "I understand" gate: the point of no return, so it
    takes the full filled-danger weight (the same shape as the filled-accent primary further below,
    danger anchor instead of accent). */
 .btn.serious[data-abandon-submit] {
@@ -212,13 +212,13 @@ summary.gate-ev-body:focus-visible { outline: 2px solid var(--accent); outline-o
 /* padding-top, not margin-top: the 0fr grid-rows collapse below relies on `.abandon-slot`'s child
    having NO margin of its own (a margin sits outside the item's box and survives a 0-height row
    track, which would leave a visible sliver even while "closed"; padding is inside the box and
-   collapses along with it — see the comment on `.abandon-slot` below). */
+   collapses along with it: see the comment on `.abandon-slot` below). */
 .acard .abandon-confirm { padding-top: var(--space-4); }
 .acard .abandon-receipt { padding-top: var(--space-3); }
 .acard .abandon-receipt .reason { margin-bottom: var(--space-2); }
 
 /* Always unwraps the host, in every context this component renders in (the Stalled card's `.actions`
-   row AND every other card's standalone placement below its own `.actions`) — so the trigger and
+   row AND every other card's standalone placement below its own `.actions`), so the trigger and
    the slot below are real flex/block children of whatever actually contains them, never a nested
    box fighting that parent's layout. */
 bridge-abandon-action { display: contents; }
@@ -226,22 +226,22 @@ bridge-abandon-action { display: contents; }
 /* THE STABLE SLOT (owner report, 2026-07-21: "when I click abandon things shift"). Before this, the
    confirm/receipt block WAS the component's entire conditional root: opening it removed the trigger
    from `.actions` outright and dropped a `flex: 1 1 100%` item in its place, so "Open in inspector"
-   and "show API" — the row's other two items — lost their neighbor, slid left to fill the gap, then
+   and "show API", the row's other two items, lost their neighbor, slid left to fill the gap, then
    wrapped onto a new line starting at the row's left edge instead of staying where they were.
    Now the trigger is ALWAYS present (abandon-action.html never removes it; it only grows `.is-held`)
    and the confirm/receipt content lives in this single sibling, `order: 1` sorting it LAST in the
    row's flex sequence no matter where it actually sits in the DOM relative to "Open in inspector"/
-   "show API" (both stay at their default `order: 0`, so — tie-broken by source order — the row's
+   "show API" (both stay at their default `order: 0`, so, tie-broken by source order, the row's
    visual sequence is always [trigger, Open in inspector, show API, slot]). `flex-basis: 100%` then
    forces exactly that slot onto its own new line, full width, below every row-1 item, which never
    moves. Outside `.actions` (every other card, where this sits alone below its own actions row)
-   these flex properties are simply inert — display:grid already makes it block-level there.
+   these flex properties are simply inert: display:grid already makes it block-level there.
    The reveal itself is a `grid-template-rows: 0fr -> 1fr` transition, not a max-height guess: it
    shrinks to the CONTENT's real height on the way in in either direction. The trick only collapses
    to a true zero if the row's child has `overflow: hidden` (that is what lets its automatic minimum
-   size be 0 instead of content's — see the padding-top note above for the other half of it). Timed
+   size be 0 instead of content's: see the padding-top note above for the other half of it). Timed
    off `--motion-base`, so it goes instant for free under the reduced-motion token collapse
-   (tokens.css) — no separate media query needed here. */
+   (tokens.css); no separate media query needed here. */
 .abandon-slot {
   order: 1;
   flex: 1 1 100%;
@@ -253,22 +253,22 @@ bridge-abandon-action { display: contents; }
 .abandon-slot > div { overflow: hidden; min-height: 0; }
 
 /* THE CONFIRM'S OWN ENTRANCE (owner ask, 2026-07-21: "on first click of the abandon button we
-   should animate in the secondary actions/confirm" — judged against the reveal above and refined).
+   should animate in the secondary actions/confirm", judged against the reveal above and refined).
    The track transition above already grows the slot from zero to the content's real height; on its
-   own that read as one flat pop — the text was simply THERE the instant the track had room for it.
+   own that read as one flat pop: the text was simply THERE the instant the track had room for it.
    This gives the content ITS OWN small motion on top, the same fade + 4px rise the app's other
    entrances use (inspector.css's PANEL MOTION block, off the cpanel/cpanel-tab pair this component's
-   focus hand-off already mirrors — see abandon-action.ts's openConfirm comment), staggered to begin
+   focus hand-off already mirrors, see abandon-action.ts's openConfirm comment), staggered to begin
    only AFTER the track finishes opening (`transition-delay: var(--motion-base)`) rather than racing
-   it — track opens, THEN its contents settle in, reading as one sequence instead of a single flat
+   it: track opens, THEN its contents settle in, reading as one sequence instead of a single flat
    pop. `@starting-style` supplies the from-state for the confirm/receipt div, which is a genuinely
-   FRESH node every time (abandon-action.html's `@if`/`@else if` mounts and unmounts it — it is never
+   FRESH node every time (abandon-action.html's `@if`/`@else if` mounts and unmounts it; it is never
    merely toggled via `[hidden]` the way cpanel is), so this is the same @starting-style mechanism,
    applied to a newly-inserted node rather than a display-none-to-block one. Reduced motion collapses
    both this transition and the track's to the same near-zero token, so nothing here needs its own
    media query. Exit is untouched: cancel or a receipt landing removes this specific div in the same
    change-detection pass that starts the track's own collapse, so there is nothing left to fade out
-   by the time a frame paints it — the content simply vanishes as the track visibly shrinks around
+   by the time a frame paints it: the content simply vanishes as the track visibly shrinks around
    it, the same as before this change. */
 .abandon-slot > div {
   transition:
@@ -283,44 +283,44 @@ bridge-abandon-action { display: contents; }
 }
 
 /* THE HUSK'S EXIT (owner ask, 2026-07-21; refined 2026-07-21 on owner feedback: "the collapse is
-   too fast, it feels jagged"). inbox.html wraps every rendered card — parked and stalled alike —
+   too fast, it feels jagged"). inbox.html wraps every rendered card, parked and stalled alike,
    in this element. Inert by default: `grid-template-rows: 1fr`, full opacity, and the SAME
    `margin-bottom` `.acard` already carries standalone, just moved here so the collapse below can
-   reach a true zero (`.acard`'s own margin is zeroed only INSIDE this wrapper, below — a card
+   reach a true zero (`.acard`'s own margin is zeroed only INSIDE this wrapper, below; a card
    mounted standalone, as every component spec in this feature does, is unaffected and keeps its
    own margin exactly as before). The same padding-vs-margin reasoning `.abandon-slot` documents
    above applies here at the whole-card scale: a margin left on the collapsing box itself would
    survive a `0fr` track as a visible sliver.
 
-   STAGED, not simultaneous — simultaneous is exactly what read jagged: collapsing grid-rows,
+   STAGED, not simultaneous: simultaneous is exactly what read jagged: collapsing grid-rows,
    opacity, and margin all at once on one short `--motion-base` beat left the card's real content
    (evidence rows, buttons, prose) visibly squishing/reflowing as the box shrank around it, because
    that content was still fully laid out and legible while its container raced to zero height. Two
    stages instead:
      1. THE CONTENT (`.acard-exit > *`, the whole card) fades and falls `--space-1` on a quick
-        `--motion-fast` beat, no delay — the card is emptied from view first, before anything about
+        `--motion-fast` beat, no delay: the card is emptied from view first, before anything about
         its box starts moving.
      2. Only once stage 1 finishes (stage 2 is delayed by `--motion-fast`, so it starts exactly as
         the fade ends rather than racing it) does the now-invisible box actually collapse: the
         wrapper's `grid-template-rows` + `margin-bottom`, AND the card's own vertical padding/border
-        (`.acard-exit .acard`'s `padding-block` / `border-block-width` — never the horizontal
+        (`.acard-exit .acard`'s `padding-block` / `border-block-width`; never the horizontal
         padding or the colored left accent rule, both untouched and simply shortened as the box's
         height is) all animate together on `--motion-large` (tokens.css), a longer sibling of
-        `--motion-base` — a full-height card is a bigger object travelling a bigger distance than
+        `--motion-base`: a full-height card is a bigger object travelling a bigger distance than
         the small reveals `--motion-base` was tuned for, so it earns proportionally more time.
         Collapsing the padding/border WITH the height, in the same stage, is what keeps a stray
         hairline or a wedge of padding from surviving the shrink as a visible jag right before the
         box hits zero.
    `.acard-exit > *`'s `overflow: hidden` is what lets the row's automatic minimum size reach zero,
-   the same requirement `.abandon-slot` documents above — an exact collapse, never a max-height
+   the same requirement `.abandon-slot` documents above: an exact collapse, never a max-height
    guess.
-   `.is-leaving` (an abandon receipt's own "Done" — see inbox.ts's `onAbandonRetire`) drives both
-   stages off one class. `onAbandonExitDone` (inbox.ts) removes the run id — actually dropping the
-   card — only once stage 2's OWN `transitionend` genuinely fires, and specifically the
+   `.is-leaving` (an abandon receipt's own "Done", see inbox.ts's `onAbandonRetire`) drives both
+   stages off one class. `onAbandonExitDone` (inbox.ts) removes the run id (actually dropping the
+   card) only once stage 2's OWN `transitionend` genuinely fires, and specifically the
    `grid-template-rows` property: stage 1's opacity/translate finish first (they are the SHORTER,
    undelayed transition) and would fire their own `transitionend` well before the box has actually
    collapsed, so inbox.ts filters on `event.propertyName` rather than reacting to the first
-   `transitionend` to arrive — never a guessed timer, and never a guessed stage either. Reduced
+   `transitionend` to arrive: never a guessed timer, and never a guessed stage either. Reduced
    motion collapses `--motion-fast`/`--motion-large` to the same near-zero token as everything else
    in the app (tokens.css); every transitionend still fires, just effectively instantly, so removal
    stays correctly keyed with no separate media query needed here. */
@@ -370,7 +370,7 @@ bridge-abandon-action { display: contents; }
 .badge.e-write { border-color: color-mix(in oklab, var(--warn), var(--fg) 12%); color: var(--amber-ink); background: var(--amber-wash); }
 
 /* ── "show API": demoted behind a native <details>, closed by default ──
-   The committed receipt's endpoint is the documented exception and never gets this treatment — it
+   The committed receipt's endpoint is the documented exception and never gets this treatment: it
    stays a plain `.endpoint` span outside any `<details>`, in the templates. */
 .api { font-family: var(--font-mono); font-size: 10px; }
 .api summary { cursor: pointer; list-style: none; color: var(--faint); letter-spacing: 0.04em; padding: 2px 0; }
@@ -384,7 +384,7 @@ bridge-abandon-action { display: contents; }
 
 .actions { display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; margin-top: var(--space-5); }
 
-/* THE FILLED ACCENT, scoped to this feature's own primary actions only — see the file banner for
+/* THE FILLED ACCENT, scoped to this feature's own primary actions only: see the file banner for
    why the bare `.btn` (already shipped, unfilled, in app.css) is reused rather than overridden. */
 .acard .actions .btn:not(.ghost):not(.serious) {
   background: var(--accent); color: var(--accent-on); border-color: transparent;
@@ -400,7 +400,7 @@ bridge-abandon-action { display: contents; }
 }
 
 /* ── the all-clear state ───────────────────────────────────────────────
-   NOT `.empty-state` (already shipped for the Inspector/Runs no-match states, a different shape) —
+   NOT `.empty-state` (already shipped for the Inspector/Runs no-match states, a different shape):
    `.state` is the big-icon centered variant used for Inbox/Spend/Workflows states. */
 .state {
   display: grid; place-items: center; gap: var(--space-3);

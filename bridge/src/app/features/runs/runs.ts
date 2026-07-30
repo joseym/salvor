@@ -48,7 +48,7 @@ import {
 } from './run-groups';
 
 type SortKey = 'status' | 'id' | 'events' | 'age' | 'agent';
-/** The Runs ledger's grouping mode — persisted, default Grouped. */
+/** The Runs ledger's grouping mode: persisted, default Grouped. */
 type GroupMode = 'grouped' | 'flat';
 const GROUP_MODE_KEY = 'salvor.groupMode';
 
@@ -61,16 +61,16 @@ interface AcItem {
 }
 
 const WHY_COST =
-  'GET /v1/runs now carries usage, but not the model id of each call — and the price table is ' +
+  'GET /v1/runs now carries usage, but not the model id of each call, and the price table is ' +
   'keyed by model. Dollars need the per-call model id from each ModelCallCompleted, so they can ' +
   'still only be folded from the log. Tokens are shown here; see Spend, which pays that cost ' +
   'deliberately.';
 const WHY_UNREADABLE =
   'GET /v1/runs omits this field for a run whose log it could not fold. An omission is not a ' +
-  'zero — the endpoint declines to answer rather than report a count it does not have.';
+  'zero: the endpoint declines to answer rather than report a count it does not have.';
 
 /** Read the persisted group mode; defaults to Grouped, including when storage is unavailable
- * (private browsing, a locked-down embed) — a read failure is never a reason to crash the view. */
+ * (private browsing, a locked-down embed); a read failure is never a reason to crash the view. */
 function readGroupMode(): GroupMode {
   try {
     return localStorage.getItem(GROUP_MODE_KEY) === 'flat' ? 'flat' : 'grouped';
@@ -82,13 +82,13 @@ function writeGroupMode(mode: GroupMode): void {
   try {
     localStorage.setItem(GROUP_MODE_KEY, mode);
   } catch {
-    /* persistence is a nicety, not a requirement — the in-memory signal still governs this session */
+    /* persistence is a nicety, not a requirement: the in-memory signal still governs this session */
   }
 }
 
 /** The minute-one teaching strip is shown until the reader dismisses it; the dismissal persists so
  * a returning operator is not lectured every visit. A read failure (private browsing, a locked-down
- * embed) is never a reason to crash the view, and it defaults to SHOWN — the teaching is the safe
+ * embed) is never a reason to crash the view, and it defaults to SHOWN: the teaching is the safe
  * fallback, not the suppression. */
 const INTRO_KEY = 'salvor.introDismissed';
 function readIntroDismissed(): boolean {
@@ -114,7 +114,7 @@ function writeIntroDismissed(dismissed: boolean): void {
  *
  * It reads {@link RunsService} (wrapping `GET /v1/runs`). The list carries
  * `usage`, `step_count` and `agent_def_hash`, so the detail panel renders those as REAL values;
- * only `cost` remains an em-dash, with WHY_COST verbatim.
+ * only `cost` remains a hyphen, with WHY_COST verbatim.
  */
 @Component({
   selector: 'bridge-runs',
@@ -130,12 +130,12 @@ export class Runs {
   private readonly caps = inject(SERVER_CAPABILITIES);
 
   /** run_id → graph_hash, populated lazily when a GRAPH run is selected in the detail panel (its
-   * hash lives behind GET /v1/runs/{id}/graph, never on the list row — see agentIdentity's 'graph'
+   * hash lives behind GET /v1/runs/{id}/graph, never on the list row; see agentIdentity's 'graph'
    * rendering). A run already fetched stays cached; a failed fetch simply leaves the panel showing
    * the plain "graph run" marker, no fabricated hash. */
   private readonly graphHashes = signal<ReadonlyMap<string, string>>(new Map());
 
-  /** The Runs list is a REST snapshot — the pill's honest state here is Snapshot, driven by the
+  /** The Runs list is a REST snapshot: the pill's honest state here is Snapshot, driven by the
    * connection machine (no public setter; toSnapshot is called on each fetch). */
   private readonly conn = createConnectionStateMachine();
   readonly connState = this.conn.state;
@@ -167,7 +167,7 @@ export class Runs {
   private seeded = false;
 
   // ── GROUPING: a persisted mode, default Grouped. Collapse state is
-  // per-key and in-memory — a fresh load starts fully expanded, the honest default (nothing
+  // per-key and in-memory: a fresh load starts fully expanded, the honest default (nothing
   // hidden until the operator collapses a group themselves). ──
   readonly groupMode = signal<GroupMode>(readGroupMode());
   private readonly collapsed = signal<ReadonlySet<string>>(new Set());
@@ -201,7 +201,7 @@ export class Runs {
   });
 
   /** GROUPED-mode presentation: the same {@link visible} rows, clustered worst-first. Attention
-   * survives grouping — any group holding a waiting run floats to the top, exactly as a waiting
+   * survives grouping: any group holding a waiting run floats to the top, exactly as a waiting
    * run would in the flat list (see `run-groups.ts#buildRunGroups`). */
   readonly groups: Signal<RunGroup[]> = computed(() => buildRunGroups(this.visible(), this.agentNames()));
 
@@ -215,7 +215,7 @@ export class Runs {
   readonly totalCount = computed(() => this.rows().length);
   readonly asOf = computed(() => {
     const iso = this.runsService.lastLoadedAt();
-    return iso ? iso.replace('T', ' ').replace(/:\d\d\.\d+Z$/, 'Z') : '—';
+    return iso ? iso.replace('T', ' ').replace(/:\d\d\.\d+Z$/, 'Z') : '-';
   });
   readonly countLabel = computed(() => {
     const v = this.visible().length;
@@ -231,7 +231,7 @@ export class Runs {
   readonly waitingActionable = computed(() => this.counts().waiting);
 
   /** The strip's honest gestalt. A run that is over budget or awaiting reconciliation is trouble,
-   * not calm — it sits in the waiting group, so a soothing "0 failed" beside it must never let the
+   * not calm: it sits in the waiting group, so a soothing "0 failed" beside it must never let the
    * strip read all-clear. `attention` whenever any run is waiting on a person OR has failed;
    * `clear` only when the census is genuinely quiet; `empty` before any run exists. */
   readonly healthState = computed<'attention' | 'clear' | 'empty'>(() => {
@@ -250,8 +250,8 @@ export class Runs {
     }
     void this.load();
 
-    // cold-load: seed the rail with the top waiting run, once — mode-aware since item 15b made
-    // Grouped the default DISPLAY order. In grouped mode the top waiting run is the first run of
+    // cold-load: seed the rail with the top waiting run, once (mode-aware since item 15b made
+    // Grouped the default DISPLAY order). In grouped mode the top waiting run is the first run of
     // the top-ranked group: groups float worst-first (see run-groups.ts#buildRunGroups), and a
     // group's own runs keep visible()'s attention-sorted order, so a rank-2 (waiting) group's
     // first run is guaranteed to be a waiting run itself. Without this, the seeded selection could
@@ -276,7 +276,7 @@ export class Runs {
     });
 
     // AGENT COLUMN (item 15a): resolve every hash-shaped agent_def_hash the list carries. Batched
-    // and cached inside AgentRegistryService — a hash already attempted (resolved or not) is never
+    // and cached inside AgentRegistryService: a hash already attempted (resolved or not) is never
     // re-fetched. Fire-and-forget: the service's own `names` signal (aliased as `agentNames`
     // above) is what the template and the computed signals above actually read.
     effect(() => {
@@ -293,7 +293,7 @@ export class Runs {
     // GRAPH RUN panel enrichment: a graph run carries no agent_def_hash on the list row, so when
     // one is selected in the detail panel we read its graph_hash from GET /v1/runs/{id}/graph (the
     // one endpoint that carries it) and cache it. Fire-and-forget, cached per run, and silent on
-    // failure — the panel keeps its honest "graph run" marker with no hash rather than inventing one.
+    // failure: the panel keeps its honest "graph run" marker with no hash rather than inventing one.
     effect(() => {
       const r = this.selectedRow();
       if (!r || agentIdentity(r).kind !== 'graph' || this.graphHashes().has(r.id)) return;
@@ -306,7 +306,7 @@ export class Runs {
         });
     });
 
-    // a filter applied from another view (Spend's hour bucket) — Runs is mounted once for the
+    // a filter applied from another view (Spend's hour bucket): Runs is mounted once for the
     // app's whole life, so this is the one channel that reaches it after that initial read
     effect(() => {
       const ext = this.viewService.externalFilter();
@@ -340,7 +340,7 @@ export class Runs {
   }
 
   /** The row's keyboard path to the Inspector (the pointer affordance is the row body). Only fires
-   * when the ROW itself holds focus — a child control (the filter pill, the copy button, the panel
+   * when the ROW itself holds focus; a child control (the filter pill, the copy button, the panel
    * toggle) handles its own Enter/Space and must not also open the run. Space is prevented from
    * scrolling the page, matching the row's button-like activation. */
   onRowKeydown(e: KeyboardEvent, r: RunRow): void {
@@ -364,7 +364,7 @@ export class Runs {
       this.qErr.set(ex instanceof Error ? ex.message : String(ex));
       // keep the last good result on screen
     }
-    // reflect into ?q= (replaceUrl — a filter is not a history entry)
+    // reflect into ?q= (replaceUrl: a filter is not a history entry)
     this.viewService.setQuery([...this.qTok()].join(' '));
   }
 
@@ -673,9 +673,9 @@ export class Runs {
    age(iso: string | undefined): string {
     return age(iso);
   }
-  // ── AGENT COLUMN (item 15a): replaces the old "Last event" cell — see run-model.ts#agentIdentity
+  // ── AGENT COLUMN (item 15a): replaces the old "Last event" cell; see run-model.ts#agentIdentity
   // for the three honest renderings this reads. A resolved NAME's title reveals its hash and
-  // provenance; a truncated LABEL's title reveals its full string — the CSS truncates visually
+  // provenance; a truncated LABEL's title reveals its full string: the CSS truncates visually
   // (max-width + ellipsis), nothing the cell shows is ever unrecoverable. ──
   identity(r: RunRow): AgentIdentity {
     return agentIdentity(r, this.agentNames());
@@ -683,8 +683,8 @@ export class Runs {
   agentCellTitle(id: AgentIdentity): string {
     if (id.kind === 'none') return 'No agent recorded on this run';
     if (id.kind === 'graph')
-      return 'A graph run — its log has no single agent_def_hash; expand the row for its graph_hash';
-    if (id.kind === 'name') return `${id.hash} — resolved via GET /v1/agents/{hash}`;
+      return 'A graph run: its log has no single agent_def_hash; expand the row for its graph_hash';
+    if (id.kind === 'name') return `${id.hash}: resolved via GET /v1/agents/{hash}`;
     return id.text;
   }
   /** The graph_hash of a selected GRAPH run once its projection has loaded (see the panel effect). */
@@ -693,7 +693,7 @@ export class Runs {
   }
 
   // ── FORK (audit item 6): a list row names no node, so this goes through the ONE fork door and
-  // lands the canvas in its node-picking state — the operator points at the fork point there. ──
+  // lands the canvas in its node-picking state; the operator points at the fork point there. ──
   forkOffered(r: RunRow): boolean {
     return this.caps().fork && agentIdentity(r).kind === 'graph';
   }
@@ -732,11 +732,11 @@ export class Runs {
     if (g.waiting) return `${g.waiting} waiting on you`;
     return g.states.map((s) => labelOf(s)).join(' · ');
   }
-  /** The header rail gets its OWN classes — `g-waiting`/`g-failed`, not the run row's own
-   * `attention`/`is-failed` — deliberately: several existing specs scope `tr.attention` /
+  /** The header rail gets its OWN classes (`g-waiting`/`g-failed`, not the run row's own
+   * `attention`/`is-failed`) deliberately: several existing specs scope `tr.attention` /
    * `tr.is-failed` to mean "a waiting/failed RUN row" (e.g. the cold-load-seed acceptance check,
    * which reads the first `tr.attention` to find the top waiting RUN). Reusing those classes on a
-   * `tr.grp-head` — which carries no `data-id` at all — silently broke that query. Same amber/red
+   * `tr.grp-head` (which carries no `data-id` at all) silently broke that query. Same amber/red
    * rail, same worst-first meaning, disjoint vocabulary. */
   groupRowClasses(g: RunGroup): Record<string, boolean> {
     return {
@@ -794,7 +794,7 @@ export class Runs {
     this.viewService.go('inbox');
   }
 
-  /** Whether this run is waiting on a human — the panel shows the inbox signpost only for these. */
+  /** Whether this run is waiting on a human: the panel shows the inbox signpost only for these. */
   waiting(r: RunRow): boolean {
     return isWaiting(r.status);
   }
@@ -809,7 +809,7 @@ export class Runs {
       case 'budget_exceeded':
         return 'Raise limit in inbox';
       case 'stalled':
-        // A stalled run has no in-app action — its driver is an external host
+        // A stalled run has no in-app action: its driver is an external host
         // process. The signpost routes to the Inbox card's guidance, never a
         // fake fix button.
         return 'See in inbox';
@@ -819,7 +819,7 @@ export class Runs {
   }
   openInInbox(id: string): void {
     // Deselect the run first: the signpost lives in this run-detail panel, and once we route to the
-    // Inbox the whole Runs section goes `[hidden]` — a still-selected panel would leave the very
+    // Inbox the whole Runs section goes `[hidden]`; a still-selected panel would leave the very
     // same `[data-inbox-run]` button sitting in the hidden DOM, a duplicate of the action the
     // operator just took. Clearing the selection removes it, so the Inbox card is the single
     // action affordance the arrival lands on.
@@ -837,7 +837,7 @@ export class Runs {
     writeIntroDismissed(true);
     focusWhenRendered('#intro-reopen');
   }
-  /** Bring the strip back — the honest re-entry path from the "i" affordance. */
+  /** Bring the strip back: the honest re-entry path from the "i" affordance. */
   reopenIntro(): void {
     this.introOpen.set(true);
     writeIntroDismissed(false);
@@ -849,7 +849,7 @@ export class Runs {
     try {
       await navigator.clipboard.writeText(value);
     } catch {
-      /* clipboard blocked — no fallback theater */
+      /* clipboard blocked: no fallback theater */
     }
   }
 }

@@ -13,7 +13,7 @@ describe('RunRef', () => {
     expect(value.getAttribute('title')).toBe('run-abc123456789');
   });
 
-  it('kind="hash" keeps the sha256: prefix, then 8 hex — the full value stays in the title', () => {
+  it('kind="hash" keeps the sha256: prefix, then 8 hex; the full value stays in the title', () => {
     const fixture = TestBed.createComponent(RunRef);
     fixture.componentRef.setInput('id', 'sha256:71d29b223d5184c1d95d7b798d00cd6');
     fixture.componentRef.setInput('kind', 'hash');

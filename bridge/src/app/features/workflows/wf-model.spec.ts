@@ -6,7 +6,7 @@ import { fromServerGraph } from './wf-model';
 /**
  * `fromServerGraph`'s node-name fallback: a server document's node payload may carry its own
  * optional `name` (the graph format's optional node display name); when it does the canvas must
- * show that display name, and when it does not the node's id is the honest fallback — never an
+ * show that display name, and when it does not the node's id is the honest fallback: never an
  * invented sentence. Both facts must hold in the SAME document, since a document can name some
  * nodes and not others.
  */
@@ -25,7 +25,7 @@ const doc: Graph = {
   edges: [{ from: 'research', to: 'approve' }],
 };
 
-describe('fromServerGraph — node display name fallback', () => {
+describe('fromServerGraph: node display name fallback', () => {
   it('renders a node payload name when the document carries one', () => {
     const graph = fromServerGraph('sha256:abc', doc);
     const research = graph.nodes.find((n) => n.id === 'research');
@@ -49,7 +49,7 @@ describe('fromServerGraph — node display name fallback', () => {
   });
 });
 
-describe('fromServerGraph — fold node', () => {
+describe('fromServerGraph: fold node', () => {
   const foldDoc: Graph = {
     schema_version: 1,
     nodes: [

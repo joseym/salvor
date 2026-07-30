@@ -13,7 +13,7 @@ import {
 import type { RunRow } from './run-model';
 
 /**
- * The filter-vocabulary bijection, checked as a real unit test — VOCAB_DRIFT's job, moved out of
+ * The filter-vocabulary bijection, checked as a real unit test: VOCAB_DRIFT's job, moved out of
  * the prototype's boot-time console probe (which evaporates when the run ends) into the suite.
  * This pins "FILTER_VOCAB as the single source with the bijection as a
  * vitest unit test".
@@ -23,7 +23,7 @@ describe('filter-vocabulary bijection', () => {
     expect(vocabDrift()).toEqual([]);
   });
 
-  it('direction 1 — every @-menu key parses to a structured (non-text) term', () => {
+  it('direction 1: every @-menu key parses to a structured (non-text) term', () => {
     for (const v of MENU_KEYS) {
       const probe = v.key + v.op + (v.op === ':' ? 'x' : '1');
       const terms = parseQuery(probe);
@@ -33,7 +33,7 @@ describe('filter-vocabulary bijection', () => {
     }
   });
 
-  it('direction 2 — the still-refused fields stay refused by the parser (agent/build joined the vocabulary in item 15, so they moved out of this list)', () => {
+  it('direction 2: the still-refused fields stay refused by the parser (agent/build joined the vocabulary in item 15, so they moved out of this list)', () => {
     for (const key of ['cost', 'steps', 'tokens']) {
       expect(FILTER_VOCAB.some((v) => v.key === key)).toBe(false);
       expect(() => parseQuery(`${key}:1`)).toThrow();
@@ -52,7 +52,7 @@ describe('filter-vocabulary bijection', () => {
     expect(MENU_KEYS.map((v) => v.key)).toContain('hour');
   });
 
-  it('agent: and build: are offered, NON-enumerable keys (item 15) — they parse and appear in the @ menu, but do not autocomplete a value list', () => {
+  it('agent: and build: are offered, NON-enumerable keys (item 15): they parse and appear in the @ menu, but do not autocomplete a value list', () => {
     for (const key of ['agent', 'build']) {
       const entry = FILTER_VOCAB.find((v) => v.key === key);
       expect(entry, `${key} must be listed`).toBeDefined();

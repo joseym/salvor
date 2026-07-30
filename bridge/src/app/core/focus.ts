@@ -6,7 +6,7 @@
  * Finding the node is NOT enough. A cross-view hand-off (the Runs signpost → an Inbox card) renders
  * the target inside a `<section>` that is still `[hidden]` for a frame or two while the router
  * commits and the shell toggles `.is-active`. `focus()` on a node inside a `display:none` ancestor
- * is a silent no-op — the node exists, the query matches, but focus never lands, and the operator is
+ * is a silent no-op: the node exists, the query matches, but focus never lands, and the operator is
  * stranded at the top of the page. So this keeps trying until focus ACTUALLY takes
  * (`document.activeElement === el`), not merely until the node is in the DOM.
  */

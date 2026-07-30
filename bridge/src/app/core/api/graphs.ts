@@ -15,8 +15,8 @@ import {
 
 /**
  * The graph catalog: `GET /v1/graphs` (list), `GET /v1/graphs/{hash}` (read one document back),
- * `POST /v1/graphs/validate` (submit's dry run, node/edge-precise — see `API.md`, "Graphs and
- * graph runs"), and `POST /v1/graphs` (submit — {@link submit}). Submission joined this surface
+ * `POST /v1/graphs/validate` (submit's dry run, node/edge-precise; see `API.md`, "Graphs and
+ * graph runs"), and `POST /v1/graphs` (submit, {@link submit}). Submission joined this surface
  * with the canvas: publishing a draft stores it content-addressed by its reproducible
  * hash, so the canvas's Publish has a real endpoint behind it rather than a local-only promotion.
  */
@@ -55,7 +55,7 @@ export class GraphsService {
    * content-addressed and answers `{ graph: <hash>, created: <bool> }` (`created: false` on an
    * idempotent re-submit of an identical document); a validation failure throws `SalvorApiError`
    * (`invalid_graph`) carrying the error list, exactly like {@link validate}'s refusal path. Returns
-   * the stored hash — the graph's new, real identity, the same value publishing mints on the canvas.
+   * the stored hash: the graph's new, real identity, the same value publishing mints on the canvas.
    */
   async submit(document: Graph): Promise<string> {
     const obj = await graphRequest(this.client, this.config, 'POST', '/v1/graphs', document);
@@ -63,13 +63,13 @@ export class GraphsService {
   }
 
   /** Read one stored graph document back by hash. Throws `SalvorApiError` (`unknown_graph`) if
-   * nothing is stored under it — the caller's problem to route, same as every other lookup here. */
+   * nothing is stored under it: the caller's problem to route, same as every other lookup here. */
   async get(hash: string): Promise<GraphDocumentRecord> {
     const obj = await graphRequest(this.client, this.config, 'GET', `/v1/graphs/${hash}`);
     return parseGraphDocumentRecord(obj);
   }
 
-  /** Validate a document without storing it — the graph counterpart of `/replay`'s dry run.
+  /** Validate a document without storing it: the graph counterpart of `/replay`'s dry run.
    * Always resolves (`valid: true`, or `valid: false` with the full node/edge-precise error
    * list); it never throws for an invalid document, only for a genuine transport failure. */
   async validate(document: Graph): Promise<ValidateResult> {

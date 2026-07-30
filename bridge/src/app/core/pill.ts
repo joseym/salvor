@@ -4,7 +4,7 @@ import { type ConnectionState } from './api';
 
 /**
  * The connection pill's shared display state. The pill lives in the app shell (`#conn`) but its
- * truth comes from wherever a stream is actually open — today only the Inspector, which pushes its
+ * truth comes from wherever a stream is actually open: today only the Inspector, which pushes its
  * stream's {@link ConnectionState} here (Live while the SSE stream delivers frames, Ended on
  * the terminal frame). Everywhere else the pill is an honest Snapshot with an as-of time.
  *
@@ -24,7 +24,7 @@ export class PillService {
 
   readonly state: Signal<ConnectionState> = this._state.asReadonly();
   readonly runId: Signal<string | undefined> = this._runId.asReadonly();
-  /** The bound run's TRUE resting state slug (folded by the Inspector — `suspended`, `completed`,
+  /** The bound run's TRUE resting state slug (folded by the Inspector: `suspended`, `completed`,
    * `budget_exceeded`, …). The transport `state` above says whether the STREAM is live or ended;
    * this says what the RUN itself is resting at, so a caught-up stream over a parked run is not
    * mislabeled as an ended run. Undefined when no run is bound (a plain Snapshot). */
