@@ -1,0 +1,62 @@
+# The operator's declaration of a tool the CLIENT performs.
+#
+# Loaded with `salvor serve --client-tool examples/client-tools/refund-card.toml`.
+# There is no code behind it on the server, and this file cannot name any: the
+# declaration format has no command, no path, and no URL, and an unknown key is
+# a parse error rather than an ignored line. What the operator fixes here is the
+# effect class, the shape of the input, the shape of the evidence a completion
+# must carry, and whether the client may close the call itself.
+#
+# The client runs the refund in its own process, against its own payment
+# provider, with a credential salvor never holds.
+
+name = "refund_card"
+
+# The operator's word, never the client's. A refund moves money, so it is a
+# Write: an intent recorded with no completion after it is a run that stops for
+# a human rather than one that retries itself.
+effect = "write"
+
+# The ordinary case: salvor takes this client's report, once the report passes
+# the output schema below. `wire-payout.toml` is the other case.
+trust_completion = true
+
+[input_schema]
+type = "object"
+required = ["order_id", "amount_cents", "currency"]
+description = "Refund a card charge on an order that has already been paid."
+
+[input_schema.properties.order_id]
+type = "string"
+description = "The order the refund is against, for example ORD-7781."
+
+[input_schema.properties.amount_cents]
+type = "integer"
+description = "How much to refund, in minor units. Never more than the original charge."
+
+[input_schema.properties.currency]
+type = "string"
+enum = ["USD", "EUR", "GBP"]
+
+[input_schema.properties.reason]
+type = "string"
+description = "Why the refund is being issued, recorded on the intent."
+
+# What a completion has to carry before salvor will record it. `provider_refund_id`
+# is the whole point: it is the one field in the report that the client could not
+# have invented without the provider answering, so a completion without it is a
+# claim rather than a result.
+[output_schema]
+type = "object"
+required = ["provider_refund_id", "status", "amount_cents"]
+
+[output_schema.properties.provider_refund_id]
+type = "string"
+description = "The provider's own identifier for the refund it created."
+
+[output_schema.properties.status]
+type = "string"
+enum = ["succeeded", "pending"]
+
+[output_schema.properties.amount_cents]
+type = "integer"

@@ -1,0 +1,54 @@
+# The same kind of declaration, with the trust turned off.
+#
+# Loaded with `salvor serve --client-tool examples/client-tools/wire-payout.toml`.
+# A bank transfer leaves the card rails entirely, so this desk's operator will
+# not let the client close the call by reporting on it. Every payout is settled
+# by a person, through the resolve endpoint, after they have looked at the
+# provider themselves.
+
+name = "wire_payout"
+effect = "write"
+
+# The line that changes everything about the second half of this example. A
+# client completion for this tool is refused, which leaves the recorded intent
+# as the log's last word, which is what `NeedsReconciliation` already means.
+trust_completion = false
+
+[input_schema]
+type = "object"
+required = ["payee_account", "amount_cents", "currency"]
+description = "Send a bank transfer to a payee whose card refund is not available."
+
+[input_schema.properties.payee_account]
+type = "string"
+description = "The masked payee account the transfer goes to."
+
+[input_schema.properties.amount_cents]
+type = "integer"
+
+[input_schema.properties.currency]
+type = "string"
+enum = ["USD", "EUR", "GBP"]
+
+[input_schema.properties.reference]
+type = "string"
+description = "The reference the payee will see on their statement."
+
+# An output schema is still declared, and still checked, even though no client
+# completion will ever reach it. Dropping it would be a second refusal for a
+# different reason (a declaration with no output schema refuses a completion
+# too), and that would hide which rule is doing the work here.
+[output_schema]
+type = "object"
+required = ["provider_transfer_id", "status", "amount_cents"]
+
+[output_schema.properties.provider_transfer_id]
+type = "string"
+description = "The provider's own identifier for the transfer it created."
+
+[output_schema.properties.status]
+type = "string"
+enum = ["succeeded", "pending"]
+
+[output_schema.properties.amount_cents]
+type = "integer"
