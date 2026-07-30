@@ -88,6 +88,24 @@ pub fn text_response(text: &str, input_tokens: u64, output_tokens: u64) -> Value
     })
 }
 
+/// A canned response body asking to call one tool.
+pub fn tool_use_response(
+    tool_use_id: &str,
+    tool: &str,
+    input: Value,
+    input_tokens: u64,
+    output_tokens: u64,
+) -> Value {
+    json!({
+        "id": format!("msg_tool_{tool_use_id}"),
+        "model": "test-model",
+        "role": "assistant",
+        "content": [{"type": "tool_use", "id": tool_use_id, "name": tool, "input": input}],
+        "stop_reason": "tool_use",
+        "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens}
+    })
+}
+
 /// A scripted model: responds to `POST /v1/messages` by matching the number of
 /// `messages` in the request body against the script. Replayed calls never
 /// reach the server, so shape-based matching stays correct across a replay.
