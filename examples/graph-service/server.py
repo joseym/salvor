@@ -187,7 +187,18 @@ def send_notice(arguments):
     notices = {}
     if os.path.exists(NOTICES_PATH):
         with open(NOTICES_PATH, encoding="utf-8") as handle:
-            notices = json.load(handle)
+            text = handle.read()
+        # A truncated-but-present notices file is zero bytes, and
+        # `os.path.exists` is true for it (a caller may create the file this
+        # way to start clean, the same way a ledger gets truncated). json.load
+        # on zero bytes raises JSONDecodeError, so an empty or otherwise
+        # unparseable file is treated exactly like an absent one rather than
+        # crashing here.
+        if text.strip():
+            try:
+                notices = json.loads(text)
+            except json.JSONDecodeError:
+                notices = {}
     notices[dispute_id] = message
     with open(NOTICES_PATH, "w", encoding="utf-8") as handle:
         json.dump(notices, handle, indent=2, sort_keys=True)
