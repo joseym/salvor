@@ -92,12 +92,55 @@ examples/graphs/invalid-dangling-edge.json: 1 validation error(s):
 ```
 
 Print the document JSON Schema, the single source of truth editors and the
-future builders read:
+builders read:
 
 ```
 $ salvor graph schema
 { "$defs": { ... }, "properties": { "schema_version": ..., "nodes": ..., "edges": ... } }
 ```
+
+The same schema is checked in at [`docs/graph-schema.json`](../../docs/graph-schema.json),
+generated from the Rust types and gated against drift, so it always describes
+the format the binary accepts.
+
+## Editor support
+
+A graph cannot carry a `$schema` key. The format sets `deny_unknown_fields` and
+the schema's root is closed to match, so adding one makes the file fail
+`salvor graph validate`. That strictness is deliberate: a silently dropped field
+could drop a gate or leave a budget unenforced.
+
+Editors are pointed at the schema by file pattern instead, which gives the same
+completion, hover text and live validation with no change to any document. This
+repository ships the mapping for VS Code in `.vscode/settings.json`:
+
+```json
+"json.schemas": [
+  { "fileMatch": ["/examples/graphs/*.json"], "url": "./docs/graph-schema.json" }
+]
+```
+
+A relative path rather than a URL, so it resolves offline and always describes
+the schema in your own checkout rather than whichever revision a remote copy
+happens to hold. Editing a graph somewhere else, point the same setting at
+
+```
+https://raw.githubusercontent.com/joseym/salvor/main/docs/graph-schema.json
+```
+
+Other editors take the same idea through their own settings: Neovim and Helix
+through a language server such as `vscode-json-languageserver` or `taplo`,
+JetBrains IDEs through Settings, Languages and Frameworks, Schemas and DTDs,
+JSON Schema Mappings. All that changes is where the pattern and the schema path
+are written down.
+
+Schema completion and `salvor graph validate` answer different questions, and
+the two deliberately invalid examples show the gap. A schema checks SHAPE, so it
+catches a misspelled field or a number where a string belongs. It cannot catch a
+cycle or an edge naming a node that does not exist, because both are legal JSON
+of the right shape. `invalid-cycle.json` and `invalid-dangling-edge.json` satisfy
+the schema and are refused by the validator, which is the division of labour
+working rather than a gap in either.
 
 ## Running a graph
 
