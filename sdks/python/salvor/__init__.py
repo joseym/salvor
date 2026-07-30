@@ -44,6 +44,7 @@ from .graph import (
     model_decision,
 )
 from .models import (
+    ClientToolDecl,
     EndFrame,
     Event,
     ForkEntry,
@@ -75,6 +76,8 @@ __all__ = [
     "ClientRunDriver",
     "ModelStepResult",
     "ModelStepStream",
+    "ClientToolDecl",
+    "ClientToolIntentResult",
     "SalvorError",
     "SalvorAPIError",
     "NeedsReconciliationError",
@@ -156,11 +159,17 @@ def __getattr__(name: str):
         globals()["Client"] = Client
         globals()["EventStream"] = EventStream
         return globals()[name]
-    if name in ("ClientRunDriver", "ModelStepResult", "ModelStepStream"):
-        from .client_runs import ClientRunDriver, ModelStepResult, ModelStepStream
+    if name in ("ClientRunDriver", "ModelStepResult", "ModelStepStream", "ClientToolIntentResult"):
+        from .client_runs import (
+            ClientRunDriver,
+            ClientToolIntentResult,
+            ModelStepResult,
+            ModelStepStream,
+        )
 
         globals()["ClientRunDriver"] = ClientRunDriver
         globals()["ModelStepResult"] = ModelStepResult
         globals()["ModelStepStream"] = ModelStepStream
+        globals()["ClientToolIntentResult"] = ClientToolIntentResult
         return globals()[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

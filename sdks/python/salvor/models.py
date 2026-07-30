@@ -631,6 +631,40 @@ class ForkEntry:
 
 
 @dataclass
+class ClientToolDecl:
+    """One operator-declared tool the CLIENT performs, from
+    ``GET /v1/client-tools``.
+
+    ``input_schema`` is the same JSON Schema a client-tool intent's ``input``
+    is checked against server-side, which is also, verbatim, the parameter
+    schema to hand the model as this tool's function definition: one schema,
+    not a copy a client keeps in step by hand. ``output_schema`` is ``None``
+    unless the declaration carries one; a tool declared without one cannot be
+    self-completed by a client (see
+    :meth:`~salvor.client_runs.ClientRunDriver.client_tool_completion`).
+    ``trust_completion`` is ``True`` unless the operator declared otherwise.
+    """
+
+    name: str
+    effect: str
+    input_schema: Any
+    output_schema: Optional[Any] = None
+    trust_completion: bool = True
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_json(cls, obj: dict[str, Any]) -> "ClientToolDecl":
+        return cls(
+            name=obj["name"],
+            effect=obj.get("effect", "read"),
+            input_schema=obj.get("input_schema"),
+            output_schema=obj.get("output_schema"),
+            trust_completion=bool(obj.get("trust_completion", True)),
+            raw=obj,
+        )
+
+
+@dataclass
 class ForksIndex:
     """The forks of a run, from ``GET /v1/runs/{id}/forks``.
 

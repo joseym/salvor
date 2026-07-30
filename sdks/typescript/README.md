@@ -172,19 +172,39 @@ const completion = stream.completion;             // -> ModelStepResult
 // A tool the server's registry holds:
 const output = await run.toolStep(3, "render", { doc: "plan.typ" });
 
+// A tool the server holds no code for at all, the payment case: you run it,
+// salvor just records that it happened.
+const { idempotencyKey } = await run.clientToolIntent(4, "charge_card", { amount_cents: 500 });
+const receipt = await chargeCard(idempotencyKey, { amount_cents: 500 }); // your code, your key
+await run.clientToolCompletion(4, receipt);
+
 await run.append([run.envelope(5, "RunCompleted", { output: answer })]);
 ```
 
 The driver's full surface: `openClientRun` (also re-opens, i.e. resumes, an
 existing run), `log(fromSeq)`, `append(events)`, `modelStep`, `modelStepStream`
-(an `AsyncIterable` of ticker deltas with a `completion` after), `toolStep`, and
-`resolve(output)`. Re-opening a run returns its recorded log on
-`run.logEnvelopes` and mints a fresh drive token (the single-writer lease every
-append presents), so a refreshed client rebuilds its cursor and re-drives from
-the log, paying nothing for a step the log already covers. A client-driven append
-the log rejects throws `DivergenceError`; a tool step that lands on a dangling
-write throws `NeedsReconciliationError` (whose `.intent` is the recorded write),
-which `resolve(output)` clears.
+(an `AsyncIterable` of ticker deltas with a `completion` after), `toolStep`,
+`clientToolIntent`, `clientToolCompletion`, and `resolve(output)`. Re-opening a
+run returns its recorded log on `run.logEnvelopes` and mints a fresh drive
+token (the single-writer lease every append presents), so a refreshed client
+rebuilds its cursor and re-drives from the log, paying nothing for a step the
+log already covers. A client-driven append the log rejects throws
+`DivergenceError`; a tool step that lands on a dangling write throws
+`NeedsReconciliationError` (whose `.intent` is the recorded write), which
+`resolve(output)` clears.
+
+`clientToolIntent` and `clientToolCompletion` are for a tool salvor never runs:
+a team keeps its payment code in its own process, and salvor only records that
+the call happened and what it returned. Open the intent to get an idempotency
+key the server derived (not one you chose, so a retry cannot mint itself a
+second charge), perform the call yourself under that key, then report the
+result. `client.listClientTools()` fetches the declared tools, each with the
+schema to hand the model as that tool's function definition. A completion is
+refused, unrecorded, when the declaration does not trust a client's own report
+or carries no output schema to check it against; settle those by hand with
+`resolve` once you have verified the call externally. A reported output that
+fails the declared schema is refused too, and there the fix is the output
+itself.
 
 The driver uses only `fetch` and the SDK's own SSE parser, with no Node-only
 API, so it runs unchanged in a browser tab: the streaming model step is a POST

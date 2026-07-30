@@ -94,6 +94,47 @@ test("startRun omits labels from the body when not given", async () => {
   }
 });
 
+test("listClientTools decodes declarations with their schemas intact", async () => {
+  const s = stub({
+    "/v1/client-tools": () => ({
+      status: 200,
+      body: {
+        client_tools: [
+          {
+            name: "charge_card",
+            effect: "write",
+            input_schema: { type: "object", required: ["amount_cents"] },
+            output_schema: { type: "object", required: ["charge_id"] },
+            trust_completion: false,
+          },
+          {
+            name: "lookup_invoice",
+            effect: "read",
+            input_schema: { type: "object" },
+            trust_completion: true,
+          },
+        ],
+      },
+    }),
+  });
+  const base = await s.ready;
+  try {
+    const client = new SalvorClient(base);
+    const decls = await client.listClientTools();
+    strictEqual(decls.length, 2);
+    const charge = decls.find((d) => d.name === "charge_card")!;
+    strictEqual(charge.effect, "write");
+    strictEqual(charge.trustCompletion, false);
+    deepStrictEqual(charge.inputSchema, { type: "object", required: ["amount_cents"] });
+    deepStrictEqual(charge.outputSchema, { type: "object", required: ["charge_id"] });
+    const lookup = decls.find((d) => d.name === "lookup_invoice")!;
+    strictEqual(lookup.outputSchema, undefined);
+    strictEqual(lookup.trustCompletion, true);
+  } finally {
+    s.server.close();
+  }
+});
+
 test("listRuns decodes labels when the server sends them, and leaves it undefined otherwise", async () => {
   const s = stub({
     "/v1/runs": () => ({

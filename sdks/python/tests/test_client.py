@@ -108,6 +108,38 @@ class ClientAgainstStub(unittest.TestCase):
         _, sent = server.requests[-1]
         self.assertNotIn("labels", sent, "no labels argument means no labels key at all")
 
+    def test_list_client_tools_decodes_declarations_with_schemas_intact(self) -> None:
+        client_tools_body = {
+            "client_tools": [
+                {
+                    "name": "charge_card",
+                    "effect": "write",
+                    "input_schema": {"type": "object", "required": ["amount_cents"]},
+                    "output_schema": {"type": "object", "required": ["charge_id"]},
+                    "trust_completion": False,
+                },
+                {
+                    "name": "lookup_invoice",
+                    "effect": "read",
+                    "input_schema": {"type": "object"},
+                    "trust_completion": True,
+                },
+            ]
+        }
+        client, _ = self.make_client(
+            {"/v1/client-tools": lambda h, body: h._send(200, client_tools_body)}
+        )
+        decls = client.list_client_tools()
+        self.assertEqual(len(decls), 2)
+        charge = next(d for d in decls if d.name == "charge_card")
+        self.assertEqual(charge.effect, "write")
+        self.assertFalse(charge.trust_completion)
+        self.assertEqual(charge.input_schema, {"type": "object", "required": ["amount_cents"]})
+        self.assertEqual(charge.output_schema, {"type": "object", "required": ["charge_id"]})
+        lookup = next(d for d in decls if d.name == "lookup_invoice")
+        self.assertIsNone(lookup.output_schema)
+        self.assertTrue(lookup.trust_completion)
+
     def test_list_runs_decodes_labels_when_present_and_none_otherwise(self) -> None:
         runs_body = {
             "runs": [

@@ -26,6 +26,7 @@ export type {
   ModelStepResult,
   ModelStepStream,
   ModelStepDelta,
+  ClientToolIntentResult,
 } from "./client_runs.js";
 export {
   SalvorError,
@@ -61,6 +62,7 @@ export {
   type ForkEntry,
   type ForksIndex,
   type RecordedWrite,
+  type ClientToolDecl,
 } from "./types.js";
 export {
   GraphBuilder,

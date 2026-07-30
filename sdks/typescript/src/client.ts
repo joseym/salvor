@@ -17,6 +17,7 @@ import type { Graph } from "./graph.js";
 import { readSseFrames } from "./sse.js";
 import {
   type AbandonResult,
+  type ClientToolDecl,
   type EndFrame,
   type ForkPreview,
   type ForkResult,
@@ -33,6 +34,7 @@ import {
   type SalvorEvent,
   type StoredGraph,
   parseAbandonResult,
+  parseClientToolDecl,
   parseEndFrame,
   parseEvent,
   parseForkPreview,
@@ -417,6 +419,25 @@ export class SalvorClient {
   async listForks(runId: string): Promise<ForksIndex> {
     return parseForksIndex(
       await this.request("GET", `/v1/runs/${runId}/forks`),
+    );
+  }
+
+  // -- client-performed tools -------------------------------------------------
+
+  /**
+   * List the client-performed tool declarations this server holds: tools an
+   * operator declared with `salvor serve --client-tool <FILE>`, which the
+   * client runs itself (see {@link ClientRunDriver.clientToolIntent}).
+   *
+   * This is how a client-driven loop gets the function definitions to hand the
+   * model: a declaration's `inputSchema` IS the model tool's parameter schema,
+   * the same schema the server checks a call's input against, published here
+   * so a client never keeps a second copy that can quietly drift from it.
+   */
+  async listClientTools(): Promise<ClientToolDecl[]> {
+    const obj = await this.request("GET", "/v1/client-tools");
+    return ((obj.client_tools as Record<string, unknown>[]) ?? []).map(
+      parseClientToolDecl,
     );
   }
 

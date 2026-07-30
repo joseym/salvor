@@ -68,6 +68,28 @@ class ModelStepResult:
         )
 
 
+@dataclass
+class ClientToolIntentResult:
+    """The receipt from opening a client-performed tool call: the position,
+    the DERIVED idempotency key the client must perform under, and the
+    operator-declared effect the intent was recorded with.
+    """
+
+    seq: int
+    idempotency_key: str
+    effect: str
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_json(cls, obj: dict[str, Any]) -> "ClientToolIntentResult":
+        return cls(
+            seq=int(obj.get("seq", 0)),
+            idempotency_key=obj.get("idempotency_key", ""),
+            effect=obj.get("effect", ""),
+            raw=obj,
+        )
+
+
 class ModelStepStream:
     """The live ticker of a streaming model step.
 
@@ -361,6 +383,65 @@ class ClientRunDriver:
             headers=self._lease(),
         )
         return self._json(resp).get("output")
+
+    # -- client-performed tool calls -------------------------------------------
+
+    def client_tool_intent(self, seq: int, tool: str, input: Any) -> ClientToolIntentResult:
+        """Open a tool call the CLIENT performs, in its own process, with its
+        own secrets.
+
+        ``seq`` is the log position the client's cursor reserved for the
+        intent; ``tool`` names a tool an operator declared with ``salvor serve
+        --client-tool <FILE>`` (never registered over HTTP; see
+        :meth:`salvor.Client.list_client_tools` to fetch what is declared);
+        ``input`` is checked against the declaration's input schema before
+        anything is written.
+
+        The returned ``idempotency_key`` comes FROM the server, not from the
+        caller. It is a derived hash of ``(run, seq, tool)``, and the client
+        must perform its call under that exact key. This is why: it is what
+        stops a retry becoming a second charge, so the party who would
+        benefit from a duplicate landing does not get to choose the key that
+        lets one through. This is the one place this driver differs from
+        :meth:`tool_step` on purpose: there the caller supplies the key,
+        because salvor performs the call itself and handing it the key is
+        safe; here the client both performs the call and stands to gain from
+        a duplicate, so the server derives the key instead of accepting one.
+
+        Raises :class:`~salvor.errors.SalvorAPIError` with code
+        ``unknown_tool`` for an undeclared tool, or ``bad_request`` when
+        ``input`` fails the declaration's schema; a ``seq`` the log is not
+        ready for, or a different event already recorded there, raises
+        :class:`~salvor.errors.DivergenceError`.
+        """
+        resp = self._http.post(
+            f"/v1/client-runs/{self.run_id}/client-tool-intent",
+            json={"seq": seq, "tool": tool, "input": input},
+            headers=self._lease(),
+        )
+        return ClientToolIntentResult.from_json(self._json(resp))
+
+    def client_tool_completion(self, seq: int, output: Any) -> None:
+        """Report what a client-performed tool call returned.
+
+        ``seq`` must name the pending intent at the end of the log; ``output``
+        is checked against the declaration's output schema before it is
+        recorded.
+
+        Refused, recording nothing, as a ``SalvorAPIError`` with code
+        ``client_completion_refused`` when: the declaration was written with
+        ``trust_completion = False``, or it carries no output schema at all.
+        Either way there is nothing this call can trust, so settle it by hand
+        instead with :meth:`resolve` once you have verified the result
+        externally. A reported ``output`` that fails the declared schema is
+        ``bad_request``; there the fix is the output, not the call.
+        """
+        resp = self._http.post(
+            f"/v1/client-runs/{self.run_id}/client-tool-completion",
+            json={"seq": seq, "output": output},
+            headers=self._lease(),
+        )
+        self._json(resp)
 
     # -- resolve --------------------------------------------------------------
 

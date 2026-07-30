@@ -21,6 +21,7 @@ from .errors import (
 )
 from .graph import Graph
 from .models import (
+    ClientToolDecl,
     EndFrame,
     Event,
     ForkPreview,
@@ -404,6 +405,25 @@ class Client:
         every run's recorded origin, labelled ``derived`` to say so."""
         resp = self._http.get(f"/v1/runs/{run_id}/forks")
         return ForksIndex.from_json(self._json(resp))
+
+    # -- client-performed tools -------------------------------------------------
+
+    def list_client_tools(self) -> list[ClientToolDecl]:
+        """List the client-performed tool declarations this server holds:
+        tools an operator declared with ``salvor serve --client-tool <FILE>``,
+        which the client runs itself (see
+        :meth:`~salvor.client_runs.ClientRunDriver.client_tool_intent`).
+
+        This is how a client-driven loop gets the function definitions to
+        hand the model: a declaration's ``input_schema`` IS the model tool's
+        parameter schema, the same schema the server checks a call's input
+        against, published here so a client never keeps a second copy that
+        can quietly drift from it.
+        """
+        resp = self._http.get("/v1/client-tools")
+        return [
+            ClientToolDecl.from_json(t) for t in self._json(resp).get("client_tools", [])
+        ]
 
     # -- event stream ---------------------------------------------------------
 

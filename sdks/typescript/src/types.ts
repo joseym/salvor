@@ -349,6 +349,25 @@ export interface ForksIndex {
   raw: Record<string, unknown>;
 }
 
+/**
+ * One operator-declared tool the CLIENT performs, from `GET /v1/client-tools`.
+ * `inputSchema` is the same JSON Schema a client-tool intent's `input` is
+ * checked against server-side, which is also, verbatim, the parameter schema
+ * to hand the model as this tool's function definition: one schema, not a
+ * copy a client keeps in step by hand. `outputSchema` is present only when the
+ * declaration carries one; a tool declared without one cannot be
+ * self-completed by a client (see `ClientRunDriver.clientToolCompletion`).
+ * `trustCompletion` is `true` unless the operator declared otherwise.
+ */
+export interface ClientToolDecl {
+  name: string;
+  effect: string;
+  inputSchema: unknown;
+  outputSchema?: unknown;
+  trustCompletion: boolean;
+  raw: Record<string, unknown>;
+}
+
 // -- decoders ---------------------------------------------------------------
 
 type Json = Record<string, unknown>;
@@ -627,6 +646,17 @@ export function parseForksIndex(obj: Json): ForksIndex {
     run: obj.run as string,
     derived: Boolean(obj.derived ?? false),
     forks: ((obj.forks as Json[]) ?? []).map(parseForkEntry),
+    raw: obj,
+  };
+}
+
+export function parseClientToolDecl(obj: Json): ClientToolDecl {
+  return {
+    name: obj.name as string,
+    effect: obj.effect as string,
+    inputSchema: obj.input_schema,
+    outputSchema: obj.output_schema,
+    trustCompletion: Boolean(obj.trust_completion ?? true),
     raw: obj,
   };
 }

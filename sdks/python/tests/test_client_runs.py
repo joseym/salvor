@@ -582,6 +582,57 @@ class DriverAgainstStub(unittest.TestCase):
         self.assertEqual(caught.exception.intent["tool"], "render")
         self.assertEqual(caught.exception.intent["effect"], "write")
 
+    def test_client_tool_intent_sends_seq_tool_input_and_surfaces_derived_key(self) -> None:
+        run, server = self.make_driver(
+            {"/v1/client-runs/11111111-1111-1111-1111-111111111111/client-tool-intent":
+             lambda h, body: h._send(
+                 200, {"seq": 5, "idempotency_key": "sha256:derived", "effect": "write"}
+             )}
+        )
+        result = run.client_tool_intent(5, "charge_card", {"amount_cents": 500})
+        self.assertEqual(result.seq, 5)
+        self.assertEqual(result.idempotency_key, "sha256:derived")
+        self.assertEqual(result.effect, "write")
+        _, headers, sent = server.requests[-1]
+        self.assertEqual(
+            sent, {"seq": 5, "tool": "charge_card", "input": {"amount_cents": 500}}
+        )
+        self.assertEqual(headers.get("X-Drive-Token"), "dt_test")
+
+    def test_client_tool_intent_undeclared_tool_raises_typed_error(self) -> None:
+        run, _ = self.make_driver(
+            {"/v1/client-runs/11111111-1111-1111-1111-111111111111/client-tool-intent":
+             lambda h, body: h._send(404, {"error": {
+                 "code": "unknown_tool",
+                 "message": "no client-performed tool named `ghost`",
+             }})}
+        )
+        with self.assertRaises(SalvorAPIError) as caught:
+            run.client_tool_intent(5, "ghost", {})
+        self.assertEqual(caught.exception.code, "unknown_tool")
+
+    def test_client_tool_completion_sends_seq_and_output(self) -> None:
+        run, server = self.make_driver(
+            {"/v1/client-runs/11111111-1111-1111-1111-111111111111/client-tool-completion":
+             lambda h, body: h._send(200, {"seq": 5, "completed": True})}
+        )
+        run.client_tool_completion(5, {"charge_id": "ch_1"})
+        _, headers, sent = server.requests[-1]
+        self.assertEqual(sent, {"seq": 5, "output": {"charge_id": "ch_1"}})
+        self.assertEqual(headers.get("X-Drive-Token"), "dt_test")
+
+    def test_client_tool_completion_refused_raises_typed_error(self) -> None:
+        run, _ = self.make_driver(
+            {"/v1/client-runs/11111111-1111-1111-1111-111111111111/client-tool-completion":
+             lambda h, body: h._send(403, {"error": {
+                 "code": "client_completion_refused",
+                 "message": "tool `charge_card` is declared with trust_completion = false",
+             }})}
+        )
+        with self.assertRaises(SalvorAPIError) as caught:
+            run.client_tool_completion(5, {"charge_id": "ch_1"})
+        self.assertEqual(caught.exception.code, "client_completion_refused")
+
     def test_resolve_posts_output(self) -> None:
         run, server = self.make_driver(
             {"/v1/client-runs/11111111-1111-1111-1111-111111111111/resolve":

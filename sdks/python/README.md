@@ -157,18 +157,38 @@ with Client("http://127.0.0.1:8080") as client:
     # A tool the server's registry holds:
     output = run.tool_step(3, "render", {"doc": "plan.typ"})
 
+    # A tool the server holds no code for at all, the payment case: you run
+    # it, salvor just records that it happened.
+    intent = run.client_tool_intent(4, "charge_card", {"amount_cents": 500})
+    receipt = charge_card(intent.idempotency_key, {"amount_cents": 500})  # your code, your key
+    run.client_tool_completion(4, receipt)
+
     run.append([run.envelope(5, "RunCompleted", output=answer)])
 ```
 
 The driver's full surface: `open` (also re-opens, i.e. resumes, an existing
 run), `log(from_seq=0)`, `append(events)`, `model_step`, `model_step_stream`,
-`tool_step`, and `resolve(output)`. Re-opening a run returns its recorded log on
+`tool_step`, `client_tool_intent`, `client_tool_completion`, and
+`resolve(output)`. Re-opening a run returns its recorded log on
 `run.log_envelopes` and mints a fresh drive token (the single-writer lease every
 append presents), so a refreshed client rebuilds its cursor and re-drives from
 the log, paying nothing for a step the log already covers. A client-driven
 append the log rejects raises `DivergenceError`; a tool step that lands on a
 dangling write raises `NeedsReconciliationError` (whose `.intent` is the recorded
 write), which `resolve(output)` clears.
+
+`client_tool_intent` and `client_tool_completion` are for a tool salvor never
+runs: a team keeps its payment code in its own process, and salvor only
+records that the call happened and what it returned. Open the intent to get an
+idempotency key the server derived (not one you chose, so a retry cannot mint
+itself a second charge), perform the call yourself under that key, then report
+the result. `client.list_client_tools()` fetches the declared tools, each with
+the schema to hand the model as that tool's function definition. A completion
+is refused, unrecorded, when the declaration does not trust a client's own
+report or carries no output schema to check it against; settle those by hand
+with `resolve` once you have verified the call externally. A reported output
+that fails the declared schema is refused too, and there the fix is the output
+itself.
 
 `examples/browser-client-run` drives this same client-driven surface from a
 browser page, and `example/client_run_loop.py` drives it from Python.
