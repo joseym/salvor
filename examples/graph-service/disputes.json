@@ -1,0 +1,26 @@
+{
+  "DSP-4471": {
+    "dispute_id": "DSP-4471",
+    "invoice_id": "INV-90210",
+    "customer": "Harborline Freight",
+    "amount_usd": 512.0,
+    "reason": "duplicate_charge",
+    "opened_on": "2025-11-03"
+  },
+  "DSP-3312": {
+    "dispute_id": "DSP-3312",
+    "invoice_id": "INV-90144",
+    "customer": "Kettle Row Bakery",
+    "amount_usd": 47.25,
+    "reason": "late_delivery_credit",
+    "opened_on": "2025-11-05"
+  },
+  "DSP-2208": {
+    "dispute_id": "DSP-2208",
+    "invoice_id": "INV-88761",
+    "customer": "Verdant Labs",
+    "amount_usd": 1290.4,
+    "reason": "service_not_rendered",
+    "opened_on": "2025-10-28"
+  }
+}

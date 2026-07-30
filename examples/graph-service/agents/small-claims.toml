@@ -1,0 +1,66 @@
+# The small-claims agent: the whole of the auto-settle arm of the graph.
+#
+# Below the review threshold the desk does not want a human in the loop, so the
+# graph hands the dispute to one agent that settles it end to end: it issues the
+# refund itself and tells the customer. The refund is still a Write, still
+# recorded write-ahead, and still never replayed blind; the only thing that
+# changed from the escalated arm is who decided, not what durability applies.
+#
+# Paths below are relative to the DIRECTORY SALVOR IS INVOKED FROM, not to this
+# file, so run everything from the repository root (`run.sh` does).
+#
+# The graph references this agent by content hash, never by path. Learn it with:
+#     salvor agent hash examples/graph-service/agents/small-claims.toml
+
+name = "small-claims"
+
+model = "claude-opus-4-8"
+
+# The first line names this agent, and that name is load-bearing offline: the
+# scripted model in `model-script.json` selects a conversation by finding its
+# name as a substring of the system prompt it was sent. Keep the phrase
+# `small-claims` here and out of the other agent's prompt, or the script server
+# refuses the request rather than guessing which conversation to serve.
+system_prompt = """
+You are the small-claims settler on an invoice disputes desk.
+
+Your input is a dispute record that already cleared the desk's auto-settle
+threshold, so no human approval is needed. Do exactly this, one tool call per
+turn:
+
+1. Call `issue_refund` once, for the full disputed amount, with the approver
+   set to `auto-settle-policy` and a one-line note saying why it qualified.
+2. Call `send_notice` once, telling the customer the credit is on its way.
+3. Reply with one sentence summarising what you did, and stop.
+
+Never call `issue_refund` twice. One dispute, one refund.
+"""
+
+[llm]
+# SALVOR_DEMO_BASE_URL, when exported and non-empty, overrides the endpoint;
+# unset means the public Anthropic endpoint. The API key is read from
+# ANTHROPIC_API_KEY and is optional for a mock or local endpoint, which is what
+# lets this same file run offline against the scripted model and against a real
+# one with nothing changed but that variable.
+base_url_env = "SALVOR_DEMO_BASE_URL"
+
+[budgets]
+# A refund, a notice, and a summary is three model calls. Twelve steps leaves
+# headroom against a real model while still parking a run that has clearly gone
+# in circles. A budget suspends rather than kills, so crossing this rail costs
+# nothing already recorded.
+steps = 12
+tokens = 100000
+
+[[mcp_servers]]
+# The same disputes-desk server the other agent declares. Each agent file spawns
+# its own child process; they share the ledger on disk, which is the point: the
+# ledger is the durable record of what actually happened, not per-process state.
+command = "python3"
+args = ["examples/graph-service/server.py"]
+# `issue_refund` carries no MCP annotation, so the conservative default already
+# reads it as a Write. Pinning it records the operator's own decision instead of
+# inheriting one: an interrupted refund surfaces for a human to reconcile rather
+# than being retried blind. `send_notice` keeps its honest `idempotentHint` and
+# `lookup_dispute` its honest `readOnlyHint`, so neither needs an override.
+effect_overrides = { issue_refund = "write" }
