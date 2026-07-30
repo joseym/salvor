@@ -14,6 +14,10 @@
 node_modules/
 .venv/
 
+# Compiled bytecode from running or importing a Python example; regenerated on
+# every run, and never something a reader should be diffing against.
+__pycache__/
+
 # Editor config is not tracked in general, but this one file is: it points a
 # JSON language server at docs/graph-schema.json, so a graph document gets
 # completion and validation on clone rather than after a setup step. A document
