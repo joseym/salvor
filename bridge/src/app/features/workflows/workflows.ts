@@ -52,6 +52,7 @@ import {
   pickOptions,
   shortHash,
 } from './wf-model';
+import { type WfOpenRefusal, openGraphDocument } from './wf-open';
 import {
   type WfNodeProjection,
   edgeWalked,
@@ -184,6 +185,9 @@ export class Workflows implements AfterViewInit {
   @ViewChild('wfStage') private stageRef?: ElementRef<HTMLElement>;
   @ViewChild('wfMapSvg') private mapSvgRef?: ElementRef<SVGSVGElement>;
   @ViewChild('forkDlg') private forkDlgRef?: ElementRef<HTMLDialogElement>;
+  @ViewChild('wfOpenFile') private openFileRef?: ElementRef<HTMLInputElement>;
+  @ViewChild('wfPasteText') private pasteTextRef?: ElementRef<HTMLTextAreaElement>;
+  @ViewChild('wfPasteBox') private pasteBoxRef?: ElementRef<HTMLElement>;
 
   readonly MAP_W = MAP_W;
   readonly MAP_H = MAP_H;
@@ -208,6 +212,12 @@ export class Workflows implements AfterViewInit {
   readonly forked = signal<string>('');
   readonly published = signal<string>('');
   readonly started = signal<string>('');
+  /** What the last open landed: a draft, named, with the node count it carries. */
+  readonly opened = signal<string>('');
+  /** Why the last open did NOT land. Present instead of a draft, never alongside one. */
+  readonly openRefusal = signal<WfOpenRefusal | undefined>(undefined);
+  /** A file is over the canvas, and the paper says so, so a drop is not a guess. */
+  readonly dropping = signal(false);
   /** A start is in flight. One graph run per click: the button reads its own state rather than
    * letting an impatient second click spawn a second run of the same document. */
   readonly starting = signal(false);
@@ -657,6 +667,8 @@ export class Workflows implements AfterViewInit {
     this.forked.set('');
     this.published.set('');
     this.started.set('');
+    this.opened.set('');
+    this.openRefusal.set(undefined);
     // A run only projects onto the graph it ran. Leaving Run mode on a graph with no runs keeps
     // the canvas honest; on a graph that HAS runs, re-anchor to one of ITS runs rather than
     // inking the previous graph's — the exact `if (!runs.includes(wfRunId)) wfRunId = runs[0]`
@@ -671,6 +683,116 @@ export class Workflows implements AfterViewInit {
 
   onPick(event: Event): void {
     this.pick((event.target as HTMLSelectElement).value);
+  }
+
+  // ── opening a document from outside (the file picker, a drop, the paste box) ──
+
+  /**
+   * THE ONE LANDING PATH. Three affordances carry a document in (the file button, a drop on the
+   * canvas, the paste box) and all three end here, so the rules are asserted once: the bytes are
+   * read and validated by {@link openGraphDocument}, and only a document that passes is written, as a
+   * DRAFT, under a name no existing draft is using. A refusal writes nothing at all, so the drafts
+   * the author already had are exactly as they were.
+   *
+   * Nothing on this path speaks to the server. A published graph is the server's, keyed by its hash;
+   * an open cannot reach one, name one, or mint one.
+   */
+  private openText(text: string, source: { label: string; nameFrom: string }): void {
+    const outcome = openGraphDocument(
+      text,
+      source,
+      this.drafts().map((d) => d.name),
+    );
+    if (!outcome.ok) {
+      this.openRefusal.set(outcome.refusal);
+      this.opened.set('');
+      return;
+    }
+    this.drafts.set(saveDraft(outcome.graph));
+    // Undo/redo is a walk over edits to the graph on screen; a different document is a different
+    // walk, and offering the previous one's steps here would put its bytes under this draft's key.
+    this.past.set([]);
+    this.future.set([]);
+    this.pick(outcome.graph.key);
+    this.opened.set(
+      `opened ${outcome.graph.name} · ${outcome.graph.nodes.length} node${outcome.graph.nodes.length === 1 ? '' : 's'} · a draft, with no hash until it is published`,
+    );
+  }
+
+  /** Read a dropped or chosen file and open its text. A file that cannot be read at all is reported
+   * the same way a file that is not a document is: as a refusal, never a silent nothing. */
+  private async openFile(file: File): Promise<void> {
+    const source = { label: file.name, nameFrom: file.name };
+    let text: string;
+    try {
+      text = await file.text();
+    } catch (err) {
+      this.opened.set('');
+      this.openRefusal.set({
+        source: source.label,
+        head: 'This file could not be read',
+        why: `${err instanceof Error ? err.message : String(err)}. Nothing was opened.`,
+        errors: [],
+      });
+      return;
+    }
+    this.openText(text, source);
+  }
+
+  /** The visible button owns the affordance; the file input behind it is the browser's own dialog. */
+  chooseFile(): void {
+    this.openFileRef?.nativeElement.click();
+  }
+
+  onFileChosen(event: Event): void {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0];
+    // Clear the input, so choosing the SAME file again is a second open rather than no event at all.
+    input.value = '';
+    if (file) void this.openFile(file);
+  }
+
+  /** A drag carrying a file, as opposed to a text selection being swept across the canvas. */
+  private static hasFile(event: DragEvent): boolean {
+    return Array.from(event.dataTransfer?.types ?? []).includes('Files');
+  }
+
+  onCanvasDragover(event: DragEvent): void {
+    if (!Workflows.hasFile(event)) return;
+    // Without this the browser takes the drop itself and navigates away to the file.
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+    this.dropping.set(true);
+  }
+  onCanvasDragleave(event: DragEvent): void {
+    // dragleave fires for every child the pointer crosses; only leaving the canvas itself counts.
+    if (event.currentTarget === event.target) this.dropping.set(false);
+  }
+  onCanvasDrop(event: DragEvent): void {
+    if (!Workflows.hasFile(event)) return;
+    event.preventDefault();
+    this.dropping.set(false);
+    const file = event.dataTransfer?.files?.[0];
+    if (file) void this.openFile(file);
+  }
+
+  /** Open what is in the paste box. The box closes either way, so a refusal is read on the page
+   * rather than behind a panel; the text stays until an open succeeds, so a fix is one edit away. */
+  openPasted(): void {
+    const box = this.pasteTextRef?.nativeElement;
+    (this.pasteBoxRef?.nativeElement as HTMLElement & { hidePopover?: () => void })?.hidePopover?.();
+    this.openText(box?.value ?? '', { label: 'a pasted document', nameFrom: 'pasted-graph' });
+    if (box && this.openRefusal() === undefined) box.value = '';
+  }
+
+  dismissOpenRefusal(): void {
+    this.openRefusal.set(undefined);
+  }
+
+  /** Where a refusal's error points, read against the document that was refused, never against the
+   * graph on screen, which is a different document entirely. */
+  openErrWhere(er: WfError): string {
+    return errWhereIn(this.openRefusal()?.graph, er);
   }
 
   // ── mode + tool ──
@@ -1120,10 +1242,7 @@ export class Workflows implements AfterViewInit {
     return started ? `pass ${joined}/${started}` : 'starting';
   }
   errWhere(er: WfError): string {
-    const g = this.currentGraph();
-    if (er.node !== undefined) return `node ${er.node}`;
-    const e = er.edge !== undefined ? g?.edges[er.edge] : undefined;
-    return `edge ${(er.edge ?? 0) + 1} · ${e?.from ?? '?'} → ${e?.to ?? '?'}`;
+    return errWhereIn(this.currentGraph(), er);
   }
 
   // ── draft editing: every mutation snapshots history and persists through the draft store ──
@@ -1269,6 +1388,15 @@ export class Workflows implements AfterViewInit {
   capabilityFork(): boolean {
     return this.capability().fork;
   }
+}
+
+/** Where one validator error points, in the graph it was computed against: a node by id, or an edge
+ * by its 1-based position and the pair it names. Shared, because the same error list is rendered for
+ * the graph on screen AND for a document that was refused before it could become one. */
+function errWhereIn(g: WfGraph | undefined, er: WfError): string {
+  if (er.node !== undefined) return `node ${er.node}`;
+  const e = er.edge !== undefined ? g?.edges[er.edge] : undefined;
+  return `edge ${(er.edge ?? 0) + 1} · ${e?.from ?? '?'} → ${e?.to ?? '?'}`;
 }
 
 /** The mono field strip a node card carries — the keys it actually reads, the way a form shows its

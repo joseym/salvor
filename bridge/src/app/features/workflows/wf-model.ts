@@ -148,12 +148,26 @@ function joinLabel(join: { kind: string; value?: string }): string {
 }
 
 /**
+ * Normalise a graph DOCUMENT's body into the canvas model: the part that is identical whether the
+ * document arrived off the wire or out of a file, because a document does not carry its own
+ * identity: the hash is computed from the bytes, and only the server has computed it. Callers
+ * supply the identity (or the honest absence of one), which is what keeps an opened file a draft.
+ */
+export function documentBody(doc: Graph): { nodes: WfNode[]; edges: WfEdge[] } {
+  return {
+    nodes: doc.nodes.map(fromServerNode),
+    edges: doc.edges.map((e) =>
+      e.label !== undefined ? { from: e.from, to: e.to, label: e.label } : { from: e.from, to: e.to },
+    ),
+  };
+}
+
+/**
  * Normalise a stored server document into the canvas model. The `name` shown in the picker is the
  * short hash — a published graph's identity is its hash.
  */
 export function fromServerGraph(hash: string, doc: Graph, summary?: GraphSummary): WfGraph {
-  const nodes: WfNode[] = doc.nodes.map(fromServerNode);
-  const edges: WfEdge[] = doc.edges.map((e) => (e.label !== undefined ? { from: e.from, to: e.to, label: e.label } : { from: e.from, to: e.to }));
+  const { nodes, edges } = documentBody(doc);
   void summary;
   return { key: hash, hash, name: shortHash(hash), state: 'published', nodes, edges };
 }

@@ -38,14 +38,16 @@
 
 #wf-forked,
 #wf-published,
-#wf-started {
+#wf-started,
+#wf-opened {
   min-height: 0;
   color: var(--amber-ink);
   font-size: var(--text-sm);
 }
 #wf-forked:empty,
 #wf-published:empty,
-#wf-started:empty {
+#wf-started:empty,
+#wf-opened:empty {
   display: none;
 }
 
@@ -138,6 +140,13 @@
 }
 .wf-canvas.tool-sel {
   cursor: default;
+}
+/* A DOCUMENT IS OVER THE PAPER. The accent rim is the whole cue and it is the canvas's own border,
+   not an overlay: an overlay would sit between the pointer and the drop, and the browser's
+   dragleave bookkeeping is hard enough to keep honest without one. */
+.wf-canvas.is-dropping {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
 }
 
 .wf-stage {
@@ -636,6 +645,24 @@
   pointer-events: none;
 }
 
+/* What a drop will do, said on the paper while the file is over it. Centred, and as passive as
+   .wf-note: it must never become the thing the file lands on instead of the canvas. */
+.wf-drop-hint {
+  position: absolute;
+  left: 50%;
+  top: 24px;
+  transform: translateX(-50%);
+  margin: 0;
+  padding: 6px 12px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--accent);
+  font-size: var(--text-xs);
+  z-index: 3;
+  pointer-events: none;
+}
+
 .wf-map {
   position: absolute;
   bottom: 12px;
@@ -821,6 +848,84 @@
 }
 .wf-about-body p {
   margin: 8px 0;
+}
+
+/* OPENING A DOCUMENT: the paste box (a popover, same panel language as About) and the refusal
+   block that stands in for a document which never made it onto the canvas. */
+.wf-paste {
+  /* The app's other popovers centre themselves the same way (see .palette): the reset zeroes the
+     UA's own `margin: auto`, so the centring is stated rather than inherited. Dropped below the
+     topbar, since a panel over the brand reads as an error rather than a place to type. */
+  margin: 10vh auto 0;
+  border: 1px solid var(--faint);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--elev-raised);
+  padding: 0;
+  max-width: 680px;
+  width: calc(100vw - 48px);
+  background: var(--surface);
+  color: var(--fg);
+}
+.wf-paste-inner {
+  padding: 18px 20px;
+}
+.wf-paste textarea {
+  display: block;
+  width: 100%;
+  margin-top: 12px;
+  padding: 10px 12px;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.55;
+  resize: vertical;
+  border: 1px solid var(--faint);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--fg);
+}
+.wf-paste-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+.wf-paste-foot .spacer {
+  flex: 1;
+}
+
+/* The refusal reads as danger because it IS one: nothing was opened. It carries the same .wf-errs
+   list the inspector shows for the graph on screen, so the two can never word an error differently. */
+.wf-open-refusal {
+  margin: 8px 0 4px;
+  padding: 12px 14px;
+  max-width: 88ch;
+  border: 1px solid var(--faint);
+  border-left: 3px solid var(--danger);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.wf-open-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.wf-open-head > div {
+  flex: 1;
+  min-width: 0;
+}
+.wf-open-refusal h5 {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--danger);
+}
+.wf-open-src {
+  margin: 4px 0 0;
+  font-size: var(--text-xs);
+  color: var(--muted);
+  line-height: 1.5;
+}
+.wf-open-refusal .wf-errs {
+  margin-top: 10px;
 }
 
 /* Publish speaks the toolbar's hairline language — same .fold-all family as its siblings, one

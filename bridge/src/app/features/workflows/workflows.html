@@ -21,6 +21,14 @@
       }
     </select>
     <button class="fold-all" type="button" id="wf-about-open" aria-haspopup="dialog" popovertarget="wf-about">About this canvas</button>
+    <!-- OPEN A DOCUMENT. The button owns the affordance; the input behind it is the browser's own
+         file dialog, kept out of the layout rather than styled into a second control. A document may
+         also be dropped on the canvas, or pasted; all three land through one path, so all three
+         obey the same two rules: it validates first, and it arrives as a draft. -->
+    <button class="fold-all" type="button" id="wf-open" (click)="chooseFile()">Open a document…</button>
+    <input class="sr" type="file" id="wf-open-file" #wfOpenFile accept="application/json,.json"
+           tabindex="-1" aria-hidden="true" (change)="onFileChosen($event)" />
+    <button class="fold-all" type="button" id="wf-paste-open" aria-haspopup="dialog" popovertarget="wf-paste">Paste a document…</button>
     <button class="fold-all" type="button" id="wf-save" [disabled]="readOnly()" (click)="save()">Save draft</button>
     <button class="fold-all strong" type="button" id="wf-publish" [disabled]="publishDisabled()"
             [attr.title]="errors().length ? errors().length + ' error' + (errors().length === 1 ? '' : 's') + ' must be resolved first.' : null"
@@ -36,6 +44,33 @@
 <div id="wf-forked" role="status">{{ forked() }}</div>
 <div id="wf-published" role="status">{{ published() }}</div>
 <div id="wf-started" role="status">{{ started() }}</div>
+<div id="wf-opened" role="status">{{ opened() }}</div>
+
+<!-- WHY A DOCUMENT DID NOT OPEN. A refused document is not on the canvas, so its errors cannot be
+     shown on it: they are shown here instead, from the same validator, with the same node-precise
+     wording the inspector uses for a draft. No one-click fixes, and that is honest: there is
+     nothing here to fix, only a document to correct and open again. -->
+@if (openRefusal(); as refusal) {
+  <div class="wf-open-refusal" id="wf-open-refusal" role="alert">
+    <div class="wf-open-head">
+      <div>
+        <h5>{{ refusal.head }}</h5>
+        <p class="wf-open-src"><span class="mono">{{ refusal.source }}</span> was not opened. {{ refusal.why }}</p>
+      </div>
+      <button class="cpanel-x" type="button" id="wf-open-dismiss" aria-label="Dismiss this refusal" (click)="dismissOpenRefusal()">×</button>
+    </div>
+    @if (refusal.errors.length) {
+      <div class="wf-errs">
+        @for (er of refusal.errors; track $index) {
+          <div class="wf-err">
+            <span class="where">{{ openErrWhere(er) }}</span>
+            {{ er.msg }}
+          </div>
+        }
+      </div>
+    }
+  </div>
+}
 
 <!-- THE TWO STANDING FACTS about a server-side graph run, said next to the control that hits them
      rather than left for a refusal to teach: the graph store is in memory, and a stock server's
@@ -67,10 +102,14 @@
       [class.is-panning]="panning()"
       [class.tool-sel]="tool() === 'sel'"
       [class.is-picking]="pickRun() !== undefined"
+      [class.is-dropping]="dropping()"
       (pointerdown)="onCanvasPointerdown($event)"
       (pointermove)="onCanvasPointermove($event)"
       (pointerup)="onCanvasPointerup()"
       (pointercancel)="onCanvasPointerup()"
+      (dragover)="onCanvasDragover($event)"
+      (dragleave)="onCanvasDragleave($event)"
+      (drop)="onCanvasDrop($event)"
     >
       <div class="wf-stage" id="wf-stage" #wfStage [style.transform]="stageTransform()">
         <svg class="wf-edges" id="wf-edges" aria-hidden="true">
@@ -185,6 +224,12 @@
       </div>
 
       <p class="wf-note mono" id="wf-note">Fork from a node — <span class="wf-note-k">⋯</span> on any node the run entered.</p>
+
+      <!-- The paper says the drop will be taken, and what it will become, so a dropped file is never
+           a guess. Decoration for assistive tech: the file button is the labelled affordance. -->
+      @if (dropping()) {
+        <p class="wf-drop-hint" id="wf-drop-hint" aria-hidden="true">Drop the document to open it as a draft</p>
+      }
 
       <!-- Minimap, bottom-right; only when the graph outruns the viewport. The field jumps the
            view; the viewport rectangle drags. Named for the a11y tree, and honest about its
@@ -358,6 +403,25 @@
     </div>
   </aside>
   <button class="cpanel-tab" type="button" data-drawer data-panel="workflows" [hidden]="panelOpen()" (click)="openPanel()">Inspector</button>
+</div>
+
+<!-- THE PASTE BOX, a popover rather than a modal: the app's one modal is the hazard review, and pasting a
+     document decides nothing that needs the operator pinned. The keyboard route to an open, and the
+     route for a document that is in a terminal rather than in a file. -->
+<div class="wf-paste" id="wf-paste" #wfPasteBox popover="auto" role="dialog" aria-labelledby="wf-paste-title">
+  <div class="wf-paste-inner">
+    <h3 class="cpanel-title" id="wf-paste-title">Paste a graph document</h3>
+    <p class="cpanel-sub">The JSON a <span class="mono">salvor graph edit</span> writes. It opens as a
+      draft with no hash, and only if it validates, by the same check that gates publish.</p>
+    <label class="sr" for="wf-paste-text">Graph document JSON</label>
+    <textarea id="wf-paste-text" #wfPasteText rows="12" spellcheck="false"
+              placeholder='{ "schema_version": 1, "nodes": [ … ], "edges": [ … ] }'></textarea>
+    <div class="wf-paste-foot">
+      <span class="spacer"></span>
+      <button class="fold-all" type="button" id="wf-paste-cancel" popovertarget="wf-paste" popovertargetaction="hide">Cancel</button>
+      <button class="btn" type="button" id="wf-paste-go" (click)="openPasted()">Open as a draft</button>
+    </div>
+  </div>
 </div>
 
 <!-- THE HAZARD REVIEW — a real <dialog>, showModal(), the app's ONE modal. Escape closes it;
