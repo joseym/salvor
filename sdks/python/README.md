@@ -173,6 +173,102 @@ write), which `resolve(output)` clears.
 `examples/browser-client-run` drives this same client-driven surface from a
 browser page, and `example/client_run_loop.py` drives it from Python.
 
+## Graphs
+
+A graph document composes `agent`, `tool`, `gate`, `branch`, `map`, and `fold`
+nodes into an authored control flow: an acyclic set of steps submitted once,
+hashed, and run by that hash exactly as an agent definition is. `GraphBuilder`
+mirrors the six node kinds as typed constructors, so a document gets editor
+typing and completion instead of hand-written JSON; the semantic checks
+(referential integrity, acyclicity) live server-side, on submit or `salvor
+graph validate`.
+
+An `agent` node references an agent by its content hash, never by path. Get
+one from `register_agent`, which accepts a TOML string and returns the hash,
+computed server-side and validated as a side effect; with no server running,
+`salvor agent hash <FILE>` prints the same hash from the command line.
+
+```python
+from salvor import GraphBuilder
+
+draft_schema = {
+    "type": "object",
+    "properties": {"draft": {"type": "string"}},
+    "required": ["draft"],
+}
+
+graph = (
+    GraphBuilder()
+    .agent("research", research_agent_hash, output_schema=draft_schema)
+    .agent(
+        "review",
+        review_agent_hash,
+        input_schema=draft_schema,
+        output_schema=draft_schema,
+    )
+    .gate(
+        "approve",
+        {
+            "type": "object",
+            "properties": {"approved": {"type": "boolean"}},
+            "required": ["approved"],
+        },
+        prompt="Approve this draft for publication?",
+    )
+    .tool(
+        "publish",
+        "http_post",
+        input={"body": "approve.draft", "url": "config.publish_url"},
+    )
+    .edge("research", "review")
+    .edge("review", "approve")
+    .edge("approve", "publish")
+    .build()
+)
+```
+
+`example/build_graph.py` builds this same research, review, gate, publish flow
+and prints the document; pipe it into `salvor graph validate /dev/stdin` for
+the semantic checks the builder itself does not run.
+
+Submit the built document, then start a run from the hash it returns:
+
+```python
+submitted = client.submit_graph(graph)        # -> GraphSubmitted
+run_id = client.start_graph_run(submitted.graph, {"topic": "..."})
+projection = client.get_run_graph(run_id)      # -> GraphProjection
+```
+
+Two things every caller meets here. First, the server keeps submitted
+documents IN MEMORY only: a restart drops them, and a hash from a previous
+process no longer resolves. That is safe rather than lossy, since submitting
+the identical document again mints the identical hash, so a caller can simply
+resubmit before starting a run. Second, a stock `salvor serve` wires an empty
+tool registry, so every `tool` node refuses with `unknown_tool` until a host
+registers the tool it names; `salvor serve --demo-tools` is the built-in way to
+get a non-empty one.
+
+The `approve` node above is the interesting case. The run parks there with
+`state == "suspended"` and the schema (`reason`, `input_schema`) the approval
+must satisfy; `resume` continues it with that approval, the same call an
+ordinary agent run's park uses:
+
+```python
+result = client.resume(run_id, {"approved": True})   # -> ResumeResult
+```
+
+A parked graph run continues through that same call. The run's log recorded
+only the graph's hash, not the document itself, so resume takes the document
+again: the server looks it back up by that hash before it can re-drive the
+walk, which means resuming depends on the document still being resolvable in
+memory, the same restart caveat submission carries above.
+
+Forking continues a run from a node boundary into a new run without touching
+the origin: `client.fork_run(run_id, "review")`, previewed first with
+`client.preview_fork`, and listed per run with `client.list_forks`. See the
+`fork_run` docstring in `salvor/client.py` for the write-replay-hazard refusal
+a fork guards against.
+
 ## Runnable example
 
 `example/agent.toml` is a model-only agent that answers one question. It is the
