@@ -86,6 +86,13 @@ export interface BranchPayload {
   /** Optional short display label. See the module docs' "The optional node display name" note. */
   name?: string;
   on?: string;
+  /**
+   * Content hash of the agent that decides a `model_decision` case, in
+   * `sha256:<64 lowercase hex>` form. Required whenever a case on this branch
+   * carries `{ kind: "model_decision" }`; `salvor graph validate` reports a
+   * model-decision case with no agent here as a node-precise error.
+   */
+  agent_hash?: string;
   cases: BranchCase[];
 }
 
@@ -186,6 +193,7 @@ export interface GateOptions {
 export interface BranchOptions {
   name?: string;
   on?: string;
+  agentHash?: string;
 }
 
 /** The optional fields a map node may declare. */
@@ -249,6 +257,7 @@ export class GraphBuilder {
     const payload: BranchPayload = { id, cases };
     if (options.name !== undefined) payload.name = options.name;
     if (options.on !== undefined) payload.on = options.on;
+    if (options.agentHash !== undefined) payload.agent_hash = options.agentHash;
     this.nodes.push({ kind: "branch", payload });
     return this;
   }

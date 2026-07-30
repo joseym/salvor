@@ -680,6 +680,62 @@ mod tests {
         );
     }
 
+    /// Builds the exact research -> assess -> route -> {approve -> publish,
+    /// escalate} flow the shared `branch-model-decision` fixture records: a
+    /// branch carrying both an expression case and a `model_decision` case,
+    /// with the `agent_hash` the latter requires.
+    fn branch_model_decision_flow() -> Graph {
+        GraphBuilder::new()
+            .agent(AgentSpec::new(
+                "research",
+                format!("sha256:{}", "1".repeat(64)),
+            ))
+            .tool(ToolSpec::new("assess", "assess"))
+            .branch(
+                BranchSpec::new("route")
+                    .on("assess.score")
+                    .agent_hash(format!("sha256:{}", "4".repeat(64)))
+                    .case("high", BranchCondition::Expression("score >= 0.8".into()))
+                    .case("review", BranchCondition::ModelDecision),
+            )
+            .gate(
+                GateSpec::new(
+                    "approve",
+                    json!({
+                        "type": "object",
+                        "properties": { "approved": { "type": "boolean" } },
+                        "required": ["approved"]
+                    }),
+                )
+                .prompt("Approve this high-scoring draft for publication?"),
+            )
+            .tool(ToolSpec::new("publish", "http_post"))
+            .tool(ToolSpec::new("escalate", "notify"))
+            .edge("research", "assess")
+            .edge("assess", "route")
+            .labeled_edge("route", "approve", "high")
+            .edge("approve", "publish")
+            .labeled_edge("route", "escalate", "review")
+            .build()
+    }
+
+    /// The builder emits a document structurally equal to the shared
+    /// branch-model-decision fixture that keeps all three language builders
+    /// honest about the branch `agent_hash` field.
+    #[test]
+    fn builds_the_branch_model_decision_document() {
+        let built =
+            serde_json::to_value(branch_model_decision_flow()).expect("serialize built graph");
+        let canonical: Value = serde_json::from_str(include_str!(
+            "../../../examples/graphs/branch-model-decision.json"
+        ))
+        .expect("parse branch-model-decision fixture");
+        assert_eq!(
+            built, canonical,
+            "builder output must match the branch-model-decision fixture exactly"
+        );
+    }
+
     /// The built fold flow passes semantic validation.
     #[test]
     fn fold_document_validates() {

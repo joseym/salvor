@@ -141,6 +141,7 @@ class BranchNode:
     cases: list[BranchCase]
     name: Optional[str] = None
     on: Optional[str] = None
+    agent_hash: Optional[str] = None
 
     def to_node(self) -> Json:
         payload: Json = {"id": self.id}
@@ -148,6 +149,8 @@ class BranchNode:
             payload["name"] = self.name
         if self.on is not None:
             payload["on"] = self.on
+        if self.agent_hash is not None:
+            payload["agent_hash"] = self.agent_hash
         payload["cases"] = [case.to_dict() for case in self.cases]
         return {"kind": "branch", "payload": payload}
 
@@ -336,9 +339,15 @@ class GraphBuilder:
         *,
         name: Optional[str] = None,
         on: Optional[str] = None,
+        agent_hash: Optional[str] = None,
     ) -> "GraphBuilder":
-        """Adds a ``branch`` node with its named cases."""
-        self._nodes.append(BranchNode(id, cases, name, on).to_node())
+        """Adds a ``branch`` node with its named cases.
+
+        ``agent_hash`` names the agent that decides a ``model_decision`` case
+        (see :func:`model_decision`); ``salvor graph validate`` requires it
+        whenever a case on this branch carries that condition.
+        """
+        self._nodes.append(BranchNode(id, cases, name, on, agent_hash).to_node())
         return self
 
     def map(

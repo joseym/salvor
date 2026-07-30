@@ -84,6 +84,47 @@ test("builder emits the canonical fold document", () => {
   deepStrictEqual(built, canonical);
 });
 
+function buildBranchModelDecisionFlow() {
+  return new GraphBuilder()
+    .agent("research", `sha256:${"1".repeat(64)}`)
+    .tool("assess", "assess")
+    .branch(
+      "route",
+      [
+        { name: "high", when: { kind: "expression", value: "score >= 0.8" } },
+        { name: "review", when: { kind: "model_decision" } },
+      ],
+      { on: "assess.score", agentHash: `sha256:${"4".repeat(64)}` },
+    )
+    .gate(
+      "approve",
+      {
+        type: "object",
+        properties: { approved: { type: "boolean" } },
+        required: ["approved"],
+      },
+      { prompt: "Approve this high-scoring draft for publication?" },
+    )
+    .tool("publish", "http_post")
+    .tool("escalate", "notify")
+    .edge("research", "assess")
+    .edge("assess", "route")
+    .edge("route", "approve", "high")
+    .edge("approve", "publish")
+    .edge("route", "escalate", "review")
+    .build();
+}
+
+test("builder emits the canonical branch model-decision document", () => {
+  const built = JSON.parse(JSON.stringify(buildBranchModelDecisionFlow()));
+  const fixturePath = resolve(
+    process.cwd(),
+    "../../examples/graphs/branch-model-decision.json",
+  );
+  const canonical = JSON.parse(readFileSync(fixturePath, "utf8"));
+  deepStrictEqual(built, canonical);
+});
+
 test("every node kind accepts an optional display name, present only when set", () => {
   const graph = new GraphBuilder()
     .agent("research", `sha256:${"1".repeat(64)}`, { name: "Research the topic" })
