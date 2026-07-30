@@ -37,7 +37,7 @@
 //! and therefore replay-safe. After a `kill -9` and a `resume` the earlier
 //! turns are read from the durable log and never reach the model, and the
 //! first live turn arrives with exactly the message count it would have had
-//! uninterrupted — so one running server serves the pre-kill run and the
+//! uninterrupted. So one running server serves the pre-kill run and the
 //! resume identically, with no state to rewind.
 //!
 //! An unmatched count is answered with a `500` shaped like the API's error

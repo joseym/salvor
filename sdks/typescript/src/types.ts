@@ -50,7 +50,7 @@ export interface PendingCall {
 /**
  * A run's liveness evidence: `"attached"` when a driver is currently running it
  * (a live server task, or a current client-driven lease), `"none"` when none is.
- * Absent (undefined) for a terminal run — a finished run needs no driver — and
+ * Absent (undefined) for a terminal run (a finished run needs no driver), and
  * absent from an older server that predates the field. It is server-reported
  * evidence, not a verdict: a client derives a `stalled` state from a `running`
  * run whose driver is `"none"` and whose last event has gone stale.
@@ -81,10 +81,10 @@ export type Labels = Record<string, string>;
  *
  * `usage`, `stepCount`, `agentDefHash`, and `labels` are additive: present
  * whenever the run's log folds (a real zero when a run genuinely has no model
- * calls yet), and absent — not a fabricated zero — only when the server could
+ * calls yet), and absent (not a fabricated zero) only when the server could
  * not read that run's log at all (see `API.md`). `labels` follows the same
  * rule one step further: also absent when a run recorded no labels at all, or
- * recorded an explicit empty set — the server never sends `labels: {}`. `raw`
+ * recorded an explicit empty set: the server never sends `labels: {}`. `raw`
  * always carries whatever the server actually sent, so a server-side field
  * this SDK has not been taught yet is never lost.
  */
@@ -409,7 +409,7 @@ export function parseRunState(obj: Json): RunState {
 }
 
 /** `"attached"`/`"none"`, or undefined for anything else (a terminal run omits
- * it, and an older server never sends it) — never a fabricated default. */
+ * it, and an older server never sends it), never a fabricated default. */
 function parseDriver(value: unknown): Driver | undefined {
   return value === "attached" || value === "none" ? value : undefined;
 }

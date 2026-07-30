@@ -20,7 +20,7 @@
 //!
 //! `POST /v1/graphs` validates a document all at once (collect-all,
 //! node/edge-precise) and refuses the whole thing with `400 invalid_graph` on
-//! any error — the strict-at-submit posture a control document earns. Starting
+//! any error: the strict-at-submit posture a control document earns. Starting
 //! a run then resolves what the document references against the server's live
 //! inventory, synchronously, before the run is spawned: every `agent` node's
 //! hash must be a registered agent (built through the same
@@ -32,7 +32,7 @@
 //!
 //! # Tool resolution: the existing registry, nothing new
 //!
-//! A graph `tool` node resolves through the server's [`ToolRegistry`] — the
+//! A graph `tool` node resolves through the server's [`ToolRegistry`]: the
 //! SAME seam a client-driven tool step dispatches through. No new
 //! tool-registration surface exists for graphs. `salvor serve` wires that
 //! registry EMPTY, so on a stock server every `tool` node is a precise
@@ -303,19 +303,19 @@ pub async fn projection(
 /// segment would re-fire.
 ///
 /// The origin is never touched: this reads its log, plans the fork purely
-/// ([`salvor_engine::plan_fork`]), and — on success — writes the child's prefix
+/// ([`salvor_engine::plan_fork`]), and, on success, writes the child's prefix
 /// under a fresh id and drives it onward from the fork node, exactly as a
 /// recovered graph run continues. The refusals, each typed and precise:
 ///
-/// - `404 unknown_run` — no such origin.
-/// - `409 not_a_graph_run` — the origin is an ordinary agent run.
-/// - `409 invalid_fork_node` — the origin never entered the named node.
-/// - `404 unknown_graph` — the origin's graph is no longer in the registry
+/// - `404 unknown_run`: no such origin.
+/// - `409 not_a_graph_run`: the origin is an ordinary agent run.
+/// - `409 invalid_fork_node`: the origin never entered the named node.
+/// - `404 unknown_graph`: the origin's graph is no longer in the registry
 ///   (graphs do not survive a restart); resubmit the identical document, then
 ///   fork.
-/// - `409 origin_needs_reconciliation` — the origin is parked at a dangling
+/// - `409 origin_needs_reconciliation`: the origin is parked at a dangling
 ///   write; resolve it first.
-/// - `409 write_replay_hazard` — the re-walked segment holds `Effect::Write`
+/// - `409 write_replay_hazard`: the re-walked segment holds `Effect::Write`
 ///   intents not covered by `acknowledge_writes`; `details.writes` lists exactly
 ///   the ones still needing acknowledgement.
 ///

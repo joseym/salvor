@@ -3,7 +3,7 @@
 //! byte-identical log, and the graph projection shows the nodes in order. The two
 //! map-refusal tests here were repurposed when the engine gained map fan-out:
 //! map nodes are no longer refused wholesale, so they now cover the typed refusals
-//! that remain — a `map` whose `over` reference resolves to a non-list, and a
+//! that remain: a `map` whose `over` reference resolves to a non-list, and a
 //! `map` whose body is an (unsupported) embedded subgraph. The full fan-out
 //! behaviour lives in `map_graph.rs`.
 
@@ -295,8 +295,8 @@ async fn a_map_with_a_subgraph_body_refuses_with_only_the_head_recorded() {
 
 /// An idempotent `tool` node records a key that is a pure function of the call's
 /// POSITION in the graph, not of drawn randomness: two independent drives of the
-/// same document — under DIFFERENT run ids and with a different random source
-/// each — record the IDENTICAL `idempotency_key`, and neither records a
+/// same document (under DIFFERENT run ids and with a different random source
+/// each) record the IDENTICAL `idempotency_key`, and neither records a
 /// `RandomObserved` for it. This is the engine-level proof of the fork-safe key:
 /// a fork re-walking this node live presents the same key its origin recorded,
 /// so the provider collapses the duplicate and only `Write` needs acknowledging.

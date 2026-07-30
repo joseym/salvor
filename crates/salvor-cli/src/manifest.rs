@@ -139,7 +139,7 @@ fn command_manifest(command: &clap::Command, is_root: bool) -> CommandManifest {
         // elsewhere in this tree, not commands in their own right. Recursing
         // would list every verb twice, so a consumer building a verb table or
         // a completion pool straight from this file would have to know to
-        // filter them back out — and the point of the manifest is that it can
+        // filter them back out, and the point of the manifest is that it can
         // be trusted unfiltered.
         subcommands: if is_builtin_help_subcommand(command) {
             Vec::new()

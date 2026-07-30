@@ -93,7 +93,7 @@ pub struct RegisteredAgent {
     pub agent_hash: String,
     /// The agent's display name, when the definition declared one
     /// (`Agent::name`, read off the built agent at registration time).
-    /// `None` when the definition carried no name — genuinely absent, not a
+    /// `None` when the definition carried no name: genuinely absent, not a
     /// default to fall back on: [`agents::get`](crate::agents::get) and
     /// [`agents::list`](crate::agents::list) omit the field entirely for
     /// such an agent rather than emit `"name": null`.
@@ -172,7 +172,7 @@ pub struct ClientRunLease {
     /// When the driver last proved it was alive: stamped at open and refreshed
     /// on every guarded operation (append, model-step, tool-step, resolve), each
     /// of which presents the drive token. That token is the driver's own proof
-    /// of life, so its arrival IS the heartbeat — there is no separate mechanism.
+    /// of life, so its arrival IS the heartbeat: there is no separate mechanism.
     /// Read against the lease TTL to decide whether a driver is still attached to
     /// a client-driven run (see
     /// [`client_run_driver_live`](AppState::client_run_driver_live)).
@@ -528,8 +528,8 @@ impl AppState {
 
     /// Whether a live driver is currently attached to a client-driven run: this
     /// process holds a lease for it AND the driver presented its token within the
-    /// lease TTL. A lapsed lease (the tab closed, the SDK exited) reports `false`
-    /// — the client-driven half of the liveness evidence `GET /v1/runs` carries.
+    /// lease TTL. A lapsed lease (the tab closed, the SDK exited) reports `false`:
+    /// the client-driven half of the liveness evidence `GET /v1/runs` carries.
     #[must_use]
     pub fn client_run_driver_live(&self, run_id: RunId) -> bool {
         let now = self.now();

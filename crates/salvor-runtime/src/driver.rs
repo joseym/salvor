@@ -110,14 +110,14 @@ pub(crate) async fn begin(
 }
 
 /// Runs the built-in agent loop over an already-begun run, returning the final
-/// output (a [`LoopOutcome::Completed`]) or a park — but **not** recording the
+/// output (a [`LoopOutcome::Completed`]) or a park, but **not** recording the
 /// terminal `RunCompleted`.
 ///
 /// The second half of [`drive`], made public so an external driver can run an
 /// agent loop inside a run it opened itself. The graph engine uses exactly
 /// this: it opens the log with `GraphRunStarted`, records `NodeEntered`, calls
 /// `drive_loop` (whose model and tool events land in the same log), records
-/// `NodeExited`, and moves to the next node — recording the single terminal
+/// `NodeExited`, and moves to the next node, recording the single terminal
 /// `RunCompleted` only after its last node. Leaving the terminal to the caller
 /// is the whole reason the completion moved out of the loop and into [`drive`].
 ///

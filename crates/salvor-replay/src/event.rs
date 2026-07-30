@@ -308,7 +308,7 @@ pub enum Event {
     /// failure says the run tried to continue and could not; an abandonment
     /// says a human decided it should stop mattering (a husk that is dead
     /// forever, or a run whose noise is no longer worth carrying in the
-    /// inbox). The two read differently everywhere downstream — the fold gives
+    /// inbox). The two read differently everywhere downstream: the fold gives
     /// abandonment its own status, and the surfaces treat it as a muted
     /// resting state, never the failure ink. Keeping [`Event::RunFailed`]
     /// untouched is the point: its recorded meaning must not shift.
@@ -363,7 +363,7 @@ pub enum Event {
         /// Optional operator-supplied correlation tags, carried for parity
         /// with [`Event::RunStarted::labels`]: grouping (a build id, an
         /// environment) matters for graph runs exactly as it does for agent
-        /// runs. Same additive-optional contract as that field — absent by
+        /// runs. Same additive-optional contract as that field: absent by
         /// default via `#[serde(default, skip_serializing_if =
         /// "Option::is_none")]`, so an unlabeled graph run omits the key
         /// entirely. A tag, never part of identity: never fed into any hash.
@@ -393,7 +393,7 @@ pub enum Event {
     },
     /// A graph node was skipped: reached on the walk but deliberately not run
     /// (for example, a branch case that did not fire routes past its node). A
-    /// skipped node WAS reached — it is recorded precisely so a projection can
+    /// skipped node WAS reached: it is recorded precisely so a projection can
     /// tell "skipped" apart from "never reached", which is the absence of any
     /// event naming the node.
     NodeSkipped {
@@ -414,7 +414,7 @@ pub enum Event {
     },
     /// A map node fanned out: the resolved list of items to map over was
     /// determined and recorded. Recording the items here (rather than
-    /// re-resolving on replay) is what makes the fan-out deterministic — the
+    /// re-resolving on replay) is what makes the fan-out deterministic: the
     /// per-iteration child ids are derived from this recorded data.
     MapFannedOut {
         /// The id of the map node.
@@ -468,8 +468,8 @@ pub enum Event {
     },
     /// A fold node settled: its loop stopped and its `join` rule selected the
     /// winning iteration. This is the sole recorded authority for WHICH pass
-    /// the fold's output came from — the argmax of a `best_by` join is read
-    /// from `winner_index`, never inferred from the iteration order — exactly
+    /// the fold's output came from: the argmax of a `best_by` join is read
+    /// from `winner_index`, never inferred from the iteration order, exactly
     /// as [`Event::BranchTaken`] is the sole authority for a branch's route.
     /// `reason` records WHY the loop ended (its stop predicate fired, the
     /// iteration bound was reached, or a pass failed to improve), an opaque

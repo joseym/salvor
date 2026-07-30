@@ -1,4 +1,4 @@
-//! The same-fold proof, native side — and the generator for its fixtures.
+//! The same-fold proof, native side, and the generator for its fixtures.
 //!
 //! One test file with two jobs, so the reference logs are defined once:
 //!
@@ -12,8 +12,8 @@
 //!   (the inputs cannot silently drift), then folds every committed log at every
 //!   prefix natively and asserts the result equals `fixtures/expected` byte for
 //!   byte. This keeps the committed native side live-verified on every
-//!   `cargo test`, so the Node harness (`js/same-fold.mjs`) — which asserts the
-//!   *wasm* fold equals that same committed expected — completes the chain:
+//!   `cargo test`, so the Node harness (`js/same-fold.mjs`), which asserts the
+//!   *wasm* fold equals that same committed expected, completes the chain:
 //!   native == committed == wasm, all three checked live.
 //!
 //! The reference logs deliberately touch every event kind and every derived
@@ -271,7 +271,7 @@ fn fixtures_dir() -> PathBuf {
 
 /// The native fold at every prefix `0..=len`, as the exact canonical JSON
 /// strings `fold_prefix_to_json` emits. These are the bytes that cross the wasm
-/// boundary, so the proof compares them byte for byte — the expected fixture
+/// boundary, so the proof compares them byte for byte: the expected fixture
 /// stores one canonical line per prefix (JSONL), no re-normalization.
 fn native_expected(events: &[EventEnvelope]) -> Vec<String> {
     let compact = serde_json::to_string(events).unwrap();

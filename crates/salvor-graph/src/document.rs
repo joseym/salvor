@@ -33,7 +33,7 @@
 //! agent is a long-lived identity that a run keeps replaying under the same
 //! hash while an operator relabels it, so a rename must not mint a new
 //! identity (see `salvor_runtime::Agent::def_hash`). A graph document has no
-//! such identity to protect — it IS its hash, the whole reason `POST
+//! such identity to protect: it IS its hash, the whole reason `POST
 //! /v1/graphs` stores it content-addressed. So a node's `name` gets NO
 //! special treatment: it is an ordinary field on the payload struct, present
 //! on the wire exactly when set (`skip_serializing_if = "Option::is_none"`),
@@ -439,7 +439,7 @@ pub struct FoldNode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// What each pass runs: a node already in this document, or an embedded
-    /// sub-graph. Not implemented exactly as [`MapBody`]'s subgraph form is not —
+    /// sub-graph. Not implemented exactly as [`MapBody`]'s subgraph form is not:
     /// the shape is legal, but no engine runs it yet.
     pub body: FoldBody,
     /// The iteration bound: the most passes the loop may run. Must be at least

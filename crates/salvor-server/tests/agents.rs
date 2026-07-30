@@ -1,6 +1,6 @@
 //! The agent registry's `name` plumbing: `POST /v1/agents` carries a built
 //! agent's `Agent::name()` into the stored [`RegisteredAgent`], and
-//! `GET /v1/agents`/`GET /v1/agents/{hash}` hand it back — present only when
+//! `GET /v1/agents`/`GET /v1/agents/{hash}` hand it back: present only when
 //! the definition actually declared one, omitted (never `null`) otherwise.
 //! The bound on `name` itself (at most 64 characters, not empty/all
 //! whitespace) is enforced where the definition is parsed
@@ -9,7 +9,7 @@
 //! validate path on every submitted definition, which is what makes the
 //! bound a server-enforced one and not merely a client-side courtesy. What
 //! this file pins is the registry/response plumbing downstream of a build
-//! that already carries (or does not carry) a name — a fixed in-process
+//! that already carries (or does not carry) a name: a fixed in-process
 //! factory stands in for the real parser, the same stand-in pattern
 //! `common::agent_factory` already uses for every other test in this suite.
 
@@ -23,7 +23,7 @@ use salvor_server::{AgentFactory, BuiltAgent};
 use std::sync::Arc;
 
 /// A factory that always builds the same named agent, regardless of the
-/// submitted definition — the same "submission is opaque to the factory"
+/// submitted definition: the same "submission is opaque to the factory"
 /// pattern `common::agent_factory` uses, extended to carry a name.
 fn named_agent_factory(name: &'static str) -> AgentFactory {
     Arc::new(move |_definition| {
@@ -86,7 +86,7 @@ async fn get_and_list_return_the_name_when_the_build_carries_one() {
 }
 
 /// A registered agent whose build carried no name omits the field entirely
-/// from both endpoints — never `"name": null`, the same honest-absence rule
+/// from both endpoints: never `"name": null`, the same honest-absence rule
 /// `GET /v1/runs` already applies to `agent_def_hash` and `labels`.
 #[tokio::test]
 async fn get_and_list_omit_name_when_the_build_carries_none() {

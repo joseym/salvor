@@ -8,9 +8,9 @@
 //!
 //! The tests split in two, and the second half is the load-bearing one:
 //!
-//! - the useful behaviour — run ids for the verbs that take one, agent
+//! - the useful behaviour: run ids for the verbs that take one, agent
 //!   identities for `salvor list --agent`;
-//! - the degradation — a missing store, a corrupt store, a store path that is
+//! - the degradation: a missing store, a corrupt store, a store path that is
 //!   a directory. Each must produce no candidates, no output on either stream,
 //!   and exit 0. This is the property most likely to rot silently, because a
 //!   store that goes unreadable in a way nobody tested reaches an operator as
@@ -198,7 +198,7 @@ async fn agent_identities_do_not_leak_onto_the_agent_file_flag() {
     );
 }
 
-/// A missing store: no candidates, nothing on either stream, exit 0 — and no
+/// A missing store: no candidates, nothing on either stream, exit 0, and no
 /// store left behind, because the SQLite call underneath would create the file
 /// it was asked to open.
 #[tokio::test]
@@ -228,7 +228,7 @@ async fn a_missing_store_offers_nothing_and_says_nothing() {
 
 /// A file that is not a database, and a store path that is a directory: the
 /// same silence. These are the shapes an unreadable store actually takes on
-/// disk — a truncated copy, a path pointing at the wrong thing.
+/// disk: a truncated copy, a path pointing at the wrong thing.
 #[tokio::test]
 async fn an_unreadable_store_offers_nothing_and_says_nothing() {
     let elsewhere = tempdir().expect("tempdir");

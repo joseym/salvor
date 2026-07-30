@@ -145,7 +145,7 @@ impl Agent {
     }
 
     /// A short human label for this agent, when set with
-    /// [`AgentBuilder::name`] — a display name the control plane's agent
+    /// [`AgentBuilder::name`]: a display name the control plane's agent
     /// registry (`GET /v1/agents/{hash}`) can hand back to a caller that only
     /// has the hash. Like [`labels`](Self::labels) and
     /// [`record_prompts`](Self::record_prompts), this is descriptive

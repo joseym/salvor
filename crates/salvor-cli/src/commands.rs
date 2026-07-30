@@ -67,7 +67,7 @@ use crate::serve_kill;
 /// `--fixture <DIR>` is the offline variant: the agent, the input, and a
 /// recorded model conversation all come from one directory, and a scripted
 /// model is stood up locally to serve that conversation (see [`crate::fixture`]).
-/// It changes only where those three things come from — everything below the
+/// It changes only where those three things come from: everything below the
 /// resolution is the same store, the same runtime, and the same event log a
 /// `--agent`/`--input` run gets.
 pub async fn run(store_path: &Path, args: RunArgs) -> Result<u8> {
@@ -663,7 +663,7 @@ pub async fn serve(store_path: &Path, args: ServeArgs) -> Result<u8> {
         .context("building the model client for the client-driven model step")?;
 
     // The tool registry: EMPTY by default (the mechanism is wired, but
-    // salvor serve ships no tools of its own — a tool-step or a graph `tool`
+    // salvor serve ships no tools of its own; a tool-step or a graph `tool`
     // node for any name is a clean `unknown_tool` until a host registers
     // one, mirroring how the model executor is wired), or the deterministic
     // demo set when `--demo-tools` opts in. This is the one place that flag
@@ -674,7 +674,7 @@ pub async fn serve(store_path: &Path, args: ServeArgs) -> Result<u8> {
         {
             tracing::info!(
                 "demo tools registered: lookup_invoice (read), issue_refund (write), send_email \
-                 (idempotent) — see salvor_cli::demo_tools"
+                 (idempotent); see salvor_cli::demo_tools"
             );
             crate::demo_tools::registry()
         }
@@ -998,7 +998,7 @@ pub fn graph_schema() -> Result<u8> {
 /// An `agent` node resolves to a provided `--agent` file by that file's
 /// definition hash; a hash matching none of them is a precise error listing what
 /// was provided. A `tool` node resolves from the tools the provided agents
-/// carry — the local counterpart of the server's tool registry, keeping one
+/// carry, the local counterpart of the server's tool registry, keeping one
 /// honest story: a tool no provided agent carries is refused, named, before the
 /// walk reaches it (as [`run_graph`] does through the resolver).
 pub async fn graph_run(store_path: &Path, args: GraphRunArgs) -> Result<u8> {
@@ -1097,7 +1097,7 @@ async fn resume_graph(
 
 /// A [`ToolResolver`] over the provided agents' own tools: a graph `tool` node
 /// resolves to the first provided agent that carries a tool of that name. This
-/// is the local counterpart of the server's tool registry — the CLI has no
+/// is the local counterpart of the server's tool registry: the CLI has no
 /// standalone tool inventory, so the tools come from the real agent definitions
 /// the operator supplied.
 struct AgentTools<'a>(&'a HashMap<String, Agent>);

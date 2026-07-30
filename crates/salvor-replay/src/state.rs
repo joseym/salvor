@@ -262,7 +262,7 @@ pub fn derive_state(log: &[EventEnvelope]) -> RunState {
             }
             // A graph run's head. It stands where an agent run's `RunStarted`
             // does: the run is now under way, so the status becomes `Running`.
-            // No new `RunStatus` variant is minted for graph runs — the whole
+            // No new `RunStatus` variant is minted for graph runs: the whole
             // point of this fold's graph handling is that a graph run reads
             // through the same agent-run status vocabulary. Between its
             // recorded steps it is `Running`; a dangling model or tool call

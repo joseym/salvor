@@ -668,7 +668,7 @@ async fn retry_with_a_different_claimed_recorded_at_is_still_idempotent() {
 }
 
 /// A client-driven run reports an ATTACHED driver while its lease is current,
-/// and NONE once the lease lapses — the client-driven half of the liveness
+/// and NONE once the lease lapses: the client-driven half of the liveness
 /// evidence `GET /v1/runs` carries. This is the honest addition the design
 /// needed: the pre-existing lease had no expiry, so a driverless client run
 /// (the tab closed, the SDK exited) was indistinguishable from a live one.
@@ -698,7 +698,7 @@ async fn client_run_driver_is_attached_while_leased_and_none_once_it_lapses() {
 
     let (run, token) = open_run(&client, &server.base).await;
 
-    // Append a RunStarted so the run's log folds to `running` — the exact state a
+    // Append a RunStarted so the run's log folds to `running`: the exact state a
     // stall hides in. The append presents the drive token, refreshing the lease.
     let (status, _) = append(
         &client,
@@ -724,11 +724,11 @@ async fn client_run_driver_is_attached_while_leased_and_none_once_it_lapses() {
     let (_, body) = get_json(&client, &format!("{}/v1/runs/{run}", server.base), None).await;
     assert_eq!(
         body["status"]["state"], "running",
-        "the fold is unchanged — the run still LOOKS running"
+        "the fold is unchanged: the run still LOOKS running"
     );
     assert_eq!(
         body["driver"], "none",
-        "but the lease lapsed, so no driver is attached — the stall the dashboard derives"
+        "but the lease lapsed, so no driver is attached: the stall the dashboard derives"
     );
 
     // The list surface reports the same evidence for the same run.

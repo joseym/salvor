@@ -258,7 +258,7 @@
         },
         "body": {
           "$ref": "#/$defs/FoldBody",
-          "description": "What each pass runs: a node already in this document, or an embedded\nsub-graph. Not implemented exactly as [`MapBody`]'s subgraph form is not —\nthe shape is legal, but no engine runs it yet."
+          "description": "What each pass runs: a node already in this document, or an embedded\nsub-graph. Not implemented exactly as [`MapBody`]'s subgraph form is not:\nthe shape is legal, but no engine runs it yet."
         },
         "id": {
           "description": "The node's stable id, unique within the document.",

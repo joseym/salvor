@@ -22,7 +22,7 @@
  * Every node payload may carry an optional `name`: a short, purely
  * presentational label ("Approve the draft"). Bounds mirror the agent
  * definition's own `name` precedent: at most 64 characters, and, when set,
- * not empty or all whitespace — `salvor graph validate` (and `POST
+ * not empty or all whitespace: `salvor graph validate` (and `POST
  * /v1/graphs`) enforce both, node-precise. Unlike an agent's `name` (excluded
  * from its definition hash so a rename never mints a new agent identity), a
  * node's `name` is an ordinary field on the payload and hashes like any

@@ -1,6 +1,6 @@
 //! MAP fan-out, on the form that shipped: **inline
 //! sequential** iterations recorded in the parent's own log (the deliberate
-//! fallback — the `concurrency` cap is accepted but not honored in v0.4). Because
+//! fallback: the `concurrency` cap is accepted but not honored in v0.4). Because
 //! the fan-out lives in one log, the whole feature is proven by the same
 //! single-log replay machinery already proven for linear and branching graphs:
 //!
@@ -90,7 +90,7 @@ async fn drive_fresh(
 /// to prove first). A fan-out of N=3 is killed at EVERY event boundary; after
 /// recovery from the truncated prefix:
 ///   (a) the resumed parent log is byte-identical to an uninterrupted drive, and
-///   (b) every completed body tool call executed exactly once — no call whose
+///   (b) every completed body tool call executed exactly once: no call whose
 ///       completion is already in the prefix re-executes, and each remaining call
 ///       runs exactly once.
 ///
@@ -98,7 +98,7 @@ async fn drive_fresh(
 /// first `k` events of the uninterrupted log (for every `k`), then resuming a
 /// `RunCtx` over that prefix and driving to completion. The resume's tool
 /// executions are counted on a fresh counter and checked against the number of
-/// body `ToolCallCompleted` events at or beyond the cut — the exact set of calls
+/// body `ToolCallCompleted` events at or beyond the cut: the exact set of calls
 /// that had not completed when the kill struck.
 #[tokio::test]
 async fn map_fan_out_holds_the_property_at_every_kill_boundary() {

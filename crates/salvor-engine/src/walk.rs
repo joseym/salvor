@@ -1,6 +1,6 @@
 //! The walk order: a deterministic topological sort of a graph's nodes.
 //!
-//! The engine executes nodes in dependency order — every node runs after all of
+//! The engine executes nodes in dependency order: every node runs after all of
 //! its edge predecessors. Where several nodes are ready at once, the smallest
 //! node id wins, so the order is a pure function of the document and reproduces
 //! bit for bit on replay. For a linear chain of edges the order is simply the

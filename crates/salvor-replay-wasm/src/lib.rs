@@ -3,7 +3,7 @@
 //! The browser inspector (the Bridge's scrubber) needs one operation: fold a
 //! run's event log up to a prefix length and read the [`RunState`] it implies,
 //! instantly, with no server round trip. This crate exposes exactly that,
-//! calling `salvor_replay::derive_state` — the same fold the runtime uses — so
+//! calling `salvor_replay::derive_state` (the same fold the runtime uses), so
 //! the state a scrubbed prefix shows cannot drift from the state the server
 //! would derive for that prefix.
 //!
@@ -352,7 +352,7 @@ mod tests {
         );
     }
 
-    /// Budget-exceeded pins the f64 fields (`limit`, `observed`) — the
+    /// Budget-exceeded pins the f64 fields (`limit`, `observed`): the
     /// cross-target number-formatting path the same-fold proof guards.
     #[test]
     fn surface_pin_budget_exceeded_floats() {

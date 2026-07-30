@@ -3,7 +3,7 @@
 //!
 //! [`crate::commands::completions`] generates a STATIC script: it knows every
 //! verb, flag, and fixed value set, because all of those are facts about the
-//! parse tree. What it cannot know is the one thing an operator types most —
+//! parse tree. What it cannot know is the one thing an operator types most:
 //! a run id. This module answers that half, and the two live side by side: the
 //! static script keeps working exactly as before, and a user who also enables
 //! this one gets run ids and agent identities on top.
@@ -15,10 +15,10 @@
 //! so the incantation a user learns here is the one the wider Rust CLI
 //! ecosystem already documents:
 //!
-//! - `COMPLETE=zsh salvor` — no arguments after a `--`, so this prints the
+//! - `COMPLETE=zsh salvor`: no arguments after a `--`, so this prints the
 //!   shell function that registers `salvor` for completion. That is what a
 //!   user evaluates from their rc file.
-//! - `COMPLETE=zsh salvor -- salvor history <partial>` — the registration
+//! - `COMPLETE=zsh salvor -- salvor history <partial>`: the registration
 //!   function's own call back into the binary on each Tab. Everything after
 //!   `--` is the command line as the shell currently sees it, and
 //!   `_SALVOR_COMPLETE_INDEX` says which of those words the cursor is in. The
@@ -38,7 +38,7 @@
 //! integration of a shipped binary. This module is the conservative trade: a
 //! few hundred lines of our own walking of the very same [`clap::Command`]
 //! tree, no new dependency, no unstable gate, and total control over the
-//! degradation rules below — which are the part that actually matters. If the
+//! degradation rules below, which are the part that actually matters. If the
 //! engine stabilises, the shell-facing protocol is deliberately the same one,
 //! so the swap is an implementation change and not a user-visible one.
 //!
@@ -50,7 +50,7 @@
 //! timeout, with the operator's shell frozen and no way to tell why.
 //!
 //! **Never speak.** A missing store, a corrupt store, a store the user cannot
-//! read, a poisoned lock, an outright panic — each degrades to zero candidates
+//! read, a poisoned lock, an outright panic: each degrades to zero candidates
 //! and exit 0. Nothing is ever written to stderr from the completion path, and
 //! the generated shell functions redirect it away besides. A shell that offers
 //! nothing is a small disappointment; a shell that prints a Rust backtrace over
@@ -86,9 +86,9 @@ const MAX_CANDIDATES: usize = 50;
 /// agent identity is not stored: it lives in a run's first event, so each
 /// distinct identity costs one full log read. That is the one genuinely
 /// unbounded cost on this path, and this is the bound: the 50 most recently
-/// active runs, newest first. Fifty is chosen to match [`MAX_CANDIDATES`] —
-/// there is no point reading a log that could not produce a candidate anyone
-/// would see — and because the set of agents an operator is switching between
+/// active runs, newest first. Fifty is chosen to match [`MAX_CANDIDATES`]
+/// (there is no point reading a log that could not produce a candidate anyone
+/// would see) and because the set of agents an operator is switching between
 /// right now is small; an identity that appears nowhere in the last fifty runs
 /// is one they can finish typing. The deadline below is the backstop for the
 /// pathological case (fifty enormous logs) that this count alone does not
@@ -205,7 +205,7 @@ fn registration(shell: &str) -> String {
         // `${(@f)...}` splits the binary's stdout on newlines into an array,
         // and `compadd` (rather than zsh's `_describe`) is what takes those
         // strings as literal candidates: it quotes a value containing a space
-        // — `graph run` is one — when it inserts it on the command line, and
+        // (`graph run` is one) when it inserts it on the command line, and
         // it never reads a `:` in a value as the start of a description.
         "zsh" => ZSH_REGISTRATION.replace("COMPLETER", &completer),
         // `read -r` into an array rather than word-splitting the output: a
@@ -666,7 +666,7 @@ fn agent_identities(store: &Path, current: &str) -> Vec<String> {
 ///
 /// The existence check is not an optimisation. `SqliteStore::open` goes
 /// through SQLite's `Connection::open`, which CREATES the database file when
-/// it is absent — so without this, pressing Tab in a directory with no store
+/// it is absent. So without this, pressing Tab in a directory with no store
 /// would leave a stray empty `salvor.db` behind in it.
 ///
 /// The worker is abandoned rather than joined when the deadline passes. The

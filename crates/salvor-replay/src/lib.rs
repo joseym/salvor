@@ -24,8 +24,8 @@
 //! - **Graph-node projection.** [`derive_graph_projection`] folds a graph run's
 //!   log into a [`GraphProjection`]: which nodes the walk reached, which branch
 //!   cases fired, and each map node's fan-out. It is separate from
-//!   [`derive_state`] on purpose — a graph run keeps the same run-level status
-//!   vocabulary as an agent run, and the per-node picture lives here — and, like
+//!   [`derive_state`] on purpose: a graph run keeps the same run-level status
+//!   vocabulary as an agent run, and the per-node picture lives here, and, like
 //!   the rest of the crate, it never depends on `salvor-graph`.
 //! - **Values read back out of a log.** [`ParkReason`] (why a run stopped short
 //!   of completing) and [`RunSummary`] (the one-line-per-run projection a store

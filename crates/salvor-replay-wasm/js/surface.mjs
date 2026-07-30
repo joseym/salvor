@@ -1,6 +1,6 @@
 // Pins the exported .d.ts surface (types/index.d.ts) against the real wasm
 // runtime output. wasm-pack's generated .d.ts covers the function signatures;
-// this asserts the JSON SHAPE those functions carry — the RunStateJson union —
+// this asserts the JSON SHAPE those functions carry (the RunStateJson union)
 // still matches what types/index.d.ts documents, so the two cannot drift.
 //
 // It checks, across the committed fixtures: that every documented status `kind`

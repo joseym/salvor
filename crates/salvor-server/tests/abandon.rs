@@ -1,6 +1,6 @@
 //! The abandon endpoint over real HTTP: retire a non-terminal run, and the
-//! refusals. Abandonment is an operator action over the store — it drives no
-//! agent and needs no lease — so these tests seed the run's log directly through
+//! refusals. Abandonment is an operator action over the store (it drives no
+//! agent and needs no lease), so these tests seed the run's log directly through
 //! the shared store and then drive the endpoint, rather than standing up the
 //! model/tool machinery a real drive would need.
 

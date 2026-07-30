@@ -12,7 +12,7 @@
 //! (a `tool` node, or a client-driven tool step) is therefore a clean
 //! `unknown_tool` until a host registers something. That is correct for a
 //! library the way an embedding host (aarg's own `ServeRenderTool`, or
-//! anyone else's) uses it — but it also means a stock `salvor serve` cannot
+//! anyone else's) uses it. But it also means a stock `salvor serve` cannot
 //! run the shape of graph the product demos and the served end-to-end suite
 //! want to show: an entry agent, a branch, a gate, a tool node that reads,
 //! and a tool node that writes.
@@ -44,7 +44,7 @@
 //! - [`SendEmail`] (`send_email`, [`Effect::Idempotent`]): the output's
 //!   `message_id` is derived from the call's idempotency key when the
 //!   runtime supplies one, so a retried attempt under the same key
-//!   reproduces the identical id — the concrete, observable proof of "safe
+//!   reproduces the identical id: the concrete, observable proof of "safe
 //!   to repeat under the same key."
 //!
 //! Every tool is pure computation over its typed input (plus, for
@@ -103,8 +103,8 @@ pub struct LookupInvoiceOutput {
 pub struct LookupInvoice;
 
 /// The small canned table a few known demo invoice ids resolve against.
-/// Anything outside this table still resolves — see
-/// [`fallback_invoice`] — so the tool never refuses on an unrecognized id.
+/// Anything outside this table still resolves (see
+/// [`fallback_invoice`]), so the tool never refuses on an unrecognized id.
 const CANNED_INVOICES: &[(&str, f64, &[&str])] = &[
     (
         "inv_1001",
@@ -187,7 +187,7 @@ pub struct IssueRefundOutput {
     /// Echoes the refunded amount.
     pub amount_usd: f64,
     /// Echoes the input's watcher, defaulting to a fixed demo address when
-    /// none was supplied — see [`IssueRefundInput::watcher`].
+    /// none was supplied (see [`IssueRefundInput::watcher`]).
     pub watcher: String,
 }
 
@@ -196,7 +196,7 @@ pub struct IssueRefundOutput {
 const DEFAULT_WATCHER: &str = "watchers@example.com";
 
 /// A write: not safe to repeat blindly. Appends one durable line to a ledger
-/// file, mirroring `demo_research::Research::save_finding` — this is the
+/// file, mirroring `demo_research::Research::save_finding`: this is the
 /// tool the hazard/fork stories point at, and the ledger is what a
 /// kill-mid-write walkthrough counts to prove zero duplicate writes.
 #[derive(Tool)]
@@ -272,7 +272,7 @@ pub struct SendEmailOutput {
     pub watcher: String,
     /// A deterministic id for the sent message. Derived from the call's
     /// idempotency key when the runtime supplies one, else from the input
-    /// alone — either way, a retried attempt reproduces the SAME id, the
+    /// alone; either way, a retried attempt reproduces the SAME id, the
     /// observable proof that this tool is safe to repeat under a key.
     pub message_id: String,
 }

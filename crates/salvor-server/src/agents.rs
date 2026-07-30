@@ -78,7 +78,7 @@ pub async fn register(
     let agent_hash = built.agent.def_hash().to_owned();
     // The name, if the definition declared one, is read off the built agent
     // (`AgentConfig::validate` already bounded it during the build above, the
-    // same parse-and-validate path a file-based `salvor run` goes through —
+    // same parse-and-validate path a file-based `salvor run` goes through;
     // this is what makes the bound a server-enforced one, not merely a
     // client-side courtesy).
     let name = built.agent.name().map(str::to_owned);
