@@ -17,9 +17,17 @@ name = "refund_card"
 # a human rather than one that retries itself.
 effect = "write"
 
-# The ordinary case: salvor takes this client's report, once the report passes
-# the output schema below. `wire-payout.toml` is the other case.
+# Self-completion is an explicit opt-in: silence would leave this call for a
+# person. This desk does trust the client's report for a card refund, once the
+# report passes the output schema below. `wire-payout.toml` is the other case.
 trust_completion = true
+
+# The output schema checks that a completion carries an amount, not that it is
+# the amount that was authorized: 50000 is as well-shaped an integer as 5000.
+# require_equal closes that gap. The reported `amount_cents` must equal the
+# amount the intent recorded, or the completion is refused and nothing is
+# written. Each named field must be required on both sides, checked at load.
+require_equal = ["amount_cents"]
 
 [input_schema]
 type = "object"

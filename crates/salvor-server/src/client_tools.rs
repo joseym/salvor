@@ -67,18 +67,26 @@ use crate::state::AppState;
 
 /// One operator-written declaration of a tool the CLIENT performs.
 ///
-/// There is no handler behind it. It exists so this server can do the four
-/// things it CAN honestly do about a call it never witnessed: fix the effect
-/// class, check the input before an intent is recorded, check the reported
-/// output against a shape the operator declared, and decide whether the
-/// client's report is allowed to close the call at all.
+/// There is no handler behind it. It exists so this server can do the things it
+/// CAN honestly do about a call it never witnessed: fix the effect class, check
+/// the input before an intent is recorded, check the reported output against a
+/// shape the operator declared, pin named fields so a report cannot alter what
+/// was authorized, and decide whether the client's report is allowed to close
+/// the call at all.
 ///
-/// Unknown keys are rejected rather than ignored. A typo in `trust_completion`
-/// would otherwise fall back to the permissive default silently, which is
-/// exactly the mistake an operator would not catch until a client had already
-/// self-completed a write.
+/// Unknown keys are rejected rather than ignored. A misspelled key like
+/// `require_equal` would otherwise be dropped silently, leaving a guard the
+/// operator meant to set quietly absent, and the mistake would not surface until
+/// a client had already altered a field the operator meant to pin. Refusing
+/// early, precisely, is the rule.
+///
+/// The declaration deserializes through [`RawClientToolDecl`] so a
+/// cross-field rule the field-by-field format cannot express is enforced at
+/// load: every [`require_equal`](Self::require_equal) name must be required on
+/// both sides. A file that breaks it fails to parse, naming the field and the
+/// missing side.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "RawClientToolDecl")]
 pub struct ClientToolDecl {
     /// The tool's name, the one a client names when it opens an intent.
     pub name: String,
@@ -93,21 +101,94 @@ pub struct ClientToolDecl {
     /// and the input check both still apply), but a tool declared without it
     /// cannot be self-completed by a client: an unfalsifiable completion is
     /// precisely what the schema exists to prevent.
-    #[serde(default)]
     pub output_schema: Option<Value>,
-    /// Whether the client may record its own completion for this tool. `true`
-    /// by default, because the ordinary case is a client salvor is willing to
-    /// take at its word. `false` means every call for this tool must be settled
-    /// by hand through the resolve endpoint after someone has verified it
+    /// Whether the client may record its own completion for this tool. `false`
+    /// by default: silence gets the safe direction, and self-completing a write
+    /// on the client's word alone is the convenient direction, so it is an
+    /// explicit opt-in. `false` means every call for this tool is settled by
+    /// hand through the resolve endpoint after someone has verified it
     /// externally.
-    #[serde(default = "trusted_by_default")]
     pub trust_completion: bool,
+    /// Top-level field names whose client-reported value must equal the intent's
+    /// recorded value. Empty by default. Every named field must appear in both
+    /// `input_schema.required` and `output_schema.required`, checked at load, so
+    /// the two values always exist to compare; at the completion boundary a
+    /// reported value that differs from the authorized one refuses the
+    /// completion. The output schema is a shape check and cannot know what was
+    /// authorized; this is the field-level equality the shape check cannot do.
+    pub require_equal: Vec<String>,
 }
 
-/// The default for [`ClientToolDecl::trust_completion`]: a declaration that
-/// says nothing about trust is trusting.
-fn trusted_by_default() -> bool {
-    true
+/// The on-disk shape of a [`ClientToolDecl`], before its cross-field rule is
+/// checked. Deserializing lands here first; [`TryFrom`] enforces the
+/// [`require_equal`](ClientToolDecl::require_equal) invariant and produces the
+/// public type, so a violating file fails to parse rather than loading a
+/// declaration whose completion boundary could not do the comparison it names.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawClientToolDecl {
+    name: String,
+    effect: Effect,
+    input_schema: Value,
+    #[serde(default)]
+    output_schema: Option<Value>,
+    /// Silence gets the safe direction: a declaration that says nothing about
+    /// trust may not self-complete.
+    #[serde(default)]
+    trust_completion: bool,
+    #[serde(default)]
+    require_equal: Vec<String>,
+}
+
+impl TryFrom<RawClientToolDecl> for ClientToolDecl {
+    type Error = String;
+
+    /// Enforces the load-time [`require_equal`](ClientToolDecl::require_equal)
+    /// rule: every named field must be present in both `input_schema.required`
+    /// and `output_schema.required`, so the value to compare always exists on
+    /// each side. A violation is refused here, naming the field and the side it
+    /// is missing from, exactly as an unknown key is refused: early and precise.
+    fn try_from(raw: RawClientToolDecl) -> Result<Self, Self::Error> {
+        for field in &raw.require_equal {
+            if !schema_requires(&raw.input_schema, field) {
+                return Err(missing_require_equal(&raw.name, field, "input_schema"));
+            }
+            let present_in_output = raw
+                .output_schema
+                .as_ref()
+                .is_some_and(|schema| schema_requires(schema, field));
+            if !present_in_output {
+                return Err(missing_require_equal(&raw.name, field, "output_schema"));
+            }
+        }
+        Ok(ClientToolDecl {
+            name: raw.name,
+            effect: raw.effect,
+            input_schema: raw.input_schema,
+            output_schema: raw.output_schema,
+            trust_completion: raw.trust_completion,
+            require_equal: raw.require_equal,
+        })
+    }
+}
+
+/// Whether `schema`'s `required` array lists `field`. A JSON Schema object with
+/// no `required`, or one whose `required` is not an array, requires nothing.
+fn schema_requires(schema: &Value, field: &str) -> bool {
+    schema
+        .get("required")
+        .and_then(Value::as_array)
+        .is_some_and(|required| required.iter().any(|name| name.as_str() == Some(field)))
+}
+
+/// The load-time refusal for a `require_equal` field absent from one side's
+/// `required` list, naming the tool, the field, and the side it is missing from.
+fn missing_require_equal(tool: &str, field: &str, side: &str) -> String {
+    format!(
+        "tool `{tool}` names `{field}` in require_equal, but `{field}` is not in {side}.required; a \
+         require_equal field must be required on both the input and the output side, so the two \
+         values always exist to compare"
+    )
 }
 
 /// The client-performed tool declarations a server was started with.
@@ -214,6 +295,12 @@ pub async fn list(State(state): State<AppState>) -> impl IntoResponse {
                     .expect("entry is a JSON object")
                     .insert("output_schema".to_owned(), output_schema);
             }
+            if !decl.require_equal.is_empty() {
+                entry
+                    .as_object_mut()
+                    .expect("entry is a JSON object")
+                    .insert("require_equal".to_owned(), json!(decl.require_equal));
+            }
             entry
         })
         .collect();
@@ -225,7 +312,8 @@ mod tests {
     use super::*;
 
     /// The TOML format the operator writes: the required fields, the optional
-    /// output schema, and the trusting default.
+    /// output schema, and the safe defaults. Silence about trust does not
+    /// self-complete, and no field is pinned unless one is named.
     #[test]
     fn a_declaration_parses_from_toml_with_its_defaults() {
         let decl: ClientToolDecl = toml::from_str(
@@ -242,14 +330,17 @@ mod tests {
         assert_eq!(decl.effect, Effect::Write);
         assert!(decl.output_schema.is_none());
         assert!(
-            decl.trust_completion,
-            "a declaration silent about trust is trusting"
+            !decl.trust_completion,
+            "a declaration silent about trust does not self-complete"
+        );
+        assert!(
+            decl.require_equal.is_empty(),
+            "no field is pinned unless one is named"
         );
     }
 
-    /// A misspelled key is an error, not a silent fall back to the permissive
-    /// default: that mistake would only be discovered after a client had
-    /// already self-completed a write.
+    /// A misspelled key is an error, not a silent drop: a mistyped `require_equal`
+    /// would otherwise leave a guard the operator meant to set quietly absent.
     #[test]
     fn an_unknown_key_is_refused() {
         let error = toml::from_str::<ClientToolDecl>(
@@ -266,6 +357,97 @@ mod tests {
         assert!(
             error.to_string().contains("trust_completions"),
             "the error names the offending key: {error}"
+        );
+    }
+
+    /// An explicit `trust_completion = true` opts into self-completion, the
+    /// direction silence no longer takes.
+    #[test]
+    fn trust_completion_is_an_explicit_opt_in() {
+        let decl: ClientToolDecl = toml::from_str(
+            r#"
+            name = "charge_card"
+            effect = "write"
+            trust_completion = true
+
+            [input_schema]
+            type = "object"
+            "#,
+        )
+        .expect("the declaration parses");
+        assert!(decl.trust_completion, "the explicit opt-in is honored");
+    }
+
+    /// A `require_equal` field present in both `required` lists loads and is
+    /// carried on the declaration.
+    #[test]
+    fn a_require_equal_field_required_on_both_sides_loads() {
+        let decl: ClientToolDecl = toml::from_str(
+            r#"
+            name = "charge_card"
+            effect = "write"
+            require_equal = ["amount_cents"]
+
+            [input_schema]
+            type = "object"
+            required = ["amount_cents"]
+
+            [output_schema]
+            type = "object"
+            required = ["amount_cents"]
+            "#,
+        )
+        .expect("the declaration parses");
+        assert_eq!(decl.require_equal, vec!["amount_cents".to_owned()]);
+    }
+
+    /// A `require_equal` field absent from `input_schema.required` is refused at
+    /// load, naming the field and the side it is missing from.
+    #[test]
+    fn a_require_equal_field_missing_from_the_input_required_is_refused() {
+        let error = toml::from_str::<ClientToolDecl>(
+            r#"
+            name = "charge_card"
+            effect = "write"
+            require_equal = ["amount_cents"]
+
+            [input_schema]
+            type = "object"
+
+            [output_schema]
+            type = "object"
+            required = ["amount_cents"]
+            "#,
+        )
+        .expect_err("the declaration is refused");
+        let message = error.to_string();
+        assert!(
+            message.contains("amount_cents") && message.contains("input_schema.required"),
+            "the error names the field and the missing side: {message}"
+        );
+    }
+
+    /// A `require_equal` field absent from `output_schema.required` (here because
+    /// there is no output schema at all) is refused at load, naming the output
+    /// side.
+    #[test]
+    fn a_require_equal_field_missing_from_the_output_required_is_refused() {
+        let error = toml::from_str::<ClientToolDecl>(
+            r#"
+            name = "charge_card"
+            effect = "write"
+            require_equal = ["amount_cents"]
+
+            [input_schema]
+            type = "object"
+            required = ["amount_cents"]
+            "#,
+        )
+        .expect_err("the declaration is refused");
+        let message = error.to_string();
+        assert!(
+            message.contains("amount_cents") && message.contains("output_schema.required"),
+            "the error names the field and the missing side: {message}"
         );
     }
 }

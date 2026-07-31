@@ -712,7 +712,10 @@ pub struct ServeArgs {
     /// what the operator is willing to accept about such a call: its name, its
     /// effect class, the schema its input must satisfy, the schema its reported
     /// completion must satisfy, and whether the client may close the call
-    /// itself (`trust_completion`, true unless the file says otherwise).
+    /// itself (`trust_completion`, false unless the file opts in, so a
+    /// declaration silent about trust settles every call by hand), plus any
+    /// fields whose reported value must equal what the intent recorded
+    /// (`require_equal`).
     ///
     /// It is a file the operator passes here, and there is no endpoint that
     /// accepts one, on purpose. The effect class fixes whether an unsettled

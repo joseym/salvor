@@ -1312,7 +1312,13 @@ fn intent_body(seq: u64, idempotency_key: &str, effect: Effect, settled: bool) -
 /// - the declaration carries no `output_schema` (`403`): with nothing to check
 ///   the report against, the completion is unfalsifiable, which is exactly what
 ///   the schema exists to prevent;
-/// - the reported output fails the declared `output_schema` (`400`).
+/// - the reported output fails the declared `output_schema` (`400`);
+/// - a `require_equal` field's reported value differs from the value the intent
+///   recorded (`403`): the output schema is a shape check and cannot know what
+///   was authorized, so a client report may not alter a pinned field.
+///
+/// The checks run in that order: the trust refusal fires before any value is
+/// compared, then the output shape, then the per-field equality.
 ///
 /// # Where a refused completion leaves the run, and why nothing else changes
 ///
@@ -1361,6 +1367,7 @@ pub async fn client_tool_completion(
     let Event::ToolCallRequested {
         seq: intent_seq,
         tool,
+        input: intent_input,
         performed_by,
         ..
     } = &pending.event
@@ -1419,6 +1426,26 @@ pub async fn client_tool_completion(
             "the reported output does not match the declared output_schema for `{tool}`: {error}"
         ))
     })?;
+
+    // The output schema is a shape check and cannot know what was authorized, so
+    // a report claiming a different amount than the intent recorded passes it. A
+    // require_equal field closes that gap: the reported value must be JSON-equal
+    // to the value the intent recorded. The load-time rule guarantees each named
+    // field is required on both sides, so both values are present to compare.
+    for field in &decl.require_equal {
+        let authorized = intent_input.get(field).unwrap_or(&Value::Null);
+        let reported = request.output.get(field).unwrap_or(&Value::Null);
+        if authorized != reported {
+            return Err(ApiError::ClientCompletionRefused(format!(
+                "tool `{tool}` reported `{field}` as {reported} for the intent at seq {}, but the \
+                 intent recorded {authorized}; a client report may not alter a require_equal field. \
+                 If the provider genuinely did something different, settle it by hand with POST \
+                 /v1/client-runs/{}/resolve",
+                request.seq,
+                run_id.as_uuid()
+            )));
+        }
+    }
 
     // The completion goes through the same guard and the same helper the
     // server-performed tool step records its own completion with, so the two

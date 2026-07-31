@@ -46,8 +46,10 @@ Then, inside a client-driven run:
 
 ## What is here
 
-- `refund-card.toml`: the first declaration. A `write`, self-completable, whose
-  output schema requires `provider_refund_id`.
+- `refund-card.toml`: the first declaration. A `write`, self-completable (an
+  explicit opt-in, since silence would leave the call for a person), whose
+  output schema requires `provider_refund_id` and whose `require_equal` pins
+  `amount_cents` to what the intent recorded.
 - `wire-payout.toml`: the second declaration. A `write` with
   `trust_completion = false`, so no client report can close it.
 - `provider.py`: the stand-in payment provider, owned by this example and run by
@@ -233,9 +235,10 @@ effect from a request body for the same reason.
 
 The output schema belongs to the operator for a related reason. It is the
 operator saying which field a report has to carry before salvor will believe it,
-and the useful choice is a field the client could not produce on its own. Here
-that is `provider_refund_id`. A client writing its own schema would require
-nothing, and every report would pass.
+and the useful choice is a field the operator can insist every report carry,
+here `provider_refund_id`: its presence is what the schema can demand, though its
+value, like the amount beside it, is still the client's report. A client writing
+its own schema would require nothing, and every report would pass.
 
 ## Why the server derives the idempotency key
 
@@ -278,6 +281,25 @@ and `derive_state` already calls that `NeedsReconciliation`. Looking for
 `trust_completion` in the fold will not find it. The fold is a pure function of
 the log and has to stay that way, because a log has to mean the same thing on a
 machine that has never seen this server's declaration files.
+
+## Pinning what was authorized: `require_equal`
+
+The output schema is a shape check. It confirms a completion carries an
+`amount_cents`, an integer, and it cannot know whether that integer is the one
+the intent authorized: `50000` is as well-shaped as `5000`. `refund-card.toml`
+carries `require_equal = ["amount_cents"]`, so the server compares the reported
+value to the value the intent recorded and refuses a completion that alters it:
+
+```
+tool `refund_card` reported `amount_cents` as 50000 for the intent at seq 1, but the intent recorded 5000; a client report may not alter a require_equal field. If the provider genuinely did something different, settle it by hand with POST /v1/client-runs/<run-id>/resolve
+```
+
+Nothing is recorded, so the write is left where an unsettled write always sits,
+`needs_reconciliation`, for a person to settle through resolve if the provider
+genuinely did something other than what was asked. Each named field must be
+required on both the input and the output side, and a declaration that names one
+absent from either `required` list is refused when the server loads it, naming
+the field and the missing side, so the comparison is always possible.
 
 ## What salvor never had
 

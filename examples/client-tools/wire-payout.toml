@@ -9,9 +9,11 @@
 name = "wire_payout"
 effect = "write"
 
-# The line that changes everything about the second half of this example. A
-# client completion for this tool is refused, which leaves the recorded intent
-# as the log's last word, which is what `NeedsReconciliation` already means.
+# Stated explicitly, though `false` is now also the default: a payout is exactly
+# the call whose refusal to self-complete belongs on the page, not left to a
+# default a reader has to already know. A client completion for this tool is
+# refused, which leaves the recorded intent as the log's last word, which is
+# what `NeedsReconciliation` already means.
 trust_completion = false
 
 [input_schema]

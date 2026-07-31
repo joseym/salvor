@@ -101,6 +101,7 @@ fn decl(
         input_schema,
         output_schema,
         trust_completion,
+        require_equal: Vec::new(),
     }
 }
 
@@ -792,5 +793,134 @@ async fn a_settled_intent_says_so_on_a_re_post() {
         read_log(&client, &server.base, &run).await.len(),
         3,
         "RunStarted, intent, completion; the re-post wrote nothing"
+    );
+}
+
+/// Test 14: a `require_equal` field pins what was authorized. An intent for
+/// `amount_cents` 5000 whose completion claims 50000 is refused, naming the
+/// field, both values, and the resolve endpoint, and nothing is recorded; the
+/// honest completion reporting 5000 is accepted. The output schema alone cannot
+/// catch this: 50000 is a perfectly well-shaped integer.
+#[tokio::test]
+async fn a_require_equal_mismatch_is_refused_and_the_honest_report_is_accepted() {
+    let pinned = ClientToolDecl {
+        name: "charge_card".to_owned(),
+        effect: Effect::Write,
+        input_schema: json!({
+            "type": "object",
+            "required": ["amount_cents"],
+            "properties": { "amount_cents": { "type": "integer" } }
+        }),
+        output_schema: Some(json!({
+            "type": "object",
+            "required": ["amount_cents", "charge_id"],
+            "properties": {
+                "amount_cents": { "type": "integer" },
+                "charge_id": { "type": "string" }
+            }
+        })),
+        trust_completion: true,
+        require_equal: vec!["amount_cents".to_owned()],
+    };
+    let server = client_tool_server(vec![pinned], vec![]).await;
+    let client = reqwest::Client::new();
+    let (run, token) = started_run(&client, &server.base).await;
+
+    let (status, opened) = intent(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        json!({ "seq": 1, "tool": "charge_card", "input": { "amount_cents": 5000 } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "intent: {opened}");
+
+    // A completion that claims a different amount than was authorized.
+    let (status, body) = completion(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        json!({ "seq": 1, "output": { "amount_cents": 50000, "charge_id": "ch_9" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "amount mismatch: {body}");
+    assert_eq!(body["error"]["code"], "client_completion_refused");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("amount_cents") && message.contains("5000") && message.contains("50000"),
+        "the refusal names the field and both values: {message}"
+    );
+    assert!(
+        message.contains("require_equal")
+            && message.contains(&format!("/v1/client-runs/{run}/resolve")),
+        "the refusal explains the rule and points at resolve: {message}"
+    );
+    assert_eq!(
+        read_log(&client, &server.base, &run).await.len(),
+        2,
+        "the mismatch recorded nothing; the intent still stands"
+    );
+
+    // The honest completion, reporting the authorized amount, is accepted.
+    let (status, done) = completion(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        json!({ "seq": 1, "output": { "amount_cents": 5000, "charge_id": "ch_9" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "honest completion: {done}");
+    let log = read_log(&client, &server.base, &run).await;
+    assert_eq!(log.len(), 3, "RunStarted, intent, completion");
+    assert!(
+        matches!(&log[2].event, Event::ToolCallCompleted { seq, output }
+            if seq.get() == 1 && output["amount_cents"] == json!(5000)),
+        "the honest completion is recorded, got {:?}",
+        log[2].event
+    );
+}
+
+/// Test 15: `GET /v1/client-tools` carries `require_equal` only when the
+/// declaration names one, following the same insert-only-when-present shape the
+/// endpoint already uses for `output_schema`. A declaration that pins nothing
+/// has no `require_equal` key at all.
+#[tokio::test]
+async fn require_equal_appears_in_the_listing_only_when_set() {
+    let pinned = ClientToolDecl {
+        name: "wire_payout".to_owned(),
+        effect: Effect::Write,
+        input_schema: json!({ "type": "object", "required": ["amount_cents"] }),
+        output_schema: Some(json!({ "type": "object", "required": ["amount_cents"] })),
+        trust_completion: true,
+        require_equal: vec!["amount_cents".to_owned()],
+    };
+    let server = client_tool_server(vec![pinned, charge_card_decl()], vec![]).await;
+    let client = reqwest::Client::new();
+
+    let (status, body) = get_json(&client, &format!("{}/v1/client-tools", server.base), None).await;
+    assert_eq!(status, StatusCode::OK, "list: {body}");
+    let tools = body["client_tools"].as_array().expect("client_tools array");
+    assert_eq!(tools.len(), 2, "both declarations come back");
+
+    let pinned_entry = tools
+        .iter()
+        .find(|tool| tool["name"] == json!("wire_payout"))
+        .expect("the pinned declaration is listed");
+    assert_eq!(
+        pinned_entry["require_equal"],
+        json!(["amount_cents"]),
+        "a pinned declaration carries its require_equal: {pinned_entry}"
+    );
+
+    let unpinned_entry = tools
+        .iter()
+        .find(|tool| tool["name"] == json!("charge_card"))
+        .expect("the unpinned declaration is listed");
+    assert!(
+        unpinned_entry.get("require_equal").is_none(),
+        "an unpinned declaration carries no require_equal key: {unpinned_entry}"
     );
 }
