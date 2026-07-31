@@ -1,0 +1,30 @@
+{
+  "2025-11-B": [
+    { "id": "E01", "name": "Ada Okonkwo",      "amount_cents": 410000 },
+    { "id": "E02", "name": "Bhavna Rao",       "amount_cents": 455000 },
+    { "id": "E03", "name": "Cyrus Alizadeh",   "amount_cents": 390000 },
+    { "id": "E04", "name": "Deepa Menon",      "amount_cents": 512000 },
+    { "id": "E05", "name": "Emil Novak",       "amount_cents": 448000 },
+    { "id": "E06", "name": "Farida Haddad",    "amount_cents": 476000 },
+    { "id": "E07", "name": "Gustavo Pinto",    "amount_cents": 4500000 },
+    { "id": "E08", "name": "Hana Sato",        "amount_cents": 505000 },
+    { "id": "E09", "name": "Ivo Petrov",       "amount_cents": 462000 },
+    { "id": "E10", "name": "June Adeyemi",     "amount_cents": 4200 },
+    { "id": "E11", "name": "Kwame Boateng",    "amount_cents": 433000 },
+    { "id": "E12", "name": "Lena Fischer",     "amount_cents": 498000 }
+  ],
+  "2025-11-A": [
+    { "id": "E01", "name": "Ada Okonkwo",      "amount_cents": 410000 },
+    { "id": "E02", "name": "Bhavna Rao",       "amount_cents": 455000 },
+    { "id": "E03", "name": "Cyrus Alizadeh",   "amount_cents": 390000 },
+    { "id": "E04", "name": "Deepa Menon",      "amount_cents": 512000 },
+    { "id": "E05", "name": "Emil Novak",       "amount_cents": 448000 },
+    { "id": "E06", "name": "Farida Haddad",    "amount_cents": 476000 },
+    { "id": "E07", "name": "Gustavo Pinto",    "amount_cents": 470000 },
+    { "id": "E08", "name": "Hana Sato",        "amount_cents": 505000 },
+    { "id": "E09", "name": "Ivo Petrov",       "amount_cents": 462000 },
+    { "id": "E10", "name": "June Adeyemi",     "amount_cents": 420000 },
+    { "id": "E11", "name": "Kwame Boateng",    "amount_cents": 433000 },
+    { "id": "E12", "name": "Lena Fischer",     "amount_cents": 498000 }
+  ]
+}

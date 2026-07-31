@@ -1,0 +1,78 @@
+# The notify-summary agent: the last node of the payroll graph.
+#
+# By the time this agent runs, every employee has already been paid: the graph's
+# `pay_each` map fanned out over the roster and each `pay_employee` iteration
+# recorded its line before it ran. All this agent does is write one closing
+# notice and report back. That split is deliberate. Money moves at the map's tool
+# iterations the graph controls; prose is the model's job, and the model is never
+# the thing deciding whether to pay.
+#
+# It is also the one node that can consume the map's output at all. A `map` joins
+# its iterations into a JSON ARRAY, and an MCP tool call's arguments must be a
+# JSON object, so a plain `tool` node cannot take the joined array as its input.
+# An `agent` node can: it reads any input and issues its own well-formed tool
+# call. That is why the summary step is an agent rather than a tool.
+#
+# This one agent file is also where the graph's `tool` nodes and the map body get
+# their tools: `salvor graph run` has no standalone tool inventory, so a `tool`
+# node's name resolves against the tools the supplied `--agent` files carry. This
+# file declares the one MCP server that carries all four.
+#
+# Paths below are relative to the DIRECTORY SALVOR IS INVOKED FROM, not to this
+# file, so run everything from the repository root (`run.sh` does).
+#
+# The graph references this agent by content hash, never by path. Learn it with:
+#     salvor agent hash examples/payroll/agents/notify-summary.toml
+
+name = "notify-summary"
+
+model = "claude-opus-4-8"
+
+# The first line names this agent, and that name is load-bearing offline: the
+# scripted model in `model-script.json` selects a conversation by finding its
+# name as a substring of the system prompt it was sent. Keep the phrase
+# `notify-summary` here, or the script server refuses the request rather than
+# guessing which conversation to serve.
+system_prompt = """
+You are the notify-summary writer on a payroll desk.
+
+The pay run is finished and every employee on the roster has been paid, exactly
+once. Your input is the list of per-employee payment results. Do exactly this,
+one tool call per turn:
+
+1. Call `send_summary` once, with a short plain message stating the payroll run
+   is complete and every employee on the roster was paid exactly once.
+2. Reply with one sentence confirming the notice went out, and stop.
+
+Never call `pay_employee`. Payments are not yours to make.
+"""
+
+[llm]
+# SALVOR_DEMO_BASE_URL, when exported and non-empty, overrides the endpoint;
+# unset means the public Anthropic endpoint. The API key is read from
+# ANTHROPIC_API_KEY and is optional for a mock or local endpoint, which is what
+# lets this same file run offline against the scripted model and against a real
+# one with nothing changed but that variable.
+base_url_env = "SALVOR_DEMO_BASE_URL"
+
+[budgets]
+# One notice and one confirmation is two model calls. Ten steps leaves room for a
+# retry or a clarifying turn against a real model while still parking a run that
+# has clearly gone in circles. A budget in Salvor suspends a run rather than
+# killing it, so crossing this rail costs nothing already recorded.
+steps = 10
+tokens = 100000
+
+[[mcp_servers]]
+# The payroll-desk tools. Every tool node in the graph, the map body, and this
+# agent resolve their tools from this one server.
+command = "python3"
+args = ["examples/payroll/server.py"]
+# `pay_employee` is the map body and MUST resolve to Idempotent: a `map` re-drives
+# a not-yet-completed iteration on resume, and only an Idempotent (or Read) body
+# recovers cleanly rather than parking for reconciliation. Its `idempotentHint`
+# already says so; pinning it records the operator's own decision. `send_summary`
+# is pinned to Write, the correct reading of an append: a re-run would add a
+# second notice. `pull_roster` and `flag_exceptions` carry an honest
+# `readOnlyHint`, so neither needs an override.
+effect_overrides = { pay_employee = "idempotent", send_summary = "write" }
