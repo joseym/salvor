@@ -642,14 +642,18 @@ class ClientToolDecl:
     unless the declaration carries one; a tool declared without one cannot be
     self-completed by a client (see
     :meth:`~salvor.client_runs.ClientRunDriver.client_tool_completion`).
-    ``trust_completion`` is ``True`` unless the operator declared otherwise.
+    ``trust_completion`` is ``False`` unless the operator opted in: silence gets
+    the safe direction. ``require_equal`` lists the fields whose reported value
+    the server pins to the intent's recorded value, and is empty unless the
+    declaration names one.
     """
 
     name: str
     effect: str
     input_schema: Any
     output_schema: Optional[Any] = None
-    trust_completion: bool = True
+    trust_completion: bool = False
+    require_equal: list[str] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -659,7 +663,8 @@ class ClientToolDecl:
             effect=obj.get("effect", "read"),
             input_schema=obj.get("input_schema"),
             output_schema=obj.get("output_schema"),
-            trust_completion=bool(obj.get("trust_completion", True)),
+            trust_completion=bool(obj.get("trust_completion", False)),
+            require_equal=list(obj.get("require_equal", [])),
             raw=obj,
         )
 

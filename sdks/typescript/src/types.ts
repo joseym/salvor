@@ -357,7 +357,10 @@ export interface ForksIndex {
  * copy a client keeps in step by hand. `outputSchema` is present only when the
  * declaration carries one; a tool declared without one cannot be
  * self-completed by a client (see `ClientRunDriver.clientToolCompletion`).
- * `trustCompletion` is `true` unless the operator declared otherwise.
+ * `trustCompletion` is `false` unless the operator opted in: silence gets the
+ * safe direction. `requireEqual` lists the fields whose reported value the
+ * server pins to the intent's recorded value, and is empty unless the
+ * declaration names one.
  */
 export interface ClientToolDecl {
   name: string;
@@ -365,6 +368,7 @@ export interface ClientToolDecl {
   inputSchema: unknown;
   outputSchema?: unknown;
   trustCompletion: boolean;
+  requireEqual: string[];
   raw: Record<string, unknown>;
 }
 
@@ -656,7 +660,8 @@ export function parseClientToolDecl(obj: Json): ClientToolDecl {
     effect: obj.effect as string,
     inputSchema: obj.input_schema,
     outputSchema: obj.output_schema,
-    trustCompletion: Boolean(obj.trust_completion ?? true),
+    trustCompletion: Boolean(obj.trust_completion ?? false),
+    requireEqual: Array.isArray(obj.require_equal) ? (obj.require_equal as string[]) : [],
     raw: obj,
   };
 }

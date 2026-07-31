@@ -106,6 +106,7 @@ test("listClientTools decodes declarations with their schemas intact", async () 
             input_schema: { type: "object", required: ["amount_cents"] },
             output_schema: { type: "object", required: ["charge_id"] },
             trust_completion: false,
+            require_equal: ["amount_cents"],
           },
           {
             name: "lookup_invoice",
@@ -127,9 +128,11 @@ test("listClientTools decodes declarations with their schemas intact", async () 
     strictEqual(charge.trustCompletion, false);
     deepStrictEqual(charge.inputSchema, { type: "object", required: ["amount_cents"] });
     deepStrictEqual(charge.outputSchema, { type: "object", required: ["charge_id"] });
+    deepStrictEqual(charge.requireEqual, ["amount_cents"]);
     const lookup = decls.find((d) => d.name === "lookup_invoice")!;
     strictEqual(lookup.outputSchema, undefined);
     strictEqual(lookup.trustCompletion, true);
+    deepStrictEqual(lookup.requireEqual, [], "no require_equal decodes to an empty array");
   } finally {
     s.server.close();
   }
