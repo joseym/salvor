@@ -69,49 +69,36 @@ pub use salvor_cli_core::cli;
 
 use anyhow::Result;
 
-use crate::cli::{AgentCommand, Cli, Command};
+use crate::cli::{Cli, Command};
 
-/// Whether `command` is a pure author-time query: it starts no run, writes
-/// nothing to a store, and exists to print one fast answer. `agent hash` and
-/// `agent validate` both build the agent definitions they are given, which
-/// connects to any MCP server the file declares, exactly as a run would; that
-/// handshake logs a handful of `INFO serve_inner: ...` lines under `rmcp`'s own
-/// target that would otherwise sit between the operator and the one line they
-/// asked for. `graph validate` parses and checks a document with no agent
-/// built and no MCP server touched, so it never has this problem and is not
-/// named here.
-fn quiets_rmcp_by_default(command: &Command) -> bool {
-    matches!(
-        command,
-        Command::Agent {
-            command: AgentCommand::Hash(_) | AgentCommand::Validate(_)
-        }
-    )
+/// The filter installed when the operator has not set `RUST_LOG`: `info` for
+/// every target except `rmcp`, held to `warn`. Any command that resolves an
+/// agent definition can connect to an MCP server the definition declares,
+/// exactly as a run would, and that handshake logs a handful of
+/// `INFO serve_inner: ...` lines under the `rmcp` target that would otherwise
+/// sit between the operator and whatever the command itself prints, on the
+/// very first run before anyone has learned to set `RUST_LOG` at all.
+const DEFAULT_LOG_DIRECTIVE: &str = "info,rmcp=warn";
+
+/// The directive `init_tracing` filters by: `rust_log` verbatim when the
+/// operator set `RUST_LOG`, [`DEFAULT_LOG_DIRECTIVE`] otherwise. Split out
+/// from `init_tracing` so the precedence is checkable without installing the
+/// process-global subscriber, which installs at most once.
+fn log_directive(rust_log: Option<&str>) -> &str {
+    rust_log.unwrap_or(DEFAULT_LOG_DIRECTIVE)
 }
 
 /// Installs the tracing subscriber: human-readable events to stderr, filtered
-/// by `RUST_LOG` (default `info`). Stderr keeps stdout clean for command
-/// output. Idempotent enough for tests: a second call is a no-op rather than a
-/// panic.
-///
-/// `command` decides only the DEFAULT filter, and only when the operator has
-/// not set `RUST_LOG` themselves: an explicit `RUST_LOG`, however it reads,
-/// always wins verbatim. For the read-only queries [`quiets_rmcp_by_default`]
-/// names, the default additionally quiets the `rmcp` target to `warn`, so the
-/// MCP handshake this build has to perform to answer does not bury the answer
-/// under its own connection log.
-pub fn init_tracing(command: &Command) {
+/// by `RUST_LOG` when set, [`DEFAULT_LOG_DIRECTIVE`] otherwise. Stderr keeps
+/// stdout clean for command output. Idempotent enough for tests: a second
+/// call is a no-op rather than a panic.
+pub fn init_tracing() {
     use std::io::IsTerminal;
 
     use tracing_subscriber::{EnvFilter, fmt};
 
-    let default_directive = if quiets_rmcp_by_default(command) {
-        "info,rmcp=warn"
-    } else {
-        "info"
-    };
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_directive));
+    let rust_log = std::env::var("RUST_LOG").ok();
+    let filter = EnvFilter::new(log_directive(rust_log.as_deref()));
     let _ = fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
@@ -160,5 +147,21 @@ pub async fn dispatch(cli: Cli) -> Result<u8> {
             crate::cli::GraphCommand::Schema => commands::graph_schema(),
             crate::cli::GraphCommand::Run(args) => commands::graph_run(store, args).await,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_rust_log_defaults_to_info_with_rmcp_held_to_warn() {
+        assert_eq!(log_directive(None), DEFAULT_LOG_DIRECTIVE);
+    }
+
+    #[test]
+    fn an_explicit_rust_log_wins_verbatim() {
+        assert_eq!(log_directive(Some("debug,rmcp=trace")), "debug,rmcp=trace");
+        assert_eq!(log_directive(Some("off")), "off");
     }
 }
