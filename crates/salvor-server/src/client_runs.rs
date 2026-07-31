@@ -1166,8 +1166,11 @@ fn client_tool_idempotency_key(run_id: RunId, seq: u64, tool: &str) -> String {
 /// that re-derives the same key and writes nothing, the safe retry a dropped
 /// response leaves behind.
 ///
-/// The response carries the derived key. The client performs the work under it
-/// and then posts [`client_tool_completion`].
+/// The response carries the derived key and a `settled` flag: `true` when the
+/// intent at this position already has its completion recorded, so a caller
+/// re-posting an intent it believes it already opened can tell "safe to
+/// perform" from "already done" without reading the log. The client performs
+/// the work under the key and then posts [`client_tool_completion`].
 pub async fn client_tool_intent(
     State(state): State<AppState>,
     Path(run_id_text): Path<String>,
@@ -1238,7 +1241,8 @@ pub async fn client_tool_intent(
         // store's stamp from the first attempt and would never match a fresh one.
         let recorded = &log[request.seq as usize];
         if recorded.event == intent.event {
-            return Ok(Json(intent_body(request.seq, &key, effect)));
+            let settled = intent_is_settled(&log, request.seq);
+            return Ok(Json(intent_body(request.seq, &key, effect, settled)));
         }
         return Err(ApiError::Divergence(format!(
             "seq {} already holds a different event; it is not this client-tool intent's position",
@@ -1253,18 +1257,41 @@ pub async fn client_tool_intent(
         .push(intent.clone())
         .map_err(|error| ApiError::Divergence(error.to_string()))?;
     state.store().append(&intent).await.map_err(append_error)?;
-    Ok(Json(intent_body(request.seq, &key, effect)))
+    // A freshly-recorded intent can never already be settled: the append above
+    // just placed it at the log's new end, with nothing after it yet.
+    Ok(Json(intent_body(request.seq, &key, effect, false)))
+}
+
+/// Whether the tool intent at `seq` already has its `ToolCallCompleted`
+/// recorded in `log`. The append-guard only ever admits a completion for the
+/// same `seq` immediately after its intent (see [`append_tool_completion`]),
+/// so it is enough to check the very next slot.
+fn intent_is_settled(log: &[EventEnvelope], seq: u64) -> bool {
+    log.get(seq as usize + 1).is_some_and(|envelope| {
+        matches!(
+            &envelope.event,
+            Event::ToolCallCompleted { seq: completed_seq, .. } if completed_seq.get() == seq
+        )
+    })
 }
 
 /// The `200` client-tool-intent body: the position, the DERIVED idempotency key
-/// the client must perform under, and the operator-declared effect it was
-/// recorded with, so a client can see the class its call was filed as without
-/// re-reading the log.
-fn intent_body(seq: u64, idempotency_key: &str, effect: Effect) -> Value {
+/// the client must perform under, the operator-declared effect it was
+/// recorded with, and whether this position's completion is ALREADY recorded.
+///
+/// `settled` exists for a caller re-posting an intent it already believes it
+/// opened, most pointedly a payments caller checking a write before it acts on
+/// the response: without it, a retried intent and a fresh one look identical
+/// (same `200`, same key), and a caller cannot tell "safe to perform" from
+/// "already done, do not perform it again" without separately reading the log.
+/// On a freshly-recorded intent it is always `false`; on a byte-identical
+/// re-post it reflects whether the completion has landed since.
+fn intent_body(seq: u64, idempotency_key: &str, effect: Effect, settled: bool) -> Value {
     json!({
         "seq": seq,
         "idempotency_key": idempotency_key,
         "effect": effect,
+        "settled": settled,
     })
 }
 

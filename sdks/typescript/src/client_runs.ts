@@ -92,13 +92,21 @@ function parseModelStepResult(obj: Record<string, unknown>): ModelStepResult {
 
 /**
  * The receipt from opening a client-performed tool call: the position, the
- * DERIVED idempotency key the client must perform under, and the
- * operator-declared effect the intent was recorded with.
+ * DERIVED idempotency key the client must perform under, the
+ * operator-declared effect the intent was recorded with, and whether this
+ * position's completion is already recorded.
+ *
+ * `settled` is `true` when the intent at `seq` already has its completion
+ * recorded, `false` otherwise. A payments caller retrying `clientToolIntent`
+ * after a dropped response gets back the same key either way; `settled` is
+ * what lets it tell "safe to perform the call" from "already done, do not
+ * perform it again" without separately reading the log.
  */
 export interface ClientToolIntentResult {
   seq: number;
   idempotencyKey: string;
   effect: string;
+  settled: boolean;
   raw: Record<string, unknown>;
 }
 
@@ -109,6 +117,7 @@ function parseClientToolIntentResult(
     seq: obj.seq as number,
     idempotencyKey: obj.idempotency_key as string,
     effect: obj.effect as string,
+    settled: obj.settled as boolean,
     raw: obj,
   };
 }
@@ -344,6 +353,12 @@ export class ClientRunDriver {
    * handing it the key is safe; here the client both performs the call and
    * stands to gain from a duplicate, so the server derives the key instead of
    * accepting one.
+   *
+   * The returned `settled` is `true` when the intent at `seq` already has its
+   * completion recorded, `false` otherwise. A payments caller retrying this
+   * call after a dropped response gets back the same key either way;
+   * `settled` is what lets it tell "safe to perform the call" from "already
+   * done, do not perform it again" without a separate log read.
    *
    * Throws `SalvorApiError` with code `unknown_tool` for an undeclared tool,
    * or `bad_request` when `input` fails the declaration's schema; a `seq` the

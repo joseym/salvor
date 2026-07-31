@@ -223,6 +223,42 @@ class BuildsCanonicalDocument(unittest.TestCase):
             list(unnamed.nodes[0]["payload"].keys()), ["id", "approval_schema"]
         )
 
+    def test_gate_accepts_an_intentionally_empty_schema(self):
+        graph = GraphBuilder().gate("approve", {}).build()
+        self.assertEqual(graph.nodes[0]["payload"]["approval_schema"], {})
+
+    def test_gate_rejects_a_non_object_approval_schema(self):
+        builder = GraphBuilder()
+        for bad_schema in ("approved", None, ["approved"], 1, True):
+            with self.assertRaises(ValueError, msg=repr(bad_schema)) as caught:
+                builder.gate("approve", bad_schema)
+            self.assertIn("plain JSON object", str(caught.exception))
+
+    def test_gate_rejects_the_swapped_argument_case(self):
+        builder = GraphBuilder()
+        with self.assertRaises(ValueError) as caught:
+            builder.gate("approve", {"prompt": "Approve this?"})
+        self.assertIn("GateOptions-shaped keys", str(caught.exception))
+
+        with self.assertRaises(ValueError) as caught:
+            builder.gate(
+                "approve", {"name": "Approve the draft", "prompt": "Approve this?"}
+            )
+        self.assertIn("GateOptions-shaped keys", str(caught.exception))
+
+        # A schema that happens to use "name" as an ordinary JSON Schema
+        # property key alongside "type"/"properties" is not ambiguous and
+        # must still pass.
+        graph = (
+            GraphBuilder()
+            .gate("approve", {"type": "object", "properties": {"name": {"type": "string"}}})
+            .build()
+        )
+        self.assertEqual(
+            graph.nodes[0]["payload"]["approval_schema"],
+            {"type": "object", "properties": {"name": {"type": "string"}}},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -586,18 +586,43 @@ class DriverAgainstStub(unittest.TestCase):
         run, server = self.make_driver(
             {"/v1/client-runs/11111111-1111-1111-1111-111111111111/client-tool-intent":
              lambda h, body: h._send(
-                 200, {"seq": 5, "idempotency_key": "sha256:derived", "effect": "write"}
+                 200,
+                 {
+                     "seq": 5,
+                     "idempotency_key": "sha256:derived",
+                     "effect": "write",
+                     "settled": False,
+                 },
              )}
         )
         result = run.client_tool_intent(5, "charge_card", {"amount_cents": 500})
         self.assertEqual(result.seq, 5)
         self.assertEqual(result.idempotency_key, "sha256:derived")
         self.assertEqual(result.effect, "write")
+        self.assertEqual(result.settled, False)
         _, headers, sent = server.requests[-1]
         self.assertEqual(
             sent, {"seq": 5, "tool": "charge_card", "input": {"amount_cents": 500}}
         )
         self.assertEqual(headers.get("X-Drive-Token"), "dt_test")
+
+    def test_client_tool_intent_surfaces_settled_true_on_a_re_post(self) -> None:
+        # A payments caller re-posting an intent after the completion already
+        # landed must be able to tell the work is done from the response alone.
+        run, _ = self.make_driver(
+            {"/v1/client-runs/11111111-1111-1111-1111-111111111111/client-tool-intent":
+             lambda h, body: h._send(
+                 200,
+                 {
+                     "seq": 5,
+                     "idempotency_key": "sha256:derived",
+                     "effect": "write",
+                     "settled": True,
+                 },
+             )}
+        )
+        result = run.client_tool_intent(5, "charge_card", {"amount_cents": 500})
+        self.assertEqual(result.settled, True)
 
     def test_client_tool_intent_undeclared_tool_raises_typed_error(self) -> None:
         run, _ = self.make_driver(

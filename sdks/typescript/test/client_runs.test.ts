@@ -227,7 +227,12 @@ test("resolve posts the output under the lease", async () => {
 test("clientToolIntent sends seq/tool/input and surfaces the derived key", async () => {
   const s = stub({
     [`/v1/client-runs/${RUN_ID}/client-tool-intent`]: (_req, res) =>
-      res.json(200, { seq: 5, idempotency_key: "sha256:derived", effect: "write" }),
+      res.json(200, {
+        seq: 5,
+        idempotency_key: "sha256:derived",
+        effect: "write",
+        settled: false,
+      }),
   });
   const base = await s.ready;
   try {
@@ -237,9 +242,33 @@ test("clientToolIntent sends seq/tool/input and surfaces the derived key", async
     strictEqual(result.seq, 5);
     strictEqual(result.idempotencyKey, "sha256:derived");
     strictEqual(result.effect, "write");
+    strictEqual(result.settled, false);
     const last = s.requests.at(-1)!;
     deepStrictEqual(last.body, { seq: 5, tool: "charge_card", input: { amount_cents: 500 } });
     strictEqual(last.headers["x-drive-token"], "dt_test");
+  } finally {
+    s.server.close();
+  }
+});
+
+test("clientToolIntent surfaces settled true on a re-post", async () => {
+  // A payments caller re-posting an intent after the completion already
+  // landed must be able to tell the work is done from the response alone.
+  const s = stub({
+    [`/v1/client-runs/${RUN_ID}/client-tool-intent`]: (_req, res) =>
+      res.json(200, {
+        seq: 5,
+        idempotency_key: "sha256:derived",
+        effect: "write",
+        settled: true,
+      }),
+  });
+  const base = await s.ready;
+  try {
+    const result = await driverAt(base).clientToolIntent(5, "charge_card", {
+      amount_cents: 500,
+    });
+    strictEqual(result.settled, true);
   } finally {
     s.server.close();
   }

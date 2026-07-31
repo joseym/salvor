@@ -746,3 +746,51 @@ async fn the_listing_is_behind_bearer_auth_when_a_token_is_configured() {
     assert_eq!(status, StatusCode::OK, "correct token passes: {body}");
     assert_eq!(body["client_tools"].as_array().map(Vec::len), Some(1));
 }
+
+/// Test 13: `settled` tells a caller re-posting an intent whether the work is
+/// already done. A fresh intent comes back `false`; once the completion lands,
+/// a byte-identical re-post of the very same intent comes back `true`, with the
+/// same key, so a paranoid (payments) caller can tell "safe to perform" from
+/// "already settled" from the response alone, without reading the log.
+#[tokio::test]
+async fn a_settled_intent_says_so_on_a_re_post() {
+    let server = client_tool_server(vec![charge_card_decl()], vec![]).await;
+    let client = reqwest::Client::new();
+    let (run, token) = started_run(&client, &server.base).await;
+    let body = json!({ "seq": 1, "tool": "charge_card", "input": { "amount_cents": 2500 } });
+
+    let (status, opened) = intent(&client, &server.base, &run, Some(&token), body.clone()).await;
+    assert_eq!(status, StatusCode::OK, "intent: {opened}");
+    assert_eq!(
+        opened["settled"],
+        json!(false),
+        "a freshly-opened intent has no completion yet"
+    );
+
+    let (status, done) = completion(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        json!({ "seq": 1, "output": { "charge_id": "ch_9" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "completion: {done}");
+
+    let (status, reposted) = intent(&client, &server.base, &run, Some(&token), body).await;
+    assert_eq!(status, StatusCode::OK, "re-posted intent: {reposted}");
+    assert_eq!(
+        reposted["settled"],
+        json!(true),
+        "the same intent, re-posted after completion, says so"
+    );
+    assert_eq!(
+        reposted["idempotency_key"], opened["idempotency_key"],
+        "the same key comes back either way"
+    );
+    assert_eq!(
+        read_log(&client, &server.base, &run).await.len(),
+        3,
+        "RunStarted, intent, completion; the re-post wrote nothing"
+    );
+}

@@ -1126,11 +1126,19 @@ write-ahead rule demands of a call it performs itself. Requires the
 - Response `200`:
 
 ```json
-{ "seq": 5, "idempotency_key": "sha256:...", "effect": "write" }
+{ "seq": 5, "idempotency_key": "sha256:...", "effect": "write", "settled": false }
 ```
 
 Notice what the request does NOT carry, compared with `tool-step` above: no
 `effect` and no `idempotency_key`.
+
+`settled` is `true` when the intent at this position already has its
+completion recorded, `false` otherwise. It matters most to a caller re-posting
+an intent it believes it already opened: a payments caller retrying after a
+dropped response gets back the same `200` and the same key either way, and
+without `settled` it cannot tell "safe to perform the call" from "already
+performed and completed, do not do it again" without separately reading the
+log. A freshly-recorded intent is always `false`.
 
 The effect is the operator's, from the declaration, for the same reason
 `tool-step` refuses a client-declared effect: a caller must not be able to
