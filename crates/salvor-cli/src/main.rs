@@ -19,8 +19,11 @@ async fn main() -> ExitCode {
     if salvor_cli::completion::try_complete() {
         return ExitCode::SUCCESS;
     }
-    salvor_cli::init_tracing();
+    // Parsed before tracing initializes: which command was asked for decides
+    // the default log filter (see `init_tracing`), and a parse failure exits
+    // through `clap` directly, needing no tracing at all.
     let cli = Cli::parse();
+    salvor_cli::init_tracing(&cli.command);
     match salvor_cli::dispatch(cli).await {
         Ok(code) => ExitCode::from(code),
         Err(error) => {

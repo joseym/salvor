@@ -69,18 +69,49 @@ pub use salvor_cli_core::cli;
 
 use anyhow::Result;
 
-use crate::cli::{Cli, Command};
+use crate::cli::{AgentCommand, Cli, Command};
+
+/// Whether `command` is a pure author-time query: it starts no run, writes
+/// nothing to a store, and exists to print one fast answer. `agent hash` and
+/// `agent validate` both build the agent definitions they are given, which
+/// connects to any MCP server the file declares, exactly as a run would; that
+/// handshake logs a handful of `INFO serve_inner: ...` lines under `rmcp`'s own
+/// target that would otherwise sit between the operator and the one line they
+/// asked for. `graph validate` parses and checks a document with no agent
+/// built and no MCP server touched, so it never has this problem and is not
+/// named here.
+fn quiets_rmcp_by_default(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Agent {
+            command: AgentCommand::Hash(_) | AgentCommand::Validate(_)
+        }
+    )
+}
 
 /// Installs the tracing subscriber: human-readable events to stderr, filtered
 /// by `RUST_LOG` (default `info`). Stderr keeps stdout clean for command
 /// output. Idempotent enough for tests: a second call is a no-op rather than a
 /// panic.
-pub fn init_tracing() {
+///
+/// `command` decides only the DEFAULT filter, and only when the operator has
+/// not set `RUST_LOG` themselves: an explicit `RUST_LOG`, however it reads,
+/// always wins verbatim. For the read-only queries [`quiets_rmcp_by_default`]
+/// names, the default additionally quiets the `rmcp` target to `warn`, so the
+/// MCP handshake this build has to perform to answer does not bury the answer
+/// under its own connection log.
+pub fn init_tracing(command: &Command) {
     use std::io::IsTerminal;
 
     use tracing_subscriber::{EnvFilter, fmt};
 
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let default_directive = if quiets_rmcp_by_default(command) {
+        "info,rmcp=warn"
+    } else {
+        "info"
+    };
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_directive));
     let _ = fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)

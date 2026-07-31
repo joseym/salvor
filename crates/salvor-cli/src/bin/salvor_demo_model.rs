@@ -114,6 +114,77 @@ const DEFAULT_PORT: u16 = 8899;
 /// fire a `kill -9` while the run waits on a model call.
 const DEFAULT_DELAY_MS: u64 = 300;
 
+/// The flags this binary recognizes that take a value, `--port`, `--delay-ms`,
+/// and `--script`. Shared between [`resolve_u64`]/[`resolve_string`]'s lookup
+/// and [`unknown_flag`]'s check, so the two cannot drift apart.
+const VALUE_FLAGS: [&str; 3] = ["--port", "--delay-ms", "--script"];
+
+/// The two spellings of the help flag, checked first in `main` so `--help`
+/// exits before any port binds or environment variable is read.
+const HELP_FLAGS: [&str; 2] = ["--help", "-h"];
+
+/// The usage text `--help`/`-h` prints, and an unknown flag's refusal
+/// accompanies. Names every flag, every environment variable, and the shape
+/// of a `--script` file, including the substring selection rule: nothing else
+/// in the binary's own output tells an author how a named conversation gets
+/// picked, so a tester debugging a graph script has nowhere else to learn it.
+fn usage() -> String {
+    format!(
+        "salvor-demo-model: a hermetic scripted model server for the demo GIF and offline runs\n\
+         \n\
+         USAGE:\n\
+         \x20   salvor-demo-model [--port <PORT>] [--delay-ms <MS>] [--script <PATH>]\n\
+         \x20   salvor-demo-model --help\n\
+         \n\
+         FLAGS:\n\
+         \x20   --port <PORT>        Port to listen on (default {DEFAULT_PORT}; 0 picks a free\n\
+         \x20                        port and prints the one chosen)\n\
+         \x20   --delay-ms <MS>      Per turn response delay in milliseconds (default\n\
+         \x20                        {DEFAULT_DELAY_MS})\n\
+         \x20   --script <PATH>      Path to a script file to serve instead of the built in\n\
+         \x20                        demo script (see SCRIPT FILE below)\n\
+         \x20   -h, --help           Print this usage and exit\n\
+         \n\
+         ENVIRONMENT:\n\
+         \x20   SALVOR_DEMO_MODEL_PORT        Same as --port; the flag wins when both are set\n\
+         \x20   SALVOR_DEMO_MODEL_DELAY_MS    Same as --delay-ms; the flag wins when both are\n\
+         \x20                                 set\n\
+         \x20   SALVOR_DEMO_MODEL_SCRIPT      Same as --script; the flag wins when both are set\n\
+         \n\
+         SCRIPT FILE:\n\
+         \x20   A --script file holds a JSON array or a JSON object. An array is one\n\
+         \x20   conversation, served no matter what the request's system prompt says. An\n\
+         \x20   object maps a name to a conversation in that same array form; this named form\n\
+         \x20   is what a graph needs, since every agent node's first model call carries\n\
+         \x20   exactly one message, so message count alone cannot tell the nodes apart.\n\
+         \n\
+         \x20   A request selects the named conversation whose name IS A SUBSTRING OF THE\n\
+         \x20   REQUEST'S SYSTEM PROMPT. Exactly one name must match: no match, or more than\n\
+         \x20   one, answers with a 500 naming the problem rather than guessing.\n"
+    )
+}
+
+/// The first command line argument that is neither a recognized flag nor the
+/// value slot right after one, scanned left to right; `None` if every
+/// argument is accounted for. The caller must already have handled
+/// `--help`/`-h` (this function does not recognize them, so an unhandled help
+/// flag would itself come back as unknown).
+fn unknown_flag(args: &[String]) -> Option<&str> {
+    let mut expect_value = false;
+    for arg in args {
+        if expect_value {
+            expect_value = false;
+            continue;
+        }
+        if VALUE_FLAGS.contains(&arg.as_str()) {
+            expect_value = true;
+            continue;
+        }
+        return Some(arg.as_str());
+    }
+    None
+}
+
 /// The resolved settings this server runs with.
 struct Settings {
     port: u16,
@@ -528,6 +599,19 @@ async fn serve_connection(
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    // Checked before anything else touches a port or an environment
+    // variable, so `--help` (in any position) always exits 0 promptly.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|arg| HELP_FLAGS.contains(&arg.as_str())) {
+        print!("{}", usage());
+        return Ok(());
+    }
+    if let Some(bad) = unknown_flag(&args) {
+        eprintln!("salvor-demo-model: unrecognized argument `{bad}`\n");
+        eprint!("{}", usage());
+        std::process::exit(2);
+    }
+
     let settings = settings();
     let script = Arc::new(resolve_script(settings.script_path.as_deref()));
     let requests = Arc::new(AtomicUsize::new(0));
@@ -848,5 +932,61 @@ mod tests {
 
         // A short prompt is quoted whole, with newlines flattened.
         assert_eq!(system_head("one\ntwo"), "one two");
+    }
+
+    #[test]
+    fn usage_names_every_flag_every_env_var_and_the_substring_rule() {
+        let text = usage();
+        for flag in ["--port", "--delay-ms", "--script", "--help", "-h"] {
+            assert!(text.contains(flag), "usage is missing `{flag}`: {text}");
+        }
+        for var in [
+            "SALVOR_DEMO_MODEL_PORT",
+            "SALVOR_DEMO_MODEL_DELAY_MS",
+            "SALVOR_DEMO_MODEL_SCRIPT",
+        ] {
+            assert!(text.contains(var), "usage is missing `{var}`: {text}");
+        }
+        // The named-conversation form and the rule a tester could not
+        // discover anywhere else: a name matches as a substring of the
+        // system prompt.
+        assert!(text.contains("SUBSTRING OF THE"), "{text}");
+        assert!(text.contains("SYSTEM PROMPT"), "{text}");
+    }
+
+    #[test]
+    fn every_recognized_flag_and_its_value_is_not_unknown() {
+        let args: Vec<String> = [
+            "--port",
+            "18940",
+            "--delay-ms",
+            "5",
+            "--script",
+            "/tmp/script.json",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        assert_eq!(unknown_flag(&args), None);
+    }
+
+    #[test]
+    fn an_unrecognized_flag_is_reported_by_name() {
+        let args: Vec<String> = ["--port", "18940", "--bogus"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(unknown_flag(&args), Some("--bogus"));
+    }
+
+    #[test]
+    fn a_bare_positional_argument_is_unknown() {
+        let args: Vec<String> = ["surprise".to_owned()].into();
+        assert_eq!(unknown_flag(&args), Some("surprise"));
+    }
+
+    #[test]
+    fn no_arguments_is_not_unknown() {
+        assert_eq!(unknown_flag(&[]), None);
     }
 }
