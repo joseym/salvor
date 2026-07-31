@@ -73,6 +73,32 @@ A graph names an agent by hash and never by path, because the run's log records
 only the hash and a replay has to mean the same agent. Edit either TOML and the
 hash changes, and the document stops resolving until you update it.
 
+## The offline model
+
+[`model-script.json`](model-script.json) is a `--script` file in the named-
+conversation form: an object mapping a name to that conversation's turns. A graph
+needs that form. Every `agent` node is its own message list, so all of them make
+their first model call carrying exactly one message and would collide if the
+script were selected by message count alone. The server instead selects the one
+conversation whose **name appears as a substring of the request's system
+prompt**, and refuses loudly when none or several match.
+
+That is why each agent's system prompt opens by naming itself, and why the two
+names (`customer-notice`, `small-claims`) appear in one prompt each. Renaming an
+agent means renaming its conversation, or the script server answers with a 500
+instead of guessing.
+
+Once a conversation is selected, its turns are a fixed tape: the messages in
+`model-script.json` play back in order, and any `tool_use` in them carries
+whatever arguments were typed into the file, for example `small-claims`'s
+`issue_refund` call always names `DSP-3312` at `47.25`. Nothing in the script
+server reads the graph's actual input or the tool results the run produced so
+far, and nothing checks a scripted call's arguments against them either. That
+is fine for a fixture built to always take one path with one input, and it is
+the thing to unlearn if you are used to a model that looks at what it is
+actually given: change `input.json` here and the scripted calls answer with
+the same numbers regardless.
+
 ## Running it
 
 Build the binaries once, from the repository root:
@@ -209,32 +235,6 @@ because Salvor records the WHOLE tool result as the node's output and the branch
 has to have something typed to route on. That is why the condition reads
 `structuredContent.amount_usd`, not `amount_usd`: the path is into the tool
 result, and a path that does not resolve is false rather than an error.
-
-## The offline model
-
-[`model-script.json`](model-script.json) is a `--script` file in the named-
-conversation form: an object mapping a name to that conversation's turns. A graph
-needs that form. Every `agent` node is its own message list, so all of them make
-their first model call carrying exactly one message and would collide if the
-script were selected by message count alone. The server instead selects the one
-conversation whose **name appears as a substring of the request's system
-prompt**, and refuses loudly when none or several match.
-
-That is why each agent's system prompt opens by naming itself, and why the two
-names (`customer-notice`, `small-claims`) appear in one prompt each. Renaming an
-agent means renaming its conversation, or the script server answers with a 500
-instead of guessing.
-
-Once a conversation is selected, its turns are a fixed tape: the messages in
-`model-script.json` play back in order, and any `tool_use` in them carries
-whatever arguments were typed into the file, for example `small-claims`'s
-`issue_refund` call always names `DSP-3312` at `47.25`. Nothing in the script
-server reads the graph's actual input or the tool results the run produced so
-far, and nothing checks a scripted call's arguments against them either. That
-is fine for a fixture built to always take one path with one input, and it is
-the thing to unlearn if you are used to a model that looks at what it is
-actually given: change `input.json` here and the scripted calls answer with
-the same numbers regardless.
 
 ## Driving this same document over HTTP
 
