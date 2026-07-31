@@ -1,4 +1,35 @@
-import { ESTRIP_GAP_BUDGET_PCT, estripGapPct, estripTickBox, zoneOf } from './event-model';
+import { ESTRIP_GAP_BUDGET_PCT, estripGapPct, estripTickBox, rowOf, zoneOf } from './event-model';
+import type { SalvorEvent } from '@salvor-run/client';
+
+function toolCallRequested(payload: Record<string, unknown>): SalvorEvent {
+  return {
+    runId: 'run-1',
+    seq: 3,
+    schemaVersion: 1,
+    recordedAt: '2026-07-30T23:46:58Z',
+    kind: 'ToolCallRequested',
+    payload: { tool: 'refund_card', effect: 'write', input: {}, ...payload },
+  };
+}
+
+describe('rowOf: a ToolCallRequested row shows who performed the call', () => {
+  it('renders no performer badge when performed_by is absent (server-performed, the common case)', () => {
+    const html = rowOf(toolCallRequested({}), [], null);
+    expect(html).not.toContain('perf-client');
+    expect(html).not.toContain('>client<');
+  });
+
+  it('renders no performer badge for an explicit server performer either', () => {
+    const html = rowOf(toolCallRequested({ performed_by: 'server' }), [], null);
+    expect(html).not.toContain('perf-client');
+  });
+
+  it('renders the client badge, alongside the effect badge, when the client performed the call', () => {
+    const html = rowOf(toolCallRequested({ performed_by: 'client' }), [], null);
+    expect(html).toContain('<span class="badge perf-client">client</span>');
+    expect(html).toContain('<span class="badge e-write">write</span>');
+  });
+});
 
 describe('zoneOf: the scrub zone a timeline row falls into', () => {
   it('marks every seq at or past the prefix as beyond', () => {

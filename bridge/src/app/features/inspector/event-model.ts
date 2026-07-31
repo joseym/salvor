@@ -182,12 +182,19 @@ export function rowOf(e: SalvorEvent, events: readonly SalvorEvent[], arrivedSeq
     }
     case 'ToolCallRequested': {
       const effect = String(p['effect']);
+      // Absent (the field's default, and every call recorded before it existed) means salvor
+      // performed the call itself: the common case, so it gets no badge. Only a recorded
+      // `performed_by: "client"` renders one, spelling out the field's own wire word rather
+      // than inventing separate wording (the CLI's `[Client]` marker in salvor-replay's
+      // render.rs makes the identical choice).
+      const performer =
+        p['performed_by'] === 'client' ? ` <span class="badge perf-client">client</span>` : '';
       const key = p['idempotency_key']
         ? ` · <span class="mono">${esc(String(p['idempotency_key']))}</span>`
         : effect === 'write'
           ? ` · <span class="mono tokens-only">idempotency_key: null</span>`
           : '';
-      detail = `<b>${esc(String(p['tool']))}</b> <span class="badge e-${effect}">${esc(effect)}</span>${key}`;
+      detail = `<b>${esc(String(p['tool']))}</b> <span class="badge e-${effect}">${esc(effect)}</span>${performer}${key}`;
       body = pane('input', p['input']);
       if (effect === 'write') cls = 'attn';
       break;

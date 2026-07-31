@@ -536,6 +536,11 @@
   color: var(--amber-ink);
   background: var(--amber-wash);
 }
+/* who performed the call, not what class of effect it was: a plain fact, not a warning, so it
+   gets no warn coloring even beside a write badge. */
+.badge.perf-client {
+  border-style: dotted;
+}
 
 .ev-note {
   margin: var(--space-2) 0 0;

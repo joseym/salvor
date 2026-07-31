@@ -18,7 +18,7 @@
 use serde_json::Value;
 use time::OffsetDateTime;
 
-use crate::event::{BudgetKind, Event};
+use crate::event::{BudgetKind, Event, Performer};
 
 /// The stable `kind` label for one event, matching the enum variant name so
 /// it reads the same as the wire form's `kind` tag.
@@ -53,11 +53,12 @@ pub fn event_kind(event: &Event) -> &'static str {
 }
 
 /// The informative payload of one event, rendered as a single line. Picks the
-/// fields that matter per kind: a tool call shows its name and effect, a model
-/// completion its token usage, a suspension its reason. Hashes are shortened
-/// and every payload is truncated, so no full input, output, or error text
-/// reaches the progress stream; `salvor history --json` is the escape hatch for
-/// the untruncated envelope.
+/// fields that matter per kind: a tool call shows its name, effect, and (when
+/// a client performed it) that fact, a model completion its token usage, a
+/// suspension its reason. Hashes are shortened and every payload is
+/// truncated, so no full input, output, or error text reaches the progress
+/// stream; `salvor history --json` is the escape hatch for the untruncated
+/// envelope.
 #[must_use]
 pub fn event_detail(event: &Event) -> String {
     match event {
@@ -82,12 +83,25 @@ pub fn event_detail(event: &Event) -> String {
             input,
             effect,
             idempotency_key,
+            performed_by,
             ..
         } => {
             let key = idempotency_key
                 .as_deref()
                 .map_or_else(String::new, |k| format!(" key {k}"));
-            format!("{tool} [{effect:?}]{key} input {}", truncate_json(input))
+            // Absent (the field's default, and every entry recorded before it
+            // existed) means salvor performed the call itself: the
+            // overwhelmingly common case, so it renders nothing. Only a
+            // recorded `Performer::Client` gets a marker, in the same
+            // bracketed register as the effect class beside it.
+            let performer = match performed_by {
+                Some(Performer::Client) => " [Client]",
+                None | Some(Performer::Server) => "",
+            };
+            format!(
+                "{tool} [{effect:?}]{performer}{key} input {}",
+                truncate_json(input)
+            )
         }
         Event::ToolCallCompleted { output, .. } => {
             if let Some(reason) = suspension_reason(output) {
@@ -342,6 +356,66 @@ mod tests {
         assert_eq!(
             event_kind(&Event::RandomObserved { value: 7 }),
             "RandomObserved"
+        );
+    }
+
+    /// The compatibility test: a `ToolCallRequested` with `performed_by: None`
+    /// (the default, and every entry recorded before the field existed)
+    /// renders EXACTLY as it did before this field's marker was added. The
+    /// string below is the pinned pre-change output; the field
+    /// deliberately reads no `performed_by` at all so a change to this test
+    /// would only ever mean the compatibility case regressed.
+    #[test]
+    fn detail_omits_performer_marker_when_absent() {
+        let event = Event::ToolCallRequested {
+            seq: crate::id::SequenceNumber::new(3),
+            tool: "refund_card".into(),
+            input: json!({"amount_cents": 15900}),
+            effect: crate::effect::Effect::Write,
+            idempotency_key: Some("sha256:d2bb005d".into()),
+            performed_by: None,
+        };
+        assert_eq!(
+            event_detail(&event),
+            r#"refund_card [Write] key sha256:d2bb005d input {"amount_cents":15900}"#
+        );
+    }
+
+    /// A `ToolCallRequested` performed by the server, explicitly recorded as
+    /// such rather than left absent, still renders no marker: the field's
+    /// meaning is "who performed this", and a server-performed call is not
+    /// noteworthy however it got recorded.
+    #[test]
+    fn detail_omits_performer_marker_for_explicit_server() {
+        let event = Event::ToolCallRequested {
+            seq: crate::id::SequenceNumber::new(3),
+            tool: "refund_card".into(),
+            input: json!({"amount_cents": 15900}),
+            effect: crate::effect::Effect::Write,
+            idempotency_key: Some("sha256:d2bb005d".into()),
+            performed_by: Some(Performer::Server),
+        };
+        assert_eq!(
+            event_detail(&event),
+            r#"refund_card [Write] key sha256:d2bb005d input {"amount_cents":15900}"#
+        );
+    }
+
+    /// A client-performed call gets the `[Client]` marker, placed right after
+    /// the effect class it sits beside.
+    #[test]
+    fn detail_marks_a_client_performed_call() {
+        let event = Event::ToolCallRequested {
+            seq: crate::id::SequenceNumber::new(3),
+            tool: "refund_card".into(),
+            input: json!({"amount_cents": 15900}),
+            effect: crate::effect::Effect::Write,
+            idempotency_key: Some("sha256:d2bb005d".into()),
+            performed_by: Some(Performer::Client),
+        };
+        assert_eq!(
+            event_detail(&event),
+            r#"refund_card [Write] [Client] key sha256:d2bb005d input {"amount_cents":15900}"#
         );
     }
 }
