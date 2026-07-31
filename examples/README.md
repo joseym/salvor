@@ -28,6 +28,13 @@ local or scripted model.
 | [`graph-service/`](graph-service/) | The authoring surface driven end to end: `salvor graph run` walks a refund-dispute graph document from the CLI, resolving its tool nodes from the `--agent` files it is handed. A kill mid-flight and a recover prove the refund executes exactly once across the crash, the write-ahead guarantee `reconciliation/` proves in isolation. | `bash examples/graph-service/run.sh`; no key |
 | [`graph-clients/`](graph-clients/) | The same refund desk as `graph-service/`, driven by application code instead of the CLI, against a stock `salvor serve` with no flags. Python and TypeScript drive it over HTTP through their SDKs; Rust embeds the engine in process and speaks no HTTP at all. It has no tool nodes, deliberately: over HTTP a tool node can only reach tools compiled into the server binary, so the side effects live in agent nodes where real MCP tools are reachable. | `bash examples/graph-clients/run.sh`; no key |
 
+Every command above calls the binary as `salvor`, which is right once it is
+installed (`npm install -g @salvor-run/cli`, `cargo install salvor-cli`, or the
+release binary) and on your `PATH`. From a checkout with nothing installed,
+build it with `cargo build` and run `./target/debug/salvor` in its place;
+`graph-service/` and `graph-clients/` name this same binary through a
+`SALVOR_BIN` environment variable for exactly this reason.
+
 Every `[[mcp_servers]]` entry above spawns a local child process over stdio; an
 entry can instead reach a server hosted elsewhere with `url` (plus
 `bearer_token_env` for auth), shown commented-out in

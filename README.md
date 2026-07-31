@@ -156,6 +156,10 @@ Full contract, every route, status code, and event shape, in [`crates/salvor-ser
 
 A container image is published to `ghcr.io/joseym/salvor` on tagged releases, API-only with no bundled UI. See [`docs/CONTAINER.md`](docs/CONTAINER.md) for the `docker run` command and why the store volume is mandatory.
 
+### Operating it
+
+The durable state is one SQLite file, at the path `--store` names (plus its `-wal` and `-shm` side files while a writer holds it open). Runs and their event logs live there and survive a restart, the same store whether the process is driving `salvor run` or `salvor serve`. A submitted graph document is the exception: `salvor serve` holds it in a process-local, in-memory registry, so a restart drops it and it has to be resubmitted before a run or fork can reference it again (see [`examples/graph-clients/README.md`](examples/graph-clients/README.md#submitted-graphs-live-in-memory)). Auth is an optional shared-secret bearer token: pass `serve --auth-token <ENV_VAR>` naming an environment variable that holds it, and every `/v1` route then requires `Authorization: Bearer <token>`; leave it unset and the server trusts its caller, expecting a reverse proxy to guard it.
+
 ### Clients
 
 Thin clients over the control plane: register an agent, start a run, stream events, resume. A few hundred lines each, and the durability stays in the one Rust process.

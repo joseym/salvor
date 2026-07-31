@@ -225,6 +225,17 @@ names (`customer-notice`, `small-claims`) appear in one prompt each. Renaming an
 agent means renaming its conversation, or the script server answers with a 500
 instead of guessing.
 
+Once a conversation is selected, its turns are a fixed tape: the messages in
+`model-script.json` play back in order, and any `tool_use` in them carries
+whatever arguments were typed into the file, for example `small-claims`'s
+`issue_refund` call always names `DSP-3312` at `47.25`. Nothing in the script
+server reads the graph's actual input or the tool results the run produced so
+far, and nothing checks a scripted call's arguments against them either. That
+is fine for a fixture built to always take one path with one input, and it is
+the thing to unlearn if you are used to a model that looks at what it is
+actually given: change `input.json` here and the scripted calls answer with
+the same numbers regardless.
+
 ## Driving this same document over HTTP
 
 The document is portable; the tools are not.

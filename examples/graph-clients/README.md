@@ -118,6 +118,22 @@ so a run either can finish or never begins. See
 CLI, where a `tool` node resolves against the tools the supplied `--agent` files
 carry and the refund happens at a node the graph itself controls.
 
+## The offline model
+
+[`model-script.json`](model-script.json) plays back fixed turns, one named
+conversation per agent, selected the same way as in
+[`examples/graph-service/`](../graph-service/): the server picks the
+conversation whose name appears as a substring of the request's system
+prompt. Once a conversation is selected its messages are a tape, not logic:
+any `tool_use` in it carries whatever arguments were typed into the file, for
+example `small-claims`'s `issue_refund` call always names `DSP-3312` at
+`47.25`. The scripted model never reads the graph's actual input or a run's
+tool results, and nothing checks a scripted call's arguments against either
+one. Feeding this document a different `amount_usd` changes which arm the
+branch takes, since that routing is real, but it does not change what the
+agent on the arm you land on says or calls: that part is fixed regardless of
+input.
+
 ## The agent hashes
 
 The document names each agent by content hash, never by path. Ask for them

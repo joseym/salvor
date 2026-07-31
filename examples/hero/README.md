@@ -16,6 +16,13 @@ cargo build
 salvor run --fixture examples/hero
 ```
 
+The commands on this page call the binary as `salvor`, which is right once one
+of the install routes above has put it on your `PATH`. `cargo build` alone
+does not do that: from a checkout with no global install, run
+`./target/debug/salvor` in place of every `salvor` below. See
+[`examples/README.md`](../README.md) for how the other examples name this
+same distinction with a `SALVOR_BIN` variable.
+
 No API key and no network. `--fixture` reads this directory's `agent.toml` and
 `input.json`, starts the recorded model in `model.json` on a local port, and
 points the agent at it.

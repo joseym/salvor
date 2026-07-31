@@ -51,7 +51,7 @@ import {
   type EventStream,
   type EndFrame,
   type Graph,
-} from "../../../sdks/typescript/dist/index.js";
+} from "../../../sdks/typescript/dist/index.js"; // read the banner above before copying this relative path into your own project
 
 /** Raised for one of this app's own loud, predictable failures: a hash that does
  * not match, or a run that rested somewhere other than where the story expects
