@@ -14,6 +14,7 @@ import {
   layoutFor,
   routeHitsForeignNode,
   segHitsBox,
+  wfBodyPath,
   wfFit,
   wfPath,
   wfRoutes,
@@ -119,6 +120,54 @@ describe('layoutFor: hand-authored sidecar vs computed, and non-overlap', () => 
   it('a laid-out graph never overlaps two DISTINCT nodes: draft and computed alike', () => {
     expect(noDistinctBoxesOverlap(layoutFor(REFUND_SWEEP_DRAFT))).toBe(true);
     expect(noDistinctBoxesOverlap(layeredLayout(chain))).toBe(true);
+  });
+});
+
+describe('body-by-id: the layout slots the body node, the path draws it distinctly', () => {
+  // A map whose body is another node by id, with the map wired into a real spine and the body node
+  // referenced ONLY by that id (no edge touches it): the orphan the layered layout drops in column 0.
+  const withBody: WfGraph = {
+    key: 'g',
+    hash: 'sha256:map',
+    name: 'g',
+    state: 'published',
+    nodes: [
+      { id: 'start', kind: 'tool', name: 'start' },
+      { id: 'pay_each', kind: 'map', name: 'pay_each', over: 'roster', concurrency: 1, body: { node: 'pay_one' } },
+      { id: 'pay_one', kind: 'tool', name: 'pay_one' },
+    ],
+    edges: [{ from: 'start', to: 'pay_each' }],
+  };
+
+  it('pulls a body-only node directly below its referencer, not into column 0', () => {
+    const layout = layeredLayout(withBody);
+    expect(layout['pay_one'].x).toBe(layout['pay_each'].x);
+    expect(layout['pay_one'].y).toBeGreaterThan(layout['pay_each'].y);
+    expect(noDistinctBoxesOverlap(layout)).toBe(true);
+  });
+
+  it('leaves a body node that also carries a real edge in its edge-derived column', () => {
+    const alsoEdged: WfGraph = { ...withBody, edges: [...withBody.edges, { from: 'pay_each', to: 'pay_one' }] };
+    const layout = layeredLayout(alsoEdged);
+    expect(layout['pay_one'].x).toBeGreaterThan(layout['pay_each'].x);
+  });
+
+  it('draws a body directly below as a straight vertical drop with a downward arrowhead', () => {
+    const path = wfBodyPath({ x: 300, y: 0 }, { x: 300, y: 160 });
+    // one vertical segment down the source's centre line, no elbow
+    expect(path.d).toBe(`M ${300 + NODE_W / 2} ${NODE_H} L ${300 + NODE_W / 2} 160`);
+    expect(path.d).not.toContain('Q');
+  });
+
+  it('falls back to the ordinary elbow for a body that is not directly below', () => {
+    expect(wfBodyPath({ x: 0, y: 0 }, { x: 600, y: 0 })).toEqual(wfPath({ x: 0, y: 0 }, { x: 600, y: 0 }));
+  });
+
+  it('a body reference never enters the topological order', () => {
+    // pay_one has no edge, so it trails the ordered spine rather than being wired after pay_each.
+    const order = wfTopo(withBody);
+    expect(order).toContain('pay_one');
+    expect(order.indexOf('start')).toBeLessThan(order.indexOf('pay_each'));
   });
 });
 

@@ -1,4 +1,4 @@
-import type { WfEdge, WfGraph } from './wf-model';
+import { bodyLinks, type WfEdge, type WfGraph } from './wf-model';
 
 /**
  * THE CANVAS GEOMETRY: the pure math the pan/zoom surface runs on, lifted from the prototype so it
@@ -151,7 +151,38 @@ export function layeredLayout(g: WfGraph): WfLayout {
     rowInCol[col] = row + 1;
     layout[id] = { x: col * PITCH_X, y: row * PITCH_Y };
   });
-  return layout;
+  return placeBodyNodes(g, layout);
+}
+
+/**
+ * Pull each body-referenced node up beside the map or fold that names it, when that node is
+ * otherwise unconnected. A body is referenced by id inside its referencer's payload, not by an edge,
+ * so the layered layout (which sees only edges) has no trace to draw the body toward and drops it in
+ * column 0, reading as a stray orphan. A node that ALSO carries a real edge keeps its edge-derived
+ * slot untouched; only a body-only node is moved, to the first free slot directly below its
+ * referencer, so the relocation can never manufacture an overlap. Distinct from the drawn body link:
+ * this places the card, the link connects the two, and neither touches the document.
+ */
+function placeBodyNodes(g: WfGraph, layout: WfLayout): WfLayout {
+  const linked = new Set<string>();
+  g.edges.forEach((e) => {
+    linked.add(e.from);
+    linked.add(e.to);
+  });
+  const next: WfLayout = { ...layout };
+  const occupied = new Set(Object.values(next).map((p) => `${p.x},${p.y}`));
+  for (const link of bodyLinks(g)) {
+    if (linked.has(link.to)) continue; // it has a real edge: keep its edge-derived column
+    const at = next[link.from];
+    const old = next[link.to];
+    if (at === undefined || old === undefined) continue;
+    occupied.delete(`${old.x},${old.y}`);
+    let y = at.y + PITCH_Y;
+    while (occupied.has(`${at.x},${y}`)) y += PITCH_Y;
+    next[link.to] = { x: at.x, y };
+    occupied.add(`${at.x},${y}`);
+  }
+  return next;
 }
 
 export interface WfEdgePath {
@@ -295,6 +326,28 @@ export function wfPath(a: WfBox, b: WfBox, ctx?: WfPathCtx): WfEdgePath {
     ly = (pts[0][1] + pts[2][1]) / 2;
   }
   return { d, arrow, lx, ly };
+}
+
+/**
+ * THE BODY LINK path: the dashed connector a map or fold draws to the node its payload names as its
+ * body. A body is referenced by id inside the node rather than through an edge, so this is a
+ * rendering affordance drawn in a DISTINCT grammar from a real trace. When the body sits directly
+ * below its referencer (where {@link placeBodyNodes} slots a body-only node) it is a straight
+ * vertical dropped from the source's bottom port into the target's top port, with a downward
+ * arrowhead, so it reads unmistakably as "this node's body is that node". A body placed anywhere else
+ * (one that also carries real edges kept its own slot) falls back to the ordinary elbow, so a link
+ * always connects. Pure, like every path here; nothing about it enters the document.
+ */
+export function wfBodyPath(a: WfBox, b: WfBox): WfEdgePath {
+  const below = Math.abs(b.x - a.x) < 1 && b.y > a.y;
+  if (!below) return wfPath(a, b);
+  const cx = a.x + NODE_W / 2;
+  const y1 = a.y + NODE_H;
+  const y2 = b.y;
+  const d = `M ${cx} ${y1} L ${cx} ${y2}`;
+  const arrow = `M ${cx - 4} ${y2 - 7} L ${cx} ${y2} L ${cx + 4} ${y2 - 7} Z`;
+  // The label rides beside the drop, so its paper-knockout clears the rule instead of splitting it.
+  return { d, arrow, lx: cx + 16, ly: (y1 + y2) / 2 };
 }
 
 /** Every axis-aligned segment of a route, as [start, end] pairs: what a node-clearance check walks. */

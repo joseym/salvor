@@ -225,6 +225,20 @@
 .wf-elabel.is-ghost {
   fill: var(--faint);
 }
+/* THE BODY LINK: a node's body referenced by id, not by an edge. Drawn dashed and in the muted ink,
+   a grammar distinct from a real trace (solid), an inked route (accent), and a ghosted arm (finer,
+   tighter dashes). A rendering affordance only: it never enters the document or its hash. */
+.wf-edge.is-body {
+  stroke: var(--muted);
+  stroke-width: 1.5;
+  stroke-dasharray: 7 5;
+}
+.wf-arrow.is-body {
+  fill: var(--muted);
+}
+.wf-elabel.is-body {
+  fill: var(--muted);
+}
 
 .wf-nodes {
   position: absolute;

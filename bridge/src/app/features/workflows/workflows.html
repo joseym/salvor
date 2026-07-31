@@ -124,15 +124,16 @@
         <svg class="wf-edges" id="wf-edges" aria-hidden="true">
           @for (e of edges(); track $index) {
             <!-- an orthogonal trace, a single fine arrowhead, and the paper knocked out behind any
-                 case label. In Run mode the recorded route inks and the road not taken ghosts. -->
+                 case label. In Run mode the recorded route inks and the road not taken ghosts. A
+                 body link is a node's body-by-id reference, drawn dashed and labelled `body`. -->
             <path class="wf-edge" [class.is-case]="e.isCase" [class.is-inked]="e.walked"
-                  [class.is-ghost]="e.ghost" [attr.d]="e.d"
+                  [class.is-ghost]="e.ghost" [class.is-body]="e.isBody" [attr.d]="e.d"
                   [attr.data-from]="e.from" [attr.data-to]="e.to" fill="none" />
             <path class="wf-arrow" [class.is-inked]="e.walked" [class.is-ghost]="e.ghost"
-                  [attr.d]="e.arrow" />
+                  [class.is-body]="e.isBody" [attr.d]="e.arrow" />
             @if (e.label; as lbl) {
               <text class="wf-elabel" [class.is-inked]="e.walked" [class.is-ghost]="e.ghost"
-                    [attr.x]="e.lx" [attr.y]="e.ly">{{ lbl }}</text>
+                    [class.is-body]="e.isBody" [attr.x]="e.lx" [attr.y]="e.ly">{{ lbl }}</text>
             }
           }
         </svg>

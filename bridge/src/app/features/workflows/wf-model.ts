@@ -249,6 +249,29 @@ export function documentBody(doc: Graph): { nodes: WfNode[]; edges: WfEdge[] } {
 }
 
 /**
+ * THE BODY LINKS a canvas draws: for every map or fold node whose payload names another node as its
+ * body (`body.node`, a node id STRING), a link from that node to the one the id resolves to. These
+ * are NOT document edges. The format references a body by id inside the node's own payload, never
+ * through the edge list, so a link here is a pure RENDERING affordance: it is derived from the nodes,
+ * kept out of `g.edges`, and therefore out of everything that reads the edge list as topology (the
+ * topological order, the layered columns, the run projection, the fork reasoning). An embedded
+ * sub-graph body carries no string id and yields no link; a body naming a node this document does
+ * not hold yields none either, so a link always has both ends to draw between. Pure and DOM-free, so
+ * the layout and the renderer derive one and the same set.
+ */
+export function bodyLinks(g: WfGraph): WfEdge[] {
+  const ids = new Set(g.nodes.map((n) => n.id));
+  const links: WfEdge[] = [];
+  for (const n of g.nodes) {
+    const target = n.body?.node;
+    if (typeof target === 'string' && target.length > 0 && ids.has(target)) {
+      links.push({ from: n.id, to: target });
+    }
+  }
+  return links;
+}
+
+/**
  * Normalise a stored server document into the canvas model. The `name` shown in the picker is the
  * short hash: a published graph's identity is its hash.
  */

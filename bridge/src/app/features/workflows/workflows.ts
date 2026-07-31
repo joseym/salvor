@@ -45,6 +45,7 @@ import {
   type WfEdgePath,
   type WfView,
   layoutFor,
+  wfBodyPath,
   wfFit,
   wfReset,
   wfRoutes,
@@ -60,6 +61,7 @@ import {
   type WfNode,
   type WfNodeKind,
   type WfPickOption,
+  bodyLinks,
   branchCases,
   fromServerGraph,
   nodeDoes,
@@ -116,6 +118,10 @@ interface PositionedEdge {
   /** Run mode: the recorded route inks; the road not taken ghosts; everything else is quiet. */
   readonly walked: boolean;
   readonly ghost: boolean;
+  /** A synthetic BODY link: the dashed connector from a map/fold to the node its payload names as
+   * its body. Not a document edge, so it is never inked, ghosted, or read as a case; it draws in its
+   * own dashed grammar and carries the `body` label. */
+  readonly isBody: boolean;
 }
 
 /** A canvas caption for a duplicate-id stack: the shared id, how many cards claim it, and where the
@@ -421,10 +427,10 @@ export class Workflows implements AfterViewInit {
     // through a card, in which case it reroutes through a clear channel below the band. Aligned to
     // g.edges, so an edge whose endpoint is unlaid (a dangling reference) is simply not drawn.
     const routes = wfRoutes(g, layout);
-    return g.edges
+    const real = g.edges
       .map((e, i) => ({ e, i, path: routes[i] }))
       .filter((r): r is { e: WfEdge; i: number; path: WfEdgePath } => r.path !== undefined)
-      .map(({ e, path }) => {
+      .map(({ e, path }): PositionedEdge => {
         const isBranch = branchSources.has(e.from);
         const walked = inRun && edgeWalked(e.from, e.to, e.label, isBranch, states);
         // The road not taken: a decided branch's OTHER arm. Ghosted, never deleted: "we did not
@@ -442,9 +448,35 @@ export class Workflows implements AfterViewInit {
           isCase: e.label !== undefined,
           walked,
           ghost,
+          isBody: false,
         };
         return e.label !== undefined ? { ...base, label: e.label } : base;
       });
+    // The synthetic body links, drawn AFTER the real traces so their dashed grammar sits over the
+    // spine. Derived from the nodes, never from g.edges, so nothing above (topology, projection,
+    // fork) ever saw them; a link whose ends are not both laid out is simply not drawn.
+    const body = bodyLinks(g)
+      .filter((l) => layout[l.from] !== undefined && layout[l.to] !== undefined)
+      .map((l): PositionedEdge => {
+        const path = wfBodyPath(
+          { x: layout[l.from].x, y: layout[l.from].y },
+          { x: layout[l.to].x, y: layout[l.to].y },
+        );
+        return {
+          from: l.from,
+          to: l.to,
+          d: path.d,
+          arrow: path.arrow,
+          lx: path.lx,
+          ly: path.ly,
+          isCase: false,
+          walked: false,
+          ghost: false,
+          isBody: true,
+          label: 'body',
+        };
+      });
+    return [...real, ...body];
   });
 
   /** The narrow viewport's one-dimensional rendering: the same graph, the same error list, the
