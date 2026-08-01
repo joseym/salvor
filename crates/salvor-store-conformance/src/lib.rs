@@ -3,11 +3,11 @@
 //!
 //! The trait's rustdoc states an implementor contract in prose: `(run_id, seq)`
 //! uniqueness, ordering by sequence, run isolation, atomic and durable append,
-//! and round-trip fidelity of the wire form. This crate turns that prose into
-//! executable checks. If you are writing a new backend (Postgres, DynamoDB, a
-//! `FoundationDbStore` in your own repository), you run this kit against it and
-//! a passing run is your evidence the backend honors the contract the runtime
-//! relies on.
+//! round-trip fidelity of the wire form, and tamper evidence over recorded
+//! rows. This crate turns that prose into executable checks. If you are writing
+//! a new backend (Postgres, DynamoDB, a `FoundationDbStore` in your own
+//! repository), you run this kit against it and a passing run is your evidence
+//! the backend honors the contract the runtime relies on.
 //!
 //! # Wiring it into your backend's tests
 //!
@@ -19,14 +19,34 @@
 //! tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 //! ```
 //!
+//! The kit drives a [`TamperHarness`]: your store, plus one test-only method
+//! that rewrites a recorded row the way an attacker with storage access would.
+//! Tamper evidence cannot be checked through the
+//! [`EventStore`](salvor_store::EventStore) surface alone,
+//! because that surface deliberately offers no way to modify a recorded event.
+//! Most harnesses are a thin wrapper that delegates the three trait methods and
+//! reaches around the store for the fourth:
+//!
+//! ```ignore
+//! struct Harness { store: MyStore, admin: AdminConnection }
+//!
+//! #[async_trait]
+//! impl EventStore for Harness { /* delegate append, read_log, list_runs */ }
+//!
+//! #[async_trait]
+//! impl salvor_store_conformance::TamperHarness for Harness {
+//!     async fn forge_recorded_envelope(&self, run: RunId, seq: SequenceNumber, json: &str) {
+//!         self.admin.overwrite_row(run, seq, json).expect("forge");
+//!     }
+//! }
+//! ```
+//!
 //! Then, in a test file, hand the [`conformance_tests!`] macro an expression
-//! that builds a fresh store. It generates one `#[tokio::test]` per check, so
+//! that builds a fresh harness. It generates one `#[tokio::test]` per check, so
 //! failures point at the exact clause that broke:
 //!
 //! ```ignore
-//! use my_backend::MyStore;
-//!
-//! salvor_store_conformance::conformance_tests!(MyStore::new().expect("open store"));
+//! salvor_store_conformance::conformance_tests!(Harness::new().expect("open store"));
 //! ```
 //!
 //! The expression is re-evaluated for each generated test, so every check gets
@@ -55,9 +75,19 @@
 //! with the typed [`StoreError::Conflict`](salvor_store::StoreError::Conflict),
 //! reads come back ordered and isolated per run, an unknown run reads empty,
 //! `list_runs` reports each run once with correct aggregates, the wire form
-//! survives a round trip across all twelve event kinds, and a pack of writers
+//! survives a round trip across all twelve event kinds, a pack of writers
 //! racing for one position produces exactly one winner with the log holding
-//! exactly that one event.
+//! exactly that one event, and a recorded row rewritten with valid JSON is
+//! refused on read with
+//! [`StoreError::TamperEvident`](salvor_store::StoreError::TamperEvident)
+//! naming the run and position, while its untouched neighbors still read.
+//!
+//! Tamper evidence is not optional here. It is in [`run_all`] and in the
+//! macro, so a backend cannot claim conformance while serving whatever bytes
+//! its storage happens to hold. What the kit checks is the guarantee, not a
+//! particular implementation of it; the practical way to satisfy it is
+//! `salvor_store::chain`, which is public so every backend chains to the same
+//! bytes.
 //!
 //! # What the kit deliberately does not check
 //!
@@ -74,6 +104,18 @@
 //!   would survive a crash. Treat durability as an argument you make about your
 //!   backend's configuration (for SQLite, WAL with `synchronous=FULL`), not
 //!   something this kit certifies.
+//! - **Tampering that rebuilds or extends a chain.** The tamper checks prove a
+//!   recorded row cannot be changed unnoticed. They do not, and cannot, prove
+//!   anything against an attacker who rewrites every row of a run from its
+//!   first event forward, or who chains fabricated events onto a run's current
+//!   head: that attacker holds every input verification holds, because the
+//!   chain is unkeyed. Detecting either needs an anchor outside the store,
+//!   which is a deployment decision rather than a property of a backend. See
+//!   `salvor_store::chain` for where such an anchor attaches.
+//! - **Storage-level write guards.** Whether your backend refuses an `UPDATE`
+//!   at the table, the bucket, or the filesystem is backend-specific and
+//!   belongs in its own tests. The kit checks the guarantee that survives
+//!   those guards being bypassed, since any of them can be.
 //! - **Performance.** The kit asserts correctness, never latency or throughput.
 //!   A per-append budget is a property of a specific backend on specific
 //!   hardware, so it stays in that backend's own tests.
@@ -84,15 +126,14 @@
 mod checks;
 
 pub use checks::{
-    concurrent_single_position_has_one_winner, duplicate_append_conflicts,
+    TamperHarness, concurrent_single_position_has_one_winner, duplicate_append_conflicts,
     list_runs_reports_each_run_once, ordering_independent_of_append_order,
-    round_trip_all_event_kinds, runs_are_isolated, unknown_run_reads_empty,
-    usable_as_arc_dyn_event_store,
+    recorded_log_verifies_when_untouched, round_trip_all_event_kinds, runs_are_isolated,
+    tamper_is_confined_to_its_run, unknown_run_reads_empty, usable_as_arc_dyn_event_store,
+    valid_json_tamper_is_detected,
 };
 
 use core::future::Future;
-
-use salvor_store::EventStore;
 
 /// Runs every conformance check in sequence, each against a store the factory
 /// produces fresh.
@@ -108,7 +149,7 @@ use salvor_store::EventStore;
 /// not run in parallel.
 pub async fn run_all<S, F, Fut>(new_store: F)
 where
-    S: EventStore + 'static,
+    S: TamperHarness,
     F: Fn() -> Fut,
     Fut: Future<Output = S>,
 {
@@ -120,6 +161,9 @@ where
     list_runs_reports_each_run_once(new_store().await).await;
     usable_as_arc_dyn_event_store(new_store().await).await;
     concurrent_single_position_has_one_winner(new_store().await).await;
+    recorded_log_verifies_when_untouched(new_store().await).await;
+    valid_json_tamper_is_detected(new_store().await).await;
+    tamper_is_confined_to_its_run(new_store().await).await;
 }
 
 /// Generates one `#[tokio::test]` per conformance check against a fresh store.
@@ -180,6 +224,21 @@ macro_rules! conformance_tests {
         #[::tokio::test(flavor = "multi_thread", worker_threads = 4)]
         async fn concurrent_single_position_has_one_winner() {
             $crate::concurrent_single_position_has_one_winner($factory).await;
+        }
+
+        #[::tokio::test]
+        async fn recorded_log_verifies_when_untouched() {
+            $crate::recorded_log_verifies_when_untouched($factory).await;
+        }
+
+        #[::tokio::test]
+        async fn valid_json_tamper_is_detected() {
+            $crate::valid_json_tamper_is_detected($factory).await;
+        }
+
+        #[::tokio::test]
+        async fn tamper_is_confined_to_its_run() {
+            $crate::tamper_is_confined_to_its_run($factory).await;
         }
     };
 }

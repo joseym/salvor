@@ -57,6 +57,19 @@ pub use salvor_core::RunSummary;
 ///   written.
 /// - **Round-trip fidelity.** An envelope read back equals the envelope
 ///   appended. The exact serialized wire form is preserved.
+/// - **Tamper evidence.** A recorded event that is later modified, reordered,
+///   inserted, or removed by anything other than [`append`](Self::append) must
+///   be detected on the next [`read_log`](Self::read_log) and reported as
+///   [`StoreError::TamperEvident`], naming the run and the position. Detection
+///   must not depend on the change being malformed: a row rewritten with
+///   perfectly valid envelope JSON is the case that matters, and the case a
+///   parse check misses. Implement this by chaining rows with
+///   [`crate::chain`], which defines the hash normatively so that every
+///   backend arrives at the same head hash for the same log, and verify the
+///   whole chain before returning any event. Storage-level guards (a trigger,
+///   a read-only bucket policy) are welcome as defense in depth but do not
+///   satisfy this clause on their own, because anything that can write the
+///   storage can usually remove the guard too.
 #[async_trait]
 pub trait EventStore: Send + Sync {
     /// Appends one event envelope to its run's log.
@@ -70,12 +83,24 @@ pub trait EventStore: Send + Sync {
     ///
     /// Returns only the named run's events. An unknown run yields an empty
     /// vector, not an error.
+    ///
+    /// This is the enforcement point for tamper evidence: the log's chain is
+    /// verified here, before any event is handed back, so a run whose recorded
+    /// bytes no longer match is refused with
+    /// [`StoreError::TamperEvident`] rather than partially served. Anything
+    /// that reads the underlying storage directly instead of calling this is
+    /// not an audit path.
     async fn read_log(&self, run_id: RunId) -> Result<Vec<EventEnvelope>, StoreError>;
 
     /// Lists every run known to the store, each exactly once, as a
     /// [`RunSummary`].
     ///
     /// This is a summary projection, not a full log read; see [`RunSummary`]
-    /// for the fields and why the set is small.
+    /// for the fields and why the set is small. Because it is a projection and
+    /// not a read of any log, it does **not** verify chains: a run whose log
+    /// has been tampered with still appears in the listing, and only
+    /// [`read_log`](Self::read_log) refuses it. That is deliberate, so one
+    /// damaged run does not blank a whole listing, but it means a listing is
+    /// not evidence about integrity.
     async fn list_runs(&self) -> Result<Vec<RunSummary>, StoreError>;
 }

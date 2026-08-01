@@ -17,6 +17,10 @@ time.workspace = true
 uuid.workspace = true
 rusqlite.workspace = true
 async-trait.workspace = true
+# The digest behind the per-run hash chain that makes a recorded log
+# tamper-evident (see the `chain` module). Already in the workspace tree via
+# salvor-runtime's content hashing, so this adds no new crate.
+sha2.workspace = true
 
 [dev-dependencies]
 # Path-only on purpose: the conformance kit depends on this crate, so a versioned dev-dep
