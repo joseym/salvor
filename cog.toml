@@ -15,6 +15,7 @@ tag_prefix = "v"
 # in the tree; recover with git checkout -- . before retrying.
 pre_bump_hooks = [
   "scripts/set-version.sh {{version}}",
+  "python3 scripts/release-facts.py --write --current v{{version}}",
   "cargo build",
 ]
 

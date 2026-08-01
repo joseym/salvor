@@ -127,6 +127,25 @@ def shipped_versions() -> list[str]:
     return sorted(tags, key=version_sort_key)
 
 
+def workspace_version() -> str:
+    """The version from [workspace.package] in the root Cargo.toml.
+
+    The bump commit stamps this via scripts/set-version.sh before the tag exists,
+    so check mode uses this to validate one-ahead state.
+    """
+    root_cargo = REPO_ROOT / "Cargo.toml"
+    config = tomllib.loads(root_cargo.read_text())
+    workspace = config.get("workspace", {})
+    package = workspace.get("package", {})
+    version = package.get("version")
+    if not version:
+        raise DerivationError("root Cargo.toml has no [workspace.package] version field")
+    # Ensure it has the v prefix for comparison
+    if not version.startswith("v"):
+        version = f"v{version}"
+    return version
+
+
 def first_version_containing(path: Path, versions: list[str]) -> str | None:
     """The earliest shipped version whose history holds `path`'s first commit.
 
@@ -371,9 +390,9 @@ def _paragraph(text: str) -> str:
     return textwrap.fill(text, width=79, break_long_words=False, break_on_hyphens=False)
 
 
-def render_block() -> str:
+def render_block(override_current: str | None = None) -> str:
     versions = shipped_versions()
-    current = versions[-1]
+    current = override_current if override_current else versions[-1]
     workflows = tag_triggered_workflows(current, versions)
     dist = dist_config()
     targets = sorted(dist.get("targets") or [])
@@ -483,19 +502,46 @@ def splice_block(document: str, block: str) -> str:
 
 def main(argv: list[str]) -> int:
     write = False
-    for argument in argv:
+    override_current = None
+    i = 0
+    while i < len(argv):
+        argument = argv[i]
         if argument in ("-h", "--help"):
             print(__doc__.strip())
             return 0
         if argument == "--write":
             write = True
+        elif argument == "--current":
+            i += 1
+            if i >= len(argv):
+                print(f"error: --current requires a value", file=sys.stderr)
+                return 2
+            override_current = argv[i]
         else:
-            print(f"usage: {Path(__file__).name} [--write]", file=sys.stderr)
+            print(f"usage: {Path(__file__).name} [--write] [--current <version>]", file=sys.stderr)
             return 2
+        i += 1
 
     try:
         document = RELEASING_MD.read_text()
-        updated = splice_block(document, render_block())
+
+        # In check mode (no --write, no --current), determine expected current from
+        # max(latest_tag, workspace_version). This lets check pass when the bump commit
+        # has stamped the workspace version but the tag doesn't exist yet.
+        check_current = override_current
+        if not write and not override_current:
+            versions = shipped_versions()
+            workspace_ver = workspace_version()
+            latest_tag = versions[-1] if versions else None
+            # Compute max of latest_tag and workspace_version using version ordering
+            if latest_tag and version_sort_key(workspace_ver) > version_sort_key(latest_tag):
+                check_current = workspace_ver
+            elif latest_tag:
+                check_current = latest_tag
+            else:
+                check_current = workspace_ver
+
+        updated = splice_block(document, render_block(check_current or override_current))
     except DerivationError as error:
         print(f"release-facts.py: {error}", file=sys.stderr)
         return 2
