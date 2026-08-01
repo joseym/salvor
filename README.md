@@ -9,7 +9,7 @@ Try it in your browser at **[salvor.run](https://salvor.run)**. The demo termina
 ![Salvor kills a research agent mid-run and resumes it to completion with no duplicate side effects](docs/demo.gif)
 
 - **Crash-exact resume.** Every event is written before the runtime acts on it, so a resume replays what already happened and re-executes none of it.
-- **No duplicate side effects.** Tools declare an effect (read, write, or idempotent) and a write is never replayed blind. A write left dangling by a crash blocks the resume until a human reconciles it.
+- **No duplicate side effects.** Tools declare an effect (read, write, or idempotent) and a write is never replayed blind. A write left dangling by a crash blocks the resume until a human reconciles it. Within one run this holds always; across separate runs it holds for a call whose tool declares an idempotency key, which the store then lets exactly one run execute.
 - **The log is the run.** State is a pure fold over events: the same code in the runtime, in `salvor replay`, and in the browser via wasm.
 - **Hard budgets.** Ceilings on steps, tokens, dollars, and wall time, enforced by the runtime rather than suggested to the model. Wall time is measured between recorded clock observations, never against the ambient clock.
 - **One static binary.** The event store and the web UI ship inside it.
@@ -33,7 +33,24 @@ curl -LsSf https://github.com/joseym/salvor/releases/latest/download/salvor-cli-
 Linux builds come in both glibc and static musl flavours, so the same binary runs on Alpine and in
 slim containers. There is also a container image: see [docs/CONTAINER.md](docs/CONTAINER.md).
 
-All routes install the same `salvor`. Examples below call it by name; from a checkout it is `./target/debug/salvor`.
+All routes install the same `salvor`, and the npm route installs the real,
+killable binary rather than a Node wrapper: `kill` or Ctrl-C on the process
+you launched stops the run immediately. Examples below call it by name; from
+a checkout it is `./target/debug/salvor`.
+
+### Bring a key
+
+An agent talks to the Messages API, and Salvor never invents or stores a key
+for you. Each agent's `[llm]` block names the environment variable the key is
+read from via `api_key_env`; when the file does not set it, the default is
+`ANTHROPIC_API_KEY`. Export it before running:
+
+```sh
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+A run that gets HTTP 401 back from the Messages API prints which variable it
+read from, so a missing or wrong key is never a guessing game.
 
 An agent is a TOML file. Save this as `hello-agent.toml`:
 
