@@ -570,3 +570,126 @@ async fn graph_projection_of_an_agent_run_is_409_not_a_graph_run() {
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["error"]["code"], "not_a_graph_run");
 }
+
+/// A gate's `approval_schema` is ENFORCED at the resume endpoint, not merely
+/// recorded and advertised.
+///
+/// The schema is the one that used to let everything through: `required` and
+/// `properties` with no `type`, which plain JSON Schema semantics leave
+/// vacuously satisfied by any non-object. All four of `null`, `42`, `"nope"`,
+/// and `{}` come back as `400 approval_schema_violation` naming the gate node
+/// and listing every violation, the log is byte-identical after each refusal,
+/// and the run is still parked at the gate. A conforming approval then resumes
+/// it and the write runs exactly once.
+#[tokio::test]
+async fn resume_refuses_an_approval_that_violates_the_gates_schema() {
+    let publish_calls = counter();
+    let registry = ToolRegistry::new().with_tool(Arc::new(PublishTool {
+        calls: publish_calls.clone(),
+    }));
+    // The store is held here, not hidden inside `graph_state`, so the test can
+    // read the raw log and prove a refusal appended nothing.
+    let store = memory_store();
+    let state = AppState::new(
+        store.clone(),
+        model_only_factory("http://model.invalid".to_owned()),
+    )
+    .with_hooks(common::fixed_clock(), common::fixed_random())
+    .with_poll_interval(Duration::from_millis(10))
+    .with_tool_registry(Arc::new(registry));
+    let server = TestServer::spawn(state).await;
+    let client = reqwest::Client::new();
+
+    // A gate-entry graph: no agent, so no model is ever called.
+    let document = json!({
+        "schema_version": 1,
+        "nodes": [
+            { "kind": "gate", "payload": { "id": "approve", "approval_schema": {
+                "required": ["approved"],
+                "properties": { "approved": { "type": "boolean" } }
+            } } },
+            { "kind": "tool", "payload": { "id": "publish", "tool": "publish" } }
+        ],
+        "edges": [ { "from": "approve", "to": "publish" } ]
+    });
+    let (status, body) = post_json(
+        &client,
+        &format!("{}/v1/graphs", server.base),
+        document,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "submit: {body}");
+    let graph_hash = body["graph"].as_str().expect("graph hash").to_owned();
+
+    let (status, body) = post_json(
+        &client,
+        &format!("{}/v1/graph-runs", server.base),
+        json!({ "graph_hash": graph_hash }),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "graph-run: {body}");
+    let run = body["run"].as_str().expect("run id").to_owned();
+    let run_id = salvor_core::RunId::from_uuid(run.parse().expect("the run id is a uuid"));
+
+    wait_for_state(&client, &server.base, &run, "suspended").await;
+    let parked = common::read_log(&store, run_id).await;
+    let parked_bytes = serde_json::to_string(&parked).expect("the log encodes");
+
+    for bad in [json!(null), json!(42), json!("nope"), json!({})] {
+        let (status, body) = post_json(
+            &client,
+            &format!("{}/v1/runs/{run}/resume", server.base),
+            json!({ "input": bad }),
+            None,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "resuming with {bad} must be refused: {body}"
+        );
+        assert_eq!(body["error"]["code"], "approval_schema_violation", "{body}");
+        assert_eq!(
+            body["error"]["details"]["node"], "approve",
+            "the refusal names the gate: {body}"
+        );
+        let violations = body["error"]["details"]["violations"]
+            .as_array()
+            .unwrap_or_else(|| panic!("a violation list: {body}"));
+        assert!(!violations.is_empty(), "{body}");
+        assert!(violations[0]["path"].is_string(), "{body}");
+        assert!(violations[0]["message"].is_string(), "{body}");
+
+        // Nothing was appended and nothing ran.
+        assert_eq!(
+            serde_json::to_string(&common::read_log(&store, run_id).await)
+                .expect("the log encodes"),
+            parked_bytes,
+            "the refusal of {bad} must leave the log untouched"
+        );
+        assert_eq!(publish_calls.load(Ordering::SeqCst), 0);
+        let (_, current) = get_json(&client, &format!("{}/v1/runs/{run}", server.base), None).await;
+        assert_eq!(
+            current["status"]["state"], "suspended",
+            "the run is still parked at the gate"
+        );
+    }
+
+    // The conforming approval behaves exactly as it always did.
+    let (status, body) = post_json(
+        &client,
+        &format!("{}/v1/runs/{run}/resume", server.base),
+        json!({ "input": { "approved": true } }),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "resume: {body}");
+    let completed = wait_for_state(&client, &server.base, &run, "completed").await;
+    assert_eq!(
+        completed["status"]["output"],
+        json!({ "published": { "approved": true } })
+    );
+    assert_eq!(publish_calls.load(Ordering::SeqCst), 1);
+}

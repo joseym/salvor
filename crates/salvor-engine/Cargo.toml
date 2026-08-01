@@ -13,6 +13,10 @@ salvor-core.workspace = true
 salvor-graph.workspace = true
 salvor-runtime.workspace = true
 salvor-tools.workspace = true
+# Enforces a gate's `approval_schema` against the resume input at the accept
+# edge (see the `approval` module). See the workspace entry for the draft
+# support and why the resolvers are off.
+jsonschema.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 time.workspace = true

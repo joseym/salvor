@@ -539,10 +539,12 @@ pub async fn forks(
 
 /// Drives a parked or crashed GRAPH run further, for
 /// [`crate::runs::resume`]'s graph branch. The resume handler has already read
-/// the log, classified the run, and validated the input against the recorded
-/// suspension schema; this resolves the graph document (by the hash the log
-/// records) and its references, then spawns the engine over it. Returns the
-/// same `202 driving` body the agent-run resume path returns.
+/// the log and classified the run, and hands a graph run's input here UNCHECKED
+/// (see [`refuse_nonconforming_approval`] for why the check belongs on this
+/// side). This resolves the graph document (by the hash the log records) and
+/// its references, vets the input against the gate or tool suspension the run
+/// is parked at, then spawns the engine over it. Returns the same
+/// `202 driving` body the agent-run resume path returns.
 pub async fn drive_resume(
     state: AppState,
     run_id: RunId,
@@ -557,6 +559,18 @@ pub async fn drive_resume(
             "the graph {hash} this run executes is not stored on this server; submit it, then resume"
         ))
     })?;
+    // The gate accept edge, on this layer. The engine enforces the same rule
+    // between its `suspend` and `await_resume` (see `salvor_engine::approval`),
+    // but that refusal would surface inside the spawned driver task, long after
+    // this handler has answered 202. Checking here makes it the synchronous 400
+    // the caller can act on, and it happens before anything is spawned, so the
+    // log is untouched and the run stays parked at the gate. The recorded
+    // suspension schema `crate::runs::resume` already checked is the same
+    // schema; what this adds is a real JSON Schema validator and the gate's
+    // node id, neither of which the recorded `Suspended` alone provides.
+    if let Some(input) = input.as_ref() {
+        refuse_nonconforming_approval(log, &graph, input)?;
+    }
     let registry = require_tools(&state, &graph)?;
     let (agents, servers) = build_agents(&state, &graph).await?;
 
@@ -566,6 +580,51 @@ pub async fn drive_resume(
     };
     spawn_graph_drive(state, run_id, graph, agents, servers, registry, verb);
     Ok(driving(run_id).into_response())
+}
+
+/// Refuses a resume input that does not satisfy the `approval_schema` of the
+/// gate the run is parked at, as `400 approval_schema_violation` naming the
+/// node and every violation.
+///
+/// This is the whole of a graph run's suspension validation:
+/// [`crate::runs::resume`] delegates rather than checking first, so the gate's
+/// precise refusal is never pre-empted by a vaguer one. A run parked at a tool
+/// suspension instead falls back to the recorded-schema check an agent run
+/// gets.
+fn refuse_nonconforming_approval(
+    log: &[EventEnvelope],
+    graph: &Graph,
+    input: &Value,
+) -> Result<(), ApiError> {
+    let Some(gate) = salvor_engine::parked_gate(log, graph) else {
+        // Not parked at a gate: apply the same recorded-schema check the
+        // agent-run resume path applies, so a graph run parked at a TOOL
+        // suspension is validated exactly as it always was. `crate::runs::resume`
+        // hands graph runs straight here rather than checking twice.
+        if let RunStatus::Suspended { input_schema, .. } = &derive_state(log).status {
+            salvor_runtime::validate_against_schema(input, input_schema)
+                .map_err(ApiError::BadRequest)?;
+        }
+        return Ok(());
+    };
+    let violations = salvor_engine::approval_violations(input, &gate.approval_schema);
+    if violations.is_empty() {
+        return Ok(());
+    }
+    Err(ApiError::ApprovalSchemaViolation {
+        message: format!(
+            "the approval does not satisfy gate `{}`'s approval_schema; the run is still parked \
+             at that gate, so a conforming approval resumes it",
+            gate.id
+        ),
+        node: gate.id.clone(),
+        violations: Value::Array(
+            violations
+                .iter()
+                .map(|violation| json!({ "path": violation.path, "message": violation.message }))
+                .collect(),
+        ),
+    })
 }
 
 /// Whether a log is a graph run: its first event is `GraphRunStarted`.

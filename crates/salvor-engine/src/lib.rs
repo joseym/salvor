@@ -29,7 +29,11 @@
 //!   suspension schema and the drive returns [`GraphOutcome::Parked`]. A later
 //!   drive over the log (carrying the resume input the existing resume machinery
 //!   appended) passes that input through the gate as its output and continues.
-//!   A gate needs no event kind of its own;
+//!   A gate needs no event kind of its own. A resume input is ENFORCED against
+//!   the gate's `approval_schema` at the accept edge, between the `suspend` and
+//!   the `await_resume` that would record it, so a non-conforming approval is a
+//!   typed refusal that appends nothing and leaves the run parked; a recorded
+//!   `Resumed` is never re-judged on replay (see [`approval`]);
 //! - a **branch** node routes on its input: an expression branch evaluates its
 //!   cases in author order and the first true case wins; a model-decision branch
 //!   drives the node's agent and maps the reply to a case name. Either way the
@@ -96,6 +100,7 @@
 
 #![warn(missing_docs)]
 
+pub mod approval;
 mod error;
 pub mod fork;
 mod walk;
@@ -111,6 +116,7 @@ use salvor_runtime::{
 use salvor_tools::DynTool;
 use serde_json::{Value, json};
 
+pub use approval::{ApprovalViolation, approval_violations, parked_gate};
 pub use error::EngineError;
 pub use fork::{ForkError, ForkPlan, WriteHazard, plan_fork};
 
@@ -371,6 +377,32 @@ pub async fn run_graph(
                 ctx.node_entered(id).await?;
                 let reason = gate_reason(gate);
                 ctx.suspend(&reason, &gate.approval_schema).await?;
+                // THE ACCEPT EDGE. Right here, and nowhere later, is where a
+                // resume input may be judged: the gate's `Suspended` is on
+                // disk, and the next line can append a `Resumed`. Refusing
+                // before that append is what keeps the refusal free: nothing
+                // lands in the log and the run stays parked at this gate,
+                // waiting for an approval that conforms.
+                //
+                // The guard is `is_replaying()`. When history remains, the next
+                // event is a RECORDED `Resumed`, and a recorded `Resumed` is
+                // never re-judged: replay trusts what was written. That is
+                // load-bearing rather than an optimization. If replay
+                // re-validated, a stricter validator (or a new `jsonschema`
+                // release) would turn logs that replayed yesterday into
+                // refusals today, and a durable log that stops replaying is not
+                // durable. So: check what has not been written, trust what has.
+                if !ctx.is_replaying()
+                    && let Some(input) = ctx.staged_resume_input()
+                {
+                    let violations = approval_violations(input, &gate.approval_schema);
+                    if !violations.is_empty() {
+                        return Err(EngineError::ApprovalSchemaViolation {
+                            node: gate.id.clone(),
+                            violations,
+                        });
+                    }
+                }
                 match ctx.await_resume().await? {
                     Resumption::Parked => {
                         return Ok(GraphOutcome::Parked {

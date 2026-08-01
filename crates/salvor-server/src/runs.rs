@@ -76,8 +76,25 @@ struct StartRequest {
 #[derive(Debug, Default, Deserialize)]
 struct ResumeRequest {
     /// The resume input, required for a parked run, ignored when recovering.
-    #[serde(default)]
+    ///
+    /// `None` means the field was ABSENT, not that it was `null`. A plain
+    /// `Option<Value>` cannot tell those apart: serde folds an explicit JSON
+    /// `null` into `None`, so `{"input": null}` used to come back as "you sent
+    /// no input" and never reached validation at all. A gate that refuses
+    /// `null` has to be able to see it, so the field is deserialized through
+    /// [`explicit_value`], which wraps whatever arrived, `null` included.
+    #[serde(default, deserialize_with = "explicit_value")]
     input: Option<Value>,
+}
+
+/// Deserializes a present field into `Some(value)` whatever it holds, so
+/// `#[serde(default)]` is the only thing that can produce `None` and `None`
+/// therefore means "absent". The standard double-option idiom.
+fn explicit_value<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Value::deserialize(deserializer).map(Some)
 }
 
 /// The body of `POST /v1/runs/{id}/resolve`.
@@ -382,6 +399,15 @@ pub async fn resume(
             // a bad input is a synchronous 400 rather than a silent no-op in
             // the driver task.
             match kind {
+                // A graph run's suspension is vetted inside
+                // `graph::drive_resume` instead, and only there. Parked at a
+                // gate it can name the node and run a real JSON Schema
+                // validator over the gate's `approval_schema`; parked at a tool
+                // suspension it applies this very same recorded-schema check.
+                // Running the weaker check here as well would pre-empt the
+                // gate's precise refusal with a vaguer message, which is worse
+                // for the operator holding the approval form.
+                ResumeKind::Suspension if crate::graph::is_graph_run(&log) => {}
                 ResumeKind::Suspension => {
                     if let RunStatus::Suspended { input_schema, .. } = &derived.status {
                         validate_against_schema(&input, input_schema)

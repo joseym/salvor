@@ -990,11 +990,11 @@ fn plan_tool_step(
     }
     match log.get(seq as usize + 1) {
         Some(next_env) => match &next_env.event {
-            Event::ToolCallCompleted { seq: corr, output } if corr.get() == seq => {
-                Ok(ToolStepPlan::Replay {
-                    output: output.clone(),
-                })
-            }
+            Event::ToolCallCompleted {
+                seq: corr, output, ..
+            } if corr.get() == seq => Ok(ToolStepPlan::Replay {
+                output: output.clone(),
+            }),
             _ => Err(ApiError::Divergence(format!(
                 "the event after the intent at seq {seq} is not its completion"
             ))),
@@ -1054,6 +1054,7 @@ async fn append_tool_completion(
         Event::ToolCallCompleted {
             seq: SequenceNumber::new(seq),
             output: output.clone(),
+            deduplicated_from: None,
         },
     );
     let log = state.store().read_log(run_id).await.map_err(store_error)?;
