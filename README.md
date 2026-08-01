@@ -4,6 +4,8 @@
 
 A salvor is whoever goes out after the wreck and brings the ship back, which is roughly the job here: a dead run comes back and finishes from exactly where it stopped.
 
+Try it in your browser at **[salvor.run](https://salvor.run)**. The demo terminal there runs the real CLI and the real replay fold, compiled to wasm from a tagged release of this repository.
+
 ![Salvor kills a research agent mid-run and resumes it to completion with no duplicate side effects](docs/demo.gif)
 
 - **Crash-exact resume.** Every event is written before the runtime acts on it, so a resume replays what already happened and re-executes none of it.
