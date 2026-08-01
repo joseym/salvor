@@ -2,6 +2,65 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.8.0 - 2026-08-01
+#### Features
+- (**bridge**) draw the body reference a map only implies - (df30546) - Josey Morton
+- (**bridge**) draw and edit graphs on the canvas - (d4bb2fb) - Josey Morton
+- (**bridge**) open a graph document on the canvas - (1157079) - Josey Morton
+- (**cli**) serve a demo model script from a file - (6adc7ea) - Josey Morton
+- (**cli**) name the agent file check `agent validate` - (e0c8a3c) - Josey Morton
+- (**cli**) complete file paths in the graph editor - (dc66029) - Josey Morton
+- (**cli**) complete graph edit lines from the document being built - (db6a840) - Josey Morton
+- (**cli**) put the graph editor behind a prompt - (5f06355) - Josey Morton
+- (**cli**) a graph editor that folds commands into a document - (8eb45d1) - Josey Morton
+- (**cli**) print an agent definition's hash - (6c09274) - Josey Morton
+- (**core**) record who performed a tool call - (5a450b4) - Josey Morton
+- (**examples**) a payroll run that cannot pay anyone twice - (1b24b77) - Josey Morton
+- (**examples**) drive a graph from three client applications - (f2ec337) - Josey Morton
+- (**examples**) drive a refund dispute through a graph - (bdfb0e7) - Josey Morton
+- (**graph**) check the document schema in and gate it - (a05ee71) - Josey Morton
+- (**replay**) mark a client-performed call where a person reads it - (c6768ef) - Josey Morton
+- (**sdk**) read the pinned fields, assume the safe trust default - (1f703f8) - Josey Morton
+- (**sdk**) refuse a bad gate schema at build time, say when an intent is settled - (a4643e1) - Josey Morton
+- (**sdk**) reach client-performed tools from Python and TypeScript - (7bbc100) - Josey Morton
+- (**server**) pin declared fields on a client completion, distrust silence - (1524ed8) - Josey Morton
+- (**server**) let a client run a tool and record it - (cdd5a7f) - Josey Morton
+- (**tools**) let a tool declare the shape of its completion - (b2aa6de) - Josey Morton
+- start a graph run from the SDKs and the canvas - (7048fcb) - Josey Morton
+#### Bug Fixes
+- (**cli**) hold the MCP handshake to warn for every command - (9dd6239) - Josey Morton
+- (**cli**) demo-model help text, quiet hash output, deduplicated errors - (ec5ba0f) - Josey Morton
+- (**examples**) keep send_notice working on an empty notices file - (ff7a599) - Josey Morton
+- (**graph**) explain a malformed branch condition in the document's own terms - (e8cd485) - Josey Morton
+- (**sdk**) let a branch name the agent that decides a case - (72e2ecf) - Josey Morton
+#### Documentation
+- (**examples**) a refund desk where the money moves in the client - (6fe95d9) - Josey Morton
+- (**examples**) tighten the graph-service readme - (00d95cb) - Josey Morton
+- (**sdks**) document the graph flow in both SDK READMEs - (44b9bc3) - Josey Morton
+- put graphs and client tools on the front page, prove every command - (3c07b59) - Josey Morton
+- record the payroll desk twice, prove it is one document - (f84a6ef) - Josey Morton
+- say how to back up the store, warn about the tape before the walkthrough - (40a51ea) - Josey Morton
+- answer what five testers could not - (574a97d) - Josey Morton
+- fix the dash punctuation in the bridge - (eb04cee) - Josey Morton
+- fix the dash punctuation in the Rust crates and the SDKs - (aca930b) - Josey Morton
+- point editors at the graph schema by file pattern - (bb19ba7) - Josey Morton
+- stop the graph docs saying nothing runs a graph - (551fab1) - Josey Morton
+- record the graph editor building a document from nothing - (b955bde) - Josey Morton
+- correct the release doc and drop the last em-dashes - (dd72099) - Josey Morton
+- drop the tells from the readme opening - (54047d3) - Josey Morton
+#### Tests
+- (**engine**) kill a graph run at every boundary and resume it - (d2b2c11) - Josey Morton
+#### Build system
+- track the editor schema mapping for graph documents - (8e861ae) - Josey Morton
+#### Continuous Integration
+- pin wasm-pack instead of taking whatever latest resolves to - (2ba60f2) - Josey Morton
+- prove the CLI's pure half still builds for wasm32 - (6a2970d) - Josey Morton
+- generate the release facts and fail when they drift - (79aafb5) - Josey Morton
+#### Miscellaneous Chores
+- ignore compiled python bytecode - (03f6cbf) - Josey Morton
+
+- - -
+
 ## v0.7.0 - 2026-07-29
 #### Features
 - (**cli**) wrap the reports to a width the caller chooses - (ecd96ad) - Josey Morton
