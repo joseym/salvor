@@ -1,0 +1,38 @@
+{
+  "name": "@salvor-run/cli",
+  "version": "0.8.0",
+  "description": "Salvor CLI: run, resume, list, history, and replay for durable agent runs",
+  "homepage": "https://github.com/joseym/salvor",
+  "repository": "https://github.com/joseym/salvor",
+  "license": "MIT OR Apache-2.0",
+  "keywords": [
+    "asynchronous",
+    "development-tools",
+    "web-programming",
+    "durable-execution",
+    "event-sourcing",
+    "agents",
+    "workflow",
+    "replay"
+  ],
+  "bin": {
+    "salvor": "bin/salvor"
+  },
+  "files": [
+    "bin",
+    "lib",
+    "postinstall.js",
+    "LICENSE-APACHE",
+    "LICENSE-MIT"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "preferUnplugged": true,
+  "dependencies": {
+    "detect-libc": "^2.1.2"
+  },
+  "scripts": {
+    "postinstall": "node ./postinstall.js"
+  }
+}

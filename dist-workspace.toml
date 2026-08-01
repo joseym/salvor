@@ -7,8 +7,17 @@ members = ["cargo:."]
 cargo-dist-version = "0.32.0"
 # CI backends to support
 ci = "github"
-# The installers to generate for each app
-installers = ["shell", "powershell", "npm", "homebrew"]
+# The installers to generate for each app. npm is deliberately absent: dist's
+# own npm installer template has no override point, and it always ships a
+# Node.js relay in front of the binary (spawnSync into the download). That
+# relay cannot be killed: SIGTERM/SIGKILL/Ctrl-C on the launched PID kills the
+# relay and orphans the real `salvor` process, which runs the durable job to
+# completion anyway. That defeats "kill it, resume it" for exactly the door
+# most users install through. npm/salvor-cli/ is a repo-owned replacement,
+# published by .github/workflows/npm-cli.yml, whose postinstall replaces its
+# own bin entry file's bytes with the downloaded binary so there is no relay
+# left to kill. See npm/salvor-cli/README-internal.md for the full mechanism.
+installers = ["shell", "powershell", "homebrew"]
 # Target platforms to build apps for (Rust target-triple syntax)
 # The musl pair is statically linked (no glibc dependency), so these are the
 # builds that actually run on Alpine and in slim/scratch containers, where the
@@ -34,17 +43,15 @@ pr-run-mode = "skip"
 # .github/workflows/ is treated by GitHub as a workflow, and one with no `on:` trigger fails
 # instantly on every push.
 github-build-setup = "../build-setup.yml"
-# The npm installer package goes to the registry on every tag, using the NPM_TOKEN secret. The
-# Homebrew formula is still only BUILT and attached to the release: joseym/homebrew-tap exists, but
-# pushing to it needs a HOMEBREW_TAP_TOKEN that does not, and a job that always fails turns every
-# release red. Add "homebrew" back alongside the secret when that channel is real.
-publish-jobs = ["npm"]
+# dist has nothing left to publish itself: npm is repo-owned (see the
+# `installers` comment above) and published by
+# .github/workflows/npm-cli.yml, not by dist. The Homebrew formula is still
+# only BUILT and attached to the release: joseym/homebrew-tap exists, but
+# pushing to it needs a HOMEBREW_TAP_TOKEN that does not, and a job that
+# always fails turns every release red. Add "homebrew" back here alongside
+# the secret when that channel is real.
+publish-jobs = []
 # The Homebrew tap the formula is pushed to, giving `brew install joseym/tap/salvor`.
 tap = "joseym/homebrew-tap"
 # The Homebrew formula name.
 formula = "salvor"
-# The npm package name for the binary-installer package. Scoped to match
-# @salvor-run/client rather than published under a personal account: the
-# unscoped `salvor` name is real and live (v0.5.1, published while this was
-# still provisional) but is not the intended long-term package.
-npm-package = "@salvor-run/cli"

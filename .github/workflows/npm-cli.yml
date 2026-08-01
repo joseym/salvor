@@ -1,0 +1,76 @@
+# Publishes the npm CLI installer (@salvor-run/cli) on a version tag.
+#
+# Separate from release.yml on purpose, the same way npm-client.yml is: release.yml is
+# regenerated wholesale by `dist generate` from dist-workspace.toml, so any job hand-added inside
+# it disappears the next time someone runs that command. npm/salvor-cli/ is repo-owned precisely
+# because dist's own npm installer template has no override point and always ships a Node.js relay
+# in front of the binary, one that cannot be killed (SIGTERM/SIGKILL/Ctrl-C on the launched PID
+# kills the relay and orphans the real `salvor` process). See npm/salvor-cli/README-internal.md
+# for the mechanism and dist-workspace.toml's `installers` comment for why npm is absent from
+# dist's own installer list. Both fire on the same tag, so one push still ships every channel.
+name: npm cli
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+
+permissions: {}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      # The tag is the release's identity: stamp the package to match it rather than trusting a
+      # hand-maintained version field, so this can never publish a version no tag points at.
+      - name: Stamp the version from the tag
+        working-directory: npm/salvor-cli
+        run: npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version --allow-same-version
+
+      # Refuse to republish a version that already exists rather than failing the whole release on
+      # npm's E409: re-running a tag should be safe.
+      - name: Skip if this version is already on the registry
+        id: published
+        working-directory: npm/salvor-cli
+        run: |
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "$name@$version is already published, nothing to do"
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The GitHub Release for this tag has to already carry the platform archives this package's
+      # postinstall downloads (release.yml's `host` job creates it), or a fresh install has nothing
+      # to fetch. release.yml and this workflow both trigger on the same tag push independently;
+      # this waits for the release to actually exist rather than assuming a race-free ordering.
+      - name: Wait for the GitHub Release to exist
+        if: steps.published.outputs.already == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for _ in $(seq 1 60); do
+            if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "timed out waiting for release $GITHUB_REF_NAME" >&2
+          exit 1
+
+      - name: Publish
+        if: steps.published.outputs.already == 'false'
+        working-directory: npm/salvor-cli
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
