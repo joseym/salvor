@@ -42,7 +42,7 @@ export class RunDetailService {
 
   /**
    * Continue a parked or crashed run. A `NeedsReconciliationError` (from
-   * `@salvor-run/client`) propagates uncaught — the caller is expected to route it to the
+   * `@salvor-run/client`) propagates uncaught: the caller is expected to route it to the
    * reconciliation path (`resolve`), per the SDK's own documented contract; this method
    * does not swallow it.
    */

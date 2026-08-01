@@ -13,23 +13,42 @@ import {
   openClientRun,
 } from "./client_runs.js";
 import { SalvorApiError, SalvorStreamError, errorFrom } from "./errors.js";
+import type { Graph } from "./graph.js";
 import { readSseFrames } from "./sse.js";
 import {
   type AbandonResult,
+  type ClientToolDecl,
   type EndFrame,
+  type ForkPreview,
+  type ForkResult,
+  type ForksIndex,
+  type GraphProjection,
+  type GraphSubmitted,
+  type GraphSummary,
+  type GraphValidation,
   type Labels,
   type ReplayState,
   type ResumeResult,
   type RunState,
   type RunSummary,
   type SalvorEvent,
+  type StoredGraph,
   parseAbandonResult,
+  parseClientToolDecl,
   parseEndFrame,
   parseEvent,
+  parseForkPreview,
+  parseForkResult,
+  parseForksIndex,
+  parseGraphProjection,
+  parseGraphSubmitted,
+  parseGraphSummary,
+  parseGraphValidation,
   parseReplayState,
   parseResumeResult,
   parseRunState,
   parseRunSummary,
+  parseStoredGraph,
 } from "./types.js";
 
 /** Options for constructing a {@link SalvorClient}. */
@@ -218,6 +237,207 @@ export class SalvorClient {
         body,
         contentType: "application/json",
       }),
+    );
+  }
+
+  // -- graphs ---------------------------------------------------------------
+
+  /**
+   * Submit and strictly validate a graph document; return its content hash and
+   * whether this call is what stored it. A graph document IS its hash, so
+   * re-submitting an identical document is idempotent: the same hash comes back
+   * with `created: false`. A validation failure throws a `SalvorApiError` with
+   * code `invalid_graph`, whose `details.errors` is the complete node- and
+   * edge-precise list (nothing short-circuits); {@link validateGraph} asks the
+   * same question without storing and without throwing.
+   *
+   * The server keeps submitted documents IN MEMORY only, so a restart drops
+   * them and a hash from a previous process no longer resolves. That is safe
+   * rather than lossy: submit the identical document again and it mints the
+   * identical hash, so a caller can simply re-submit before starting a run.
+   */
+  async submitGraph(document: Graph): Promise<GraphSubmitted> {
+    return parseGraphSubmitted(
+      await this.request("POST", "/v1/graphs", {
+        body: JSON.stringify(document),
+        contentType: "application/json",
+      }),
+    );
+  }
+
+  /** List the stored graphs, each with its hash and shape summary. */
+  async listGraphs(): Promise<GraphSummary[]> {
+    const obj = await this.request("GET", "/v1/graphs");
+    return ((obj.graphs as Record<string, unknown>[]) ?? []).map(
+      parseGraphSummary,
+    );
+  }
+
+  /**
+   * Read one stored document back by hash. Throws a `SalvorApiError` with code
+   * `unknown_graph` when nothing is stored under it, which is also what a hash
+   * from before a server restart gets: see {@link submitGraph} on the in-memory
+   * store.
+   */
+  async getGraph(graphHash: string): Promise<StoredGraph> {
+    return parseStoredGraph(
+      await this.request("GET", `/v1/graphs/${graphHash}`),
+    );
+  }
+
+  /**
+   * Validate a document without storing it: {@link submitGraph}'s dry run, the
+   * graph counterpart of {@link replay}. It answers the question rather than
+   * refusing the request, so an invalid document resolves with `valid: false`
+   * and the full error list instead of throwing. Nothing is ever stored.
+   */
+  async validateGraph(document: Graph): Promise<GraphValidation> {
+    return parseGraphValidation(
+      await this.request("POST", "/v1/graphs/validate", {
+        body: JSON.stringify(document),
+        contentType: "application/json",
+      }),
+    );
+  }
+
+  /**
+   * Start a fresh run of a STORED graph; return its run id. Fire-and-return,
+   * exactly as {@link startRun} is for an agent run: the call resolves as soon
+   * as the run is accepted, and the walk then drives in the background. A graph
+   * run is an ordinary run with a richer log, so {@link getRun},
+   * {@link streamEvents}, {@link replay} and {@link resume} all work on it
+   * unchanged; {@link getRunGraph} adds the per-node view only a graph run has.
+   *
+   * Everything the document references is resolved BEFORE the run is spawned,
+   * so a reference that cannot resolve is a refusal rather than a run that
+   * fails halfway:
+   *
+   * - `unknown_graph` when the hash names no stored graph (including a hash
+   *   from before a server restart, since the graph store is in memory).
+   * - `unknown_agent`, naming the node, when an `agent` node references a hash
+   *   no agent is registered under.
+   * - `unknown_tool`, naming the node, when a `tool` node names a tool the
+   *   server's registry does not hold. A stock `salvor serve` wires that
+   *   registry EMPTY, so on a default server EVERY `tool` node refuses this
+   *   way until a host registers the tool it names (`salvor serve
+   *   --demo-tools` is the built-in way to get a non-empty registry).
+   *
+   * `options.labels` are optional correlation tags under the same bounds an
+   * agent run's carry; omitted entirely, the run records none.
+   */
+  async startGraphRun(
+    graphHash: string,
+    input: unknown = null,
+    options: { labels?: Labels } = {},
+  ): Promise<string> {
+    const body: Record<string, unknown> = { graph_hash: graphHash, input };
+    if (options.labels !== undefined) body.labels = options.labels;
+    const obj = await this.request("POST", "/v1/graph-runs", {
+      body: JSON.stringify(body),
+      contentType: "application/json",
+    });
+    return obj.run as string;
+  }
+
+  /**
+   * A graph run's per-node projection: which nodes the walk has reached, which
+   * case each `branch` fired, and the node it is inside right now. A node the
+   * walk has not reached is absent rather than reported as some pending state.
+   * Refuses with `not_a_graph_run` for an ordinary agent run, which has no walk
+   * to project.
+   */
+  async getRunGraph(runId: string): Promise<GraphProjection> {
+    return parseGraphProjection(
+      await this.request("GET", `/v1/runs/${runId}/graph`),
+    );
+  }
+
+  /**
+   * Fork a graph run from a node boundary into a NEW run. The child opens with
+   * the origin's log prefix rewritten under its own id and then continues from
+   * `fromNode`; the origin is never touched, and the child reuses the origin's
+   * graph unchanged (to change the graph, submit a new document and start a
+   * fresh run).
+   *
+   * A fork that would re-execute a recorded write the operator has not
+   * acknowledged is REFUSED, not silently replayed: a `SalvorApiError` with
+   * code `write_replay_hazard`, whose `details.writes` lists exactly the writes
+   * still needing acknowledgement. Pass their `seq`s as
+   * `options.acknowledgeWrites` to accept that they may re-fire, and they are
+   * recorded permanently on the child. {@link previewFork} asks the same
+   * question first, without creating anything.
+   */
+  async forkRun(
+    runId: string,
+    fromNode: string,
+    options: { acknowledgeWrites?: readonly number[] } = {},
+  ): Promise<ForkResult> {
+    const body: Record<string, unknown> = { from_node: fromNode };
+    if (options.acknowledgeWrites !== undefined) {
+      body.acknowledge_writes = options.acknowledgeWrites;
+    }
+    return parseForkResult(
+      await this.request("POST", `/v1/runs/${runId}/fork`, {
+        body: JSON.stringify(body),
+        contentType: "application/json",
+      }),
+    );
+  }
+
+  /**
+   * Preview a fork without creating one: which writes the re-walked segment
+   * holds, which of them are still unacknowledged, and whether the fork would
+   * proceed. The structural refusals ({@link forkRun}'s `invalid_fork_node`,
+   * `origin_needs_reconciliation`, `not_a_graph_run`) still throw here, so a
+   * fork that could never proceed is reported rather than faked.
+   */
+  async previewFork(
+    runId: string,
+    fromNode: string,
+    options: { acknowledgeWrites?: readonly number[] } = {},
+  ): Promise<ForkPreview> {
+    const body: Record<string, unknown> = {
+      from_node: fromNode,
+      dry_run: true,
+    };
+    if (options.acknowledgeWrites !== undefined) {
+      body.acknowledge_writes = options.acknowledgeWrites;
+    }
+    return parseForkPreview(
+      await this.request("POST", `/v1/runs/${runId}/fork`, {
+        body: JSON.stringify(body),
+        contentType: "application/json",
+      }),
+    );
+  }
+
+  /**
+   * The forks of a run, as the server's own DERIVED index: an origin is
+   * immutable and never points forward at its children, so this is a scan of
+   * every run's recorded origin, labelled `derived` to say so.
+   */
+  async listForks(runId: string): Promise<ForksIndex> {
+    return parseForksIndex(
+      await this.request("GET", `/v1/runs/${runId}/forks`),
+    );
+  }
+
+  // -- client-performed tools -------------------------------------------------
+
+  /**
+   * List the client-performed tool declarations this server holds: tools an
+   * operator declared with `salvor serve --client-tool <FILE>`, which the
+   * client runs itself (see {@link ClientRunDriver.clientToolIntent}).
+   *
+   * This is how a client-driven loop gets the function definitions to hand the
+   * model: a declaration's `inputSchema` IS the model tool's parameter schema,
+   * the same schema the server checks a call's input against, published here
+   * so a client never keeps a second copy that can quietly drift from it.
+   */
+  async listClientTools(): Promise<ClientToolDecl[]> {
+    const obj = await this.request("GET", "/v1/client-tools");
+    return ((obj.client_tools as Record<string, unknown>[]) ?? []).map(
+      parseClientToolDecl,
     );
   }
 

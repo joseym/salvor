@@ -4,13 +4,13 @@
    The single source of truth for every color, typeface, radius, elevation,
    spacing, and motion value the app paints. No component stylesheet in
    this app should contain a literal hex color, a literal `white`/`black`
-   keyword, or a raw font stack — everything routes through the tokens
+   keyword, or a raw font stack: everything routes through the tokens
    below.
 
    ARCHITECTURE (do not break this):
      - Six --anchor-* values, defined ONCE, in this file, in the block
        below. Nothing else defines an --anchor-*. If a color needs to
-       change, change an anchor or add a new color-mix derived from one —
+       change, change an anchor or add a new color-mix derived from one;
        never hand-roll a new hex value elsewhere.
      - Every other color is `color-mix(in oklab, <anchor-or-derived>, ...)`.
        The two exceptions (--surface brightened past paper, --dk-bg
@@ -20,7 +20,7 @@
      - The dark palette (--dk-*) is computed ONCE, here, from the same six
        anchors. The two theme-remap blocks below (explicit attribute +
        prefers-color-scheme media query) only REBIND --bg/--fg/etc to the
-       --dk-* values — they never introduce a new literal color, so the
+       --dk-* values: they never introduce a new literal color, so the
        two remap copies cannot drift from each other.
      - This file used to have a dead first-pass anchor set and a second
        conflicting --dk-* palette; both were removed. Do not recreate a
@@ -57,11 +57,11 @@
 
   /* ─── Motion ───
      Consumed directly (`transition: background var(--motion-fast) var(--ease-standard)`),
-     never via `transition: all` — the build gate fails on that literal. */
+     never via `transition: all`: the build gate fails on that literal. */
   --motion-fast: 150ms;
   --motion-base: 200ms;
   /* A longer sibling of --motion-base, for a LARGE element's own motion (e.g. a whole card folding
-     away) rather than a small control's reveal — more travel needs proportionally more time, not
+     away) rather than a small control's reveal: more travel needs proportionally more time, not
      the same duration stretched thin. Derived from --motion-base (1.6x) rather than a hand-picked
      literal, so it moves with --motion-base if that ever changes. */
   --motion-large: 320ms;
@@ -78,7 +78,7 @@
 }
 
 /* ============================================================
-   THE ANCHORS — the only literal colors in this app.
+   THE ANCHORS: the only literal colors in this app.
    ============================================================ */
 :root {
   --anchor-paper:   #f7f4ee;   /* warm paper, not a screen white */
@@ -86,12 +86,12 @@
   --anchor-blue:    #24406b;   /* writing-ink blue, not framework blue */
   --anchor-success: #1f5130;
   --anchor-warn:    #b47607;   /* amber stays the human-attention colour */
-  --anchor-danger:  #9e2b24;   /* red stays the failure colour — and destructive actions (owner call, 2026-07-20) */
+  --anchor-danger:  #9e2b24;   /* red stays the failure colour, and destructive actions (owner call, 2026-07-20) */
 
   /* --- Light: paper and ink. --- */
   --bg:            var(--anchor-paper);
   /* ANCHOR-EXCEPTION: brightening past the paper anchor itself needs a
-     literal white reference point — there is no way to derive "lighter
+     literal white reference point: there is no way to derive "lighter
      than paper" from paper alone. Allowlisted by name in the gate script. */
   --surface:       color-mix(in oklab, var(--anchor-paper), white 55%);
   --surface-warm:  var(--surface);
@@ -101,11 +101,11 @@
   --meta:          var(--muted);
   --faint:         color-mix(in oklab, var(--muted), var(--bg) 12%);
 
-  /* hairlines you can actually see — in a ledger the rule IS the structure */
+  /* hairlines you can actually see: in a ledger the rule IS the structure */
   --border:        color-mix(in oklab, var(--anchor-ink), var(--anchor-paper) 58%);
   --border-soft:   color-mix(in oklab, var(--anchor-ink), var(--anchor-paper) 86%);
   /* 3.2:1 edge for affordances whose ONLY boundary is a border (inputs,
-     ghost buttons) — WCAG 1.4.11, stronger than the decorative --border. */
+     ghost buttons), WCAG 1.4.11, stronger than the decorative --border. */
   --edge-strong:   color-mix(in oklab, var(--border), var(--fg) 42%);
   --wash:          color-mix(in oklab, var(--border-soft), var(--bg) 45%);
   --rule:          var(--border-soft);
@@ -120,7 +120,7 @@
   --warn:    var(--anchor-warn);
   --danger:  var(--anchor-danger);
   /* the destructive-action fill (owner call, 2026-07-20): same on-color / hover / active shape as
-     --accent's, mixed from --anchor-danger instead — a filled danger button (abandon's confirm step)
+     --accent's, mixed from --anchor-danger instead: a filled danger button (abandon's confirm step)
      needs the same three states a filled accent button does. */
   --danger-on:      var(--anchor-paper);
   --danger-hover:   color-mix(in oklab, var(--anchor-danger), var(--anchor-ink) 28%);
@@ -159,7 +159,7 @@
 
   /* --- Dark: the same identity at night, computed once. ---
      ANCHOR-EXCEPTION: darkening past the ink anchor itself needs a literal
-     black reference point, for the same reason --surface above needs white —
+     black reference point, for the same reason --surface above needs white:
      there is no way to derive "darker than ink" from ink alone. */
   --dk-bg:          color-mix(in oklab, var(--anchor-ink), black 30%);
   --dk-surface:     color-mix(in oklab, var(--anchor-ink), var(--anchor-paper) 6%);
@@ -195,7 +195,7 @@
 }
 
 /* ============================================================
-   THEME REMAP — two selectors, one set of --dk-* values.
+   THEME REMAP: two selectors, one set of --dk-* values.
 
    `:root:not([data-theme="light"])` is unsafe unscoped (it would match
    every page that has not explicitly opted into light, including a
@@ -274,11 +274,11 @@
 }
 
 /* ============================================================
-   REDUCED MOTION — one switch. Every transition and animation in the app is
+   REDUCED MOTION: one switch. Every transition and animation in the app is
    timed off --motion-fast / --motion-base, so collapsing those two tokens is
    the single source that stills the whole UI; anything reading the tokens from
    JS (getComputedStyle) sees the same near-zero value. The universal rule below
-   is belt-and-braces for any duration that did not read a token — the token
+   is belt-and-braces for any duration that did not read a token: the token
    gate keeps durations token-driven, so it should catch nothing.
    ============================================================ */
 @media (prefers-reduced-motion: reduce) {

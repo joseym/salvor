@@ -2,7 +2,7 @@
 //!
 //! The headline is the design claim proven end to end: a graph run is an
 //! ordinary run with a richer log, so `GET /v1/runs/{id}`, `/v1/runs` (the
-//! enriched list), and — the strongest evidence — `POST /v1/runs/{id}/resume`
+//! enriched list), and (the strongest evidence) `POST /v1/runs/{id}/resume`
 //! all work on a graph run through their EXISTING code. The flagship test
 //! submits an `agent -> gate -> tool` graph, starts a graph run, watches it
 //! park at the gate, resumes it through the very same resume endpoint an agent
@@ -202,7 +202,7 @@ async fn graph_run_parks_resumes_through_the_existing_endpoint_and_completes() {
 
     // The graph run appears in the enriched run list, with the existing field
     // semantics intact: status/usage/step_count present, agent_def_hash absent
-    // (a graph run has no single RunStarted agent hash — the honest absence).
+    // (a graph run has no single RunStarted agent hash: the honest absence).
     let (_, list) = get_json(&client, &format!("{}/v1/runs", server.base), None).await;
     let entry = list["runs"]
         .as_array()

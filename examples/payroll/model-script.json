@@ -1,0 +1,34 @@
+{
+  "notify-summary": [
+    {
+      "id": "msg_summary_1",
+      "model": "salvor-demo-model",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "tu_summary_send",
+          "name": "send_summary",
+          "input": {
+            "message": "Payroll run complete: every employee on the roster was paid exactly once."
+          }
+        }
+      ],
+      "stop_reason": "tool_use",
+      "usage": { "input_tokens": 260, "output_tokens": 40 }
+    },
+    {
+      "id": "msg_summary_2",
+      "model": "salvor-demo-model",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Summary notice sent: the payroll run is complete and every employee was paid exactly once."
+        }
+      ],
+      "stop_reason": "end_turn",
+      "usage": { "input_tokens": 320, "output_tokens": 24 }
+    }
+  ]
+}

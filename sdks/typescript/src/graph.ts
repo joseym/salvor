@@ -22,7 +22,7 @@
  * Every node payload may carry an optional `name`: a short, purely
  * presentational label ("Approve the draft"). Bounds mirror the agent
  * definition's own `name` precedent: at most 64 characters, and, when set,
- * not empty or all whitespace — `salvor graph validate` (and `POST
+ * not empty or all whitespace: `salvor graph validate` (and `POST
  * /v1/graphs`) enforce both, node-precise. Unlike an agent's `name` (excluded
  * from its definition hash so a rename never mints a new agent identity), a
  * node's `name` is an ordinary field on the payload and hashes like any
@@ -38,6 +38,21 @@ export type JsonValue =
   | string
   | JsonValue[]
   | { [key: string]: JsonValue };
+
+/** Whether `value` is a plain JSON object: not `null`, not an array, not a primitive. */
+function isPlainObject(value: JsonValue): value is { [key: string]: JsonValue } {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** A short, human-readable description of a JSON value's shape, for an error message. */
+function describeJsonValue(value: JsonValue): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return `an array (${JSON.stringify(value)})`;
+  const type = typeof value;
+  if (type === "string") return `a string (${JSON.stringify(value)})`;
+  if (type === "number" || type === "boolean") return `a ${type} (${JSON.stringify(value)})`;
+  return type;
+}
 
 /** The `agent` node payload: a full agent loop referenced by content hash. */
 export interface AgentPayload {
@@ -86,6 +101,13 @@ export interface BranchPayload {
   /** Optional short display label. See the module docs' "The optional node display name" note. */
   name?: string;
   on?: string;
+  /**
+   * Content hash of the agent that decides a `model_decision` case, in
+   * `sha256:<64 lowercase hex>` form. Required whenever a case on this branch
+   * carries `{ kind: "model_decision" }`; `salvor graph validate` reports a
+   * model-decision case with no agent here as a node-precise error.
+   */
+  agent_hash?: string;
   cases: BranchCase[];
 }
 
@@ -186,6 +208,7 @@ export interface GateOptions {
 export interface BranchOptions {
   name?: string;
   on?: string;
+  agentHash?: string;
 }
 
 /** The optional fields a map node may declare. */
@@ -235,8 +258,49 @@ export class GraphBuilder {
     return this;
   }
 
-  /** Adds a `gate` node. The approval schema is required. */
+  /**
+   * Adds a `gate` node. The approval schema is required and must be a plain
+   * JSON object (a JSON Schema describing the approval payload); the server
+   * refuses anything else with `approval_schema_not_object`, but this throws
+   * at authoring time instead, before a document with a quietly-dropped
+   * prompt is ever built. `{}` (an intentionally permissive, empty schema) is
+   * accepted.
+   *
+   * Also catches the likely argument swap: calling `gate(id, options,
+   * schema)` instead of `gate(id, schema, options)`. Because {@link
+   * GateOptions} has only optional fields, TypeScript's structural typing
+   * lets any object through in the schema position, so a swap type-checks
+   * silently; this method additionally rejects a schema-position object whose
+   * only keys are `name`/`prompt` (the `GateOptions` shape) and that carries
+   * none of the ordinary JSON Schema keys (`type`, `properties`, `required`),
+   * since that combination is far more likely to be a misplaced options
+   * object than a real schema.
+   */
   gate(id: string, approvalSchema: JsonValue, options: GateOptions = {}): this {
+    if (!isPlainObject(approvalSchema)) {
+      throw new Error(
+        `gate("${id}", ...) approvalSchema must be a plain JSON object (a JSON Schema ` +
+          `describing the approval payload, e.g. { type: "object", properties: {...} }), but ` +
+          `received ${describeJsonValue(approvalSchema)}. An intentionally empty schema is ` +
+          `written as {}, not omitted or replaced with null/an array/a primitive.`,
+      );
+    }
+    const keys = Object.keys(approvalSchema);
+    const looksLikeSwappedOptions =
+      keys.length > 0 &&
+      keys.every((key) => key === "name" || key === "prompt") &&
+      !("type" in approvalSchema) &&
+      !("properties" in approvalSchema) &&
+      !("required" in approvalSchema);
+    if (looksLikeSwappedOptions) {
+      throw new Error(
+        `gate("${id}", ...) received { ${keys.join(", ")} } as the approval schema, but those ` +
+          `are GateOptions keys ("name"/"prompt"), not a JSON Schema. Either the arguments were ` +
+          `swapped (call gate(id, schema, options), not gate(id, options, schema)), or this is ` +
+          `genuinely intended as an approval schema, in which case give it a "type" or ` +
+          `"properties" key so it reads unambiguously as one.`,
+      );
+    }
     const payload: GatePayload = { id, approval_schema: approvalSchema };
     if (options.name !== undefined) payload.name = options.name;
     if (options.prompt !== undefined) payload.prompt = options.prompt;
@@ -249,6 +313,7 @@ export class GraphBuilder {
     const payload: BranchPayload = { id, cases };
     if (options.name !== undefined) payload.name = options.name;
     if (options.on !== undefined) payload.on = options.on;
+    if (options.agentHash !== undefined) payload.agent_hash = options.agentHash;
     this.nodes.push({ kind: "branch", payload });
     return this;
   }

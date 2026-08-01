@@ -4,7 +4,7 @@
       <h3 class="section">Burn-down against declared budgets</h3>
 
       <!-- THE UNPRICED LEDE: when EVERY run is unpriced, the empty dollar column is one page-wide
-           fact, stated once and prominently, with the exact token burn lifted to the lede — not a
+           fact, stated once and prominently, with the exact token burn lifted to the lede, not a
            footnote repeated on every row. When any run is priced this does not render (a real
            $0.00 is a figure, not an absence). -->
       @if (allUnpriced()) {
@@ -92,14 +92,14 @@
           reaches the log solely as a <code>BudgetExceeded</code> event carrying the limit and the
           observed value. Every other run's ceiling is simply not on record here, so it reads
           unknown. Tokens are exact from the fold; dollars are an estimate from a maintained price
-          table keyed by the model id on each completion — a run whose model is not in the table
+          table keyed by the model id on each completion; a run whose model is not in the table
           degrades to <b>tokens only</b> rather than quoting a number that silently omits spend.
         </p>
         <!-- Demoted to SECONDARY: a real but second-order caveat that must not crowd the
              tokens-vs-dollars point the lede now leads with. It stays in the apparatus (an apparatus
-             groups several points), read quieter — a leading label and muted body. -->
+             groups several points), read quieter: a leading label and muted body. -->
         <p class="fork-note">
-          <b class="fork-note-k">Aside — forks would double-count.</b> A fork's log is seeded with a
+          <b class="fork-note-k">Aside: forks would double-count.</b> A fork's log is seeded with a
           copy of its origin's events, and those events carry the origin's real
           <code>ModelCallCompleted</code> usage, so folding the fork's whole log counts that spend a
           second time. The fold itself is right; it sums events genuinely in the log. What would be
@@ -182,7 +182,7 @@
         </div>
         <p class="caption">
           Every completed call's cost is attributed to the day it was <code>recorded_at</code>. A
-          window spanning only a day or two renders only that many rows — a chart drawing more bars
+          window spanning only a day or two renders only that many rows: a chart drawing more bars
           than there are days would be drawing data that does not exist.
         </p>
       </div>
@@ -216,14 +216,14 @@
            one apparatus. -->
       <div class="notes">
         <p>
-          <b>One bar per hour, counting events by their own <code>recorded_at</code></b> — not by the
+          <b>One bar per hour, counting events by their own <code>recorded_at</code></b>, not by the
           run's last touch. A run that worked for three hours spans three bars, which is what a chart
           shaped like time has to mean. This lives on Spend because it needs every event's timestamp,
-          which means folding every log — the same cost Spend already pays for a dollar figure, and
+          which means folding every log: the same cost Spend already pays for a dollar figure, and
           the cost the run list refuses to pay.
         </p>
         <p>
-          <b>An hour filters the run list to the runs it can name — which is not the same set the bar
+          <b>An hour filters the run list to the runs it can name, which is not the same set the bar
           counted.</b>
           The bar knows every event's own hour because Spend folded the logs; the list knows only
           <code>last</code>, so <code>hour:</code> means <i>last active in this hour</i>. A run that
@@ -253,7 +253,7 @@
           <div><dt>status</dt><dd><span class="status" [attr.data-group]="group(r.status)">{{ label(r.status) }}</span></dd></div>
           <div>
             <dt>agent</dt>
-            <dd>{{ selectedFolded()?.agent ?? '—' }}</dd>
+            <dd>{{ selectedFolded()?.agent ?? '-' }}</dd>
             <p class="gloss">The log records a hash, never a human name for an agent.</p>
           </div>
           <div>
@@ -262,7 +262,7 @@
               @if (selectedFolded(); as f) {
                 {{ int(f.usage.inputTokens) }} in / {{ int(f.usage.outputTokens) }} out
               } @else {
-                —
+                -
               }
             </dd>
           </div>

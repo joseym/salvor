@@ -26,6 +26,7 @@ export type {
   ModelStepResult,
   ModelStepStream,
   ModelStepDelta,
+  ClientToolIntentResult,
 } from "./client_runs.js";
 export {
   SalvorError,
@@ -47,6 +48,21 @@ export {
   type PendingCall,
   type Usage,
   type Labels,
+  type GraphShape,
+  type GraphSubmitted,
+  type GraphSummary,
+  type StoredGraph,
+  type GraphValidation,
+  type GraphValidationError,
+  type GraphProjection,
+  type GraphNodeProgress,
+  type ForkOrigin,
+  type ForkResult,
+  type ForkPreview,
+  type ForkEntry,
+  type ForksIndex,
+  type RecordedWrite,
+  type ClientToolDecl,
 } from "./types.js";
 export {
   GraphBuilder,

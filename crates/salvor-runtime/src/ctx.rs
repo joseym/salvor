@@ -423,8 +423,8 @@ impl RunCtx {
     ///
     /// Recorded between the map node's [`node_entered`](Self::node_entered) and its
     /// per-iteration markers. The `items` must be a deterministic function of
-    /// recorded values — the map's `over` reference resolved against the recorded
-    /// routed value — so replay reproduces the identical fan-out, which is what
+    /// recorded values (the map's `over` reference resolved against the recorded
+    /// routed value), so replay reproduces the identical fan-out, which is what
     /// makes the derived per-iteration child ids reproducible.
     ///
     /// # Errors
@@ -443,8 +443,8 @@ impl RunCtx {
     /// Records (or replays) that one iteration of a map fan-out started, as a child
     /// run with the derived id `child_run`. The `child_run` is derived from the
     /// parent run id, the node id, and the index. On replay the RECORDED id wins
-    /// and the match is on `node` + `index` alone, so a fork — which replays the
-    /// origin's prefix under a new run id and thus re-derives a different id —
+    /// and the match is on `node` + `index` alone, so a fork (which replays the
+    /// origin's prefix under a new run id and thus re-derives a different id)
     /// still replays its inherited map markers cleanly.
     ///
     /// # Errors

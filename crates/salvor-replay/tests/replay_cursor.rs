@@ -473,6 +473,7 @@ fn dangling_write_intent_needs_reconciliation() {
                 input: ticket.clone(),
                 effect: Effect::Write,
                 idempotency_key: None,
+                performed_by: None,
             },
         ),
     ];
@@ -522,6 +523,7 @@ fn dangling_idempotent_intent_retries_under_recorded_key() {
                 input: doc.clone(),
                 effect: Effect::Idempotent,
                 idempotency_key: Some("key-9".into()),
+                performed_by: None,
             },
         ),
     ];

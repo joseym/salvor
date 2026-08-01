@@ -14,7 +14,7 @@ export interface SalvorApiConfig {
  * {@link provideSalvorApi} in `app.config.ts`, once there is a shell to read a runtime base
  * URL from. Absent that, {@link SALVOR_CLIENT}'s
  * factory falls back to the SDK README's own local-dev default
- * (`http://127.0.0.1:8080`, the address the SDK's own example uses) —
+ * (`http://127.0.0.1:8080`, the address the SDK's own example uses),
  * a placeholder for this service layer, not a production default.
  */
 export const SALVOR_API_CONFIG = new InjectionToken<SalvorApiConfig>('SALVOR_API_CONFIG');
@@ -29,7 +29,7 @@ export function provideSalvorApi(config: SalvorApiConfig): Provider {
 /**
  * The one {@link SalvorClient} instance the API layer shares. Every service in this
  * directory injects this token rather than constructing its own client, so a test can
- * substitute a fake by overriding the provider — none of the SDK's zero-dependency
+ * substitute a fake by overriding the provider: none of the SDK's zero-dependency
  * `fetch` usage needs mocking at the module level.
  */
 export const SALVOR_CLIENT = new InjectionToken<SalvorClient>('SALVOR_CLIENT', {

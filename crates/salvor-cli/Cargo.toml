@@ -145,6 +145,15 @@ clap.workspace = true
 clap_complete.workspace = true
 anstyle.workspace = true
 anstream.workspace = true
+# The pane width `salvor graph edit` wraps the editor's prose to; see the
+# workspace Cargo.toml for why this crate rather than a terminal library.
+terminal_size.workspace = true
+# The line editor an interactive `salvor graph edit` reads through, Tab
+# completion included. It lives here rather than in salvor-cli-core because raw
+# mode is IO and that crate compiles for wasm; the candidates it offers are
+# computed there. See the workspace Cargo.toml for the version and the feature
+# choice.
+rustyline.workspace = true
 toml.workspace = true
 # Process discovery + termination for `salvor serve --kill`; see the
 # workspace Cargo.toml for the version/feature-weight justification.
@@ -168,6 +177,10 @@ schemars = { workspace = true, optional = true }
 # `ToolHandler` impls; optional and behind the `fixture` feature like the two
 # deps above.
 async-trait = { workspace = true, optional = true }
+
+[[example]]
+name = "graph_clients"
+path = "../../examples/graph-clients/rust/main.rs"
 
 [dev-dependencies]
 assert_cmd.workspace = true

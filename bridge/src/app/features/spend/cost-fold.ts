@@ -11,7 +11,7 @@ import { FoldService, type RunStateJson, toWireLog } from '../inspector/wasm-fol
  * model id, and the only place that lives is the log. This reads a run's full recorded log (its
  * whole event stream, seq 0 through however many events `GET /v1/runs` had already counted when
  * the ledger was fetched) and folds it through the SAME wasm `derive_state` the Inspector uses
- * ({@link FoldService}) — never a second reimplementation of the fold — plus the shared price
+ * ({@link FoldService}), never a second reimplementation of the fold, plus the shared price
  * table ({@link costOfPrefix}) for the dollar total.
  */
 
@@ -20,7 +20,7 @@ export interface FoldedRun {
   readonly id: string;
   /** Every event this run's log actually recorded, up to the prefix this fold could read. */
   readonly events: readonly SalvorEvent[];
-  /** False when fewer events came back than `GET /v1/runs` had counted — the log could not be
+  /** False when fewer events came back than `GET /v1/runs` had counted: the log could not be
    *  read in full (a store error, a run that vanished between the list fetch and the read). The
    *  figures below are then a partial fold, never silently presented as the whole run. */
   readonly readable: boolean;
@@ -28,10 +28,10 @@ export interface FoldedRun {
   readonly usage: { readonly inputTokens: number; readonly outputTokens: number };
   readonly cost: CostTotal;
   /** How many `ModelCallCompleted` events this run's log recorded. A run that made ZERO model
-   *  calls (a stalled run that died before any call completed — RunStarted, maybe a dangling
+   *  calls (a stalled run that died before any call completed: RunStarted, maybe a dangling
    *  ModelCallRequested, then abandoned) has nothing to price at all: {@link CostTotal.complete}
    *  reads `true` for it VACUOUSLY (no calls means no unpriced model to report), which is honest
-   *  as a per-run figure ($0 spent so far) but must not be read as "this run's model IS priced" —
+   *  as a per-run figure ($0 spent so far) but must not be read as "this run's model IS priced";
    *  see {@link allUnpriced}, which excludes zero-call runs from that determination for exactly
    *  this reason. */
   readonly calls: number;
@@ -45,17 +45,17 @@ export interface FoldedRun {
  *
  * A run with ZERO model calls (a stalled run that died before any call completed) is EXCLUDED from
  * this check on both sides: it must not count as "priced" (its {@link CostTotal.complete} reads
- * `true` vacuously — there is no unpriced model to report when there were no calls at all — so
+ * `true` vacuously, there is no unpriced model to report when there were no calls at all, so
  * without this exclusion a single such run would wrongly suppress a real all-unpriced banner), and
  * it must not count as "unpriced" either (there is no unpriced FACT to state about a run that never
- * called a model). Only `readable` runs are considered — an unreadable log has no honest verdict.
+ * called a model). Only `readable` runs are considered: an unreadable log has no honest verdict.
  */
 export function allUnpriced(runs: readonly FoldedRun[]): boolean {
   const priced = runs.filter((f) => f.readable && f.calls > 0);
   return priced.length > 0 && priced.every((f) => !f.cost.complete);
 }
 
-/** Precedence for what a run's ceiling was: the log's own `BudgetExceeded` (authoritative — it is
+/** Precedence for what a run's ceiling was: the log's own `BudgetExceeded` (authoritative: it is
  *  the limit that was actually in force), or genuinely unknown. This build has no `GET /v1/agents`
  *  registry wired (the same honest gap the Inspector's run-stats hero already declares), so unlike
  *  the design that shipped a registry lookup, a ceiling that was never crossed has no second place
@@ -87,7 +87,7 @@ export class CostFoldService {
     try {
       state = events.length > 0 ? this.fold.deriveState(toWireLog(events), events.length) : undefined;
     } catch {
-      state = undefined; // a log the wasm fold itself refused — honest absence, not a fabricated zero
+      state = undefined; // a log the wasm fold itself refused: honest absence, not a fabricated zero
     }
 
     return {
@@ -105,8 +105,8 @@ export class CostFoldService {
   }
 
   /** Drain the SDK's event stream for `runId` from seq 0, stopping as soon as `expected` events
-   *  have arrived (or the stream itself rests). A run still in progress never rests on its own —
-   *  the server tails it live — so this bounds the read to the prefix the list already counted,
+   *  have arrived (or the stream itself rests). A run still in progress never rests on its own,
+   *  the server tails it live, so this bounds the read to the prefix the list already counted,
    *  which is what makes it a snapshot fold rather than an indefinite hang. Every one of those
    *  events is already durably recorded, so the bound is always reachable. */
   private async readLog(runId: string, expected: number): Promise<SalvorEvent[]> {

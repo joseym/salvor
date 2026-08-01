@@ -19,14 +19,32 @@ from .errors import (
     SalvorStreamError,
     decode_error,
 )
+from .graph import Graph
 from .models import (
+    ClientToolDecl,
     EndFrame,
     Event,
+    ForkPreview,
+    ForkResult,
+    ForksIndex,
+    GraphProjection,
+    GraphSubmitted,
+    GraphSummary,
+    GraphValidation,
     ReplayState,
     ResumeResult,
     RunState,
     RunSummary,
+    StoredGraph,
 )
+
+
+def _document(document: Union[Graph, dict[str, Any]]) -> dict[str, Any]:
+    """The wire JSON for a graph document, from either a built
+    :class:`~salvor.graph.Graph` or a plain dict of the same fields. A dict is
+    passed through untouched, so a document authored by hand (or read from a
+    file) needs no builder."""
+    return document.to_dict() if isinstance(document, Graph) else document
 
 
 class EventStream:
@@ -219,6 +237,193 @@ class Client:
                 "event_count": obj.get("event_count", 0),
             }
         )
+
+    # -- graphs ---------------------------------------------------------------
+
+    def submit_graph(self, document: Union[Graph, dict[str, Any]]) -> GraphSubmitted:
+        """Submit and strictly validate a graph document; return its content
+        hash and whether this call is what stored it.
+
+        A graph document IS its hash, so re-submitting an identical document is
+        idempotent: the same hash comes back with ``created=False``. A validation
+        failure raises :class:`~salvor.errors.SalvorAPIError` with code
+        ``invalid_graph``, whose ``details["errors"]`` is the complete node- and
+        edge-precise list (nothing short-circuits); :meth:`validate_graph` asks
+        the same question without storing and without raising.
+
+        The server keeps submitted documents IN MEMORY only, so a restart drops
+        them and a hash from a previous process no longer resolves. That is safe
+        rather than lossy: submit the identical document again and it mints the
+        identical hash, so a caller can simply re-submit before starting a run.
+
+        Args:
+            document: A :class:`~salvor.graph.Graph` from
+                :meth:`~salvor.graph.GraphBuilder.build`, or the same document
+                as a dict.
+        """
+        resp = self._http.post("/v1/graphs", json=_document(document))
+        return GraphSubmitted.from_json(self._json(resp))
+
+    def list_graphs(self) -> list[GraphSummary]:
+        """List the stored graphs, each with its hash and shape summary."""
+        resp = self._http.get("/v1/graphs")
+        return [GraphSummary.from_json(g) for g in self._json(resp).get("graphs", [])]
+
+    def get_graph(self, graph_hash: str) -> StoredGraph:
+        """Read one stored document back by hash.
+
+        Raises :class:`~salvor.errors.SalvorAPIError` with code
+        ``unknown_graph`` when nothing is stored under it, which is also what a
+        hash from before a server restart gets: see :meth:`submit_graph` on the
+        in-memory store.
+        """
+        resp = self._http.get(f"/v1/graphs/{graph_hash}")
+        return StoredGraph.from_json(self._json(resp))
+
+    def validate_graph(self, document: Union[Graph, dict[str, Any]]) -> GraphValidation:
+        """Validate a document without storing it: :meth:`submit_graph`'s dry
+        run, the graph counterpart of :meth:`replay`.
+
+        It answers the question rather than refusing the request, so an invalid
+        document comes back with ``valid=False`` and the full error list instead
+        of raising. Nothing is ever stored.
+        """
+        resp = self._http.post("/v1/graphs/validate", json=_document(document))
+        return GraphValidation.from_json(self._json(resp))
+
+    def start_graph_run(
+        self,
+        graph_hash: str,
+        input: Any = None,
+        *,
+        labels: Optional[dict[str, str]] = None,
+    ) -> str:
+        """Start a fresh run of a STORED graph; return its run id.
+
+        Fire-and-return, exactly as :meth:`start_run` is for an agent run: the
+        call returns as soon as the run is accepted, and the walk then drives in
+        the background on the server. A graph run is an ordinary run with a
+        richer log, so :meth:`get_run`, :meth:`stream_events`, :meth:`replay`
+        and :meth:`resume` all work on it unchanged; :meth:`get_run_graph` adds
+        the per-node view only a graph run has.
+
+        Everything the document references is resolved BEFORE the run is
+        spawned, so a reference that cannot resolve is a refusal rather than a
+        run that fails halfway:
+
+        - ``unknown_graph`` when the hash names no stored graph (including a
+          hash from before a server restart, since the graph store is in
+          memory).
+        - ``unknown_agent``, naming the node, when an ``agent`` node references
+          a hash no agent is registered under.
+        - ``unknown_tool``, naming the node, when a ``tool`` node names a tool
+          the server's registry does not hold. A stock ``salvor serve`` wires
+          that registry EMPTY, so on a default server EVERY ``tool`` node
+          refuses this way until a host registers the tool it names
+          (``salvor serve --demo-tools`` is the built-in way to get a non-empty
+          registry).
+
+        Args:
+            graph_hash: The stored graph's hash from :meth:`submit_graph`.
+            input: The run input, any JSON value. Defaults to ``None``.
+            labels: Optional correlation tags under the same bounds an agent
+                run's carry. Omitted entirely, the run records none.
+
+        Returns:
+            The run id.
+        """
+        body: dict[str, Any] = {"graph_hash": graph_hash, "input": input}
+        if labels is not None:
+            body["labels"] = labels
+        resp = self._http.post("/v1/graph-runs", json=body)
+        return self._json(resp)["run"]
+
+    def get_run_graph(self, run_id: str) -> GraphProjection:
+        """A graph run's per-node projection: which nodes the walk has reached,
+        which case each ``branch`` fired, and the node it is inside right now.
+
+        A node the walk has not reached is absent rather than reported as some
+        pending state. Refuses with ``not_a_graph_run`` for an ordinary agent
+        run, which has no walk to project.
+        """
+        resp = self._http.get(f"/v1/runs/{run_id}/graph")
+        return GraphProjection.from_json(self._json(resp))
+
+    def fork_run(
+        self,
+        run_id: str,
+        from_node: str,
+        *,
+        acknowledge_writes: Optional[list[int]] = None,
+    ) -> ForkResult:
+        """Fork a graph run from a node boundary into a NEW run.
+
+        The child opens with the origin's log prefix rewritten under its own id
+        and then continues from ``from_node``; the origin is never touched, and
+        the child reuses the origin's graph unchanged (to change the graph,
+        submit a new document and start a fresh run).
+
+        A fork that would re-execute a recorded write the operator has not
+        acknowledged is REFUSED, not silently replayed:
+        :class:`~salvor.errors.SalvorAPIError` with code
+        ``write_replay_hazard``, whose ``details["writes"]`` lists exactly the
+        writes still needing acknowledgement. Pass their ``seq`` values as
+        ``acknowledge_writes`` to accept that they may re-fire, and they are
+        recorded permanently on the child. :meth:`preview_fork` asks the same
+        question first, without creating anything.
+        """
+        body: dict[str, Any] = {"from_node": from_node}
+        if acknowledge_writes is not None:
+            body["acknowledge_writes"] = acknowledge_writes
+        resp = self._http.post(f"/v1/runs/{run_id}/fork", json=body)
+        return ForkResult.from_json(self._json(resp))
+
+    def preview_fork(
+        self,
+        run_id: str,
+        from_node: str,
+        *,
+        acknowledge_writes: Optional[list[int]] = None,
+    ) -> ForkPreview:
+        """Preview a fork without creating one: which writes the re-walked
+        segment holds, which of them are still unacknowledged, and whether the
+        fork would proceed.
+
+        The structural refusals (:meth:`fork_run`'s ``invalid_fork_node``,
+        ``origin_needs_reconciliation``, ``not_a_graph_run``) still raise here,
+        so a fork that could never proceed is reported rather than faked.
+        """
+        body: dict[str, Any] = {"from_node": from_node, "dry_run": True}
+        if acknowledge_writes is not None:
+            body["acknowledge_writes"] = acknowledge_writes
+        resp = self._http.post(f"/v1/runs/{run_id}/fork", json=body)
+        return ForkPreview.from_json(self._json(resp))
+
+    def list_forks(self, run_id: str) -> ForksIndex:
+        """The forks of a run, as the server's own DERIVED index: an origin is
+        immutable and never points forward at its children, so this is a scan of
+        every run's recorded origin, labelled ``derived`` to say so."""
+        resp = self._http.get(f"/v1/runs/{run_id}/forks")
+        return ForksIndex.from_json(self._json(resp))
+
+    # -- client-performed tools -------------------------------------------------
+
+    def list_client_tools(self) -> list[ClientToolDecl]:
+        """List the client-performed tool declarations this server holds:
+        tools an operator declared with ``salvor serve --client-tool <FILE>``,
+        which the client runs itself (see
+        :meth:`~salvor.client_runs.ClientRunDriver.client_tool_intent`).
+
+        This is how a client-driven loop gets the function definitions to
+        hand the model: a declaration's ``input_schema`` IS the model tool's
+        parameter schema, the same schema the server checks a call's input
+        against, published here so a client never keeps a second copy that
+        can quietly drift from it.
+        """
+        resp = self._http.get("/v1/client-tools")
+        return [
+            ClientToolDecl.from_json(t) for t in self._json(resp).get("client_tools", [])
+        ]
 
     # -- event stream ---------------------------------------------------------
 

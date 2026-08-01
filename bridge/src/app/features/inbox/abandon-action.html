@@ -1,10 +1,10 @@
 <!-- The shared "retire this run" affordance. LAYOUT STABILITY (owner report, 2026-07-21: "when I
-     click abandon things shift"): the trigger below is ALWAYS rendered — it never disappears when
-     the confirm opens, it only swaps to a held look (`.is-held` + `aria-expanded`) — so on the
+     click abandon things shift"): the trigger below is ALWAYS rendered; it never disappears when
+     the confirm opens, it only swaps to a held look (`.is-held` + `aria-expanded`), so on the
      Stalled card, where this trigger is embedded directly in `.actions` beside "Open in inspector"
      and "show API", those neighbors never reflow. The confirm/receipt content lives in a single
      `.abandon-slot` sibling that a CSS `order` always sorts LAST in that row regardless of DOM
-     position, so it grows a new line BELOW the row instead of splicing into the middle of it — see
+     position, so it grows a new line BELOW the row instead of splicing into the middle of it: see
      inbox.css for the mechanism and the grid-rows reveal. -->
 <button
   class="btn serious"
@@ -20,12 +20,12 @@
 </button>
 
 <div class="abandon-slot" [id]="'abandon-slot-' + ns()" [class.is-open]="open() || !!receipt()" data-abandon-slot>
-  <!-- Nothing here sets a status by hand — the receipt reads the server's re-derived status
+  <!-- Nothing here sets a status by hand: the receipt reads the server's re-derived status
        straight off the abandon response. -->
   @if (receipt(); as r) {
     <div class="abandon-receipt" data-abandon-receipt>
       <p class="reason">
-        <b>Appended RunAbandoned at seq {{ r.appendedSeq ?? '—' }}.</b>
+        <b>Appended RunAbandoned at seq {{ r.appendedSeq ?? '-' }}.</b>
         Status now <span class="mono">{{ r.status.state }}</span>. Nothing was edited or re-run; the run is retired.
       </p>
       @if (unresolved(); as w) {
@@ -39,7 +39,7 @@
       <div class="actions">
         <!-- Explicit dismiss, never a timer: nothing else in this app auto-vanishes (see
              app.css's .intro-strip dismiss for the same idiom), and abandonment is a one-time,
-             sacred receipt — a quiet acknowledgement the operator gives once they've read it. The
+             sacred receipt: a quiet acknowledgement the operator gives once they've read it. The
              parent folds the whole card away on this; see stalled-card.ts / inbox.ts. -->
         <button class="btn ghost" type="button" (click)="dismiss()" data-abandon-done>Done</button>
         <span class="endpoint">{{ endpoint() }}</span>
@@ -67,7 +67,7 @@
         @if (reconcile()) {
           <span>
             I understand this run is retired for good. Its dangling write stays
-            <b>unresolved</b> and is recorded as such — abandoning it does not answer whether the write
+            <b>unresolved</b> and is recorded as such; abandoning it does not answer whether the write
             took effect.
           </span>
         } @else {

@@ -717,7 +717,7 @@ impl ReplayCursor {
     /// run with the derived id `child_run`.
     ///
     /// Replayed: matches the recorded [`Event::MapIterationStarted`] on its
-    /// STRUCTURAL position — `node` and `index` — and the RECORDED `child_run`
+    /// STRUCTURAL position (`node` and `index`) and the RECORDED `child_run`
     /// wins, exactly as the recorded input wins in [`begin`](ReplayCursor::begin).
     /// The passed `child_run` is compared only loosely (it is derived data), for a
     /// deliberate reason: the id is `sha256:` over the parent run id, the node, and
@@ -995,6 +995,7 @@ impl ReplayCursor {
                     input: recorded_input,
                     effect: recorded_effect,
                     idempotency_key: recorded_key,
+                    ..
                 } if recorded_tool == tool
                     && recorded_input == input
                     && *recorded_effect == effect
@@ -1052,6 +1053,7 @@ impl ReplayCursor {
                 input: input.clone(),
                 effect,
                 idempotency_key: key.clone(),
+                performed_by: None,
             },
         };
         Ok(Outcome::Live(ToolCallPermit {
@@ -1620,7 +1622,7 @@ mod tests {
     }
 
     /// A graph run's log opens with `GraphRunStarted`, and the cursor accepts
-    /// it as a legal run head — the sole wire-adjacent change graph runs make
+    /// it as a legal run head: the sole wire-adjacent change graph runs make
     /// to the cursor.
     #[test]
     fn graph_run_started_is_a_legal_first_event() {

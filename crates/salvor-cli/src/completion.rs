@@ -3,7 +3,7 @@
 //!
 //! [`crate::commands::completions`] generates a STATIC script: it knows every
 //! verb, flag, and fixed value set, because all of those are facts about the
-//! parse tree. What it cannot know is the one thing an operator types most —
+//! parse tree. What it cannot know is the one thing an operator types most:
 //! a run id. This module answers that half, and the two live side by side: the
 //! static script keeps working exactly as before, and a user who also enables
 //! this one gets run ids and agent identities on top.
@@ -15,10 +15,10 @@
 //! so the incantation a user learns here is the one the wider Rust CLI
 //! ecosystem already documents:
 //!
-//! - `COMPLETE=zsh salvor` — no arguments after a `--`, so this prints the
+//! - `COMPLETE=zsh salvor`: no arguments after a `--`, so this prints the
 //!   shell function that registers `salvor` for completion. That is what a
 //!   user evaluates from their rc file.
-//! - `COMPLETE=zsh salvor -- salvor history <partial>` — the registration
+//! - `COMPLETE=zsh salvor -- salvor history <partial>`: the registration
 //!   function's own call back into the binary on each Tab. Everything after
 //!   `--` is the command line as the shell currently sees it, and
 //!   `_SALVOR_COMPLETE_INDEX` says which of those words the cursor is in. The
@@ -38,7 +38,7 @@
 //! integration of a shipped binary. This module is the conservative trade: a
 //! few hundred lines of our own walking of the very same [`clap::Command`]
 //! tree, no new dependency, no unstable gate, and total control over the
-//! degradation rules below — which are the part that actually matters. If the
+//! degradation rules below, which are the part that actually matters. If the
 //! engine stabilises, the shell-facing protocol is deliberately the same one,
 //! so the swap is an implementation change and not a user-visible one.
 //!
@@ -50,7 +50,7 @@
 //! timeout, with the operator's shell frozen and no way to tell why.
 //!
 //! **Never speak.** A missing store, a corrupt store, a store the user cannot
-//! read, a poisoned lock, an outright panic — each degrades to zero candidates
+//! read, a poisoned lock, an outright panic: each degrades to zero candidates
 //! and exit 0. Nothing is ever written to stderr from the completion path, and
 //! the generated shell functions redirect it away besides. A shell that offers
 //! nothing is a small disappointment; a shell that prints a Rust backtrace over
@@ -86,9 +86,9 @@ const MAX_CANDIDATES: usize = 50;
 /// agent identity is not stored: it lives in a run's first event, so each
 /// distinct identity costs one full log read. That is the one genuinely
 /// unbounded cost on this path, and this is the bound: the 50 most recently
-/// active runs, newest first. Fifty is chosen to match [`MAX_CANDIDATES`] —
-/// there is no point reading a log that could not produce a candidate anyone
-/// would see — and because the set of agents an operator is switching between
+/// active runs, newest first. Fifty is chosen to match [`MAX_CANDIDATES`]
+/// (there is no point reading a log that could not produce a candidate anyone
+/// would see) and because the set of agents an operator is switching between
 /// right now is small; an identity that appears nowhere in the last fifty runs
 /// is one they can finish typing. The deadline below is the backstop for the
 /// pathological case (fifty enormous logs) that this count alone does not
@@ -205,7 +205,7 @@ fn registration(shell: &str) -> String {
         // `${(@f)...}` splits the binary's stdout on newlines into an array,
         // and `compadd` (rather than zsh's `_describe`) is what takes those
         // strings as literal candidates: it quotes a value containing a space
-        // — `graph run` is one — when it inserts it on the command line, and
+        // (`graph run` is one) when it inserts it on the command line, and
         // it never reads a `:` in a value as the start of a description.
         "zsh" => ZSH_REGISTRATION.replace("COMPLETER", &completer),
         // `read -r` into an array rather than word-splitting the output: a
@@ -340,7 +340,7 @@ fn candidates(words: &[String], index: usize) -> Vec<String> {
             .map(|sub| sub.get_name().to_owned())
             .filter(|name| name.starts_with(current))
             .collect();
-        if let Some(arg) = walk.command.get_positionals().nth(walk.positionals) {
+        if let Some(arg) = positional_at(walk.command, walk.positionals) {
             out.extend(value_candidates(walk.command, arg, current, &store));
         }
         out
@@ -426,6 +426,24 @@ fn walk<'a>(command: &'a clap::Command, preceding: &[String]) -> Walk<'a> {
     }
 
     walk
+}
+
+/// The positional argument the cursor sits on, given how many positional values
+/// the command has already been handed.
+///
+/// Past the last declared positional the answer is normally nothing. The
+/// exception is a REPEATABLE positional (`salvor agent hash a.toml b.toml`),
+/// which keeps accepting values at its own slot: the cursor stays on it however
+/// many have been typed, so the second file completes exactly like the first.
+fn positional_at(command: &clap::Command, index: usize) -> Option<&clap::Arg> {
+    let positionals: Vec<&clap::Arg> = command.get_positionals().collect();
+    if let Some(arg) = positionals.get(index) {
+        return Some(arg);
+    }
+    positionals.last().copied().filter(|arg| {
+        arg.get_num_args()
+            .is_some_and(|range| range.max_values() > 1)
+    })
 }
 
 /// Splits `--flag=value` into its two halves, or `None` for anything else.
@@ -648,7 +666,7 @@ fn agent_identities(store: &Path, current: &str) -> Vec<String> {
 ///
 /// The existence check is not an optimisation. `SqliteStore::open` goes
 /// through SQLite's `Connection::open`, which CREATES the database file when
-/// it is absent — so without this, pressing Tab in a directory with no store
+/// it is absent. So without this, pressing Tab in a directory with no store
 /// would leave a stray empty `salvor.db` behind in it.
 ///
 /// The worker is abandoned rather than joined when the deadline passes. The
@@ -701,8 +719,81 @@ mod tests {
     #[test]
     fn nested_verbs_complete_under_graph() {
         let offered = complete(&["salvor", "graph", ""], 2);
+        assert!(offered.contains(&"edit".to_owned()), "{offered:?}");
         assert!(offered.contains(&"validate".to_owned()), "{offered:?}");
         assert!(offered.contains(&"run".to_owned()), "{offered:?}");
+    }
+
+    /// The built tree the parser itself runs on, for the tests that ask a
+    /// question about an argument rather than about a candidate list.
+    fn built_command() -> clap::Command {
+        let mut command = <crate::cli::Cli as CommandFactory>::command();
+        command.build();
+        command
+    }
+
+    /// A file positional that repeats has to keep completing: `salvor agent
+    /// hash` takes any number of definitions, so the cursor past the first is
+    /// still on the same argument. A positional that takes exactly one value
+    /// (every run id in the CLI) must NOT behave that way, or a stray extra
+    /// word would be offered completions it can never accept.
+    #[test]
+    fn a_repeatable_positional_keeps_completing_past_the_first_value() {
+        let command = built_command();
+
+        let hash = command
+            .find_subcommand("agent")
+            .and_then(|agent| agent.find_subcommand("hash"))
+            .expect("`agent hash` is in the tree");
+        let first = positional_at(hash, 0).expect("the first file is a positional");
+        assert_eq!(value_name(first), Some("FILE"));
+        for already_typed in [1, 2, 7] {
+            assert_eq!(
+                positional_at(hash, already_typed).map(clap::Arg::get_id),
+                Some(first.get_id()),
+                "the file positional repeats, so {already_typed} values in the cursor is still on it"
+            );
+        }
+
+        let history = command
+            .find_subcommand("history")
+            .expect("`history` is in the tree");
+        assert!(positional_at(history, 0).is_some(), "the run id");
+        assert!(
+            positional_at(history, 1).is_none(),
+            "a run id takes exactly one value, so there is no second positional to complete"
+        );
+    }
+
+    /// A FILE positional gets path completion from its value name alone, which
+    /// is the whole reason the new verb needed nothing added here.
+    #[test]
+    fn an_agent_definition_path_completes_from_the_filesystem() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        std::fs::write(directory.path().join("research.toml"), "model = \"m\"").expect("write");
+        std::fs::create_dir(directory.path().join("agents")).expect("mkdir");
+        let prefix = format!("{}/", directory.path().display());
+
+        let command = built_command();
+        let hash = command
+            .find_subcommand("agent")
+            .and_then(|agent| agent.find_subcommand("hash"))
+            .expect("`agent hash` is in the tree");
+        let arg = positional_at(hash, 0).expect("the file positional");
+        let offered = value_candidates(hash, arg, &format!("{prefix}re"), Path::new("nothing.db"));
+
+        assert_eq!(
+            offered,
+            vec![format!("{prefix}research.toml")],
+            "{offered:?}"
+        );
+        // A directory is offered with a trailing slash so the next Tab
+        // descends into it, and a FILE position offers directories too.
+        let offered = value_candidates(hash, arg, &prefix, Path::new("nothing.db"));
+        assert!(
+            offered.contains(&format!("{prefix}agents/")),
+            "a directory on the way to a file: {offered:?}"
+        );
     }
 
     #[test]

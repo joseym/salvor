@@ -96,6 +96,29 @@ clap_complete = "4"
 # CLICOLOR, so a piped `salvor list` stays plain text.
 anstyle = "1"
 anstream = "1"
+# The real terminal's column count, for `salvor graph edit`: the editor wraps
+# its prose to the pane it is printing into, and the only way to know that
+# number is to ask the terminal. This is the crate clap itself uses for
+# `wrap_help`, and it is a thin shim over one ioctl rather than a terminal
+# library: on Unix it adds nothing to the tree, since rustix is already
+# resolved through sysinfo and tempfile, and its Windows half is gated to that
+# target.
+terminal_size = "0.4"
+# The line editor behind an interactive `salvor graph edit`: arrow keys, an
+# in-session history, and the Tab that asks the editor what can go here.
+# Verified against crates.io on 2026-07-29; 18.0.1 was the latest release.
+# Chosen over reedline (which pulls crossterm and a widget tree for a
+# multi-line, syntax-highlighting prompt this loop has no use for) because it
+# is the smallest crate that owns raw mode and a completion hook. Taken with
+# `default-features = false`, which drops radix_trie (custom key bindings) and
+# home (a history file's directory): the history is deliberately in memory
+# only, so an editing session writes no file nobody asked for. On Unix that
+# leaves three crates the workspace does not already resolve (rustyline,
+# unicode-width, unicode-segmentation); bitflags, cfg-if, libc, log, memchr,
+# and nix are all already in the tree. Terminal-only by construction, so it is
+# named by salvor-cli and never by salvor-cli-core, which has to keep compiling
+# for wasm32-unknown-unknown.
+rustyline = { version = "18", default-features = false }
 toml = "0.8"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Process discovery behind `salvor serve --kill`: finding a running

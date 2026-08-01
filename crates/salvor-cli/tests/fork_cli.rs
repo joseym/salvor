@@ -1,9 +1,9 @@
 //! End to end through the real `salvor` binary for `salvor fork`.
 //!
 //! Hermetic: a two-`gate` graph parks with no model and no tool, so the whole
-//! run -> resume -> fork loop runs offline. These prove the CLI wiring — the
+//! run -> resume -> fork loop runs offline. These prove the CLI wiring, the
 //! local flavor that re-supplies the document (hash-checked), plans the fork,
-//! and drives the child from the fork node — plus the typed refusals: a hash
+//! and drives the child from the fork node, plus the typed refusals: a hash
 //! mismatch, a node the origin never entered, and an unknown run. The
 //! refuse-then-record behavior over a real recorded WRITE is proven
 //! authoritatively in the engine and server suites (a hermetic CLI write tool

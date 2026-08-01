@@ -12,14 +12,14 @@
       <bridge-run-ref [id]="row().run" />
     </div>
     <dl class="evidence">
-      <div><dt>seq</dt><dd>{{ r.seq ?? '—' }}</dd></div>
+      <div><dt>seq</dt><dd>{{ r.seq ?? '-' }}</dd></div>
       <div><dt>event.kind</dt><dd>{{ r.kind }}</dd></div>
-      <div><dt>recorded_at</dt><dd>{{ r.recordedAt ?? '—' }}</dd></div>
+      <div><dt>recorded_at</dt><dd>{{ r.recordedAt ?? '-' }}</dd></div>
       <div><dt>payload</dt><dd [innerHTML]="jsonHiCompact(r.payload)"></dd></div>
       <div><dt>status now</dt><dd>{{ r.statusState }}</dd></div>
     </dl>
     <p class="reason">
-      <b>Nothing was edited.</b> The run's status was not set — it was re-derived from
+      <b>Nothing was edited.</b> The run's status was not set; it was re-derived from
       <span class="mono">GET /v1/runs/{{ ns() }}…</span> after this append.
     </p>
     <div class="actions">
@@ -47,7 +47,7 @@
       <div>
         <dt>idempotency_key</dt>
         <dd [class.null]="!i.idempotencyKey">
-          {{ i.idempotencyKey ?? 'null — the call cannot be safely retried' }}
+          {{ i.idempotencyKey ?? 'null: the call cannot be safely retried' }}
         </dd>
       </div>
       <div><dt>input</dt><dd [innerHTML]="jsonHiCompact(i.input)"></dd></div>
@@ -59,7 +59,7 @@
       <b>Resolve appends one <span class="mono">ToolCallCompleted</span> carrying the output you
       give it.</b>
       On resume the loop replays that completion; it never re-executes the write. There is no way
-      to record that nothing happened — the log has no shape for an absence.
+      to record that nothing happened; the log has no shape for an absence.
     </p>
 
     <fieldset class="f-field">
@@ -74,7 +74,7 @@
             [checked]="outcome() === 'reached'"
             (change)="chooseOutcome('reached')"
           />
-          It reached the provider — I have its output</label
+          It reached the provider; I have its output</label
         >
         <label
           ><input
@@ -112,7 +112,7 @@
       </svg>
       <span
         ><b>Then perform it yourself, and come back with what it returned.</b> Resolve cannot record
-        an absence and will not retry the write for you — so the run stays parked until a real
+        an absence and will not retry the write for you, so the run stays parked until a real
         completion exists to record. Run <span class="mono">{{ i.tool }}</span> manually with the
         input above, then choose the first option and paste its output.</span
       >
@@ -133,7 +133,7 @@
         </button>
       </div>
       <p class="offramp-why">
-        A tool executes in the host that registered it — the same process that ran this agent —
+        A tool executes in the host that registered it (the same process that ran this agent),
         never here in the browser.
       </p>
     </div>
@@ -158,7 +158,7 @@
 
     <!-- The SUBORDINATE off-ramp: resolving is the primary path, but a run you no longer care about
          can be abandoned instead. On this card the confirm copy states plainly that the write stays
-         unresolved and is recorded as such — abandoning does not answer whether it took effect. -->
+         unresolved and is recorded as such: abandoning does not answer whether it took effect. -->
     <p class="offramp-why">Or, if this run no longer matters, retire it without resolving:</p>
     <bridge-abandon-action
       [row]="row()"

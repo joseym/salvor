@@ -89,7 +89,7 @@ const GROUPS: TokenGroup[] = [
     })),
   },
   {
-    label: 'Elevation (box-shadow, mixed from ink — never black)',
+    label: 'Elevation (box-shadow, mixed from ink, never black)',
     tokens: ['elev-ring', 'elev-raised', 'focus-ring'].map((name) => ({
       name,
       prop: 'box-shadow',
@@ -166,8 +166,8 @@ const CONTRAST_PAIRS: ContrastPair[] = [
   { label: 'success on bg', fg: 'success', bg: 'bg', threshold: 4.5 },
   { label: 'warn on bg', fg: 'warn', bg: 'bg', threshold: 4.5 },
   { label: 'danger on bg', fg: 'danger', bg: 'bg', threshold: 4.5 },
-  { label: 'border on bg (hairline, non-text — WCAG 1.4.11)', fg: 'border', bg: 'bg', threshold: 3 },
-  { label: 'edge-strong on bg (input boundary — WCAG 1.4.11)', fg: 'edge-strong', bg: 'bg', threshold: 3 },
+  { label: 'border on bg (hairline, non-text: WCAG 1.4.11)', fg: 'border', bg: 'bg', threshold: 3 },
+  { label: 'edge-strong on bg (input boundary: WCAG 1.4.11)', fg: 'edge-strong', bg: 'bg', threshold: 3 },
 ];
 
 function parseRgb(value: string): [number, number, number] | null {
@@ -205,7 +205,7 @@ function contrastRatio(a: string, b: string): number {
  * <html> element). So to read a token's DARK value without disturbing the
  * page the user is looking at, this flips `document.documentElement`'s
  * `data-theme` to each value in turn, reads every token's computed value
- * off a detached probe element, and restores the original attribute — all
+ * off a detached probe element, and restores the original attribute, all
  * synchronously in one task, so there is no visible flash.
  */
 @Component({

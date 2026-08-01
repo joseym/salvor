@@ -62,7 +62,7 @@ function info(why: string): string {
  * prefixes through the REAL wasm fold ({@link FoldService}); JSON highlighting via `jsonHi`.
  * Hold-on-scrub-back during live SSE appends, the live ticker driven by the channel's
  * connection state, the run-stats hero, the note apparatus, the empty state, and the
- * capability-gated fork offer (off in this build — the server has no fork runtime).
+ * capability-gated fork offer (off in this build: the server has no fork runtime).
  *
  * The complex, byte-exact DOM (the `.levent` grid, kchip dots, effect badges, highlighted panes,
  * the derived panel) is built as HTML strings and written into stable container refs with
@@ -118,18 +118,18 @@ export class Inspector implements AfterViewInit {
   readonly panelOpen = signal(true);
 
   /** A graph run's `graph_hash`, fetched from GET /v1/runs/{id}/graph (it is never on the log or
-   * the list row). Undefined until the projection loads — the AGENT card shows the honest "graph
+   * the list row). Undefined until the projection loads; the AGENT card shows the honest "graph
    * run" identity with no fabricated hash until then. */
   private readonly graphHash = signal<string | undefined>(undefined);
 
   /** The run's LIVENESS evidence from GET /v1/runs/{id}: the server's `driver` field and the newest
    * event's `last_recorded_at`. The log fold tells us a run IS `running`; only this tells us whether
    * anyone is DRIVING it. Fetched once per run (reset in `loadRun`); undefined until it lands, so
-   * the stalled treatment appears only once there is genuine evidence for it — never a guess. */
+   * the stalled treatment appears only once there is genuine evidence for it, never a guess. */
   private readonly runLiveness = signal<{ driver?: string; last?: string } | undefined>(undefined);
 
   /** The stalled verdict for the open run: its log folds to some state in the IN-PROGRESS family
-   * (`running`, `awaiting_model`, `awaiting_tool`, `not_started` — see `run-model.ts#derivedStatus`
+   * (`running`, `awaiting_model`, `awaiting_tool`, `not_started`, see `run-model.ts#derivedStatus`
    * for why the family is wider than literal `running`), yet the server reports no driver and its
    * last event has gone stale. This is the one place the Inspector reads the same derivation the
    * ledger and Inbox do. */
@@ -144,9 +144,9 @@ export class Inspector implements AfterViewInit {
   readonly lastEventAge = computed<string>(() => age(this.runLiveness()?.last));
 
   /** Fork LINEAGE, both directions, read from the server's derived surfaces (never the log):
-   *  - `forkedFrom` — this run's own projection carries it when it IS a forked child (the header
+   *  - `forkedFrom`: this run's own projection carries it when it IS a forked child (the header
    *    chip links back to the parent).
-   *  - `forks` — GET /v1/runs/{id}/forks, the derived index of children forked FROM this run.
+   *  - `forks`: GET /v1/runs/{id}/forks, the derived index of children forked FROM this run.
    * Both are honestly labelled derived where shown; both undefined until fetched, and reset per run. */
   private readonly forkedFrom = signal<ForkOrigin | undefined>(undefined);
   private readonly forks = signal<readonly ForkListEntry[] | undefined>(undefined);
@@ -176,7 +176,7 @@ export class Inspector implements AfterViewInit {
    * Runs table's `agentIdentity` makes, read here from the log the Inspector already holds. */
   readonly isGraphRun = computed(() => this.events()[0]?.kind === 'GraphRunStarted');
 
-  /** The run's TRUE resting state slug, folded from the whole log — what the run actually IS
+  /** The run's TRUE resting state slug, folded from the whole log: what the run actually IS
    * (`suspended`, `completed`, `budget_exceeded`, …), not what the transport did. The pill and the
    * live ticker read this so a caught-up stream over a parked run is never labeled as ended. */
   readonly restingState = computed<string | null>(() => {
@@ -202,8 +202,8 @@ export class Inspector implements AfterViewInit {
   );
   readonly foldAllTitle = computed(() =>
     this.foldAllDisabled()
-      ? 'The whole log is already folded — the playhead is at the end.'
-      : 'Fold every event — return the playhead to the end of the log.',
+      ? 'The whole log is already folded: the playhead is at the end.'
+      : 'Fold every event: return the playhead to the end of the log.',
   );
 
   constructor() {
@@ -253,7 +253,7 @@ export class Inspector implements AfterViewInit {
     // (4a) The run's liveness evidence (GET /v1/runs/{id}: `driver` + `last_recorded_at`). The log
     // fold says whether the run IS running; this says whether anyone is driving it, the two facts a
     // stall is derived from. Fetched once per run, silent on failure (no stalled treatment without
-    // evidence — honesty over a guess), and guarded so a late response for a since-closed run is
+    // evidence: honesty over a guess), and guarded so a late response for a since-closed run is
     // dropped rather than shown against the wrong run.
     effect(() => {
       const id = this.viewService.runId();
@@ -271,7 +271,7 @@ export class Inspector implements AfterViewInit {
     });
 
     // (4b) a graph run carries no agent_def_hash; its graph_hash lives only behind
-    // GET /v1/runs/{id}/graph. Fetch it once per graph run so the AGENT card can name it — silent
+    // GET /v1/runs/{id}/graph. Fetch it once per graph run so the AGENT card can name it, silent
     // on failure (the card keeps the plain "graph run" identity, never a fabricated hash).
     effect(() => {
       const id = this.viewService.runId();
@@ -290,7 +290,7 @@ export class Inspector implements AfterViewInit {
         });
     });
 
-    // (4c) The forks OF this run — the server's derived index (GET /v1/runs/{id}/forks). Graph runs
+    // (4c) The forks OF this run: the server's derived index (GET /v1/runs/{id}/forks). Graph runs
     // only (the fork API is graph-run shaped; asking about a plain agent run would 404 and the
     // browser logs that to the console). Fetched once per run, silent on failure.
     effect(() => {
@@ -314,7 +314,7 @@ export class Inspector implements AfterViewInit {
     });
 
     // (5) scrub-only render (derived panel, dim/cut, playhead, ticks, fork offer). Also re-runs
-    // when the capability probe answers — the fork offer is gated on it, and the probe resolves
+    // when the capability probe answers: the fork offer is gated on it, and the probe resolves
     // after the first paint.
     effect(() => {
       this.prefixN();
@@ -355,7 +355,7 @@ export class Inspector implements AfterViewInit {
   // ── run loading ──────────────────────────────────────────────────────────
   private loadRun(id: string | undefined): void {
     const prev = this.channelSig();
-    if (prev && prev.runId === id) return; // same run — nothing to do
+    if (prev && prev.runId === id) return; // same run: nothing to do
     prev?.disconnect();
     this.nodeFilter.set(null);
     this.arrivedSeq = null;
@@ -414,7 +414,7 @@ export class Inspector implements AfterViewInit {
     const dur = secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m ${secs % 60}s`;
     const cost = costOfPrefix(evs, evs.length);
 
-    // The ceiling: crossed (read from this run's own BudgetExceeded) or unknown — this build has
+    // The ceiling: crossed (read from this run's own BudgetExceeded) or unknown; this build has
     // no GET /v1/agents registry, so a declared-but-uncrossed ceiling cannot be fetched. Honest.
     let ceiling: string;
     if (st.status.kind === 'BudgetExceeded') {
@@ -424,7 +424,7 @@ export class Inspector implements AfterViewInit {
     }
 
     // The hero pill reflects the DERIVED state: a run whose log folds to `running` but that the
-    // server reports no driver for, gone stale, reads `stalled` here — the same verdict the ledger
+    // server reports no driver for, gone stale, reads `stalled` here, the same verdict the ledger
     // pill makes, so the Inspector never asserts "running" for a run going nowhere.
     const displayState = this.stalled() ? 'stalled' : state;
     el.innerHTML = `
@@ -473,7 +473,7 @@ export class Inspector implements AfterViewInit {
         <div class="forks-head">Forks of this run
           <span class="lineage-derived" title="A derived index; not a fact this run recorded">derived</span></div>
         <ul class="forks-list">${rows}</ul>
-        <p class="gloss">The server's derived index (<span class="mono">GET /v1/runs/${esc((this.viewService.runId() ?? '').slice(0, 8))}…/forks</span>) — not a fact the origin's log recorded.</p>
+        <p class="gloss">The server's derived index (<span class="mono">GET /v1/runs/${esc((this.viewService.runId() ?? '').slice(0, 8))}…/forks</span>), not a fact the origin's log recorded.</p>
       </div>`;
     }
     el.innerHTML = html;
@@ -489,8 +489,8 @@ export class Inspector implements AfterViewInit {
         ? `graph run · ${this.runRefHtml(gh, 'hash')}`
         : 'graph run';
       const sub = gh
-        ? 'graph_hash — a graph run has no single agent_def_hash; this is the graph it ran'
-        : 'a graph run — its log has no single agent_def_hash; its graph_hash is loading';
+        ? 'graph_hash: a graph run has no single agent_def_hash; this is the graph it ran'
+        : 'a graph run: its log has no single agent_def_hash; its graph_hash is loading';
       return `<div class="stat"><dt>Agent</dt>
         <dd style="font-size:15px">${value}<span class="sub">${sub}</span></dd></div>`;
     }
@@ -500,8 +500,8 @@ export class Inspector implements AfterViewInit {
       <dd style="font-size:15px">${this.runRefHtml(agent, agentKind)}
         <span class="sub">${
           agentKind === 'hash'
-            ? 'agent_def_hash — the log records no human name for an agent'
-            : 'a label the driver recorded, not a hash — shown in full'
+            ? 'agent_def_hash: the log records no human name for an agent'
+            : 'a label the driver recorded, not a hash, shown in full'
         }</span></dd></div>`;
   }
 
@@ -518,10 +518,10 @@ export class Inspector implements AfterViewInit {
       return `<div class="band is-fail">${FAIL_ICO}
         <span><b>Failed.</b>${err ? ` ${esc(err)}` : ''} This run is terminal; its log is closed.</span></div>`;
     }
-    // ABANDONED — a terminal, operator-retired run. Muted, never the fail band's danger red:
+    // ABANDONED: a terminal, operator-retired run. Muted, never the fail band's danger red:
     // abandonment is a deliberate retirement, not an error (state-not-status ink). States the
-    // reason when one was recorded, and — when the run was abandoned while parked at a dangling
-    // write — the unresolved-write honesty line: the abandonment recorded the outstanding write
+    // reason when one was recorded, and, when the run was abandoned while parked at a dangling
+    // write, the unresolved-write honesty line: the abandonment recorded the outstanding write
     // rather than claiming it settled.
     if (state === 'abandoned') {
       const reason = st.status.kind === 'Abandoned' ? st.status.reason : undefined;
@@ -533,15 +533,15 @@ export class Inspector implements AfterViewInit {
       return `<div class="band is-abandoned">${ABANDON_ICO}
         <span><b>Abandoned.</b>${reasonText} This run was retired by an operator; it is terminal and its log is closed.${honesty}</span></div>`;
     }
-    // STALLED — the expert's exact phrasing family: "<resting state> — last event 10m ago, no
+    // STALLED: the expert's exact phrasing family: "<resting state>: last event 10m ago, no
     // driver attached." The resting state named is the run's ACTUAL fold (e.g. `awaiting_model`
-    // for a run that died mid model-call), never a hardcoded "running" — the in-progress family is
+    // for a run that died mid model-call), never a hardcoded "running": the in-progress family is
     // wider than that one state (see `run-model.ts#derivedStatus`). Attention family (amber), never
     // the fail band's danger red. Its "action" is a signpost to the Inbox card, whose guidance is
-    // external (restart the host driver) — there is no fix button, here or there.
+    // external (restart the host driver); there is no fix button, here or there.
     if (this.stalled()) {
       return `<div class="band is-stalled">${WARN_ICO}
-        <span><b>Stalled.</b> <span class="mono">${esc(labelOf(state))}</span> — last event ${esc(this.lastEventAge())} ago, no driver attached. No task is driving this run and no client lease is current; restart the driver that owns it, or resolve/abandon.</span>
+        <span><b>Stalled.</b> <span class="mono">${esc(labelOf(state))}</span>: last event ${esc(this.lastEventAge())} ago, no driver attached. No task is driving this run and no client lease is current; restart the driver that owns it, or resolve/abandon.</span>
         <button class="link-btn" type="button" data-goto="inbox">See in inbox</button></div>`;
     }
     if (!isWaitingState(state)) return '';
@@ -583,7 +583,7 @@ export class Inspector implements AfterViewInit {
     if (!el) return;
     const evs = this.events();
     // The gap is density-scaled so it can never itself overflow the strip (see
-    // event-model.ts#estripGapPct) — set inline because it depends on the event count, which
+    // event-model.ts#estripGapPct): set inline because it depends on the event count, which
     // renderStripHtml's returned markup (the ticks alone) has no way to carry onto the container.
     el.style.gap = `${estripGapPct(evs.length)}%`;
     el.innerHTML = renderStripHtml(evs, this.arrivedSeq);
@@ -622,14 +622,14 @@ export class Inspector implements AfterViewInit {
       // state, so a past `completed`/`running` pill is never mistaken for what the run IS now. The
       // status pill itself gets an outlined "at seq N" variant. Extends the timeline's own
       // boundary/dimmed-future vocabulary rather than inventing a new one. At the head (following)
-      // the rail is plain — nothing is being previewed.
+      // the rail is plain: nothing is being previewed.
       const held = n < evs.length;
       derived.classList.toggle('preview', held);
       let banner = '';
       if (held) {
         const rest = this.restingState();
         const restLabel = rest ? labelOf(rest) : 'at rest';
-        banner = `<div class="preview-note" data-preview-banner>Preview of past state — the run is still <b>${esc(restLabel)}</b>. <button class="link-btn" type="button" data-to-live>Jump to live.</button></div>`;
+        banner = `<div class="preview-note" data-preview-banner>Preview of past state: the run is still <b>${esc(restLabel)}</b>. <button class="link-btn" type="button" data-to-live>Jump to live.</button></div>`;
       }
       const statusDd = held
         ? `<span class="at-seq" data-at-seq>at seq ${n}</span>${statusHtml(state)}`
@@ -647,7 +647,7 @@ export class Inspector implements AfterViewInit {
 
     this.renderForkHere(n);
 
-    // The three scrub zones on timeline rows — folded (no class), boundary (the event under the
+    // The three scrub zones on timeline rows: folded (no class), boundary (the event under the
     // playhead, seq n-1), beyond (dimmed, seq >= n). `zoneOf` is the single source of truth so
     // this toggle and its unit tests cannot drift apart.
     let boundaryRow: HTMLElement | undefined;
@@ -658,13 +658,13 @@ export class Inspector implements AfterViewInit {
       row.classList.toggle('dim', zone === 'beyond');
       if (zone === 'boundary') boundaryRow = row;
     });
-    // FOLLOW — keep the boundary row in view WHILE SCRUBBING, and only then. `.dragging` on the
+    // FOLLOW: keep the boundary row in view WHILE SCRUBBING, and only then. `.dragging` on the
     // scrub element is the single "actively scrubbing" predicate: the range's pointer + keyboard
     // handlers (onRangeGrab/onRangeRelease) and the tick strip (wireStrip) both set it; a
     // re-render triggered by a live append or a filter change never does, so browsing the log by
     // hand is never hijacked. This is the same respect-the-reading-position principle as the live
     // ticker's hold-on-scrub-back: THAT decides whether the PLAYHEAD advances when a new event
-    // arrives; THIS decides whether the VIEWPORT moves during a drag. They cannot fight — the
+    // arrives; THIS decides whether the VIEWPORT moves during a drag. They cannot fight: the
     // ticker is not a drag and so never sets `.dragging`. A boundary row hidden by the kind/node
     // filter is not chased.
     if (n > 0 && boundaryRow && !boundaryRow.hidden && this.scrubEl()?.classList.contains('dragging')) {
@@ -684,11 +684,11 @@ export class Inspector implements AfterViewInit {
     this.arrivedSeq = null; // the arrival has been drawn once
   }
 
-  /** The node under the playhead. A real log attributes events to nodes as RECORDED SPANS —
-   * `NodeEntered`/`NodeExited` pairs — not as a denormalised field on every envelope, so this
+  /** The node under the playhead. A real log attributes events to nodes as RECORDED SPANS,
+   * `NodeEntered`/`NodeExited` pairs, not as a denormalised field on every envelope, so this
    * folds the prefix: the node whose open span contains the playhead is the node under it. That
    * is reading recorded structure, never guessing. Outside any span (RunStarted, the gap after an
-   * exit, a budget event) it is null — the canvas lets the operator point at a node instead. */
+   * exit, a budget event) it is null: the canvas lets the operator point at a node instead. */
   private forkNodeAt(n: number): string | null {
     let current: string | null = null;
     for (const e of this.events()) {
@@ -713,14 +713,14 @@ export class Inspector implements AfterViewInit {
     el.innerHTML = `<button class="btn ghost" type="button" id="fork-here-btn">Fork this run…</button>
       <p class="gloss">${
         node
-          ? `From <span class="mono">${esc(node)}</span> — the node under the playhead. Opens the hazard review on the canvas: every write recorded after that node will happen again, and each one needs your say-so.`
+          ? `From <span class="mono">${esc(node)}</span>: the node under the playhead. Opens the hazard review on the canvas: every write recorded after that node will happen again, and each one needs your say-so.`
           : 'The event under the playhead names no node, so this opens the canvas to let you pick the fork point. It will not choose one for you.'
       }</p>`;
   }
 
   /** The scrubber's fork offer, into the ONE fork door the canvas owns. The canvas resolves the
    * run's graph, lands on the canonical `/workflows/<hashPrefix>` URL and opens the hazard review
-   * (or its refusal) — byte-identical to a canvas-originated fork. */
+   * (or its refusal), byte-identical to a canvas-originated fork. */
   onForkHere(event: Event): void {
     if (!(event.target as HTMLElement).closest('#fork-here-btn')) return;
     const runId = this.viewService.runId();
@@ -754,7 +754,7 @@ export class Inspector implements AfterViewInit {
     this.liveMode = mode;
 
     if (mode === 'done') {
-      // The stream is at its terminal frame with the playhead at the head — but "at rest" is not
+      // The stream is at its terminal frame with the playhead at the head, but "at rest" is not
       // "complete". State the run's TRUE resting state (a suspended run is parked, not finished).
       const rest = this.restingState();
       const restText = rest === 'completed' || rest === null ? 'Run complete' : labelOf(rest);
@@ -765,7 +765,7 @@ export class Inspector implements AfterViewInit {
       el.innerHTML = `<span class="live-tag${enter}"><span class="live-dot"></span>Live · following the head</span>`;
       return;
     }
-    el.innerHTML = `<span class="live-tag held${enter}">Held at seq ${n} — ${behind} newer event${behind === 1 ? '' : 's'} recorded</span>
+    el.innerHTML = `<span class="live-tag held${enter}">Held at seq ${n}: ${behind} newer event${behind === 1 ? '' : 's'} recorded</span>
       <button class="link-btn" type="button" id="to-live">Jump to live</button>`;
     const b = el.querySelector<HTMLButtonElement>('#to-live');
     if (b) b.addEventListener('click', () => this.foldAll());
@@ -775,7 +775,7 @@ export class Inspector implements AfterViewInit {
   private setPrefix(n: number): void {
     const clamped = Math.max(0, Math.min(this.events().length, n));
     this.prefixN.set(clamped);
-    // First Receipts step 2 reads the REAL playhead position — this genuine scrub, never a
+    // First Receipts step 2 reads the REAL playhead position: this genuine scrub, never a
     // tutorial event. Ticks silently the first time the playhead sits before the log's end.
     this.firstReceipts.noteScrub(clamped, this.events().length);
   }
@@ -789,7 +789,7 @@ export class Inspector implements AfterViewInit {
   onRangeRelease(): void {
     // Zoneless rendering flushes on the NEXT animation frame, so the render a keypress queued can
     // land after its own keyup. Clearing the class synchronously would make that render read "not
-    // scrubbing" and skip the follow — a keyboard scrub that never chases its boundary. Deferring
+    // scrubbing" and skip the follow, a keyboard scrub that never chases its boundary. Deferring
     // the removal past the flush keeps the predicate true for the gesture's own render, and a
     // re-grab (the next arrow keydown) cancels the pending release.
     clearTimeout(this.releaseTimer);
@@ -801,14 +801,14 @@ export class Inspector implements AfterViewInit {
   }
 
   /**
-   * Scroll the DOCUMENT so the boundary row sits in a comfortable upper band — never
+   * Scroll the DOCUMENT so the boundary row sits in a comfortable upper band: never
    * `scrollIntoView`, which can drag an unrelated ancestor's scroll position along with it. It
    * only nudges when the row has drifted OUT of the band, so a steady drag does not thrash the
    * page. `topGuard` clears the sticky column-head (`.lhead`) rather than a hardcoded pixel
    * figure, since it is measured, not assumed. `bandBottom` tracks the scrubber panel's own top
    * IF it is ever docked at the viewport bottom (this build always renders it as the sticky
    * 340px side column, so that branch is inert today but keeps the contract if a narrow layout
-   * ever docks it) — otherwise the floor is the viewport bottom. Smooth unless reduced motion.
+   * ever docks it), otherwise the floor is the viewport bottom. Smooth unless reduced motion.
    */
   private followBoundary(row: HTMLElement): void {
     const r = row.getBoundingClientRect();
@@ -834,19 +834,19 @@ export class Inspector implements AfterViewInit {
     this.setPrefix(seq + 1);
   }
 
-  /** Which tick is under `clientX` — asked of the strip's own geometry, not a proportion of a
+  /** Which tick is under `clientX`: asked of the strip's own geometry, not a proportion of a
    *  DOM measurement (the off-by-one fix this replaced). Returns -1 for "off the left edge: fold
    *  nothing".
    *
-   *  Pitch is `box.width / n` — the strip's floating-point `getBoundingClientRect().width`
-   *  divided by the tick count — matching `estripTickBox`'s own algebra (`event-model.ts`): `n`
+   *  Pitch is `box.width / n`, the strip's floating-point `getBoundingClientRect().width`
+   *  divided by the tick count, matching `estripTickBox`'s own algebra (`event-model.ts`): `n`
    *  equal-share ticks tile the strip, so each occupies `1/n` of it (the tiny density-scaled gap
    *  budget is within ESTRIP_GAP_MAX_PCT ≈ 0.5% and negligible here). This used to be measured
    *  empirically as `ticks[1].offsetLeft - ticks[0].offsetLeft`, but `offsetLeft` is an INTEGER
-   *  (rounded to the nearest CSS pixel) — once the geometry fix let a dense run's true per-tick
+   *  (rounded to the nearest CSS pixel): once the geometry fix let a dense run's true per-tick
    *  pitch drop under ~2px (a 206-event run in the Scrubber's ~316px column pitches at ~1.3px),
    *  that rounding was a large fraction of the true pitch, and the quantized value it produced
-   *  resolved a center-click on tick i to some OTHER tick — the same off-by-a-few defect the strip
+   *  resolved a center-click on tick i to some OTHER tick: the same off-by-a-few defect the strip
    *  overflow was masking. The analytic pitch has no such rounding: it stays accurate at any n. */
   private tickAt(clientX: number): number {
     const strip = this.stripEl?.nativeElement;
@@ -919,7 +919,7 @@ export class Inspector implements AfterViewInit {
       const b = (e.target as HTMLElement).closest<HTMLElement>('[data-goto]');
       if (b) this.viewService.go('inbox');
     });
-    // the time-travel preview banner's "Jump to live" — folds back to the head of the log
+    // the time-travel preview banner's "Jump to live": folds back to the head of the log
     this.derivedEl?.nativeElement.addEventListener('click', (e) => {
       if ((e.target as HTMLElement).closest('[data-to-live]')) this.foldAll();
     });

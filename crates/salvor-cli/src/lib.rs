@@ -18,6 +18,10 @@
 //! - [`fixture`] is `salvor run --fixture <DIR>`: the offline, self-contained
 //!   fixture directory (agent, input, and a recorded model conversation) and
 //!   the in-process scripted model that serves it.
+//! - [`graph_edit`] is the prompt loop behind `salvor graph edit`: the terminal
+//!   and the filesystem around
+//!   [`salvor_cli_core::graph_editor`], which is the editor itself and performs
+//!   no IO.
 //! - [`render`] is pure value-to-text formatting, shared by the commands.
 //! - [`manifest`] walks clap's own `Command` tree into the machine-readable
 //!   description checked in at `docs/cli-manifest.json`, for a consumer
@@ -53,6 +57,7 @@ pub mod demo_script;
 pub mod demo_tools;
 pub mod dev_server;
 pub mod fixture;
+pub mod graph_edit;
 pub mod manifest;
 pub mod render;
 pub mod serve_kill;
@@ -66,16 +71,34 @@ use anyhow::Result;
 
 use crate::cli::{Cli, Command};
 
+/// The filter installed when the operator has not set `RUST_LOG`: `info` for
+/// every target except `rmcp`, held to `warn`. Any command that resolves an
+/// agent definition can connect to an MCP server the definition declares,
+/// exactly as a run would, and that handshake logs a handful of
+/// `INFO serve_inner: ...` lines under the `rmcp` target that would otherwise
+/// sit between the operator and whatever the command itself prints, on the
+/// very first run before anyone has learned to set `RUST_LOG` at all.
+const DEFAULT_LOG_DIRECTIVE: &str = "info,rmcp=warn";
+
+/// The directive `init_tracing` filters by: `rust_log` verbatim when the
+/// operator set `RUST_LOG`, [`DEFAULT_LOG_DIRECTIVE`] otherwise. Split out
+/// from `init_tracing` so the precedence is checkable without installing the
+/// process-global subscriber, which installs at most once.
+fn log_directive(rust_log: Option<&str>) -> &str {
+    rust_log.unwrap_or(DEFAULT_LOG_DIRECTIVE)
+}
+
 /// Installs the tracing subscriber: human-readable events to stderr, filtered
-/// by `RUST_LOG` (default `info`). Stderr keeps stdout clean for command
-/// output. Idempotent enough for tests: a second call is a no-op rather than a
-/// panic.
+/// by `RUST_LOG` when set, [`DEFAULT_LOG_DIRECTIVE`] otherwise. Stderr keeps
+/// stdout clean for command output. Idempotent enough for tests: a second
+/// call is a no-op rather than a panic.
 pub fn init_tracing() {
     use std::io::IsTerminal;
 
     use tracing_subscriber::{EnvFilter, fmt};
 
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let rust_log = std::env::var("RUST_LOG").ok();
+    let filter = EnvFilter::new(log_directive(rust_log.as_deref()));
     let _ = fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
@@ -106,13 +129,39 @@ pub async fn dispatch(cli: Cli) -> Result<u8> {
         Command::Serve(args) => commands::serve(store, args).await,
         // `build` produces the product from a checkout; it reads no store.
         Command::Build(args) => commands::build(args).await,
+        // `agent hash` reads no store and starts no run: it builds the
+        // definitions it is given and prints what a run would record them as.
+        Command::Agent { command } => match command {
+            crate::cli::AgentCommand::Hash(args) => commands::agent_hash(args).await,
+            crate::cli::AgentCommand::Validate(args) => commands::agent_validate(args).await,
+        },
         Command::Graph { command } => match command {
-            // `validate` and `schema` read no store and drive no run, so they
-            // are synchronous and ignore the store path; `run` drives a graph
-            // over the store, exactly as `salvor run` drives an agent run.
+            // `edit`, `validate` and `schema` read no store and drive no run,
+            // so they ignore the store path; `run` drives a graph over the
+            // store, exactly as `salvor run` drives an agent run. Only `edit`
+            // is awaited among the three, because resolving an agent node's
+            // `--file` builds the definition and that connects to whatever MCP
+            // servers it declares.
+            crate::cli::GraphCommand::Edit(args) => commands::graph_edit(args).await,
             crate::cli::GraphCommand::Validate(args) => commands::graph_validate(args),
             crate::cli::GraphCommand::Schema => commands::graph_schema(),
             crate::cli::GraphCommand::Run(args) => commands::graph_run(store, args).await,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_rust_log_defaults_to_info_with_rmcp_held_to_warn() {
+        assert_eq!(log_directive(None), DEFAULT_LOG_DIRECTIVE);
+    }
+
+    #[test]
+    fn an_explicit_rust_log_wins_verbatim() {
+        assert_eq!(log_directive(Some("debug,rmcp=trace")), "debug,rmcp=trace");
+        assert_eq!(log_directive(Some("off")), "off");
     }
 }

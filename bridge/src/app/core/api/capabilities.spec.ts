@@ -11,7 +11,7 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-describe('CapabilityProbeService — the real GET /v1/capabilities probe', () => {
+describe('CapabilityProbeService: the real GET /v1/capabilities probe', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
@@ -76,7 +76,7 @@ describe('CapabilityProbeService — the real GET /v1/capabilities probe', () =>
     await expect(service.probe()).resolves.toEqual(UNPROBED_CAPABILITIES);
   });
 
-  it('never fabricates fork:true — a capabilities object missing fork decodes to false', async () => {
+  it('never fabricates fork:true: a capabilities object missing fork decodes to false', async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ capabilities: {} }));
     const service = TestBed.inject(CapabilityProbeService);
 

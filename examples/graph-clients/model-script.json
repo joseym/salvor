@@ -1,0 +1,108 @@
+{
+  "settle-and-notify": [
+    {
+      "id": "msg_settle_1",
+      "model": "salvor-demo-model",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "tu_settle_refund",
+          "name": "issue_refund",
+          "input": {
+            "dispute_id": "DSP-4471",
+            "amount_usd": 512.0,
+            "approver": "j.okafor",
+            "note": "Duplicate charge confirmed against INV-90210."
+          }
+        }
+      ],
+      "stop_reason": "tool_use",
+      "usage": { "input_tokens": 240, "output_tokens": 48 }
+    },
+    {
+      "id": "msg_settle_2",
+      "model": "salvor-demo-model",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "tu_settle_notice",
+          "name": "send_notice",
+          "input": {
+            "dispute_id": "DSP-4471",
+            "message": "Your dispute on invoice INV-90210 was approved. A refund of $512.00 has been issued and should reach your account within three business days."
+          }
+        }
+      ],
+      "stop_reason": "tool_use",
+      "usage": { "input_tokens": 300, "output_tokens": 44 }
+    },
+    {
+      "id": "msg_settle_3",
+      "model": "salvor-demo-model",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Refunded $512.00 on DSP-4471 as approved by j.okafor, and told Harborline Freight it is on the way."
+        }
+      ],
+      "stop_reason": "end_turn",
+      "usage": { "input_tokens": 360, "output_tokens": 28 }
+    }
+  ],
+  "small-claims": [
+    {
+      "id": "msg_small_1",
+      "model": "salvor-demo-model",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "tu_small_refund",
+          "name": "issue_refund",
+          "input": {
+            "dispute_id": "DSP-3312",
+            "amount_usd": 47.25,
+            "approver": "auto-settle-policy",
+            "note": "Late-delivery credit under the review threshold; settled without escalation."
+          }
+        }
+      ],
+      "stop_reason": "tool_use",
+      "usage": { "input_tokens": 220, "output_tokens": 44 }
+    },
+    {
+      "id": "msg_small_2",
+      "model": "salvor-demo-model",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "tu_small_notice",
+          "name": "send_notice",
+          "input": {
+            "dispute_id": "DSP-3312",
+            "message": "Your late-delivery credit of $47.25 on invoice INV-90144 has been refunded. No further action is needed."
+          }
+        }
+      ],
+      "stop_reason": "tool_use",
+      "usage": { "input_tokens": 280, "output_tokens": 40 }
+    },
+    {
+      "id": "msg_small_3",
+      "model": "salvor-demo-model",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Settled DSP-3312: refunded $47.25 to Kettle Row Bakery under the auto-settle policy and sent the notice."
+        }
+      ],
+      "stop_reason": "end_turn",
+      "usage": { "input_tokens": 340, "output_tokens": 28 }
+    }
+  ]
+}

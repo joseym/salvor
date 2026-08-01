@@ -25,4 +25,7 @@ clap_complete.workspace = true
 # caller that owns stdout.
 anstyle.workspace = true
 serde_json.workspace = true
+# The graph editor's parse error, which names the command and the token that
+# broke it. A proc macro plus a Display impl, so nothing here reaches the host.
+thiserror.workspace = true
 time.workspace = true

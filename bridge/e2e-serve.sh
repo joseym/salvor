@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# e2e-serve.sh — bring up the Bridge build for the Playwright suite.
+# e2e-serve.sh: bring up the Bridge build for the Playwright suite.
 #
 # It seeds a real Salvor control plane (an OFFLINE demo model, a disposable SQLite store, two
-# agents, two runs — one completed, one budget-exceeded so the waiting group is non-empty),
+# agents, two runs: one completed, one budget-exceeded so the waiting group is non-empty),
 # builds the Angular app, and serves the app + the API on ONE origin
 # from `salvor serve` itself: the ui-enabled server embeds the dashboard and answers both the
 # static app and /v1/* on the same port, so there is no separate proxy and no CORS to configure.
@@ -11,20 +11,20 @@
 # the server is used.
 #
 # Inbox ADDITION, on top of the above, unchanged: one genuine `needs_reconciliation` run,
-# seeded via the repo's own offline reconciliation walkthrough (examples/reconciliation/) — run,
+# seeded via the repo's own offline reconciliation walkthrough (examples/reconciliation/): run,
 # kill mid-write, leave the dangling ToolCallRequested behind. This is additive only: it runs the
 # `salvor` CLI directly against the SAME store `salvor serve` already has open (a fold reads
 # straight off the log, so no HTTP agent registration is needed for the run to appear or for
-# /resolve to work on it — only /resume would need the agent registered, and the Inbox's
+# /resolve to work on it; only /resume would need the agent registered, and the Inbox's
 # reconciliation card never calls resume). The four runs above are untouched; this only adds a
 # fifth. See step 5.5 below.
 #
 # Graph-seeds ADDITION, on top of everything above, unchanged: three real v0.4 graph-engine
 # runs over ONE stored document (`research` agent -> `approve` gate -> `followup` agent), agent and
-# gate nodes ONLY — the stock server's tool registry is empty and wiring a tool node is a Rust
+# gate nodes ONLY: the stock server's tool registry is empty and wiring a tool node is a Rust
 # change out of scope here. Both agent nodes reference the SAME registered demo agent (DEMO_AGENT,
 # step 4), so every agent-node walk genuinely drives demo/agent.toml's 20-turn research loop against
-# the offline model and the salvor-demo-research MCP fixture already up from step 2 — no new
+# the offline model and the salvor-demo-research MCP fixture already up from step 2: no new
 # process, no new Rust. One run is driven to completion (parks at the gate, resumed through the
 # ordinary /resume endpoint), one is left parked at the gate on purpose, and one is a fork of the
 # completed run from the gate boundary. See step 5.6 below, including a note on a discovery made
@@ -34,7 +34,7 @@
 # flow rather than a hazard-free fork.
 #
 # DEFECT A ADDITION, on top of everything above, unchanged: a SECOND stalled seed, the real-world
-# shape (an owner's client-run that died mid model-call, not mid-open) — RunStarted, then a
+# shape (an owner's client-run that died mid model-call, not mid-open): RunStarted, then a
 # ModelCallRequested with no completion, folding to `awaiting_model` rather than `running`. See step
 # 5.4b below, right after the original `running`-shaped stall (5.4). Both shapes must render as
 # stalled; the second is what the derivation's old, narrower rule (`state !== 'running'`) missed.
@@ -77,7 +77,7 @@ FINDINGS="/tmp/salvor-bridge-e2e-findings.txt"
 # above (the MCP research fixture's own file) so the two effect-class stories never share a file.
 TOOL_LEDGER="/tmp/salvor-bridge-e2e-tool-ledger.txt"
 # EXACT-PID TEARDOWN: every background process this script starts records its own $! here, one pid
-# per line, and stop() kills ONLY these recorded pids — never a name/argv pattern. A pattern kill
+# per line, and stop() kills ONLY these recorded pids, never a name/argv pattern. A pattern kill
 # (the old `pkill -f 'salvor .*serve'`) also matches the OWNER'S real server on :8080, whose argv is
 # likewise `salvor … serve …`, and has taken it down as collateral. Exact pids can never match a
 # process this script did not start, so :8080 is structurally safe from this teardown.
@@ -86,7 +86,7 @@ PIDFILE="${PIDFILE:-/tmp/salvor-bridge-e2e.pids}"
 # do not collide with MODEL_PORT/SERVE_ADDR/APP_PORT above. The report path is NOT overridable
 # from here: examples/reconciliation/agent.toml declares RECON_REPORT_PATH literally in its own
 # `[[mcp_servers]] env` table, which wins over anything exported before invoking `salvor run` (an
-# explicit `Command::env` for a key beats whatever the child would otherwise inherit) — so this
+# explicit `Command::env` for a key beats whatever the child would otherwise inherit), so this
 # polls the example's own hardcoded path rather than trying to relocate it.
 RECON_MODEL_PORT="${RECON_MODEL_PORT:-8892}"
 RECON_REPORT="/tmp/salvor-reconciliation-report.txt"
@@ -96,10 +96,10 @@ record_pid() {
   echo "$1" >> "$PIDFILE"
 }
 
-# Tear down ONLY the pids this script recorded — never a pattern. For each recorded pid: SIGTERM it,
+# Tear down ONLY the pids this script recorded, never a pattern. For each recorded pid: SIGTERM it,
 # wait briefly for it to exit, then SIGKILL only that same pid if it is still alive. A pid that is
 # already gone (or was never ours) is skipped. Nothing here consults a process name or argv, so it
-# can never reach a process this script did not start — the owner's :8080 server included.
+# can never reach a process this script did not start, the owner's :8080 server included.
 stop() {
   echo "[e2e-serve] stopping servers (exact recorded pids only)"
   [ -f "$PIDFILE" ] || return 0
@@ -180,7 +180,7 @@ TINY_AGENT=$(curl -s -X POST "${API}/v1/agents" -H 'Content-Type: application/to
 #     registry-resolved-NAME rendering end to end. The Bridge's lookup
 #     (bridge/src/app/core/api/agent-registry.ts) deliberately reads `name` only off a JSON-format
 #     definition's own top-level key, never a TOML body (to avoid mistaking a [[wasm_tools]]
-#     entry's nested `name` for the agent's own identity), so this registers as JSON specifically —
+#     entry's nested `name` for the agent's own identity), so this registers as JSON specifically:
 #     a TOML registration would carry the same schema field but stay invisible to the column, by
 #     design. No run is started against it: registration alone makes the hash resolvable, which is
 #     all the column's lookup (GET /v1/agents/{hash}) needs.
@@ -188,16 +188,16 @@ echo "[e2e-serve] registering a named agent (JSON) so the Agent column has a res
 curl -s -X POST "${API}/v1/agents" -H 'Content-Type: application/json' \
   -d '{"model":"claude-opus-4-8","name":"demo-writer"}' >/dev/null
 
-# 5. Start the runs — TWO completed + TWO budget-exceeded. The suite's row-channel tests need
+# 5. Start the runs: TWO completed + TWO budget-exceeded. The suite's row-channel tests need
 #    both a second WAITING row (besides the cold-seeded selection) and a zebra (odd-index)
 #    NON-waiting row, which needs two terminal rows below the two waiting ones.
 #
 #    Labels addition (additive only, same four runs, labels only): the two
-#    completed DEMO_AGENT runs share one build_id (bld_e2e_alpha) — a real 2-run, non-degenerate
+#    completed DEMO_AGENT runs share one build_id (bld_e2e_alpha): a real 2-run, non-degenerate
 #    build group, both terminal so it also supplies the zebra (odd-index) non-waiting row item 10's
 #    suite already depends on. The first budget-exceeded run gets its OWN build_id (bld_e2e_beta,
 #    a singleton build); the second is left unlabeled, falling back to grouping by its own agent
-#    identity (never guessed into a build it wasn't tagged with) — plus the reconciliation run
+#    identity (never guessed into a build it wasn't tagged with), plus the reconciliation run
 #    below, also genuinely unlabeled. Two distinct build_id values, a multi-run group, and honest
 #    unlabelled runs, all from the same four-run seed the row-channel tests already rely on.
 INPUT='{"topic":"durable execution for AI agents"}'
@@ -212,16 +212,16 @@ curl -s -X POST "${API}/v1/runs" -H 'Content-Type: application/json' \
   -d "{\"agent\":\"${TINY_AGENT}\",\"input\":${INPUT}}" >/dev/null
 
 # 5.4. LIVENESS addition (additive only): one genuinely STALLED run. A client-driven run is opened,
-#      a single RunStarted is appended (so its log folds to `running` — mid-flight and drivable),
+#      a single RunStarted is appended (so its log folds to `running`, mid-flight and drivable),
 #      and then its drive-token lease is left to lapse: nothing drives it again. With
 #      SALVOR_CLIENT_LEASE_TTL_SECS=2 (set on serve, step 3), the lease lapses within seconds and is
-#      never refreshed, so GET /v1/runs reports this run as `running` with `driver: "none"` — the
+#      never refreshed, so GET /v1/runs reports this run as `running` with `driver: "none"`, the
 #      exact evidence the dashboard folds into a `stalled` verdict (running + driverless + stale).
 #      Seeded EARLY, before the slow reconciliation and graph seeds below, so its last event is
 #      comfortably older than the client-side stall grace by the time the suite runs.
 #
 #      Its `agent_def_hash` is a READABLE LABEL (`stalled_demo_v1`), not a `sha256:` hash, so the
-#      Agent column renders it as-is and never issues a GET /v1/agents/{hash} — a hash there would
+#      Agent column renders it as-is and never issues a GET /v1/agents/{hash}; a hash there would
 #      404 (this run is registered under no agent) and trip the suite's zero-console-errors gate.
 echo "[e2e-serve] seeding a STALLED client-driven run (opened, RunStarted appended, lease left to lapse)"
 STALL_OPEN=$(curl -s -X POST "${API}/v1/client-runs" -H 'Content-Type: application/json' -d '{}')
@@ -250,19 +250,19 @@ fi
 echo "[e2e-serve] stalled run seeded: ${STALL_RUN} (folds to running; lease lapses in ~2s and is never refreshed)"
 
 # 5.4b. LIVENESS addition, second shape (additive only): the REAL-WORLD stall. The owner's actual
-#       abandoned client-runs did not die between steps (the shape step 5.4 seeds) — they died
+#       abandoned client-runs did not die between steps (the shape step 5.4 seeds); they died
 #       MID MODEL-CALL: a RunStarted, then a ModelCallRequested with no completion, so they fold to
 #       `awaiting_model`, never literal `running`. This is exactly the shape defect A's fix widens
 #       the stalled derivation to cover (the in-progress family, not just `running`).
 #
 #       A client-run is opened, RunStarted appended, then one model-step is requested with a
-#       request body that cannot match any scripted turn in demo_script (an empty `messages` array —
+#       request body that cannot match any scripted turn in demo_script (an empty `messages` array:
 #       the script's shortest scripted turn carries 1 message). The server's write-ahead rule
 #       (client_runs.rs#model_step) durably records the ModelCallRequested intent BEFORE contacting
 #       the provider; the provider then answers with its own scripted 500 ("no scripted response"),
 #       the executor call fails, and model_step returns an error with the intent already on the log
 #       and no completion ever written. No process is killed and nothing is retried, so the intent
-#       is genuinely, permanently dangling — the log folds to `awaiting_model` for good. Its lease
+#       is genuinely, permanently dangling: the log folds to `awaiting_model` for good. Its lease
 #       then lapses exactly as step 5.4's does (same SALVOR_CLIENT_LEASE_TTL_SECS=2).
 echo "[e2e-serve] seeding a second STALLED client-driven run, the real-world shape (died mid model-call, folds to awaiting_model)"
 STALL2_OPEN=$(curl -s -X POST "${API}/v1/client-runs" -H 'Content-Type: application/json' -d '{}')
@@ -284,7 +284,7 @@ curl -s -X POST "${API}/v1/client-runs/${STALL2_RUN}/events" \
   -H 'Content-Type: application/json' -H "x-drive-token: ${STALL2_TOKEN}" \
   --data-binary @/tmp/salvor-bridge-e2e-stall2-events.json > /tmp/salvor-bridge-e2e-stall2-append.json
 # An unscripted model-step: demo-model has no turn scripted for 0 messages, so it answers 500 and
-# the executor call fails — but only AFTER the intent was durably written write-ahead. The step
+# the executor call fails, but only AFTER the intent was durably written write-ahead. The step
 # itself is expected to error; only the resulting log state matters below.
 curl -s -X POST "${API}/v1/client-runs/${STALL2_RUN}/model-step" \
   -H 'Content-Type: application/json' -H "x-drive-token: ${STALL2_TOKEN}" \
@@ -297,14 +297,14 @@ fi
 echo "[e2e-serve] second stalled run seeded: ${STALL2_RUN} (folds to awaiting_model, dangling model intent; lease lapses in ~2s and is never refreshed)"
 
 # 5.4c. ABANDON addition (additive only): one genuinely ABANDONED run, so every abandoned treatment
-#       is demonstrable end to end — the muted `abandoned` pill in the Runs ledger, `status:abandoned`
+#       is demonstrable end to end: the muted `abandoned` pill in the Runs ledger, `status:abandoned`
 #       in the filter, the run counting as TERMINAL (never attention) in the health strip, and the
 #       Inspector's abandoned terminal banner with its recorded reason. It is seeded as a stalled-
 #       shaped run (a client-run with a single RunStarted, folding to `running`) that is then RETIRED
-#       through the real operator endpoint POST /v1/runs/{id}/abandon — exactly the "we do not care
+#       through the real operator endpoint POST /v1/runs/{id}/abandon, exactly the "we do not care
 #       about this run anymore" path the feature exists for. No lease and no drive token: abandon is
 #       an operator action over the store, not a driver step. Kept separate from the two live stalled
-#       seeds above (5.4/5.4b), which must STAY stalled for the Inbox's stalled-card demos — this one
+#       seeds above (5.4/5.4b), which must STAY stalled for the Inbox's stalled-card demos; this one
 #       leaves the stalled family the instant it is abandoned, which is the whole point.
 echo "[e2e-serve] seeding an ABANDONED run (opened, RunStarted appended, then retired via POST /abandon)"
 ABANDON_OPEN=$(curl -s -X POST "${API}/v1/client-runs" -H 'Content-Type: application/json' -d '{}')
@@ -334,17 +334,17 @@ if [ "$ABANDON_STATE" != "abandoned" ]; then
 fi
 echo "[e2e-serve] abandoned run seeded: ${ABANDON_RUN} (retired via /abandon; folds to abandoned, reason recorded)"
 
-# 5.5. Inbox addition: one needs_reconciliation run, via the CLI directly against $STORE (additive —
+# 5.5. Inbox addition: one needs_reconciliation run, via the CLI directly against $STORE (additive:
 #      the four runs above are untouched). Mirrors examples/reconciliation/run.sh's own stages 1-2
 #      (run, kill mid-write) without its later resolve/resume stages: this build's Inbox performs
 #      those itself, live, in the suite trial and in the browser.
 #
 #      Labels addition: also register this agent against the SAME serve process
-#      over HTTP (idempotent by content hash — `created` comes back false since the CLI run below
+#      over HTTP (idempotent by content hash: `created` comes back false since the CLI run below
 #      already built it once into $STORE; this registers it into `salvor serve`'s own in-memory
 #      registry too, which is separate and process-local). Without this, the reconciliation run's
 #      agent_def_hash is registered nowhere the browser can ask about, so the Runs ledger's agent
-#      column (GET /v1/agents/{hash}) gets a genuine 404 for it on every load — and Chromium logs
+#      column (GET /v1/agents/{hash}) gets a genuine 404 for it on every load, and Chromium logs
 #      that 404 to the console regardless of how gracefully the app's own JS handles the rejection,
 #      which trips this suite's zero-console-errors gate on every test that touches Runs. The run
 #      itself is unaffected: it already finished driving via the CLI before this registers.
@@ -376,11 +376,11 @@ for _ in $(seq 1 100); do
   sleep 0.1
 done
 if [ -z "$RECON_RUN_ID" ]; then
-  echo "[e2e-serve] WARNING: the reconciliation run never printed its id — no needs_reconciliation seed this run" >&2
+  echo "[e2e-serve] WARNING: the reconciliation run never printed its id; no needs_reconciliation seed this run" >&2
   cat /tmp/salvor-bridge-e2e-recon-run.err >&2 || true
 else
   # write-ahead ordering: once the report line is on disk, the intent is durably recorded and the
-  # tool is blocking with no completion yet — the exact dangling-write window (see the example's
+  # tool is blocking with no completion yet: the exact dangling-write window (see the example's
   # own README for the full argument).
   for _ in $(seq 1 200); do
     [ -s "$RECON_REPORT" ] && break
@@ -391,7 +391,7 @@ else
     kill -9 "$RECON_RUN_PID" 2>/dev/null || true
     wait "$RECON_RUN_PID" 2>/dev/null || true
   else
-    echo "[e2e-serve] WARNING: the reconciliation write never landed — no needs_reconciliation seed this run" >&2
+    echo "[e2e-serve] WARNING: the reconciliation write never landed; no needs_reconciliation seed this run" >&2
     cat /tmp/salvor-bridge-e2e-recon-run.err >&2 || true
   fi
 fi
@@ -413,13 +413,13 @@ wait "$RECON_MODEL_PID" 2>/dev/null || true
 #      Seed A (graph-run-completed): started, awaited to the gate, resumed with {"approved":true}
 #      through the ORDINARY /v1/runs/{id}/resume endpoint (no graph-specific verb), awaited to
 #      completion.
-#      Seed B (graph-run-parked): started, awaited to the gate, left suspended on purpose — a
+#      Seed B (graph-run-parked): started, awaited to the gate, left suspended on purpose, a
 #      second, independent parked run.
 #      Seed C (graph-run-forked): forks seed A from the "approve" gate boundary. A dry run first
 #      discovers the exact hazard seqs (found empirically while writing this seed: forking past
 #      "approve" is NOT hazard-free here, because "followup" is the SAME demo agent and its own
 #      internal save_finding MCP calls are real Effect::Write tool calls sitting in the origin's
-#      log — the fork engine's hazard scan is a flat per-run log scan with no node-kind filter, so
+#      log; the fork engine's hazard scan is a flat per-run log scan with no node-kind filter, so
 #      it sees them same as it would a graph tool node's write), then the real fork acknowledges
 #      exactly those seqs. The child re-enters "approve" fresh (a fork's prefix ends BELOW the fork
 #      node's NodeEntered, so the origin's Resumed event is excluded) and is left parked there,
@@ -731,7 +731,7 @@ cat <<EOF
 Run the suite from the e2e suite directory:
   TARGET_URL=${API}/ ./run.sh 01-boot.spec.js 05-routes-and-deeplinks.spec.js
 
-Tear down (kills ONLY the exact pids this run recorded in ${PIDFILE} — never a name pattern,
+Tear down (kills ONLY the exact pids this run recorded in ${PIDFILE}, never a name pattern,
 so the owner's :8080 server is never matched):
   bridge/e2e-serve.sh --stop
 EOF

@@ -162,8 +162,21 @@ impl McpServer {
                 // The server's input schema is a JSON object; surface it as a
                 // `Value` so it sits alongside a native tool's schema unchanged.
                 let input_schema = Value::Object((*tool.input_schema).clone());
+                // The server's output schema is optional on the wire (most
+                // tools declare none); converted the same way as the input
+                // schema when present.
+                let output_schema = tool
+                    .output_schema
+                    .map(|schema| Value::Object((*schema).clone()));
                 let effect = effect_for(&name, tool.annotations.as_ref(), overrides);
-                McpTool::new(peer.clone(), name, description, input_schema, effect)
+                McpTool::new(
+                    peer.clone(),
+                    name,
+                    description,
+                    input_schema,
+                    output_schema,
+                    effect,
+                )
             })
             .collect();
 

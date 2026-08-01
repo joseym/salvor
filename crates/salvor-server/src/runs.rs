@@ -151,16 +151,16 @@ pub async fn start(
 }
 
 /// `GET /v1/runs`: one entry per run with its folded status, plus per-run
-/// `usage` totals, `step_count`, `agent_def_hash`, `labels`, and `driver` —
+/// `usage` totals, `step_count`, `agent_def_hash`, `labels`, and `driver`:
 /// additive fields folded from the SAME log read and the SAME [`derive_state`]
 /// call this handler has always run for `status`. No second read of the log and
 /// no second fold pass: `usage` comes straight off the already-derived
 /// [`RunState`](salvor_core::RunState), and `step_count`/`agent_def_hash`/
 /// `labels` are read off the same in-memory `log` slice already in hand.
 ///
-/// `driver` is the run's liveness evidence — `"attached"` when a driver is
+/// `driver` is the run's liveness evidence: `"attached"` when a driver is
 /// currently running it (a live server task or a current client lease),
-/// `"none"` when none is, and omitted entirely for a terminal run — see
+/// `"none"` when none is, and omitted entirely for a terminal run. See
 /// [`driver_evidence`]. It reads no log: it consults only the process's own
 /// driving-run set and client-run leases, the truth the server already holds.
 /// The newest envelope's `last_recorded_at` (already carried, unchanged) is the
@@ -181,7 +181,7 @@ pub async fn start(
 /// "unknown":
 ///
 /// - **The log folds.** `usage` and `step_count` are always present and are
-///   real counts — a run with no model calls truthfully folds to
+///   real counts: a run with no model calls truthfully folds to
 ///   `step_count: 0` and `usage: {"input_tokens": 0, "output_tokens": 0}`.
 ///   `agent_def_hash` is read off the run's `RunStarted` event, which is
 ///   recorded first on every started run by construction, so it is present
@@ -190,7 +190,7 @@ pub async fn start(
 ///   invent a value for. `labels` is the same `Option` treatment one step
 ///   further: absent whenever the run recorded none (an unlabeled run, or an
 ///   old run from before labels existed), and *also* absent when the
-///   recorded value is an explicit empty map — the API never emits `"labels":
+///   recorded value is an explicit empty map: the API never emits `"labels":
 ///   {}`, because an empty map is not a fact worth claiming any more than an
 ///   unknown count is. A run that recorded at least one label reports exactly
 ///   what was recorded, and only that.
@@ -208,7 +208,7 @@ pub async fn start(
 ///   and `last_recorded_at` stay present, since they never depended on that
 ///   read. This is strictly additive: before this change such a run took
 ///   the whole request down (a `500`), so no existing consumer ever
-///   observed — or could have pinned — a shape for this case.
+///   observed (or could have pinned) a shape for this case.
 ///
 /// [`StoreError::Serialization`]: salvor_store::StoreError::Serialization
 /// [`StoreError::Backend`]: salvor_store::StoreError::Backend
@@ -394,7 +394,7 @@ pub async fn resume(
             }
             // A graph run is an ordinary run with a richer log: the classify,
             // the input validation above, and the request/response contract are
-            // all shared. Only the re-drive differs — a graph run continues over
+            // all shared. Only the re-drive differs: a graph run continues over
             // the engine, resolving its document by the hash the log records,
             // where an agent run rebuilds its agent and continues the built-in
             // loop. This is the sole graph-specific branch the resume path needs.
@@ -467,8 +467,8 @@ pub async fn resolve(
 /// action. It validates the run is non-terminal, appends the abandonment
 /// server-stamped through the runtime (which computes and records the
 /// outstanding write from the log's dangling intent when the run needs
-/// reconciliation), and returns the receipt shape — the appended seq and the
-/// re-derived status — exactly as resolve does.
+/// reconciliation), and returns the receipt shape (the appended seq and the
+/// re-derived status) exactly as resolve does.
 ///
 /// # Why no lease
 ///
@@ -477,7 +477,7 @@ pub async fn resolve(
 /// the store whatever drove it (a server task, a client SDK, or nothing at all
 /// anymore): the very case it exists for is a run no driver is coming back to.
 /// The append-guard's terminal rule is the only concurrency protection it
-/// needs — a run that reached a terminal first refuses the abandonment.
+/// needs: a run that reached a terminal first refuses the abandonment.
 ///
 /// # Refusals
 ///
@@ -577,14 +577,14 @@ async fn rebuild_agent(state: &AppState, log: &[EventEnvelope]) -> Result<BuiltA
 
 /// The liveness evidence for a run: whether a driver is currently attached to
 /// it, or none is. The server reports this evidence; the dashboard derives the
-/// `stalled` verdict from it (a `running` run with no driver, gone stale) — the
+/// `stalled` verdict from it (a `running` run with no driver, gone stale): the
 /// same division of labor `status` itself has, where the server folds the log
 /// and the client reads the fold.
 ///
 /// # What "attached" means, from evidence the server already holds
 ///
 /// - A **server-driven** run is attached exactly when a driver task is still
-///   running it in this process ([`AppState::is_run_active`]) — the same fact
+///   running it in this process ([`AppState::is_run_active`]): the same fact
 ///   the event stream's `detached` end-frame already reports (see `sse.rs`).
 ///   The task is removed the instant it ends (completes, parks, or errors), so
 ///   `is_run_active` is exact, not a heuristic.

@@ -1,0 +1,597 @@
+{
+  "$defs": {
+    "AgentNode": {
+      "additionalProperties": false,
+      "description": "An `agent` node: a full agent loop referenced by content hash.",
+      "properties": {
+        "agent_hash": {
+          "description": "Content hash of the agent definition (model, prompt, tools, budget) this\nnode runs, in `sha256:<64 lowercase hex>` form. A hash, never an\nembedded definition: that keeps this crate independent of the\nagent-definition schema and lets the same definition be shared across\nnodes and runs by identity.",
+          "type": "string"
+        },
+        "id": {
+          "description": "The node's stable id, unique within the document.",
+          "type": "string"
+        },
+        "input_schema": {
+          "description": "Optional JSON Schema for the payload this node consumes. Additive: absent\non the wire when unset."
+        },
+        "name": {
+          "description": "Optional short display label for this node. See the module docs' \"The\noptional node display name\" section for the bound and the deliberate\nhash-inclusion contrast with the agent `name` field. Additive: absent\non the wire when unset.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "output_schema": {
+          "description": "Optional JSON Schema for the payload this node produces."
+        }
+      },
+      "required": [
+        "id",
+        "agent_hash"
+      ],
+      "type": "object"
+    },
+    "BranchCase": {
+      "additionalProperties": false,
+      "description": "One case of a [`BranchNode`]: a name and the condition that selects it.\n\nThe realized routing (which downstream node a fired case flows to) is\ncarried by an [`Edge`] whose `label` matches the case `name`, so topology\nstays entirely in the edge list and a branch has real outbound edges.",
+      "properties": {
+        "name": {
+          "description": "The case name. An edge labeled with this name realizes the route.",
+          "type": "string"
+        },
+        "when": {
+          "$ref": "#/$defs/BranchCondition",
+          "description": "The condition that selects this case. Data only, never evaluated here."
+        }
+      },
+      "required": [
+        "name",
+        "when"
+      ],
+      "type": "object"
+    },
+    "BranchCondition": {
+      "description": "How a [`BranchCase`] is selected. Modeled as data; not evaluated in this\ncrate.\n\nAdjacently tagged (`{\"kind\": \"...\", \"value\": ...}`) so it stays additive:\na future condition kind is a new variant, which does not change how an\nexisting document encodes.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "A constrained boolean expression over the routed value, recorded as an\nopaque string. NOT parsed or evaluated in this crate.",
+          "properties": {
+            "kind": {
+              "const": "expression",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The case is chosen by a model decision at run time, recorded as an event.\nCarries no author-time data.",
+          "properties": {
+            "kind": {
+              "const": "model_decision",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "BranchNode": {
+      "additionalProperties": false,
+      "description": "A `branch` node: routes on a typed output.",
+      "properties": {
+        "agent_hash": {
+          "description": "Content hash of the agent that decides a [`BranchCondition::ModelDecision`]\ncase, in `sha256:<64 lowercase hex>` form. Present only on a branch that\ncarries a model-decision case: the engine drives this agent with the\nrouted value and maps its reply to a case name. Additive: absent on the\nwire when unset, so a purely expression-driven branch (and every document\nwritten before this field existed) serializes byte for byte as before.\n[`crate::validate`] reports a model-decision case with no agent here as a\nnode-precise error.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cases": {
+          "description": "The cases, each a named condition. An expression condition is evaluated\nagainst the routed value; a model-decision condition is resolved by the\nnode's [`agent_hash`](Self::agent_hash) agent. The first matching case in\nauthor order wins, and the engine records the choice as a\n[`crate::document`]-external `BranchTaken` event.",
+          "items": {
+            "$ref": "#/$defs/BranchCase"
+          },
+          "type": "array"
+        },
+        "id": {
+          "description": "The node's stable id, unique within the document.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Optional short display label for this node. See the module docs' \"The\noptional node display name\" section for the bound and the deliberate\nhash-inclusion contrast with the agent `name` field. Additive: absent\non the wire when unset.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "on": {
+          "description": "Optional opaque reference to the typed value the branch routes on.\nRecorded as DATA; not resolved in this crate.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "cases"
+      ],
+      "type": "object"
+    },
+    "Edge": {
+      "additionalProperties": false,
+      "description": "A directed edge: a typed payload flows from one node to another.\n\nEdges are the single source of graph topology. Referential integrity, the\nacyclic check, and the entry/terminal summary all read the edge list. No\nports are modeled here; a `port` pair is a documented additive\nfollow-up.",
+      "properties": {
+        "from": {
+          "description": "The source node id.",
+          "type": "string"
+        },
+        "label": {
+          "description": "Optional label. When the source is a [`BranchNode`], this names the\n[`BranchCase`] this edge realizes. Data only.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "to": {
+          "description": "The destination node id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ],
+      "type": "object"
+    },
+    "FoldBody": {
+      "description": "The body a [`FoldNode`] runs each pass. Adjacently tagged, mirroring\n[`MapBody`], so adding a third form later stays additive. A `node` body names\nan existing node by id (checked for existence during validation); a\n`subgraph` body embeds a whole [`Graph`] and is deferred exactly as the map's\nsubgraph body is.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Run each pass through an existing node in this document, by id.",
+          "properties": {
+            "kind": {
+              "const": "node",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Run each pass through an embedded sub-graph. Boxed because a `Graph`\ncontains nodes, one of which may itself be a `fold`, so the type is\nrecursive.",
+          "properties": {
+            "kind": {
+              "const": "subgraph",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "FoldJoin": {
+      "description": "How a [`FoldNode`] folds its passes into the single value it produces.\n\nAdjacently tagged (`{\"kind\": \"...\", \"value\": ...}` for the variant that\ncarries data, `{\"kind\": \"...\"}` for the unit variants) so a future join rule\nis a new variant that does not change how an existing document encodes,\nexactly like [`BranchCondition`].\n\nThe variants are grounded in what the AARG loop actually needs. `best_by` is\nthe argmax winner the loop's \"best draft wins, never the last pass\" rule\nrequires; `last` and `all` are the two obvious simpler folds a different\nconsumer might want.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Produce the pass whose value MAXIMIZES the given reference (a path into\nthe accumulated value, `score` or `review.overall_score`). This is the\nargmax the AARG loop needs: the best draft wins, never the last. The\nreference is parsed at submit like a [`crate::expr`] path, so a malformed\none is a node-precise error.",
+          "properties": {
+            "kind": {
+              "const": "best_by",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Produce the value of the last pass the loop ran.",
+          "properties": {
+            "kind": {
+              "const": "last",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Produce every pass's value as a list, in pass order.",
+          "properties": {
+            "kind": {
+              "const": "all",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "FoldNode": {
+      "additionalProperties": false,
+      "description": "A `fold` node: bounded iteration that accumulates across passes.\n\nModels an adversarial refine loop as one node: a `body` is run up to\n`max_iterations` times, each pass folding into an accumulated value, and the\nloop stops when `stop_when` holds over that value (or the bound is reached).\nThe `join` rule then selects the value the node produces. Every field is\nauthor-time data; this crate never runs the loop.\n\nGrounded in the AARG tailor loop the graph wiring models: bounded revisions\n(`max_iterations`), a stop predicate over the accumulated score\n(`stop_when`, an expression in the same language a branch case uses), and an\nargmax winner (`join` = [`FoldJoin::BestBy`] over the score). See the\ncrate-level docs and the graph wiring plan.",
+      "properties": {
+        "accumulator_schema": {
+          "description": "Optional JSON Schema for the accumulated value the loop carries and\nproduces. Data only, like an [`AgentNode`]'s `output_schema`: recorded\nfor authoring and tooling, never wired into the edge type-compatibility\ncheck (a fold's produced-value semantics are not implemented with\nits execution). Additive: absent on the wire when unset."
+        },
+        "body": {
+          "$ref": "#/$defs/FoldBody",
+          "description": "What each pass runs: a node already in this document, or an embedded\nsub-graph. Not implemented exactly as [`MapBody`]'s subgraph form is not:\nthe shape is legal, but no engine runs it yet."
+        },
+        "id": {
+          "description": "The node's stable id, unique within the document.",
+          "type": "string"
+        },
+        "join": {
+          "$ref": "#/$defs/FoldJoin",
+          "description": "How the passes are folded into the value the node produces."
+        },
+        "max_iterations": {
+          "description": "The iteration bound: the most passes the loop may run. Must be at least\n1; [`crate::validate`] reports a zero bound by node id.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "description": "Optional short display label for this node. See the module docs' \"The\noptional node display name\" section for the bound and the deliberate\nhash-inclusion contrast with the agent `name` field. Additive: absent\non the wire when unset.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stop_when": {
+          "description": "A boolean expression over the accumulated value that stops the loop when\nit holds. Written in the [`crate::expr`] condition language, the same one\na [`BranchCondition::Expression`] uses, and validated at submit so a\nmalformed predicate is a node-precise error, never a run-time failure.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "body",
+        "max_iterations",
+        "stop_when",
+        "join"
+      ],
+      "type": "object"
+    },
+    "GateNode": {
+      "additionalProperties": false,
+      "description": "A `gate` node: human approval that suspends the run.",
+      "properties": {
+        "approval_schema": {
+          "description": "JSON Schema the human approval input must satisfy, mirroring the recorded\n`Suspended` event's `input_schema`. Required: a gate with no declared\napproval shape is meaningless."
+        },
+        "id": {
+          "description": "The node's stable id, unique within the document.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Optional short display label for this node. See the module docs' \"The\noptional node display name\" section for the bound and the deliberate\nhash-inclusion contrast with the agent `name` field. Additive: absent\non the wire when unset.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prompt": {
+          "description": "Optional human-readable prompt shown in the approval inbox.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "approval_schema"
+      ],
+      "type": "object"
+    },
+    "MapBody": {
+      "description": "The body a [`MapNode`] maps each element through.\n\nAdjacently tagged, so adding a third form later is additive. A `node` body\nnames an existing node by id (checked for existence during validation); a\n`subgraph` body embeds a whole [`Graph`].",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Map each element through an existing node in this document, by id.",
+          "properties": {
+            "kind": {
+              "const": "node",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Map each element through an embedded sub-graph. Boxed because a `Graph`\ncontains nodes, one of which may be a `map`, so the type is recursive.",
+          "properties": {
+            "kind": {
+              "const": "subgraph",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "MapNode": {
+      "additionalProperties": false,
+      "description": "A `map` node: fan-out a sub-run per element of a typed list, with a\nconcurrency cap.",
+      "properties": {
+        "body": {
+          "$ref": "#/$defs/MapBody",
+          "description": "What each element is mapped through: a node already in this document, or\nan embedded sub-graph."
+        },
+        "concurrency": {
+          "description": "The maximum number of sub-runs in flight at once. Must be at least 1;\n[`crate::validate`] reports a non-positive cap by node id.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "description": "The node's stable id, unique within the document.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Optional short display label for this node. See the module docs' \"The\noptional node display name\" section for the bound and the deliberate\nhash-inclusion contrast with the agent `name` field. Additive: absent\non the wire when unset.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "output_schema": {
+          "description": "Optional JSON Schema for the joined list this node produces."
+        },
+        "over": {
+          "description": "Opaque reference to the typed list this node fans out over. Data only,\nnot resolved in this crate.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "over",
+        "concurrency",
+        "body"
+      ],
+      "type": "object"
+    },
+    "Node": {
+      "description": "One node in a graph: exactly one of the six kinds the runtime knows how to\nexecute.\n\nAdjacently tagged like the event enum: each node serializes as `{\"kind\":\n\"...\", \"payload\": {...}}`. The tag (`kind`) and content (`payload`) live in\nseparate keys, which never collides with a payload field and does not force\npayloads to be JSON objects. `deny_unknown_fields` on the enum rejects any\nkey other than `kind` and `payload`.\n\nThe stable node id lives inside each payload (every payload struct carries\nan `id`), reachable generically through [`Node::id`]. Keeping the id in the\npayload is what lets the outer shape stay exactly the two-key adjacent\ntagging the event log uses, with no third common field to special-case.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "A full agent loop (model, prompt, tools, budget). The whole v0.1 product\nbecomes one node kind. It references its agent definition BY CONTENT\nHASH, never an embedded definition, so this crate stays a leaf that does\nnot depend on the agent-definition schema.",
+          "properties": {
+            "kind": {
+              "const": "agent",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/AgentNode"
+            }
+          },
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A single direct tool invocation, no model in the loop.",
+          "properties": {
+            "kind": {
+              "const": "tool",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/ToolNode"
+            }
+          },
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Human approval: suspends the graph run and renders in the approval\ninbox.",
+          "properties": {
+            "kind": {
+              "const": "gate",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/GateNode"
+            }
+          },
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Routes on a typed output. The cases (conditions and their names) are\nrecorded as DATA here; this crate never evaluates them.",
+          "properties": {
+            "kind": {
+              "const": "branch",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/BranchNode"
+            }
+          },
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Fan-out: spawn a sub-run per element of a typed list, join on\ncompletion, with a concurrency cap.",
+          "properties": {
+            "kind": {
+              "const": "map",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/MapNode"
+            }
+          },
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Bounded iteration: run a body repeatedly, accumulating across passes,\nuntil a stop predicate holds or an iteration bound is reached, then join\nthe passes into one value. Models an adversarial refine loop (draft,\nscore, review, revise) as one node. Execution is not implemented: the\nfold exists in the format, the validator, the projection, and the\ncanvas; the engine records a typed refusal for it.",
+          "properties": {
+            "kind": {
+              "const": "fold",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/FoldNode"
+            }
+          },
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ToolNode": {
+      "additionalProperties": false,
+      "description": "A `tool` node: one direct tool invocation.",
+      "properties": {
+        "id": {
+          "description": "The node's stable id, unique within the document.",
+          "type": "string"
+        },
+        "input": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "The input mapping: tool input field name to an opaque source reference.\nRecorded as DATA; this crate does not resolve or evaluate the references.\nAdditive: omitted on the wire when empty.",
+          "type": "object"
+        },
+        "input_schema": {
+          "description": "Optional JSON Schema for the payload this node consumes."
+        },
+        "name": {
+          "description": "Optional short display label for this node. See the module docs' \"The\noptional node display name\" section for the bound and the deliberate\nhash-inclusion contrast with the agent `name` field. Additive: absent\non the wire when unset.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "output_schema": {
+          "description": "Optional JSON Schema for the payload this node produces."
+        },
+        "tool": {
+          "description": "The tool's name, as registered with the runtime.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "tool"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A graph document: the control document authored once, submitted, hashed into\na run, and then frozen. It carries the schema version, the set of nodes\n(each with a stable string id), and the edges that connect them.\n\nSerializing a `Graph` always includes `schema_version`, so the wire form is\nself-describing. Unknown top-level keys are rejected.",
+  "properties": {
+    "edges": {
+      "default": [],
+      "description": "The directed edges connecting nodes. A document with a single node and\nno edges is legal, so this defaults to empty.",
+      "items": {
+        "$ref": "#/$defs/Edge"
+      },
+      "type": "array"
+    },
+    "nodes": {
+      "description": "The nodes, each identified by a stable string id unique within the\ndocument.",
+      "items": {
+        "$ref": "#/$defs/Node"
+      },
+      "type": "array"
+    },
+    "schema_version": {
+      "description": "The document schema version. Always [`SCHEMA_VERSION`] for documents\nthis build writes; an older value may appear when reading a recorded\ndocument.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema_version",
+    "nodes"
+  ],
+  "title": "Graph",
+  "type": "object"
+}

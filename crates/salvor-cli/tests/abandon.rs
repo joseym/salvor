@@ -56,6 +56,7 @@ async fn seed_dangling_write(path: &Path) -> RunId {
             input: json!({"doc": "otters"}),
             effect: Effect::Write,
             idempotency_key: None,
+            performed_by: None,
         },
     ];
     for (i, event) in events.into_iter().enumerate() {

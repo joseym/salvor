@@ -92,11 +92,14 @@ codes:
 | GET | `/v1/graphs/{hash}` | Read one stored graph document back |
 | POST | `/v1/graphs/validate` | Validate a document without storing it |
 | POST | `/v1/graph-runs` | Start a run of a stored graph |
+| GET | `/v1/client-tools` | List the client-performed tool declarations this server holds |
 | POST | `/v1/client-runs` | Open or resume a client-driven run |
 | GET | `/v1/client-runs/{id}/log` | Read a client-driven run's recorded log |
 | POST | `/v1/client-runs/{id}/events` | Append control and context events (the guarded append) |
 | POST | `/v1/client-runs/{id}/model-step` | Perform and record a model call (server-performed) |
 | POST | `/v1/client-runs/{id}/tool-step` | Perform and record a tool call (server-performed) |
+| POST | `/v1/client-runs/{id}/client-tool-intent` | Open a tool call the CLIENT performs, and derive its idempotency key |
+| POST | `/v1/client-runs/{id}/client-tool-completion` | Record what a client-performed tool call returned |
 | POST | `/v1/client-runs/{id}/resolve` | Record a dangling write's completion by hand (client-driven) |
 
 ### POST /v1/agents
@@ -777,6 +780,54 @@ child onward from the fork node, refusing any write the re-walked segment would
 re-fire until `--acknowledge-writes` covers it. Same refuse-then-record contract
 as the endpoint, exit 1 on an unacknowledged hazard.
 
+## Client-performed tools
+
+### GET /v1/client-tools
+
+Every client-performed tool declaration this server was started with: the
+tools an operator declared with `salvor serve --client-tool <FILE>`, which the
+client runs itself, in its own process (see `POST
+/v1/client-runs/{id}/client-tool-intent` below). This server holds no code for
+them; the declaration is name, effect, and schemas, nothing else.
+
+This is how a client-driven loop gets the model's function definitions. A
+declaration's `input_schema` IS the tool's parameter schema, the exact one
+this server checks a client-tool intent's input against, published here so a
+client never keeps a second copy of it that can quietly drift from the one
+the server validates against.
+
+No drive token: this lists server configuration, not run state, so it sits
+behind only the bearer-auth layer every other `/v1` route sits behind.
+
+- Response `200`:
+
+```json
+{
+  "client_tools": [
+    {
+      "name": "charge_card",
+      "effect": "write",
+      "input_schema": { "type": "object", "required": ["amount_cents"], "...": "..." },
+      "output_schema": { "type": "object", "required": ["charge_id"], "...": "..." },
+      "trust_completion": true
+    }
+  ]
+}
+```
+
+`output_schema` is present only when the declaration carries one, following
+the zero-vs-absent rule `GET /v1/agents` already applies to `name`: a tool
+declared without an output schema cannot be self-completed by a client (see
+`client-tool-completion` below), and there is no genuinely empty schema to
+fall back to, so the key is omitted entirely rather than sent as `null`.
+
+A server started with no `--client-tool` files answers `{ "client_tools": [] }`,
+not an error: nothing declared is a complete, honest state, the same one every
+client-tool intent already answers with a clean `unknown_tool`.
+
+Declarations are loaded by the operator and are never registered over HTTP;
+see `client-tool-intent` below for why that is not an omission.
+
 ## Client-driven runs
 
 Everything above is the server-driven control plane: the server owns the loop
@@ -903,7 +954,12 @@ Semantics, keyed by sequence number:
   event, or a malformed head) is `409 divergence`, with the append-guard's
   precise reason in `message`.
 - A model or tool event is `422 unsupported_event_kind`: those are recorded
-  through the model-step and tool-step endpoints.
+  through the model-step and tool-step endpoints, or, for a call the client
+  performs in its own process, through the client-tool-intent and
+  client-tool-completion endpoints. A client-performed tool call is possible; it
+  is just not possible by hand-appending an event, because the effect class, the
+  input check, and the idempotency key are the server's to decide from an
+  operator's declaration.
 - A missing drive token is `401 missing_drive_token`; a token that is not the
   run's current lease is `403 invalid_drive_token`.
 - A body over the `8 MB` cap, or a batch over 1024 events, is `413
@@ -1052,6 +1108,121 @@ tool-bearing graph with no embedding host at all. It changes nothing about the
 seam above: the demo tools register through the exact same `ToolRegistry`
 any other host would, and a plain `salvor serve` with no flag still wires it
 empty, byte for byte.
+
+### POST /v1/client-runs/{id}/client-tool-intent
+
+Open a tool call the CLIENT performs, in its own process, with its own secrets.
+This server holds no code for such a tool and never dispatches it; it records
+that the call was asked for, before the effect happens, exactly as the
+write-ahead rule demands of a call it performs itself. Requires the
+`X-Drive-Token` header.
+
+- Request:
+
+```json
+{ "seq": 5, "tool": "charge_card", "input": <any json> }
+```
+
+- Response `200`:
+
+```json
+{ "seq": 5, "idempotency_key": "sha256:...", "effect": "write", "settled": false }
+```
+
+Notice what the request does NOT carry, compared with `tool-step` above: no
+`effect` and no `idempotency_key`.
+
+`settled` is `true` when the intent at this position already has its
+completion recorded, `false` otherwise. It matters most to a caller re-posting
+an intent it believes it already opened: a payments caller retrying after a
+dropped response gets back the same `200` and the same key either way, and
+without `settled` it cannot tell "safe to perform the call" from "already
+performed and completed, do not do it again" without separately reading the
+log. A freshly-recorded intent is always `false`.
+
+The effect is the operator's, from the declaration, for the same reason
+`tool-step` refuses a client-declared effect: a caller must not be able to
+up- or down-grade its own write into a freely retried read.
+
+The idempotency key is DERIVED by the server, a canonical hash of `{ run, seq,
+tool }`, and this deliberately differs from `tool-step`, where the client
+supplies it. There, salvor performs the call, so the party choosing the key is
+not the party making the write. Here the client both chooses and performs, which
+is the one case where the party choosing the key is also the party who benefits
+from a duplicate landing. Deriving it removes the choice: the same `(run, seq,
+tool)` always derives the same key, so an honest retry after a dropped response
+presents the identical key and the provider collapses the pair, and a second
+attempt cannot mint itself a fresh one. A client can derive the key
+independently, with any canonical-JSON SHA-256, to check the server's work.
+
+The input is validated against the declaration's `input_schema` before anything
+is written, so a malformed call never becomes history. The intent then goes
+through the same append-guard every other write on this surface uses.
+
+Refusals, each of which writes nothing:
+
+- an undeclared tool is `404 unknown_tool`;
+- an input failing `input_schema` is `400 bad_request`;
+- a `seq` the log is not ready for, or a different event already recorded
+  there, is `409 divergence`.
+
+A byte-identical re-post at an already-recorded position is a `200` that
+re-derives the same key and writes nothing: the safe retry a dropped response
+leaves behind.
+
+Declarations are loaded by the operator (`salvor serve --client-tool <FILE>`, or
+`AppState::with_client_tools` for an embedding host) and are NEVER registered
+over HTTP. That is not an omission. A declaration fixes the effect class, so a
+client able to POST one would be deciding whether its own writes are subject to
+the write-ahead rule at all.
+
+### POST /v1/client-runs/{id}/client-tool-completion
+
+Record what a client-performed tool call returned. The client ran the call;
+salvor did not witness it, so everything this endpoint can check, it checks
+before the report becomes history. Requires the `X-Drive-Token` header.
+
+- Request:
+
+```json
+{ "seq": 5, "output": <the json the client says the call returned> }
+```
+
+- Response `200`:
+
+```json
+{ "seq": 5, "completed": true }
+```
+
+Refusals, each of which records nothing:
+
+- the log does not end at a tool intent, or ends at one whose `seq` is not the
+  one named: `409 divergence`;
+- the pending intent was performed by the SERVER: `403
+  client_completion_refused`. A client must not close a call salvor made, since
+  salvor holds the real result;
+- the declaration says `trust_completion = false`: `403
+  client_completion_refused`;
+- the declaration carries no `output_schema`: `403 client_completion_refused`.
+  With nothing to check the report against, the completion is unfalsifiable,
+  which is exactly what the schema exists to prevent;
+- the output fails the declared `output_schema`: `400 bad_request`.
+
+A refusal is not a dead end, and it needed no new run state. The log still ends
+at the recorded `ToolCallRequested`, and for an `Effect::Write` the pure fold in
+`salvor-replay` already reports that as `needs_reconciliation`, because an
+uncompleted write intent as the log's last word is precisely what that status
+means. The resolve endpoint below already exists to settle it by hand, once a
+person has verified externally whether the call landed. So `trust_completion =
+false` is enforced here, at the completion boundary, and deliberately not in
+`derive_state`: that fold is a pure function of the log with no access to
+declarations, and it must stay that way, because a log has to mean the same
+thing to a replay on a machine that has never seen this server's declaration
+files.
+
+The recorded `ToolCallRequested` carries `performed_by: "client"`, which is how
+a later reader tells a call salvor witnessed from a call it was told about. A
+server-performed intent omits the field entirely.
 
 ### POST /v1/client-runs/{id}/resolve
 

@@ -1,11 +1,11 @@
 //! Fork planning: the pure computation behind fork-from-node.
 //!
-//! A fork is a NEW run whose log opens with the origin's prefix — every event
-//! below the [`Event::NodeEntered`] the fork restarts from — rewritten under the
+//! A fork is a NEW run whose log opens with the origin's prefix: every event
+//! below the [`Event::NodeEntered`] the fork restarts from, rewritten under the
 //! fork's own run id, with the seq-0 [`Event::GraphRunStarted`] carrying a
 //! [`ForkOrigin`] as the durable record of that descent. The origin is never
-//! touched: [`plan_fork`] only reads it. Everything in this module is pure — no
-//! store, no clock, no randomness — so the server and the CLI share one honest
+//! touched: [`plan_fork`] only reads it. Everything in this module is pure; no
+//! store, no clock, no randomness, so the server and the CLI share one honest
 //! story for where the fork boundary sits, which writes the re-walked segment
 //! would re-fire, and what bytes the child's prefix holds.
 //!
@@ -14,7 +14,7 @@
 //! The boundary is the position `k` of the [`Event::NodeEntered`] for the
 //! requested node. The prefix is every event with `seq < k`; the child restarts
 //! by re-walking from that node. A node the origin never entered is refused
-//! ([`ForkError::NodeNeverEntered`]) rather than guessed at — a fork must land on
+//! ([`ForkError::NodeNeverEntered`]) rather than guessed at: a fork must land on
 //! a real node boundary the run actually reached, so the prefix is always a
 //! faithful sub-log the child replays byte for byte before continuing live.
 //!
@@ -36,7 +36,7 @@ use time::OffsetDateTime;
 /// A recorded [`Effect::Write`] tool intent that a fork's re-walked segment would
 /// re-execute: the evidence the refuse-then-record policy shows the operator.
 ///
-/// `seq` is the intent's position in the ORIGIN log — the number the operator
+/// `seq` is the intent's position in the ORIGIN log: the number the operator
 /// acknowledges and the number recorded into [`ForkOrigin::acknowledged_writes`].
 #[derive(Clone, Debug)]
 pub struct WriteHazard {
@@ -57,7 +57,7 @@ pub struct WriteHazard {
 ///
 /// These are the structural refusals: the run is not a graph run, or the fork
 /// point is not a node the origin entered. The acknowledgement refusal is not
-/// here — it is the caller's policy over [`ForkPlan::hazards`].
+/// here: it is the caller's policy over [`ForkPlan::hazards`].
 #[derive(Debug, Error)]
 pub enum ForkError {
     /// The origin's log does not open with [`Event::GraphRunStarted`], so it is
@@ -150,8 +150,8 @@ impl ForkPlan {
 
     /// Builds the child's log prefix: the origin's `[0, boundary)` events
     /// rewritten under `child`, with the seq-0 [`Event::GraphRunStarted`]
-    /// carrying `forked_from`. Every other field of every envelope — `seq`,
-    /// `schema_version`, `recorded_at`, and the payload — is copied verbatim, so
+    /// carrying `forked_from`. Every other field of every envelope (`seq`,
+    /// `schema_version`, `recorded_at`, and the payload) is copied verbatim, so
     /// the child's prefix is byte-identical to the origin's modulo the run id and
     /// that one seq-0 field. `acknowledged_writes` is recorded verbatim into the
     /// [`ForkOrigin`].
@@ -329,6 +329,7 @@ mod tests {
                     input: json!({"body": "draft"}),
                     effect: Effect::Write,
                     idempotency_key: None,
+                    performed_by: None,
                 },
             ),
             envelope(

@@ -1,6 +1,6 @@
 //! Proves the hero fixture works: drives the real `salvor` binary with
 //! `--fixture examples/hero`, from the workspace root, with no API key, no
-//! network, and no scripted model of the test's own — the fixture supplies all
+//! network, and no scripted model of the test's own: the fixture supplies all
 //! three of those itself.
 //!
 //! This is the offline sibling of `demo_run.rs`. That test mounts a wiremock
@@ -15,7 +15,7 @@
 //! One environment hook, plumbed through ordinary environment inheritance
 //! (test -> salvor -> spawned MCP child): `SALVOR_HERO_CLAIMS` points the
 //! `salvor-hero-tools` server's claims file at a temp path, keeping the
-//! repository clean. The model endpoint needs no hook at all — that is what
+//! repository clean. The model endpoint needs no hook at all: that is what
 //! `--fixture` is for; it exports `SALVOR_HERO_BASE_URL` (the variable
 //! `examples/hero/agent.toml` declares) at its own in-process server.
 //!

@@ -23,7 +23,7 @@ The optional node display name
 Every node type may carry an optional ``name``: a short, purely
 presentational label ("Approve the draft"). Bounds mirror the agent
 definition's own ``name`` precedent: at most 64 characters, and, when set,
-not empty or all whitespace -- ``salvor graph validate`` (and ``POST
+not empty or all whitespace: ``salvor graph validate`` (and ``POST
 /v1/graphs``) enforce both, node-precise. Unlike an agent's ``name``
 (excluded from its definition hash so a rename never mints a new agent
 identity), a node's ``name`` is an ordinary field on the payload and hashes
@@ -46,6 +46,21 @@ JsonValue = Any
 
 # A serialized node or edge: a plain JSON object.
 Json = dict[str, Any]
+
+
+def _describe_json_value(value: Any) -> str:
+    """A short, human-readable description of a value's shape, for an error message."""
+    if value is None:
+        return "None"
+    if isinstance(value, list):
+        return f"a list ({value!r})"
+    if isinstance(value, bool):
+        return f"a bool ({value!r})"
+    if isinstance(value, str):
+        return f"a string ({value!r})"
+    if isinstance(value, (int, float)):
+        return f"a {type(value).__name__} ({value!r})"
+    return type(value).__name__
 
 
 @dataclass
@@ -141,6 +156,7 @@ class BranchNode:
     cases: list[BranchCase]
     name: Optional[str] = None
     on: Optional[str] = None
+    agent_hash: Optional[str] = None
 
     def to_node(self) -> Json:
         payload: Json = {"id": self.id}
@@ -148,6 +164,8 @@ class BranchNode:
             payload["name"] = self.name
         if self.on is not None:
             payload["on"] = self.on
+        if self.agent_hash is not None:
+            payload["agent_hash"] = self.agent_hash
         payload["cases"] = [case.to_dict() for case in self.cases]
         return {"kind": "branch", "payload": payload}
 
@@ -325,7 +343,48 @@ class GraphBuilder:
         name: Optional[str] = None,
         prompt: Optional[str] = None,
     ) -> "GraphBuilder":
-        """Adds a ``gate`` node. The approval schema is required."""
+        """Adds a ``gate`` node. The approval schema is required.
+
+        ``approval_schema`` must be a plain JSON object (a JSON Schema
+        describing the approval payload); ``salvor graph validate`` (and
+        ``POST /v1/graphs``) refuse anything else with
+        ``approval_schema_not_object``, but this raises at authoring time
+        instead, before a document with a silently-dropped prompt is ever
+        built. ``{}`` (an intentionally permissive, empty schema) is accepted.
+
+        Also catches a schema-position dict that is actually shaped like this
+        method's own ``name``/``prompt`` keyword options and carries none of
+        the ordinary JSON Schema keys (``type``, ``properties``, ``required``):
+        that combination is far more likely to be a misplaced options mapping
+        than a genuine schema.
+
+        Raises :class:`ValueError` in either case.
+        """
+        if not isinstance(approval_schema, dict):
+            raise ValueError(
+                f'gate("{id}", ...) approval_schema must be a plain JSON object (a JSON Schema '
+                'describing the approval payload, e.g. {"type": "object", "properties": '
+                f"{{...}}}}), but received {_describe_json_value(approval_schema)}. An "
+                'intentionally empty schema is written as {}, not omitted or replaced with '
+                "None/a list/a primitive."
+            )
+        keys = set(approval_schema.keys())
+        looks_like_swapped_options = (
+            bool(keys)
+            and keys <= {"name", "prompt"}
+            and "type" not in approval_schema
+            and "properties" not in approval_schema
+            and "required" not in approval_schema
+        )
+        if looks_like_swapped_options:
+            raise ValueError(
+                f'gate("{id}", ...) received {sorted(keys)!r} as the approval schema, but '
+                'those are GateOptions-shaped keys ("name"/"prompt"), not a JSON Schema. '
+                "Either name/prompt were meant as this method's own keyword arguments rather "
+                "than the schema, or this is genuinely intended as an approval schema, in "
+                'which case give it a "type" or "properties" key so it reads unambiguously '
+                "as one."
+            )
         self._nodes.append(GateNode(id, approval_schema, name, prompt).to_node())
         return self
 
@@ -336,9 +395,15 @@ class GraphBuilder:
         *,
         name: Optional[str] = None,
         on: Optional[str] = None,
+        agent_hash: Optional[str] = None,
     ) -> "GraphBuilder":
-        """Adds a ``branch`` node with its named cases."""
-        self._nodes.append(BranchNode(id, cases, name, on).to_node())
+        """Adds a ``branch`` node with its named cases.
+
+        ``agent_hash`` names the agent that decides a ``model_decision`` case
+        (see :func:`model_decision`); ``salvor graph validate`` requires it
+        whenever a case on this branch carries that condition.
+        """
+        self._nodes.append(BranchNode(id, cases, name, on, agent_hash).to_node())
         return self
 
     def map(

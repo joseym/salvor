@@ -4,28 +4,28 @@ import { esc } from '../../shared/json-hi';
 import { hourKey } from '../runs/run-model';
 
 /**
- * The activity histogram's bucket builder and SVG renderer — pure functions over the events every
+ * The activity histogram's bucket builder and SVG renderer: pure functions over the events every
  * folded run actually recorded, mirroring `event-model.ts`'s split (compute here, the component
  * injects the markup and wires delegated events).
  *
- * One bar per UTC hour, counting events by their OWN `recorded_at` — never by a run's last touch.
+ * One bar per UTC hour, counting events by their OWN `recorded_at`: never by a run's last touch.
  * A run that worked for three hours spans three bars, which is the only thing a chart shaped like
  * time can honestly mean.
  *
  * DISCLOSE AND EXCLUDE: a `recorded_at` cannot be trusted just because it parses. A production
- * store held events stamped `1970-01-01T00:00:00Z` — a client placeholder the server took on
+ * store held events stamped `1970-01-01T00:00:00Z`, a client placeholder the server took on
  * faith before it started stamping `recorded_at` itself (see `client_runs.rs`'s server-clock
  * fix). A single such stray beside real 2026 events stretches the window to 56 years and collapses
  * every real bar onto the right edge; clamping it silently would draw a window that never
  * happened. Instead, an implausible stamp is EXCLUDED from the window/bucket computation and its
- * count is disclosed ({@link ActivityWindow.excluded}) — the event is real spend and still counts
+ * count is disclosed ({@link ActivityWindow.excluded}); the event is real spend and still counts
  * everywhere else in Spend, only its place on this timeline is unknowable.
  */
 
 const HOUR_MS = 3600_000;
 
 /** Salvor cannot have recorded a real event before it existed. Any `recorded_at` older than this
- * is not a real timestamp — in practice, the epoch-zero client placeholder above — so it is
+ * is not a real timestamp (in practice, the epoch-zero client placeholder above), so it is
  * excluded from the window rather than trusted to place a bar. */
 const PLAUSIBLE_FLOOR_MS = Date.parse('2020-01-01T00:00:00Z');
 
@@ -42,7 +42,7 @@ export interface ActivityWindow {
   readonly hi: number;
   readonly nBuckets: number;
   readonly buckets: readonly HourBucket[];
-  /** Events whose `recorded_at` fell before {@link PLAUSIBLE_FLOOR_MS} — excluded from `lo`/`hi`/
+  /** Events whose `recorded_at` fell before {@link PLAUSIBLE_FLOOR_MS}: excluded from `lo`/`hi`/
    * `buckets` above, counted here rather than dropped silently. Zero when every stamp was
    * plausible. `nBuckets` is 0 (an honest empty window, not a broken axis) when NO stamp was
    * plausible; `excluded` alone still reports how many events that was. */
@@ -51,7 +51,7 @@ export interface ActivityWindow {
 
 /** Bucket every event from every folded run's log by the UTC hour its own `recorded_at` falls in.
  * Events with an implausible `recorded_at` (see {@link PLAUSIBLE_FLOOR_MS}) never enter the
- * window's extent or its buckets — only plausible stamps place a bar — but they are counted in
+ * window's extent or its buckets (only plausible stamps place a bar), but they are counted in
  * the returned window's `excluded` so nothing is dropped without being said. */
 export function bucketEvents(allEvents: readonly (readonly SalvorEvent[])[]): ActivityWindow | undefined {
   const stamps: { t: number; kind: string }[] = [];
@@ -70,7 +70,7 @@ export function bucketEvents(allEvents: readonly (readonly SalvorEvent[])[]): Ac
     else plausible.push(s);
   }
   if (plausible.length === 0) {
-    // every recorded_at was implausible — an honest empty window, not a broken axis
+    // every recorded_at was implausible: an honest empty window, not a broken axis
     return { lo: 0, hi: 0, nBuckets: 0, buckets: [], excluded };
   }
 
@@ -106,7 +106,7 @@ export function bucketEvents(allEvents: readonly (readonly SalvorEvent[])[]): Ac
   return { lo, hi, nBuckets, buckets, excluded };
 }
 
-/** The `hour:` term a click on bucket `i` would apply — same vocabulary Runs' own filter reads. */
+/** The `hour:` term a click on bucket `i` would apply: same vocabulary Runs' own filter reads. */
 export function hourTermOf(lo: number, i: number): string {
   return hourKey(new Date(lo + i * HOUR_MS).toISOString());
 }
@@ -120,7 +120,7 @@ const PAD_L = 22;
 /**
  * The tallest stacked bar's event count, floored at 1 (the histogram's y-axis top). Iterated on
  * purpose: a window whose events span a very wide time range has one hourly bucket PER HOUR of the
- * range — hundreds of thousands of them for a stray 1970 timestamp beside a 2026 one — and
+ * range (hundreds of thousands of them for a stray 1970 timestamp beside a 2026 one) and
  * `Math.max(...buckets.map(...))` would spread that whole array into `Math.max`, overflowing the
  * call stack. A loop has no such ceiling and returns the identical number for any window.
  */
@@ -137,7 +137,7 @@ function peakTotal(buckets: readonly HourBucket[]): number {
  * Render the histogram's `<svg>` inner markup: a stacked bar per non-empty hour (`.hbucket`, a
  * real `role="button"` when the run list can name any run for it, drawn-but-inert otherwise), the
  * hour ticks, the axis and its end labels. `lastActiveCount(hourTerm)` answers, per hour, how many
- * runs the Runs filter would actually land on — the bar's own count and that count are frequently
+ * runs the Runs filter would actually land on; the bar's own count and that count are frequently
  * different numbers, which is exactly what the label discloses.
  */
 export function renderActivityHtml(
@@ -146,7 +146,7 @@ export function renderActivityHtml(
   selectedHourTerm: string | undefined,
 ): string {
   const { lo, nBuckets, buckets } = win;
-  if (nBuckets === 0) return ''; // no plausible stamp to place a bar at — an empty chart, not a broken axis
+  if (nBuckets === 0) return ''; // no plausible stamp to place a bar at: an empty chart, not a broken axis
   const max = peakTotal(buckets);
   const step = (W - PAD_L - 6) / nBuckets;
   const bw = Math.max(3, step - 2);
@@ -169,7 +169,7 @@ export function renderActivityHtml(
       // `step` wide, edge to edge with its neighbors, zero overlap and zero gap. The visible bar
       // (`bw`, above) is clamped to a 3px floor so a thin bucket still paints something, but a
       // click target built the same way overlaps its neighbors once buckets get denser than that
-      // floor — a dense real window (hundreds of hourly buckets, step under 3px) had `bw+2`-wide
+      // floor: a dense real window (hundreds of hourly buckets, step under 3px) had `bw+2`-wide
       // hit rects overlapping by nearly half a bucket, so a center-click could resolve to the
       // WRONG neighbor (`elementFromPoint` picks whichever overlapping rect is later in paint
       // order). Tiling the hit geometry on `step` alone removes the overlap at any density while
@@ -177,12 +177,12 @@ export function renderActivityHtml(
       const hr = hourTermOf(lo, i);
       const n = lastActiveCount(hr);
       const label =
-        `${hr.slice(11, 16)}Z — ${total} event${total === 1 ? '' : 's'}` +
+        `${hr.slice(11, 16)}Z: ${total} event${total === 1 ? '' : 's'}` +
         (b.fail ? ', a run failed this hour' : b.park ? ', a run parked this hour' : '') +
         `. ${
           n === 0
             ? 'No run was last active in this hour, so there is nothing to filter to'
-            : `${n} run${n === 1 ? '' : 's'} last active in this hour — filter the run list to ${n === 1 ? 'it' : 'them'}`
+            : `${n} run${n === 1 ? '' : 's'} last active in this hour; filter the run list to ${n === 1 ? 'it' : 'them'}`
         }.`;
       const cls = [
         'hbucket',
@@ -221,7 +221,7 @@ export function renderActivityHtml(
     <text x="${W}" y="${BASE + 26}" text-anchor="end">${new Date(win.hi).toISOString().slice(5, 10)}</text>`;
 }
 
-/** The disclosure sentence for events {@link bucketEvents} excluded as implausible — undefined
+/** The disclosure sentence for events {@link bucketEvents} excluded as implausible: undefined
  * (not an empty string) when nothing was excluded, so the view can render no note at all rather
  * than an empty one: zero-vs-absent. When every stamp was implausible (`nBuckets === 0`) the
  * chart itself has nothing to draw, so the sentence says that rather than naming a timeline the
@@ -231,8 +231,8 @@ export function activityExclusionNote(win: ActivityWindow | undefined): string |
   const noun = `${win.excluded} event${win.excluded === 1 ? '' : 's'}`;
   const verb = win.excluded === 1 ? 'carries' : 'carry';
   return win.nBuckets === 0
-    ? `${noun} ${verb} no plausible timestamp — there is nothing to chart.`
-    : `${noun} ${verb} no plausible timestamp — excluded from the timeline.`;
+    ? `${noun} ${verb} no plausible timestamp. There is nothing to chart.`
+    : `${noun} ${verb} no plausible timestamp: excluded from the timeline.`;
 }
 
 /** The `#activity-desc` `.sr` text: the chart's content, said in words for anyone not reading bars. */

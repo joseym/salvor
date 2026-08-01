@@ -4,7 +4,7 @@ import { REFUND_SWEEP_DRAFT } from './wf-draft';
 import type { WfGraph } from './wf-model';
 import { applyFix, HASH_RE, nearestId, validateGraph, verdictOf } from './wf-validate';
 
-// The server's real form: a full sha256, 64 lowercase hex characters — the same literal the
+// The server's real form: a full sha256, 64 lowercase hex characters, the same literal the
 // e2e suite types into the panel's hash field by hand,
 // kept identical here so the two are coherent about what "a well-formed hash" looks like.
 const FULL_HASH = `sha256:${'0123456789abcdef'.repeat(4)}`;
@@ -34,7 +34,7 @@ describe('validateGraph', () => {
     expect(errs.map((e) => e.code).sort()).toEqual(
       ['bad_agent_hash', 'bad_concurrency', 'cycle', 'dangling_edge', 'duplicate_id', 'edge_type'].sort(),
     );
-    expect(verdictOf(errs)).toBe('6 errors — publish is blocked');
+    expect(verdictOf(errs)).toBe('6 errors: publish is blocked');
   });
 
   it('the dangling edge suggests the one unambiguous near-miss (n_notifyy → n_notify)', () => {
@@ -65,7 +65,7 @@ describe('validateGraph', () => {
   });
 
   // sync-ledger item 4: the server's rule is the full 64-hex form, not this app's own old 16-hex
-  // short form — a hash that used to pass must now fail, node/edge-precise as ever.
+  // short form: a hash that used to pass must now fail, node/edge-precise as ever.
   it('a well-formed-but-short hash (the old 16-hex tolerance) is now malformed', () => {
     expect(HASH_RE.test(FULL_HASH)).toBe(true);
     const g: WfGraph = {
@@ -74,11 +74,11 @@ describe('validateGraph', () => {
     };
     const err = validateGraph(g).find((e) => e.code === 'bad_agent_hash');
     expect(err).toBeDefined();
-    // valid hex, just short — completing it is offered
+    // valid hex, just short: completing it is offered
     expect(err?.fix).toMatchObject({ kind: 'complete_hash', id: 'a' });
   });
 
-  // sync-ledger item 4: a `model_decision` case names no agent to decide it — node/case-precise,
+  // sync-ledger item 4: a `model_decision` case names no agent to decide it: node/case-precise,
   // exactly like the server's own error, with a fix that only ever reuses a hash already in the
   // document (never a fabricated one).
   it('a model_decision case with no branch agent_hash is reported, one error per case', () => {
@@ -93,7 +93,7 @@ describe('validateGraph', () => {
     const errs = validateGraph(g).filter((e) => e.code === 'model_decision_without_agent');
     expect(errs).toHaveLength(2);
     expect(errs.map((e) => e.case).sort()).toEqual(['x', 'y']);
-    // node 'a' is the only well-formed agent in the document — the donor the fix reuses
+    // node 'a' is the only well-formed agent in the document: the donor the fix reuses
     expect(errs[0].fix).toMatchObject({ kind: 'attach_agent', id: 'br', hash: FULL_HASH });
 
     const fixed = applyFix(g, errs[0].fix!);
@@ -135,7 +135,7 @@ describe('validateGraph', () => {
   });
 });
 
-describe('applyFix — every one-click offer, applied through the same pure path', () => {
+describe('applyFix: every one-click offer, applied through the same pure path', () => {
   it('the five offered fixes plus one typed hash repair take refund-sweep to zero errors', () => {
     let g: WfGraph = REFUND_SWEEP_DRAFT;
     // apply first-offered fixes until none remain, as the panel's buttons would
@@ -144,7 +144,7 @@ describe('applyFix — every one-click offer, applied through the same pure path
       if (!withFix?.fix) break;
       g = applyFix(g, withFix.fix);
     }
-    // the malformed agent hash has no one-click fix by design — repair it as the field edit does
+    // the malformed agent hash has no one-click fix by design: repair it as the field edit does
     const remaining = validateGraph(g);
     expect(remaining.map((e) => e.code)).toEqual(['bad_agent_hash']);
     g = {

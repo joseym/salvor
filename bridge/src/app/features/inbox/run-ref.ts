@@ -3,15 +3,15 @@ import { Component, computed, input } from '@angular/core';
 import { shortId } from './inbox-model';
 
 /** How the value is shaped, so it truncates (or doesn't) the right way:
- *  - `id`    a run id — truncated to 8 chars.
- *  - `hash`  a content hash (`agent_def_hash`) — the `sha256:` prefix kept, then 8 hex.
- *  - `label` a human label (a client-driven run's agent) — shown in full, never truncated. */
+ *  - `id`    a run id: truncated to 8 chars.
+ *  - `hash`  a content hash (`agent_def_hash`): the `sha256:` prefix kept, then 8 hex.
+ *  - `label` a human label (a client-driven run's agent): shown in full, never truncated. */
 export type RunRefKind = 'id' | 'hash' | 'label';
 
 /**
- * A tiny component for a truncated, copyable reference — a run id by default, or (via `kind`) an
- * agent hash or label. Reuses `.runref`/`.runid`/`.agent-label`/`.copy` — already global, shared
- * with the Runs ledger (`app.css`) — so this needs no styles of its own.
+ * A tiny component for a truncated, copyable reference: a run id by default, or (via `kind`) an
+ * agent hash or label. Reuses `.runref`/`.runid`/`.agent-label`/`.copy`, already global, shared
+ * with the Runs ledger (`app.css`), so this needs no styles of its own.
  */
 @Component({
   selector: 'bridge-run-ref',
@@ -40,7 +40,7 @@ export class RunRef {
     try {
       await navigator.clipboard.writeText(this.id());
     } catch {
-      /* clipboard blocked — no fallback theater, matching the Runs ledger's own copy() */
+      /* clipboard blocked: no fallback theater, matching the Runs ledger's own copy() */
     }
   }
 }

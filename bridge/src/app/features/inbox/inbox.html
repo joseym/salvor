@@ -4,11 +4,11 @@
   <div class="view-work" data-panel-dock [attr.data-panel]="panelOpen() ? 'open' : 'closed'">
     <div>
       <!-- THE LEDE, in the hero position: unboxed, INSIDE the left column with the cards it
-           describes (the flush-sidebar rule) — under the heading, above the first card; never a
+           describes (the flush-sidebar rule), under the heading, above the first card; never a
            boxed note fused with the apparatus that belongs at the foot. -->
       <p class="lede">
         Every run at <code>suspended</code>, <code>budget_exceeded</code>, or
-        <code>needs_reconciliation</code>, with the one action that unblocks it — plus any run gone
+        <code>needs_reconciliation</code>, with the one action that unblocks it, plus any run gone
         <code>stalled</code>: running, but with no driver attached.
       </p>
 
@@ -31,15 +31,15 @@
             <h4>All clear</h4>
             <p>
               No run is suspended, over budget, awaiting reconciliation, or stalled with no driver.
-              This is the state a healthy control plane sits in — runs that need a person arrive here
+              This is the state a healthy control plane sits in. Runs that need a person arrive here
               with the one action that unblocks them.
             </p>
           </div>
         } @else {
           @for (c of parked(); track c.row.run) {
             <!-- THE HUSK'S EXIT wrapper (see inbox.ts): inert for every card kind except an abandon
-                 that has been dismissed, at which point `.is-leaving` collapses it in two stages —
-                 content fade, then grid-rows/margin/padding/border, the reveal idiom reversed — and
+                 that has been dismissed, at which point `.is-leaving` collapses it in two stages:
+                 content fade, then grid-rows/margin/padding/border, the reveal idiom reversed, and
                  `onAbandonExitDone` drops the run id once the height stage genuinely finishes (its
                  own `transitionend`, filtered by property, never a timer). -->
             <div
@@ -82,7 +82,7 @@
             </div>
           }
           <!-- STALLED cards, live-derived (see inbox.ts): a running run with no driver attached. No
-               commit, so no receipt and no permanence — the card drops out the moment a driver
+               commit, so no receipt and no permanence. The card drops out the moment a driver
                reattaches. Its action is external (restart a host process), so it carries guidance
                and a link to the run, never a fix button. An abandon receipt pins it instead (see
                `abandonPinned`), until the same fold-away exit above drops it. -->
@@ -122,7 +122,7 @@
         @if (!evidenceSel()) {
           <p class="ev-empty">
             Select a card's <b>Evidence</b> to read what the run recorded. The action stays in the
-            card — reading here can never disturb a form you have started filling in.
+            card. Reading here can never disturb a form you have started filling in.
           </p>
         } @else if (evidenceError()) {
           <p class="ev-empty" role="alert">{{ evidenceError() }}</p>
@@ -133,7 +133,7 @@
           </div>
           @if (st.driver) {
             <!-- Liveness evidence, verbatim: for a stalled run this reads `none` beside a `running`
-                 status — the whole basis of the stall, shown as recorded fact. -->
+                 status: the whole basis of the stall, shown as recorded fact. -->
             <div class="ev-field">
               <span class="k">driver</span>
               <div class="v">{{ st.driver }}</div>
@@ -159,7 +159,7 @@
                 <span class="k">Suspended.input_schema</span>
                 <div class="v"><pre [innerHTML]="evidenceSchemaHtml(st)"></pre></div>
                 <p class="ev-why">
-                  The Inbox form is generated from this schema — nothing is hand-written per agent.
+                  The Inbox form is generated from this schema: nothing is hand-written per agent.
                 </p>
               </div>
             }
@@ -190,17 +190,17 @@
     <button class="cpanel-tab" type="button" data-drawer data-panel="inbox" [hidden]="panelOpen()" (click)="openPanel()">Evidence</button>
   </div>
 
-  <!-- THE FOOT APPARATUS — two blocks, not one, because these are two different kinds of statement
+  <!-- THE FOOT APPARATUS: two blocks, not one, because these are two different kinds of statement
        (per the hero-position rule: fusing kinds is what puts a doorstop where the lede belongs). -->
   <p class="caption">
-    Client-driven runs — driven by an SDK straight against the log, never started through
-    <code>POST /v1/runs</code> — are enumerated here the moment they record an event:
+    Client-driven runs (driven by an SDK straight against the log, never started through
+    <code>POST /v1/runs</code>) are enumerated here the moment they record an event:
     <code>GET /v1/runs</code> lists any run with events in the store, whatever opened it. The one it
-    cannot show is a client-run holding a lease that has appended nothing yet — no event, so nothing
+    cannot show is a client-run holding a lease that has appended nothing yet: no event, so nothing
     to list.
   </p>
   <p class="mechanism">
     Suspension forms are generated from the run's own recorded
-    <code>Suspended.input_schema</code> — nothing here is hand-written per agent.
+    <code>Suspended.input_schema</code>: nothing here is hand-written per agent.
   </p>
 </div>

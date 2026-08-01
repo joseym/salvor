@@ -28,7 +28,7 @@ import {
 
 /**
  * SuspensionCard: `status.state === 'suspended'`. The whole form is GENERATED from the run's own
- * recorded `Suspended.input_schema` — see {@link schemaFields} — with a raw-JSON textarea fallback
+ * recorded `Suspended.input_schema` (see {@link schemaFields}) with a raw-JSON textarea fallback
  * for a schema this generator cannot turn into fields (no `properties`, or not an object at all).
  * Commits through `RunDetailService.resume`, the receipt pattern via {@link buildReceipt}.
  */
@@ -51,10 +51,10 @@ export class SuspensionCard {
   readonly committed = output<void>();
   /** READ, never act: asks the parent to show this run's recorded evidence in the side panel. */
   readonly evidence = output<void>();
-  /** Forwarded from the embedded (secondary) abandon-action's receipt "Done" — an abandon here
+  /** Forwarded from the embedded (secondary) abandon-action's receipt "Done": an abandon here
    * retires the run instead of resuming it, so the parent folds this whole card away, the same
    * treatment the Stalled card's abandon receipt gets (see stalled-card.ts's EXIT note). The card's
-   * OWN resume receipt is untouched — it keeps its existing, permanent `.committed` treatment. */
+   * OWN resume receipt is untouched: it keeps its existing, permanent `.committed` treatment. */
   readonly retire = output<void>();
 
   readonly ns = computed(() => shortId(this.row().run));
@@ -71,7 +71,7 @@ export class SuspensionCard {
   readonly showProvenance = computed(() => hasProposedValues(this.fields()));
   readonly usesRawJson = computed(() => this.schema() === undefined);
 
-  /** Only the fields a person has actually EDITED — never pre-seeded from the schema's defaults in
+  /** Only the fields a person has actually EDITED, never pre-seeded from the schema's defaults in
    * the constructor, because a signal input's value is not guaranteed readable that early. An
    * untouched field reads its schema default lazily, via {@link valueOf}. */
   private readonly edited = signal<Record<string, string>>({});
@@ -86,7 +86,7 @@ export class SuspensionCard {
   // A gate asks true/false; these carry the run's recent substance to the decision point, read off
   // its own log (bounded excerpts, with an honest "from seq N" provenance), plus what a resume
   // continues into (the graph projection's next nodes). Undefined until loaded; absent honestly for
-  // an agent run (no projection) — which gets the last-events excerpt alone, per the brief.
+  // an agent run (no projection), which gets the last-events excerpt alone, per the brief.
   readonly lastText = signal<{ readonly text: string; readonly seq: number } | undefined>(undefined);
   readonly lastTool = signal<{ readonly tool: string; readonly output: unknown; readonly seq: number } | undefined>(undefined);
   readonly continuesInto = signal<readonly NextNode[] | undefined>(undefined);
@@ -96,7 +96,7 @@ export class SuspensionCard {
   constructor() {
     // Earn the cost when the Inbox is actually looked at. Every view is mounted from boot, so
     // loading evidence in a constructor/ngOnInit would stream a log per suspended run on every page
-    // load, for a view nobody may open — the same "gate the fold on the active view" rule Spend
+    // load, for a view nobody may open: the same "gate the fold on the active view" rule Spend
     // states. Once loaded it never re-fetches (evidenceLoaded latches).
     effect(() => {
       if (this.viewService.view() !== 'inbox' || this.evidenceLoaded()) return;
@@ -104,7 +104,7 @@ export class SuspensionCard {
     });
   }
 
-  /** Read the run's recent substance off its own log, and — for a graph run parked at a gate — what
+  /** Read the run's recent substance off its own log, and (for a graph run parked at a gate) what
    * resuming continues into. Evidence is a courtesy at the decision point; every failure is
    * swallowed so the form still works without it (an agent run simply gets the excerpt, no next
    * nodes). Bounded: {@link collectLog} stops at the recorded head, never holding the live stream. */
@@ -124,13 +124,13 @@ export class SuspensionCard {
         }
       }
     } catch {
-      /* evidence is a courtesy — the form works without it */
+      /* evidence is a courtesy: the form works without it */
     } finally {
       this.evidenceLoaded.set(true);
     }
   }
 
-  /** A bounded excerpt for the evidence card — the full text stays available on expand. */
+  /** A bounded excerpt for the evidence card: the full text stays available on expand. */
   excerpt(text: string, max = 240): string {
     const t = text.trim();
     return t.length > max ? t.slice(0, max).trimEnd() + '…' : t;
@@ -167,7 +167,7 @@ export class SuspensionCard {
       try {
         resumeInput = JSON.parse(text);
       } catch (ex) {
-        this.submitError.set(`Not valid JSON — ${errorMessage(ex)}`);
+        this.submitError.set(`Not valid JSON: ${errorMessage(ex)}`);
         return;
       }
     } else {
@@ -191,7 +191,7 @@ export class SuspensionCard {
       );
       this.receipt.set(r);
       this.announce.emit(
-        `Resumed run ${this.ns()}. Appended at sequence ${r.seq ?? '—'}. Status now ${r.statusState}.`,
+        `Resumed run ${this.ns()}. Appended at sequence ${r.seq ?? '-'}. Status now ${r.statusState}.`,
       );
       this.committed.emit();
     } catch (ex) {

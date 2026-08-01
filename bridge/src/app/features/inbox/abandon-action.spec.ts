@@ -29,7 +29,7 @@ function abandonResponse(extra: Record<string, unknown> = {}): Response {
   });
 }
 
-describe('AbandonAction — the retire affordance', () => {
+describe('AbandonAction: the retire affordance', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
@@ -59,7 +59,7 @@ describe('AbandonAction — the retire affordance', () => {
     return fixture;
   }
 
-  it('the trigger never abandons on a single click — it opens a confirm affordance first', async () => {
+  it('the trigger never abandons on a single click; it opens a confirm affordance first', async () => {
     const fixture = mount('primary');
     const el = fixture.nativeElement as HTMLElement;
     (el.querySelector('[data-abandon]') as HTMLButtonElement).click();
@@ -141,7 +141,7 @@ describe('AbandonAction — the retire affordance', () => {
     expect(honesty.textContent).toContain('unresolved');
   });
 
-  it('emits receipted the instant the receipt lands, BEFORE committed — the parent must be able to pin before the commit-triggered refresh lands', async () => {
+  it('emits receipted the instant the receipt lands, BEFORE committed: the parent must be able to pin before the commit-triggered refresh lands', async () => {
     fetchMock.mockResolvedValueOnce(abandonResponse());
     const fixture = mount('primary');
     const order: string[] = [];
@@ -175,14 +175,14 @@ describe('AbandonAction — the retire affordance', () => {
     const done = el.querySelector('[data-abandon-done]') as HTMLButtonElement;
     expect(done, 'the receipt offers an explicit dismiss').toBeTruthy();
     expect(done.textContent?.trim()).toBe('Done');
-    // the receipt itself is untouched by dismissing — this component never destroys its own record;
+    // the receipt itself is untouched by dismissing: this component never destroys its own record;
     // the parent decides whether/how to fold the card away.
     expect(el.querySelector('[data-abandon-receipt]'), 'the receipt is still rendered after Done').toBeTruthy();
 
     done.click();
     fixture.detectChanges();
     expect(retired).toBe(1);
-    expect(el.querySelector('[data-abandon-receipt]'), 'still not destroyed — that is the parent\'s call').toBeTruthy();
+    expect(el.querySelector('[data-abandon-receipt]'), 'still not destroyed: that is the parent\'s call').toBeTruthy();
   });
 
   it('emits announce and committed after a successful abandon', async () => {

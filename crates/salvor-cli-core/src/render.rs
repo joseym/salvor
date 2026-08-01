@@ -53,7 +53,9 @@ pub const DEFAULT_REPORT_WIDTH: usize = 80;
 /// word that does not fit after its prefix is still placed on that line
 /// rather than split, since a broken word reads worse than a long line.
 ///
-/// This is the only function in this module that reflows text. A report
+/// This is the only function in this module that reflows text, and
+/// `crate::graph_editor` shares it rather than growing a second wrapper, so
+/// every surface in this crate breaks lines by one rule. A report
 /// function calls it exactly on the spans meant to read as paragraphs:
 /// headings and list-item prose. A command line, the aligned key/value
 /// block, and pretty-printed JSON are written straight into the output and
@@ -62,7 +64,7 @@ pub const DEFAULT_REPORT_WIDTH: usize = 80;
 /// across lines: nothing in the report functions below hands those spans to
 /// this function.
 #[must_use]
-fn wrap(text: &str, width: usize, first_prefix: &str, rest_prefix: &str) -> String {
+pub(crate) fn wrap(text: &str, width: usize, first_prefix: &str, rest_prefix: &str) -> String {
     let mut lines: Vec<String> = Vec::new();
     let mut line = first_prefix.to_owned();
     let mut prefix_len = first_prefix.len();
@@ -549,8 +551,9 @@ fn format_ts(ts: OffsetDateTime) -> String {
 }
 
 /// Indents every line of `text` by `spaces`, for nesting a pretty JSON block
-/// under a labeled heading.
-fn indent(text: &str, spaces: usize) -> String {
+/// under a labeled heading. Shared with `crate::graph_editor`, which nests a
+/// node's schemas the same way.
+pub(crate) fn indent(text: &str, spaces: usize) -> String {
     let pad = " ".repeat(spaces);
     text.lines()
         .map(|line| format!("{pad}{line}"))

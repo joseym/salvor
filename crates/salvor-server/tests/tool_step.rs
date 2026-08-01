@@ -354,6 +354,7 @@ async fn dangling_idempotent_reexecutes_under_recorded_key() {
             input: json!({ "n": 7 }),
             effect: Effect::Idempotent,
             idempotency_key: Some("recorded-key-123".into()),
+            performed_by: None,
         },
     )
     .await;
@@ -422,6 +423,7 @@ async fn dangling_write_reconciles_then_resolve_unsticks() {
             input: json!({ "doc": "a.typ" }),
             effect: Effect::Write,
             idempotency_key: None,
+            performed_by: None,
         },
     )
     .await;

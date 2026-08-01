@@ -7,12 +7,12 @@ import { errorMessage } from './errors';
 /**
  * The Runs ledger's list surface: `GET /v1/runs`.
  *
- * `RunSummary` (from `@salvor-run/client`) already carries the fields `e3182c5` added —
- * `usage`, `stepCount`, `agentDefHash` — additively and honestly absent (never a
+ * `RunSummary` (from `@salvor-run/client`) already carries the fields `e3182c5` added:
+ * `usage`, `stepCount`, `agentDefHash`, additively and honestly absent (never a
  * fabricated zero) when a run's log could not fold; this service does no re-shaping, it
  * just surfaces the SDK's typed decode as a signal. This is a REST snapshot, not a
  * stream: there is no `GET /v1/runs` SSE surface, so freshness here is always "as of
- * `lastLoadedAt`" — a future Runs-list consumer states that honestly rather than
+ * `lastLoadedAt`"; a future Runs-list consumer states that honestly rather than
  * borrowing the per-run connection pill's "Live" label for a listing nothing pushes to.
  */
 @Injectable({ providedIn: 'root' })

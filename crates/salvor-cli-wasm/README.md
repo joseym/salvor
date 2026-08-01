@@ -76,16 +76,17 @@ compared byte for byte. The chain has two links:
    inputs through `renderList`, `helpText`, and `parseArgv` and asserts the
    results equal that same committed expected.
 
-Together: **native == committed == wasm**, all three checked live. Latest run:
-**53 comparisons** on the wasm side.
+Together: **native == committed == wasm**, all three checked live. The
+comparison count is the committed corpus: two per row set, two per help page,
+one per argv, **60** as it stands.
 
 The corpus is deliberately wide. The list tables cover every status label the
 STATUS column can print (each takes a different colour branch), an unrecognised
 label, an empty table, and a wide row. The help pages cover the root, flat
-verbs, and both nested `graph` verbs. The parse cases cover every refusal shape
-the CLI has, including the two custom `did you mean` tips that a plain
-`value_parser` would have replaced with clap's string-similarity guess (which
-for `--group awaiting-model` names the WRONG group).
+verbs, both nested groups, and a nested verb under each. The parse cases cover
+every refusal shape the CLI has, including the two custom `did you mean` tips
+that a plain `value_parser` would have replaced with clap's string-similarity
+guess (which for `--group awaiting-model` names the WRONG group).
 
 ## Building
 

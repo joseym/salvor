@@ -172,19 +172,39 @@ const completion = stream.completion;             // -> ModelStepResult
 // A tool the server's registry holds:
 const output = await run.toolStep(3, "render", { doc: "plan.typ" });
 
+// A tool the server holds no code for at all, the payment case: you run it,
+// salvor just records that it happened.
+const { idempotencyKey } = await run.clientToolIntent(4, "charge_card", { amount_cents: 500 });
+const receipt = await chargeCard(idempotencyKey, { amount_cents: 500 }); // your code, your key
+await run.clientToolCompletion(4, receipt);
+
 await run.append([run.envelope(5, "RunCompleted", { output: answer })]);
 ```
 
 The driver's full surface: `openClientRun` (also re-opens, i.e. resumes, an
 existing run), `log(fromSeq)`, `append(events)`, `modelStep`, `modelStepStream`
-(an `AsyncIterable` of ticker deltas with a `completion` after), `toolStep`, and
-`resolve(output)`. Re-opening a run returns its recorded log on
-`run.logEnvelopes` and mints a fresh drive token (the single-writer lease every
-append presents), so a refreshed client rebuilds its cursor and re-drives from
-the log, paying nothing for a step the log already covers. A client-driven append
-the log rejects throws `DivergenceError`; a tool step that lands on a dangling
-write throws `NeedsReconciliationError` (whose `.intent` is the recorded write),
-which `resolve(output)` clears.
+(an `AsyncIterable` of ticker deltas with a `completion` after), `toolStep`,
+`clientToolIntent`, `clientToolCompletion`, and `resolve(output)`. Re-opening a
+run returns its recorded log on `run.logEnvelopes` and mints a fresh drive
+token (the single-writer lease every append presents), so a refreshed client
+rebuilds its cursor and re-drives from the log, paying nothing for a step the
+log already covers. A client-driven append the log rejects throws
+`DivergenceError`; a tool step that lands on a dangling write throws
+`NeedsReconciliationError` (whose `.intent` is the recorded write), which
+`resolve(output)` clears.
+
+`clientToolIntent` and `clientToolCompletion` are for a tool salvor never runs:
+a team keeps its payment code in its own process, and salvor only records that
+the call happened and what it returned. Open the intent to get an idempotency
+key the server derived (not one you chose, so a retry cannot mint itself a
+second charge), perform the call yourself under that key, then report the
+result. `client.listClientTools()` fetches the declared tools, each with the
+schema to hand the model as that tool's function definition. A completion is
+refused, unrecorded, when the declaration does not trust a client's own report
+or carries no output schema to check it against; settle those by hand with
+`resolve` once you have verified the call externally. A reported output that
+fails the declared schema is refused too, and there the fix is the output
+itself.
 
 The driver uses only `fetch` and the SDK's own SSE parser, with no Node-only
 API, so it runs unchanged in a browser tab: the streaming model step is a POST
@@ -192,6 +212,96 @@ that returns server-sent events, which `EventSource` cannot do, so the SDK parse
 the fetch body stream itself. `examples/browser-client-run` drives this same
 surface from a browser page, and `example/client_run_loop.ts` drives it from
 Node.
+
+## Graphs
+
+A graph document composes `agent`, `tool`, `gate`, `branch`, `map`, and `fold`
+nodes into an authored control flow: an acyclic set of steps submitted once,
+hashed, and run by that hash exactly as an agent definition is. `GraphBuilder`
+mirrors the six node kinds as typed methods, so a document gets editor
+completion and compile-time typing instead of hand-written JSON; the semantic
+checks (referential integrity, acyclicity) live server-side, on submit or
+`salvor graph validate`.
+
+An `agent` node references an agent by its content hash, never by path. Get
+one from `registerAgent`, which accepts a TOML string and returns the hash,
+computed server-side and validated as a side effect; with no server running,
+`salvor agent hash <FILE>` prints the same hash from the command line.
+
+```ts
+import { GraphBuilder } from "@salvor-run/client";
+
+const draftSchema = {
+  type: "object",
+  properties: { draft: { type: "string" } },
+  required: ["draft"],
+};
+
+const graph = new GraphBuilder()
+  .agent("research", researchAgentHash, { outputSchema: draftSchema })
+  .agent("review", reviewAgentHash, {
+    inputSchema: draftSchema,
+    outputSchema: draftSchema,
+  })
+  .gate(
+    "approve",
+    {
+      type: "object",
+      properties: { approved: { type: "boolean" } },
+      required: ["approved"],
+    },
+    { prompt: "Approve this draft for publication?" },
+  )
+  .tool("publish", "http_post", {
+    input: { body: "approve.draft", url: "config.publish_url" },
+  })
+  .edge("research", "review")
+  .edge("review", "approve")
+  .edge("approve", "publish")
+  .build();
+```
+
+`example/build_graph.ts` builds this same research, review, gate, publish flow
+and prints the document; pipe it into `salvor graph validate /dev/stdin` for
+the semantic checks the builder itself does not run.
+
+Submit the built document, then start a run from the hash it returns:
+
+```ts
+const { graph: graphHash } = await client.submitGraph(graph); // -> GraphSubmitted
+const runId = await client.startGraphRun(graphHash, { topic: "..." });
+const projection = await client.getRunGraph(runId); // -> GraphProjection
+```
+
+Two things every caller meets here. First, the server keeps submitted
+documents IN MEMORY only: a restart drops them, and a hash from a previous
+process no longer resolves. That is safe rather than lossy, since submitting
+the identical document again mints the identical hash, so a caller can simply
+resubmit before starting a run. Second, a stock `salvor serve` wires an empty
+tool registry, so every `tool` node refuses with `unknown_tool` until a host
+registers the tool it names; `salvor serve --demo-tools` is the built-in way to
+get a non-empty one.
+
+The `approve` node above is the interesting case. The run parks there with
+`state: "suspended"` and the schema (`reason`, `inputSchema`) the approval must
+satisfy; `resume` continues it with that approval, the same call an ordinary
+agent run's park uses:
+
+```ts
+const result = await client.resume(runId, { approved: true }); // -> ResumeResult
+```
+
+A parked graph run continues through that same call. The run's log recorded
+only the graph's hash, not the document itself, so resume takes the document
+again: the server looks it back up by that hash before it can re-drive the
+walk, which means resuming depends on the document still being resolvable in
+memory, the same restart caveat submission carries above.
+
+Forking continues a run from a node boundary into a new run without touching
+the origin: `client.forkRun(runId, "review")`, previewed first with
+`client.previewFork`, and listed per run with `client.listForks`. See the
+`forkRun` doc comment in `src/client.ts` for the write-replay-hazard refusal a
+fork guards against.
 
 ## Runnable example
 

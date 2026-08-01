@@ -177,7 +177,7 @@ const RECORD_PROMPTS_ENV: &str = "SALVOR_RECORD_PROMPTS";
 /// display label for the registry and dashboards, not a payload, so the
 /// bound is generous for a title but rejects anything payload-shaped.
 /// Checked in [`AgentConfig::validate`], which runs on every parse
-/// (`load`, `from_toml_str`, `from_json_str`) — including the control
+/// (`load`, `from_toml_str`, `from_json_str`), including the control
 /// plane's `POST /v1/agents`, so a submitted name is bounded before it is
 /// trusted, the same as any other client-supplied config.
 pub const MAX_NAME_LEN: usize = 64;

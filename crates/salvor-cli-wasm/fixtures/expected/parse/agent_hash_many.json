@@ -1,0 +1,16 @@
+{
+  "command": {
+    "command": {
+      "command": {
+        "agent_verb": "hash",
+        "agents": [
+          "agents/writer.toml",
+          "agents/reviewer.toml"
+        ]
+      },
+      "verb": "agent"
+    },
+    "store": "./salvor.db"
+  },
+  "ok": true
+}

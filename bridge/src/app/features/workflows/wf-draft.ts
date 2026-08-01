@@ -2,10 +2,10 @@ import type { WfGraph } from './wf-model';
 
 /**
  * THE DRAFT STORE. A draft is a graph the operator is authoring that has not been published, so it
- * has no hash and no server identity yet (the hash IS the version — see {@link WfGraph}). The
+ * has no hash and no server identity yet (the hash IS the version: see {@link WfGraph}). The
  * prototype modelled its one draft as an in-memory fixture; here drafts live in `localStorage`, so
  * an author's unpublished work survives a reload, and "Save draft" is a real local write rather
- * than a no-op. Published graphs never live here — those are the server's, read from `GET /v1/graphs`.
+ * than a no-op. Published graphs never live here: those are the server's, read from `GET /v1/graphs`.
  *
  * The seeded `refund-sweep` draft is ported verbatim from the prototype fixture, defects and all
  * (a duplicate id, a dangling edge, a cycle): it is the draft the fork specs pick to prove the
@@ -14,7 +14,7 @@ import type { WfGraph } from './wf-model';
  */
 const DRAFTS_KEY = 'salvor.wf.drafts';
 
-/** The ported prototype draft — deliberately broken, one defect per validator error class: a
+/** The ported prototype draft, deliberately broken, one defect per validator error class: a
  * malformed agent hash, a duplicate node id, a zero-worker fan-out, a dangling edge one keystroke
  * from a real node, a cycle, and a case label on a non-branch edge. Six errors, exactly. */
 export const REFUND_SWEEP_DRAFT: WfGraph = {
@@ -29,7 +29,7 @@ export const REFUND_SWEEP_DRAFT: WfGraph = {
     { id: 'n_charge', kind: 'tool', name: 'Charge the card again', tool: 'charge_card', effect: 'write', idempotencyKey: null, input: {} } /* duplicate id */,
     { id: 'n_pick', kind: 'branch', name: 'Retry or give up', cases: ['retry', 'give_up'] },
     { id: 'n_fan', kind: 'map', name: 'Email each watcher', over: '${n_fetch.watchers}', concurrency: 0, body: { tool: 'send_email', effect: 'idempotent' } } /* fans out to nobody */,
-    /* This hash used to pass the client's old 16-hex tolerance untouched — the padding is
+    /* This hash used to pass the client's old 16-hex tolerance untouched: the padding is
        mechanical (sync-ledger item 4's own pattern), the same fix `complete_hash` offers, applied
        up front so the seeded defect count stays six, not seven, once the client requires the
        server's real 64-hex form. */
@@ -40,7 +40,7 @@ export const REFUND_SWEEP_DRAFT: WfGraph = {
     { from: 'n_fetch', to: 'n_charge' },
     { from: 'n_charge', to: 'n_pick' },
     { from: 'n_pick', to: 'n_fan', label: 'retry' },
-    { from: 'n_pick', to: 'n_notifyy', label: 'give_up' } /* dangling — one key off */,
+    { from: 'n_pick', to: 'n_notifyy', label: 'give_up' } /* dangling: one key off */,
     { from: 'n_fan', to: 'n_fetch' } /* closes a cycle */,
     { from: 'n_charge', to: 'n_notify', label: 'final' } /* case label, but not a branch */,
   ],
@@ -61,7 +61,7 @@ function writeStore(store: Record<string, WfGraph>): void {
   try {
     localStorage.setItem(DRAFTS_KEY, JSON.stringify(store));
   } catch {
-    /* a locked-down embed has no storage — a failed persist is never a reason to crash the canvas */
+    /* a locked-down embed has no storage: a failed persist is never a reason to crash the canvas */
   }
 }
 

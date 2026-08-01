@@ -224,6 +224,114 @@ test("resolve posts the output under the lease", async () => {
   }
 });
 
+test("clientToolIntent sends seq/tool/input and surfaces the derived key", async () => {
+  const s = stub({
+    [`/v1/client-runs/${RUN_ID}/client-tool-intent`]: (_req, res) =>
+      res.json(200, {
+        seq: 5,
+        idempotency_key: "sha256:derived",
+        effect: "write",
+        settled: false,
+      }),
+  });
+  const base = await s.ready;
+  try {
+    const result = await driverAt(base).clientToolIntent(5, "charge_card", {
+      amount_cents: 500,
+    });
+    strictEqual(result.seq, 5);
+    strictEqual(result.idempotencyKey, "sha256:derived");
+    strictEqual(result.effect, "write");
+    strictEqual(result.settled, false);
+    const last = s.requests.at(-1)!;
+    deepStrictEqual(last.body, { seq: 5, tool: "charge_card", input: { amount_cents: 500 } });
+    strictEqual(last.headers["x-drive-token"], "dt_test");
+  } finally {
+    s.server.close();
+  }
+});
+
+test("clientToolIntent surfaces settled true on a re-post", async () => {
+  // A payments caller re-posting an intent after the completion already
+  // landed must be able to tell the work is done from the response alone.
+  const s = stub({
+    [`/v1/client-runs/${RUN_ID}/client-tool-intent`]: (_req, res) =>
+      res.json(200, {
+        seq: 5,
+        idempotency_key: "sha256:derived",
+        effect: "write",
+        settled: true,
+      }),
+  });
+  const base = await s.ready;
+  try {
+    const result = await driverAt(base).clientToolIntent(5, "charge_card", {
+      amount_cents: 500,
+    });
+    strictEqual(result.settled, true);
+  } finally {
+    s.server.close();
+  }
+});
+
+test("clientToolIntent on an undeclared tool throws SalvorApiError with code unknown_tool", async () => {
+  const s = stub({
+    [`/v1/client-runs/${RUN_ID}/client-tool-intent`]: (_req, res) =>
+      res.json(404, {
+        error: { code: "unknown_tool", message: "no client-performed tool named `ghost`" },
+      }),
+  });
+  const base = await s.ready;
+  try {
+    const driver = driverAt(base);
+    await rejects(
+      () => driver.clientToolIntent(5, "ghost", {}),
+      (error: unknown) => error instanceof SalvorApiError && error.code === "unknown_tool",
+    );
+  } finally {
+    s.server.close();
+  }
+});
+
+test("clientToolCompletion sends seq and output under the lease", async () => {
+  const s = stub({
+    [`/v1/client-runs/${RUN_ID}/client-tool-completion`]: (_req, res) =>
+      res.json(200, { seq: 5, completed: true }),
+  });
+  const base = await s.ready;
+  try {
+    await driverAt(base).clientToolCompletion(5, { charge_id: "ch_1" });
+    const last = s.requests.at(-1)!;
+    deepStrictEqual(last.body, { seq: 5, output: { charge_id: "ch_1" } });
+    strictEqual(last.headers["x-drive-token"], "dt_test");
+  } finally {
+    s.server.close();
+  }
+});
+
+test("clientToolCompletion refused (trust_completion=false) throws SalvorApiError with code client_completion_refused", async () => {
+  const s = stub({
+    [`/v1/client-runs/${RUN_ID}/client-tool-completion`]: (_req, res) =>
+      res.json(403, {
+        error: {
+          code: "client_completion_refused",
+          message: "tool `charge_card` is declared with trust_completion = false",
+        },
+      }),
+  });
+  const base = await s.ready;
+  try {
+    const driver = driverAt(base);
+    await rejects(
+      () => driver.clientToolCompletion(5, { charge_id: "ch_1" }),
+      (error: unknown) =>
+        error instanceof SalvorApiError && error.code === "client_completion_refused",
+    );
+  } finally {
+    s.server.close();
+  }
+});
+
 test("append surfaces divergence as DivergenceError", async () => {
   const s = stub({
     [`/v1/client-runs/${RUN_ID}/events`]: (_req, res) =>

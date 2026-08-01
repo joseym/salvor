@@ -23,7 +23,7 @@ const preview: ForkOutcome = {
   raw: {},
 };
 
-describe('reviewOf — a preview', () => {
+describe('reviewOf: a preview', () => {
   it('lists every write as a hazard row with seq/tool/input/key/recordedAt', () => {
     const review = reviewOf(preview);
     expect(review.hazards).toHaveLength(2);
@@ -40,7 +40,7 @@ describe('reviewOf — a preview', () => {
   });
 });
 
-describe('reviewOf — a 409 hazard refusal folds identically', () => {
+describe('reviewOf: a 409 hazard refusal folds identically', () => {
   it('treats every listed write as outstanding', () => {
     const hazard: ForkOutcome = {
       kind: 'hazard',
@@ -55,7 +55,7 @@ describe('reviewOf — a 409 hazard refusal folds identically', () => {
   });
 });
 
-describe('forkReady — the confirm gate', () => {
+describe('forkReady: the confirm gate', () => {
   it('stays blocked until every outstanding hazard is acknowledged', () => {
     const review = reviewOf(preview);
     expect(forkReady(review, new Set())).toBe(false);

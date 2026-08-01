@@ -2,7 +2,7 @@
   <div class="wf-title">
     <h3 class="section" id="wf-name">{{ graphName() }}</h3>
     <span class="wf-state" id="wf-state">{{ graphState() }}</span>
-    <!-- the hash, or the honest absence of one — a draft has no identity until published -->
+    <!-- the hash, or the honest absence of one: a draft has no identity until published -->
     <span class="wf-hashwrap" id="wf-hashwrap">
       @if (graphHashChip(); as h) {
         <span class="mono" [attr.title]="h">{{ hashShort(h) }}</span>
@@ -21,23 +21,84 @@
       }
     </select>
     <button class="fold-all" type="button" id="wf-about-open" aria-haspopup="dialog" popovertarget="wf-about">About this canvas</button>
+    <!-- OPEN A DOCUMENT. The button owns the affordance; the input behind it is the browser's own
+         file dialog, kept out of the layout rather than styled into a second control. A document may
+         also be dropped on the canvas, or pasted; all three land through one path, so all three
+         obey the same two rules: it validates first, and it arrives as a draft. -->
+    <button class="fold-all" type="button" id="wf-open" (click)="chooseFile()">Open a document…</button>
+    <input class="sr" type="file" id="wf-open-file" #wfOpenFile accept="application/json,.json"
+           tabindex="-1" aria-hidden="true" (change)="onFileChosen($event)" />
+    <button class="fold-all" type="button" id="wf-paste-open" aria-haspopup="dialog" popovertarget="wf-paste">Paste a document…</button>
     <button class="fold-all" type="button" id="wf-save" [disabled]="readOnly()" (click)="save()">Save draft</button>
     <button class="fold-all strong" type="button" id="wf-publish" [disabled]="publishDisabled()"
-            [attr.title]="errors().length ? errors().length + ' error' + (errors().length === 1 ? '' : 's') + ' must be resolved first.' : null"
+            [attr.title]="errors().length ? errors().length + ' error' + (errors().length === 1 ? '' : 's') + ' must be resolved first.' : (emptyDraft() ? 'There is nothing in this document yet: a graph with no nodes is not a graph.' : null)"
             (click)="publish()">{{ publishLabel() }}</button>
+    <!-- a run starts from a STORED hash, so this is live only once the document is published -->
+    <button class="fold-all strong" type="button" id="wf-start" [disabled]="startDisabled()"
+            [attr.title]="graphHash() === null ? 'Publish this draft first: a run starts from a stored graph hash.' : null"
+            (click)="startRun()">{{ startLabel() }}</button>
   </div>
 </div>
 
 <!-- what the fork just made; role=status so the operator is TOLD, not left to notice a quiet change -->
 <div id="wf-forked" role="status">{{ forked() }}</div>
 <div id="wf-published" role="status">{{ published() }}</div>
+<div id="wf-started" role="status">{{ started() }}</div>
+<div id="wf-opened" role="status">{{ opened() }}</div>
+<div id="wf-edited" role="status">{{ edited() }}</div>
 
-<!-- the node-picking state: a live state the operator is standing in, not a receipt — it ends
+<!-- WHY A DOCUMENT DID NOT OPEN. A refused document is not on the canvas, so its errors cannot be
+     shown on it: they are shown here instead, from the same validator, with the same node-precise
+     wording the inspector uses for a draft. No one-click fixes, and that is honest: there is
+     nothing here to fix, only a document to correct and open again. -->
+@if (openRefusal(); as refusal) {
+  <div class="wf-open-refusal" id="wf-open-refusal" role="alert">
+    <div class="wf-open-head">
+      <div>
+        <h5>{{ refusal.head }}</h5>
+        <p class="wf-open-src"><span class="mono">{{ refusal.source }}</span> was not opened. {{ refusal.why }}</p>
+      </div>
+      <button class="cpanel-x" type="button" id="wf-open-dismiss" aria-label="Dismiss this refusal" (click)="dismissOpenRefusal()">×</button>
+    </div>
+    @if (refusal.errors.length) {
+      <div class="wf-errs">
+        @for (er of refusal.errors; track $index) {
+          <div class="wf-err">
+            <span class="where">{{ openErrWhere(er) }}</span>
+            {{ er.msg }}
+          </div>
+        }
+      </div>
+    }
+  </div>
+}
+
+<!-- THE TWO STANDING FACTS about a server-side graph run, said next to the control that hits them
+     rather than left for a refusal to teach: the graph store is in memory, and a stock server's
+     tool registry is empty. Shown only for a published graph, the only thing that can be started. -->
+@if (graphHash() !== null) {
+  <p class="wf-runnote" id="wf-runnote">A run walks the stored document, which the server keeps in
+    <strong>memory only</strong>: a restart drops it, and publishing the identical document again
+    mints the identical hash. Its <span class="mono">tool</span> nodes resolve against the server's
+    tool registry, which a stock <span class="mono">salvor serve</span> wires
+    <strong>empty</strong>: every tool node refuses with <span class="mono">unknown_tool</span> until
+    a host registers that tool, or the server was started with
+    <span class="mono">--demo-tools</span>.</p>
+}
+
+<!-- the node-picking state: a live state the operator is standing in, not a receipt; it ends
      when they pick or cancel -->
 <div id="wf-forkpick" role="status">@if (pickRun(); as origin) {<span class="wf-forkpick-line"><span class="k">pick a node</span>
   <span>Click the node to fork <span class="mono">{{ origin.slice(0, 8) }}</span> from. It has to be a node this
-    run actually entered — pick one that did not and it will say so rather than invent a boundary.</span>
+    run actually entered. Pick one that did not and it will say so rather than invent a boundary.</span>
   <button class="link-btn" type="button" id="wf-forkpick-cancel" (click)="forkPickCancel()">Cancel</button></span>}</div>
+
+<!-- the armed connect: the same live-state treatment the fork pick gets, because it is the same
+     shape of state. It ends when the author picks the far end, or cancels. -->
+<div id="wf-linking" role="status">@if (linkFrom(); as from) {<span class="wf-forkpick-line"><span class="k">pick the far end</span>
+  <span>Click the node the edge out of <span class="mono">{{ from }}</span> should reach. It lands with no case
+    on it: a branch's edge names the case it realizes, and that is a choice, not a default.</span>
+  <button class="link-btn" type="button" id="wf-link-cancel" (click)="cancelLink()">Cancel</button></span>}</div>
 
 <div class="view-work wf-work" #wfWork data-panel-dock [attr.data-panel]="panelOpen() ? 'open' : 'closed'">
   <div class="wf-main">
@@ -48,29 +109,35 @@
       tabindex="-1"
       [class.is-panning]="panning()"
       [class.tool-sel]="tool() === 'sel'"
-      [class.is-picking]="pickRun() !== undefined"
+      [class.is-picking]="pickRun() !== undefined || linkFrom() !== undefined"
+      [class.is-dropping]="dropping()"
+      (keydown)="onCanvasKeydown($event)"
       (pointerdown)="onCanvasPointerdown($event)"
       (pointermove)="onCanvasPointermove($event)"
       (pointerup)="onCanvasPointerup()"
       (pointercancel)="onCanvasPointerup()"
+      (dragover)="onCanvasDragover($event)"
+      (dragleave)="onCanvasDragleave($event)"
+      (drop)="onCanvasDrop($event)"
     >
       <div class="wf-stage" id="wf-stage" #wfStage [style.transform]="stageTransform()">
         <svg class="wf-edges" id="wf-edges" aria-hidden="true">
           @for (e of edges(); track $index) {
             <!-- an orthogonal trace, a single fine arrowhead, and the paper knocked out behind any
-                 case label. In Run mode the recorded route inks and the road not taken ghosts. -->
+                 case label. In Run mode the recorded route inks and the road not taken ghosts. A
+                 body link is a node's body-by-id reference, drawn dashed and labelled `body`. -->
             <path class="wf-edge" [class.is-case]="e.isCase" [class.is-inked]="e.walked"
-                  [class.is-ghost]="e.ghost" [attr.d]="e.d"
+                  [class.is-ghost]="e.ghost" [class.is-body]="e.isBody" [attr.d]="e.d"
                   [attr.data-from]="e.from" [attr.data-to]="e.to" fill="none" />
             <path class="wf-arrow" [class.is-inked]="e.walked" [class.is-ghost]="e.ghost"
-                  [attr.d]="e.arrow" />
+                  [class.is-body]="e.isBody" [attr.d]="e.arrow" />
             @if (e.label; as lbl) {
               <text class="wf-elabel" [class.is-inked]="e.walked" [class.is-ghost]="e.ghost"
-                    [attr.x]="e.lx" [attr.y]="e.ly">{{ lbl }}</text>
+                    [class.is-body]="e.isBody" [attr.x]="e.lx" [attr.y]="e.ly">{{ lbl }}</text>
             }
           }
         </svg>
-        <!-- Tab walks the nodes (each is a real button); focus alone never selects — Enter/Space,
+        <!-- Tab walks the nodes (each is a real button); focus alone never selects: Enter/Space,
              the button's own activation, is what selects. Focus pans an off-screen node into view. -->
         <div class="wf-nodes" id="wf-nodes" (focusin)="onNodesFocusin($event)">
           @for (n of nodes(); track $index) {
@@ -107,7 +174,7 @@
                 <span class="wf-eff" [attr.data-eff]="eff">{{ eff }}</span>
               }
               @if (n.bad) { <span class="wf-badge" aria-hidden="true">!</span> }
-              <!-- a span with button semantics, never a nested <button> — invalid HTML would let
+              <!-- a span with button semantics, never a nested <button>; invalid HTML would let
                    the browser re-parent it and orphan the menu affordance -->
               <span class="wf-more" role="button" tabindex="0" [attr.data-more]="n.id"
                     [attr.aria-label]="'Actions for ' + n.name"
@@ -117,7 +184,7 @@
           <!-- DUPLICATE-ID STACK CAPTIONS. One chip per collision, anchored to the top card of the
                nudged stack: it names the shared id and the count, in the same danger ink as the
                error dot, and opens the validator's own duplicate-id error (with its rename fix).
-               Present ONLY when ids actually collide — a clean graph renders none. -->
+               Present ONLY when ids actually collide; a clean graph renders none. -->
           @for (s of dupStacks(); track s.id) {
             <button type="button" class="wf-dup-chip" [attr.data-dup]="s.id"
                     [style.left.px]="s.x" [style.top.px]="s.y"
@@ -129,6 +196,11 @@
           }
         </div>
       </div>
+
+      @if (emptyDraft()) {
+        <p class="wf-blank" id="wf-blank">Nothing here yet. Add a node from the inspector to start
+          drawing, or open a document.</p>
+      }
 
       <!-- history, top-left -->
       <div class="wf-chips wf-tl" role="group" aria-label="History">
@@ -166,13 +238,19 @@
         <span class="wf-legend mono" id="wf-legend">drag to pan · scroll to zoom · tab walks the nodes</span>
       </div>
 
-      <p class="wf-note mono" id="wf-note">Fork from a node — <span class="wf-note-k">⋯</span> on any node the run entered.</p>
+      <p class="wf-note mono" id="wf-note">Fork from a node: <span class="wf-note-k">⋯</span> on any node the run entered.</p>
+
+      <!-- The paper says the drop will be taken, and what it will become, so a dropped file is never
+           a guess. Decoration for assistive tech: the file button is the labelled affordance. -->
+      @if (dropping()) {
+        <p class="wf-drop-hint" id="wf-drop-hint" aria-hidden="true">Drop the document to open it as a draft</p>
+      }
 
       <!-- Minimap, bottom-right; only when the graph outruns the viewport. The field jumps the
            view; the viewport rectangle drags. Named for the a11y tree, and honest about its
            keyboard story: Tab reaches every node this map could, by name rather than position. -->
       <div class="wf-map" id="wf-map" [hidden]="minimapHidden()" role="group"
-           aria-label="Minimap — click the field to jump the view, or drag the viewport rectangle to pan"
+           aria-label="Minimap: click the field to jump the view, or drag the viewport rectangle to pan"
            aria-describedby="wf-map-kbd"
            (pointerdown)="onMapPointerdown($event)"
            (pointermove)="onMapPointermove($event)"
@@ -191,7 +269,7 @@
           this map could, by name rather than by position.</p>
       </div>
 
-      <!-- the node ⋯ menu — the .wf-menu-why line carries the honesty for the two non-acting states -->
+      <!-- the node ⋯ menu: the .wf-menu-why line carries the honesty for the two non-acting states -->
       @if (menu(); as m) {
         <div class="wf-menu" [style.left.px]="m.x" [style.top.px]="m.y" (keydown)="onMenuKeydown($event)">
           @switch (forkMenuState()) {
@@ -201,19 +279,26 @@
             }
             @case ('switch') {
               <button type="button" data-act="fork-switch" (click)="menuForkSwitch()">Fork from here…</button>
-              <p class="wf-menu-why">A fork replays a recorded run. This switches to Run mode and picks one — then fork.</p>
+              <p class="wf-menu-why">A fork replays a recorded run. This switches to Run mode and picks one, then fork.</p>
             }
             @case ('disabled') {
               <button type="button" data-act="fork" disabled aria-disabled="true">Fork from here…</button>
               <p class="wf-menu-why">A fork replays a recorded run, and this graph has none yet. Publish it and start a run first.</p>
             }
           }
+          @if (!readOnly()) {
+            <button type="button" data-act="connect" (click)="menuConnect()">Connect from here…</button>
+            <!-- A delete keeps the edges that named the node, on purpose: each becomes an error
+                 pointing at what it used to reach. The count is on the button so that is offered
+                 rather than discovered. -->
+            <button type="button" data-act="delete" (click)="menuDelete()">Delete this node@if (orphanCount(menuNodeId()); as n) { <span class="wf-menu-n">({{ n }} edge{{ n === 1 ? '' : 's' }} left dangling)</span>}</button>
+          }
           <button type="button" data-act="copy" (click)="menuCopy()">Copy node id</button>
         </div>
       }
     </div>
 
-    <!-- THE NARROW LIST — below 900px the canvas yields to this one-dimensional rendering of the
+    <!-- THE NARROW LIST: below 900px the canvas yields to this one-dimensional rendering of the
          SAME graph: topological reading order, every incoming edge named, same selection, same
          error marks. Not a second view kept in step; the same computed state, rendered linearly. -->
     <ul class="wf-list" id="wf-list">
@@ -249,7 +334,7 @@
 
   <!-- THE DOCKED NODE INSPECTOR. This rail keeps its width with nothing selected, alone among the
        five, because it has something to say without a selection: the validator's verdict on the
-       whole graph — so the head IS the verdict. -->
+       whole graph, so the head IS the verdict. -->
   <aside class="cpanel" data-drawer data-panel="workflows" aria-label="Node inspector" [hidden]="!panelOpen()">
     <div class="cpanel-head">
       <div>
@@ -259,67 +344,239 @@
       <button class="cpanel-x" type="button" aria-label="Close the node inspector" (click)="closePanel()">×</button>
     </div>
     <div class="cpanel-body" id="wf-panel">
+      <!-- THE PALETTE. The kinds are not listed here: they come from the derived kind table
+           (wf-kinds.ts), which is a mapped type over the document format's own node union, so this
+           row offers exactly what a document may contain and in the format's own order. -->
+      @if (!readOnly()) {
+        <div class="wf-add" role="group" aria-label="Add a node">
+          <span class="k">add a node</span>
+          <div class="wf-add-row">
+            @for (p of palette(); track p.kind) {
+              <button class="wf-add-b" type="button" [attr.data-add]="p.kind" [attr.title]="p.kind + ': ' + p.blurb"
+                      (click)="addKind(p.kind)">{{ p.kind }}</button>
+            }
+          </div>
+          <p class="wf-why">A new node lands with the fields only you can decide left empty, so the
+            error list below names the next thing to choose rather than the canvas inventing a value
+            that could publish unread.</p>
+          <div class="wf-add-row">
+            <button class="wf-add-b" type="button" id="wf-new" (click)="newDraft()">Start a new draft</button>
+          </div>
+        </div>
+      } @else {
+        <!-- A published graph is not editable here, and there is no version of this panel that makes
+             it so: a run replays against these bytes. The door out is a draft copy. -->
+        <div class="wf-add">
+          <span class="k">frozen</span>
+          <p class="wf-why">This document is published, so it is immutable: its hash is computed from
+            its bytes, and runs already reference it by that hash. Copy it into a draft to change it;
+            publishing the draft mints a hash of its own and leaves this one exactly as it is.</p>
+          <div class="wf-add-row">
+            <button class="wf-add-b" type="button" id="wf-fork-draft" (click)="editAsDraft()">Edit as a draft</button>
+            <button class="wf-add-b" type="button" id="wf-new" (click)="newDraft()">Start a new draft</button>
+          </div>
+        </div>
+      }
+
       @if (selectedNodeObj(); as n) {
-        <div class="wf-field"><span class="k">kind</span><div class="v">{{ n.kind }} — {{ kindBlurb(n.kind) }}</div></div>
+        <div class="wf-field"><span class="k">kind</span><div class="v">{{ n.kind }}: {{ kindBlurb(n.kind) }}</div></div>
         <div class="wf-field"><label for="wf-f-name">display name</label>
           <input id="wf-f-name" type="text" [value]="n.name" [readOnly]="readOnly()" (input)="editName($event)" />
-          <p class="wf-why">Renaming this does not touch the id below — every edge in the graph joins on the id.</p>
+          <p class="wf-why">Renaming this does not touch the id below. Every edge in the graph joins on the id.</p>
         </div>
-        <div class="wf-field"><span class="k">id — the join key</span><div class="v mono">{{ n.id }}</div></div>
+        <div class="wf-field"><span class="k">id: the join key</span><div class="v mono">{{ n.id }}</div></div>
 
         @if (n.kind === 'agent') {
           <div class="wf-field"><label for="wf-f-hash">agent_def_hash</label>
             <input id="wf-f-hash" type="text" [value]="n.agentHash ?? ''" [readOnly]="readOnly()" (input)="editHash($event)" />
-            <p class="wf-why">A node references an agent by hash only — no prompt, no model, no name inline.</p>
+            <p class="wf-why">A node references an agent by hash only: no prompt, no model, no name inline.</p>
           </div>
         }
         @if (n.kind === 'tool') {
-          <div class="wf-field"><span class="k">tool</span><div class="v mono">{{ n.tool }}</div></div>
+          <div class="wf-field"><label for="wf-f-tool">tool</label>
+            <input id="wf-f-tool" class="mono" type="text" [value]="n.tool ?? ''" [readOnly]="readOnly()" (input)="editTool($event)" />
+            <p class="wf-why">The tool's name as the runtime's registry knows it. A name no host has
+              registered resolves to <span class="mono">unknown_tool</span> when the run reaches this node.</p>
+          </div>
           <div class="wf-field"><label for="wf-f-eff">effect class</label>
             <select id="wf-f-eff" [disabled]="readOnly()" (change)="editEffect($event)">
               <option value="read" [selected]="n.effect === 'read'">read</option>
               <option value="write" [selected]="n.effect === 'write'">write</option>
               <option value="idempotent" [selected]="n.effect === 'idempotent'">idempotent</option>
             </select>
-            <p class="wf-why">A write re-runs on a fork — this is the field the hazard review turns on. Reads are never fork hazards.</p>
+            <p class="wf-why">A write re-runs on a fork, and that is what the hazard review turns on.
+              The document itself carries no effect class: a tool's effect comes from the tool's own
+              contract, and the review reads what a run RECORDED. So this is a note on the draft, and
+              it is not published with the document.</p>
           </div>
-          <div class="wf-field"><span class="k">idempotency_key</span><div class="v">{{ n.idempotencyKey == null ? 'null — the call cannot be safely retried' : n.idempotencyKey }}</div></div>
+          <div class="wf-field"><span class="k">idempotency_key</span><div class="v">{{ n.idempotencyKey == null ? 'null: the call cannot be safely retried' : n.idempotencyKey }}</div></div>
           <div class="wf-field"><span class="k">input</span><div class="v"><pre [innerHTML]="jsonHtml(n.input ?? {})"></pre></div></div>
         }
         @if (n.kind === 'gate') {
-          @if (n.prompt) {
-            <div class="wf-field"><span class="k">prompt</span><div class="v">{{ n.prompt }}</div></div>
-          }
+          <div class="wf-field"><label for="wf-f-prompt">prompt</label>
+            <input id="wf-f-prompt" type="text" [value]="n.prompt ?? ''" [readOnly]="readOnly()" (input)="editPrompt($event)" />
+            <p class="wf-why">What the approval inbox asks. Optional: emptied, the field is left off
+              the document rather than published as an empty question.</p>
+          </div>
           <div class="wf-field"><span class="k">approval schema</span><div class="v"><pre [innerHTML]="jsonHtml(n.inputSchema ?? {})"></pre></div>
             <p class="wf-why">This is the schema the run log records on <span class="mono">Suspended</span>, and the Inbox form is generated from it.</p>
           </div>
         }
         @if (n.kind === 'branch') {
-          <div class="wf-field"><span class="k">cases</span><div class="v">{{ (n.cases ?? []).join(' · ') }}</div>
-            <p class="wf-why">Each outbound edge names the case it realizes.</p>
+          <div class="wf-field"><span class="k">cases</span>
+            @if (selectedCases().length) {
+              <ul class="wf-cases">
+                @for (c of selectedCases(); track c.name) {
+                  <li class="wf-case-row" [attr.data-case]="c.name">
+                    <span class="wf-case-n mono">{{ c.name }}</span>
+                    @if (c.model) {
+                      <span class="wf-case-w">its agent decides this one at run time</span>
+                    } @else {
+                      <label class="sr" [attr.for]="'wf-case-e-' + c.name">condition for {{ c.name }}</label>
+                      <input class="wf-case-e mono" type="text" [attr.id]="'wf-case-e-' + c.name"
+                             [value]="c.expression" [readOnly]="readOnly()" placeholder="amount_usd >= 500"
+                             (input)="onCaseExpression(c.name, $event)" />
+                    }
+                    <span class="wf-case-r" [class.is-un]="!c.realized">{{ c.realized ? 'realized' : 'no edge' }}</span>
+                    @if (!readOnly()) {
+                      <button class="wf-case-x" type="button" [attr.data-drop-case]="c.name"
+                              [attr.aria-label]="'Remove the case ' + c.name" (click)="dropBranchCase(c.name)">Remove</button>
+                    }
+                  </li>
+                }
+              </ul>
+            } @else {
+              <div class="v">none yet</div>
+            }
+            <p class="wf-why">A case is a name and the condition that selects it: an expression over the
+              routed value, or a decision this branch's own agent makes. The edge labelled with the name
+              is what actually routes it, so a case with no edge is an error until you draw one.</p>
+          </div>
+          @if (!readOnly()) {
+            <div class="wf-field wf-newcase">
+              <label for="wf-case-name">add a case</label>
+              <input id="wf-case-name" class="mono" #wfCaseName type="text" placeholder="over_500" />
+              <label class="sr" for="wf-case-expr">condition</label>
+              <input id="wf-case-expr" class="mono" #wfCaseExpr type="text" placeholder="amount_usd >= 500" />
+              <div class="wf-add-row">
+                <button class="wf-add-b" type="button" id="wf-case-add" (click)="addBranchCase(false)">Add with this condition</button>
+                <button class="wf-add-b" type="button" id="wf-case-add-model" (click)="addBranchCase(true)">Add as a model decision</button>
+              </div>
+              <p class="wf-why">The condition is a boolean expression over the routed value, checked by
+                the same parser <span class="mono">salvor graph validate</span> runs, when you publish.</p>
+            </div>
+          }
+          <div class="wf-field"><label for="wf-f-bhash">agent_hash</label>
+            <input id="wf-f-bhash" type="text" [value]="n.agentHash ?? ''" [readOnly]="readOnly()" (input)="editBranchHash($event)" />
+            <p class="wf-why">Only a model-decided case needs one: it names which agent decides. A branch
+              whose cases are all expressions leaves this empty.</p>
           </div>
         }
         @if (n.kind === 'map') {
-          <div class="wf-field"><span class="k">over</span><div class="v mono">{{ n.over }}</div></div>
+          <div class="wf-field"><label for="wf-f-over">over</label>
+            <input id="wf-f-over" class="mono" type="text" [value]="n.over ?? ''" [readOnly]="readOnly()"
+                   placeholder="${n_fetch.watchers}" (input)="editOver($event)" />
+            <p class="wf-why">A reference to the list this node fans out over, recorded as data: the
+              runtime resolves it, the document only names it.</p>
+          </div>
           <div class="wf-field"><label for="wf-f-conc">concurrency</label>
             <input id="wf-f-conc" type="number" min="1" step="1" [value]="n.concurrency ?? 0" [readOnly]="readOnly()" (input)="editConcurrency($event)" />
           </div>
           @if (n.body?.tool) {
             <div class="wf-field"><span class="k">body</span><div class="v">{{ n.body?.tool }} · {{ n.body?.effect }}</div></div>
+          } @else {
+            <div class="wf-field"><label for="wf-f-body">body</label>
+              <select id="wf-f-body" [disabled]="readOnly()" (change)="editBody($event)">
+                <option value="" [selected]="!n.body?.node">no body yet</option>
+                @for (id of nodeIds(); track id) {
+                  <option [value]="id" [selected]="n.body?.node === id">{{ id }}</option>
+                }
+              </select>
+              <p class="wf-why">Each element runs through a node of this same document, named by id.</p>
+            </div>
           }
         }
         @if (n.kind === 'fold') {
-          <div class="wf-field"><span class="k">max_iterations</span><div class="v mono">{{ n.maxIterations }}</div>
-            <p class="wf-why">The bound on the refine loop — engine execution of a fold is deferred, so a client-driven run records its passes against this document.</p>
+          <div class="wf-field"><label for="wf-f-iters">max_iterations</label>
+            <input id="wf-f-iters" type="number" min="1" step="1" [value]="n.maxIterations ?? 0" [readOnly]="readOnly()" (input)="editMaxIterations($event)" />
+            <p class="wf-why">The bound on the refine loop: engine execution of a fold is deferred, so a client-driven run records its passes against this document.</p>
           </div>
-          <div class="wf-field"><span class="k">stop_when</span><div class="v mono">{{ n.stopWhen }}</div></div>
-          <div class="wf-field"><span class="k">join</span><div class="v">{{ n.join }}</div></div>
-          @if (n.body?.node) {
-            <div class="wf-field"><span class="k">body</span><div class="v mono">{{ n.body?.node }}</div></div>
+          <div class="wf-field"><label for="wf-f-stop">stop_when</label>
+            <input id="wf-f-stop" class="mono" type="text" [value]="n.stopWhen ?? ''" [readOnly]="readOnly()"
+                   placeholder="score >= 0.85" (input)="editStopWhen($event)" />
+            <p class="wf-why">A boolean expression over the accumulated value, in the same language a
+              branch case uses. <span class="mono">false</span> never stops, so the bound above is what ends the loop.</p>
+          </div>
+          <div class="wf-field"><span class="k">join</span><div class="v">{{ n.join }}</div>
+            <p class="wf-why">How the passes fold into one value. Authored with
+              <span class="mono">salvor graph edit</span>; a fold drawn here joins on the last pass, and
+              the rule it was opened with is published back unchanged.</p>
+          </div>
+          <div class="wf-field"><label for="wf-f-fbody">body</label>
+            <select id="wf-f-fbody" [disabled]="readOnly()" (change)="editBody($event)">
+              <option value="" [selected]="!n.body?.node">no body yet</option>
+              @for (id of nodeIds(); track id) {
+                <option [value]="id" [selected]="n.body?.node === id">{{ id }}</option>
+              }
+            </select>
+            <p class="wf-why">Each pass runs through a node of this same document, named by id.</p>
+          </div>
+        }
+        <!-- THE EDGES this node is an end of, both directions, addressed by their position in the
+             document's edge list, which is what a validator error names an edge by. A case select
+             appears exactly where the format allows a case: on an edge out of a branch. -->
+        <div class="wf-field"><span class="k">edges</span>
+          @if (selectedEdges().length) {
+            <ul class="wf-edgelist">
+              @for (row of selectedEdges(); track row.index) {
+                <li class="wf-edgerow" [attr.data-edge]="row.index">
+                  <span class="wf-edge-d mono">{{ row.out ? '→' : '←' }} {{ row.other }}</span>
+                  @if (row.out && row.cases.length) {
+                    <label class="sr" [attr.for]="'wf-edge-c-' + row.index">case this edge realizes</label>
+                    <select class="wf-edge-c" [attr.id]="'wf-edge-c-' + row.index" [disabled]="readOnly()"
+                            (change)="onEdgeCase(row.index, $event)">
+                      <option value="" [selected]="!row.label">no case</option>
+                      @for (c of row.cases; track c) {
+                        <option [value]="c" [selected]="row.label === c">{{ c }}</option>
+                      }
+                    </select>
+                  } @else if (row.label) {
+                    <span class="wf-case">{{ row.label }}</span>
+                  }
+                  @if (!readOnly()) {
+                    <button class="wf-case-x" type="button" [attr.data-cut]="row.index"
+                            [attr.aria-label]="'Cut the edge ' + row.other" (click)="cutEdgeAt(row.index)">Cut</button>
+                  }
+                </li>
+              }
+            </ul>
+          } @else {
+            <div class="v">nothing joins this node yet</div>
           }
+          @if (!readOnly()) {
+            <div class="wf-add-row">
+              <button class="wf-add-b" type="button" id="wf-connect" (click)="armLink(n.id)">Connect from here…</button>
+            </div>
+          }
+        </div>
+
+        @if (!readOnly()) {
+          <!-- A delete takes the node and NOTHING else. The edges that named it stay, and each one
+               becomes an error naming what it used to reach, because five edges quietly vanishing
+               looks the same as deleting a node nothing referenced. -->
+          <div class="wf-field wf-danger">
+            <button class="wf-del-b" type="button" id="wf-delete" (click)="removeSelected()">Delete {{ n.id }}</button>
+            <p class="wf-why">@if (orphanCount(n.id); as count) {
+              {{ count }} edge{{ count === 1 ? '' : 's' }} still name{{ count === 1 ? 's' : '' }} this node.
+              They are kept, and each becomes an error pointing at what it used to reach, rather than
+              disappearing with it.
+            } @else {
+              No edge references this node, so nothing else changes.
+            }</p>
+          </div>
         }
       } @else {
-        <p class="wf-empty">Select a node to inspect it — click one, or Tab into the canvas and press Enter.</p>
+        <p class="wf-empty">Select a node to inspect it: click one, or Tab into the canvas and press Enter.</p>
       }
 
       <!-- ONE error list per render: these are the same offenders the canvas marks. -->
@@ -342,7 +599,26 @@
   <button class="cpanel-tab" type="button" data-drawer data-panel="workflows" [hidden]="panelOpen()" (click)="openPanel()">Inspector</button>
 </div>
 
-<!-- THE HAZARD REVIEW — a real <dialog>, showModal(), the app's ONE modal. Escape closes it;
+<!-- THE PASTE BOX, a popover rather than a modal: the app's one modal is the hazard review, and pasting a
+     document decides nothing that needs the operator pinned. The keyboard route to an open, and the
+     route for a document that is in a terminal rather than in a file. -->
+<div class="wf-paste" id="wf-paste" #wfPasteBox popover="auto" role="dialog" aria-labelledby="wf-paste-title">
+  <div class="wf-paste-inner">
+    <h3 class="cpanel-title" id="wf-paste-title">Paste a graph document</h3>
+    <p class="cpanel-sub">The JSON a <span class="mono">salvor graph edit</span> writes. It opens as a
+      draft with no hash, and only if it validates, by the same check that gates publish.</p>
+    <label class="sr" for="wf-paste-text">Graph document JSON</label>
+    <textarea id="wf-paste-text" #wfPasteText rows="12" spellcheck="false"
+              placeholder='{ "schema_version": 1, "nodes": [ … ], "edges": [ … ] }'></textarea>
+    <div class="wf-paste-foot">
+      <span class="spacer"></span>
+      <button class="fold-all" type="button" id="wf-paste-cancel" popovertarget="wf-paste" popovertargetaction="hide">Cancel</button>
+      <button class="btn" type="button" id="wf-paste-go" (click)="openPasted()">Open as a draft</button>
+    </div>
+  </div>
+</div>
+
+<!-- THE HAZARD REVIEW: a real <dialog>, showModal(), the app's ONE modal. Escape closes it;
      nothing is forked by dismissing it. -->
 <dialog class="fork" id="fork-dlg" #forkDlg aria-labelledby="fork-title">
   <div class="fork-inner">
@@ -361,7 +637,7 @@
         </div>
       } @else {
         @if (hazardRows().length) {
-          <p><b>A fork is a new run.</b> The origin is never touched. The writes below will run again — acknowledge each one.</p>
+          <p><b>A fork is a new run.</b> The origin is never touched. The writes below will run again: acknowledge each one.</p>
           @for (h of hazardRows(); track h.seq) {
             <div class="haz" [class.is-ack]="isAcked(h.seq)" [attr.data-haz]="h.seq">
               <input type="checkbox" [attr.id]="'ack-' + h.seq" [attr.data-ack]="h.seq" [checked]="isAcked(h.seq)" (change)="toggleAck(h.seq, $any($event.target).checked)" />
@@ -371,7 +647,7 @@
                   <span class="badge e-write">write</span>
                   <span class="seq">seq {{ h.seq }} · ran {{ h.recordedAt }}</span>
                 </div>
-                <p class="haz-k" [class.is-null]="h.key === null">idempotency_key: {{ h.key === null ? 'null — the call cannot be safely retried, so the provider will not collapse the repeat' : h.key }}</p>
+                <p class="haz-k" [class.is-null]="h.key === null">idempotency_key: {{ h.key === null ? 'null: the call cannot be safely retried, so the provider will not collapse the repeat' : h.key }}</p>
                 <pre [innerHTML]="jsonHtml(h.input)"></pre>
                 <label class="haz-ack" [attr.for]="'ack-' + h.seq">I acknowledge that <span class="mono">{{ h.tool }}</span> will run a second time with this input.</label>
               </div>
@@ -379,7 +655,7 @@
           }
         } @else {
           <div class="fork-clean">
-            <h5>No writes downstream — this fork is clean</h5>
+            <h5>No writes downstream: this fork is clean</h5>
             <p>The origin recorded no write from this node onward, so nothing this fork re-executes has a side effect to double.</p>
           </div>
         }

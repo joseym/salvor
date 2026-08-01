@@ -184,7 +184,7 @@ async fn fork_records_the_acknowledgement_and_the_child_replays_standalone() {
         publish_before + 1,
         "the downstream write executes exactly once in the child"
     );
-    // The idempotent notify re-executed (allowed) — but under the SAME key.
+    // The idempotent notify re-executed (allowed), but under the SAME key.
     assert_eq!(notify_calls.load(Ordering::SeqCst), notify_before + 1);
     // research replayed from the prefix: no new model request.
     assert_eq!(
@@ -223,7 +223,7 @@ async fn fork_records_the_acknowledgement_and_the_child_replays_standalone() {
         other => panic!("child head is not GraphRunStarted: {other:?}"),
     }
 
-    // Acceptance E5: the child log replays standalone — a fresh cursor over the
+    // Acceptance E5: the child log replays standalone: a fresh cursor over the
     // child log alone accepts it, and a re-drive makes zero live calls and
     // produces a byte-identical log.
     ReplayCursor::new(child_log.clone()).expect("the child log is a legal standalone run log");

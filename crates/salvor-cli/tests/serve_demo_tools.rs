@@ -115,7 +115,7 @@ fn http(addr: &str, method: &str, path: &str, body: Option<&Value>) -> (u16, Val
 /// A one-node graph document: a single `tool` node, no edges, so it runs
 /// straight off the run's own input with nothing else to resolve. Used by
 /// both tests, so the two paths (refused vs. dispatched) are directly
-/// comparable — same document, same tool name, only the registry differs.
+/// comparable: same document, same tool name, only the registry differs.
 fn one_tool_node_graph() -> Value {
     json!({
         "schema_version": 1,
@@ -230,7 +230,7 @@ fn demo_tools_flag_registers_and_dispatches_the_three_tools() {
     let run = started["run"].as_str().expect("run id in response");
 
     // The one-node graph has nothing left to drive once its sole tool node
-    // exits, so the response above already reflects a completed run — but
+    // exits, so the response above already reflects a completed run. But
     // poll briefly for it anyway rather than assume the exact response shape
     // of a synchronous drive.
     let deadline = Instant::now() + Duration::from_secs(10);

@@ -352,7 +352,7 @@ async fn wait_for_status(client: &reqwest::Client, server: &TestServer, run: &st
 }
 
 /// A server-driven run reports an ATTACHED driver while a task is driving it,
-/// and NONE once that task is gone — the same `is_run_active` truth the event
+/// and NONE once that task is gone: the same `is_run_active` truth the event
 /// stream's `detached` end-frame already reports, now surfaced on the run list
 /// so the dashboard can derive a stalled verdict. The status fold is identical
 /// before and after the abort (the log does not change); only the liveness
@@ -409,11 +409,11 @@ async fn list_reports_driver_attached_while_driving_and_none_after_the_task_is_g
     let entry = list["runs"][0].clone();
     assert_eq!(
         entry["status"]["state"], "awaiting_tool",
-        "the fold is unchanged — the run still LOOKS mid-step"
+        "the fold is unchanged: the run still LOOKS mid-step"
     );
     assert_eq!(
         entry["driver"], "none",
-        "the task is gone, so no driver is attached — the stall the dashboard derives"
+        "the task is gone, so no driver is attached: the stall the dashboard derives"
     );
 
     // The single-run read agrees with the list.
@@ -421,7 +421,7 @@ async fn list_reports_driver_attached_while_driving_and_none_after_the_task_is_g
     assert_eq!(one["driver"], "none");
 }
 
-/// A terminal run omits `driver` entirely — asking whether a driver is attached
+/// A terminal run omits `driver` entirely: asking whether a driver is attached
 /// to a finished run is not a meaningful question, so the field is absent, never
 /// `"driver": "none"`. Same zero-vs-absent house rule the folded fields follow.
 #[tokio::test]

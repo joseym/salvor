@@ -22,22 +22,33 @@ use salvor_store::StoreError;
 use thiserror::Error;
 
 /// What can go wrong while driving a run.
+///
+/// `Replay`, `Store`, and `Model` each spell out their inner error's `Display`
+/// directly in their own message (`"replay: {0}"` and so on) rather than
+/// leaning on `thiserror`'s `#[source]`/`#[from]` chaining for that text. A
+/// field that is both interpolated into the message AND wired as the
+/// `Error::source()` gets printed twice by anything that walks the source
+/// chain on top of `Display` (`anyhow`'s `{:#}`, `{:?}`, and the like): once
+/// embedded in this variant's own message, once again as the chain's next
+/// link. Plain `From` impls below give `?` the same conversion `#[from]`
+/// would without also handing these three a chained source, so the detail
+/// appears exactly once no matter how the caller prints the error.
 #[derive(Debug, Error)]
 pub enum RuntimeError {
     /// The replay layer refused to continue: divergence, a malformed log, or
     /// a dangling write intent that needs human reconciliation.
     #[error("replay: {0}")]
-    Replay(#[from] ReplayError),
+    Replay(ReplayError),
 
     /// The event store failed to persist or read an event.
     #[error("store: {0}")]
-    Store(#[from] StoreError),
+    Store(StoreError),
 
     /// A live model call failed after the client's own retries. The run's
     /// log is intact (the intent, if any, is recorded), so the run can be
     /// recovered later; the model intent will be re-issued safely.
     #[error("model call: {0}")]
-    Model(#[from] salvor_llm::Error),
+    Model(salvor_llm::Error),
 
     /// A model request could not be serialized to JSON for hashing.
     #[error("model request did not serialize: {0}")]
@@ -112,4 +123,75 @@ pub enum RuntimeError {
         /// A short description of the terminal status the run was in.
         status: String,
     },
+}
+
+// Plain `From` impls, not `#[from]`: see the doc comment on `RuntimeError`
+// for why these three stay unchained.
+impl From<ReplayError> for RuntimeError {
+    fn from(error: ReplayError) -> Self {
+        RuntimeError::Replay(error)
+    }
+}
+
+impl From<StoreError> for RuntimeError {
+    fn from(error: StoreError) -> Self {
+        RuntimeError::Store(error)
+    }
+}
+
+impl From<salvor_llm::Error> for RuntimeError {
+    fn from(error: salvor_llm::Error) -> Self {
+        RuntimeError::Model(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Joins an error's `Display` with every `source()` below it, exactly the
+    /// walk `anyhow`'s `{:#}`/`{:?}` and `salvor_runtime::wire::error_chain`
+    /// both do. A variant whose message already embeds its own `#[source]`
+    /// field's text, while ALSO exposing that field as the chained source,
+    /// would print the same text twice through a walk like this one; that is
+    /// the bug a tester hit for `RuntimeError::Model`.
+    fn chain(error: &dyn std::error::Error) -> String {
+        let mut message = error.to_string();
+        let mut source = error.source();
+        while let Some(inner) = source {
+            message.push_str(": ");
+            message.push_str(&inner.to_string());
+            source = inner.source();
+        }
+        message
+    }
+
+    /// Pins the fix: a model call's `500` (the demo model's own
+    /// no-conversation-matched error, reproduced by hand here) reads exactly
+    /// once whether a caller walks the source chain (`chain`, matching
+    /// `anyhow`'s alternate `Display`) or just calls `to_string()` on the bare
+    /// `RuntimeError` (matching `ApiError::message()`'s plain `Display` on the
+    /// HTTP path). Before the fix, `chain` doubled it: `Model`'s own message
+    /// interpolated the inner error's text AND `#[from]` chained that same
+    /// field as `source()`.
+    #[test]
+    fn model_error_prints_once_through_the_source_chain_and_plain_display() {
+        let inner = salvor_llm::Error::Api(salvor_llm::ApiError {
+            status: 500,
+            kind: "demo_script_no_conversation".to_owned(),
+            message: "no conversation name matched the system prompt".to_owned(),
+            request_id: None,
+            retry_after: None,
+        });
+        let error: RuntimeError = inner.into();
+
+        let needle = "no conversation name matched the system prompt";
+        let chained = chain(&error);
+        assert_eq!(chained.matches(needle).count(), 1, "{chained}");
+        assert_eq!(error.to_string().matches(needle).count(), 1, "{error}");
+
+        // No source to walk past `RuntimeError` itself: that absence is what
+        // keeps `chain` from doubling the text back up.
+        assert!(std::error::Error::source(&error).is_none());
+    }
 }

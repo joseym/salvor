@@ -1,19 +1,50 @@
-import { ESTRIP_GAP_BUDGET_PCT, estripGapPct, estripTickBox, zoneOf } from './event-model';
+import { ESTRIP_GAP_BUDGET_PCT, estripGapPct, estripTickBox, rowOf, zoneOf } from './event-model';
+import type { SalvorEvent } from '@salvor-run/client';
 
-describe('zoneOf — the scrub zone a timeline row falls into', () => {
+function toolCallRequested(payload: Record<string, unknown>): SalvorEvent {
+  return {
+    runId: 'run-1',
+    seq: 3,
+    schemaVersion: 1,
+    recordedAt: '2026-07-30T23:46:58Z',
+    kind: 'ToolCallRequested',
+    payload: { tool: 'refund_card', effect: 'write', input: {}, ...payload },
+  };
+}
+
+describe('rowOf: a ToolCallRequested row shows who performed the call', () => {
+  it('renders no performer badge when performed_by is absent (server-performed, the common case)', () => {
+    const html = rowOf(toolCallRequested({}), [], null);
+    expect(html).not.toContain('perf-client');
+    expect(html).not.toContain('>client<');
+  });
+
+  it('renders no performer badge for an explicit server performer either', () => {
+    const html = rowOf(toolCallRequested({ performed_by: 'server' }), [], null);
+    expect(html).not.toContain('perf-client');
+  });
+
+  it('renders the client badge, alongside the effect badge, when the client performed the call', () => {
+    const html = rowOf(toolCallRequested({ performed_by: 'client' }), [], null);
+    expect(html).toContain('<span class="badge perf-client">client</span>');
+    expect(html).toContain('<span class="badge e-write">write</span>');
+  });
+});
+
+describe('zoneOf: the scrub zone a timeline row falls into', () => {
   it('marks every seq at or past the prefix as beyond', () => {
     expect(zoneOf(5, 5)).toBe('beyond');
     expect(zoneOf(6, 5)).toBe('beyond');
-    expect(zoneOf(0, 0)).toBe('beyond'); // nothing folded yet — seq 0 has not happened
+    expect(zoneOf(0, 0)).toBe('beyond'); // nothing folded yet: seq 0 has not happened
   });
 
-  it('marks seq n-1 — the event under the playhead — as boundary, never seq n', () => {
+  it('marks seq n-1 (the event under the playhead) as boundary, never seq n', () => {
     // the bug this replaces: the old treatment accented seq === n (the first EXCLUDED event)
     expect(zoneOf(4, 5)).toBe('boundary');
     expect(zoneOf(5, 5)).not.toBe('boundary');
   });
 
-  it('there is no boundary at n = 0 — nothing is folded, so nothing is under the playhead', () => {
+  it('there is no boundary at n = 0: nothing is folded, so nothing is under the playhead', () => {
     expect(zoneOf(0, 0)).not.toBe('boundary');
     expect(zoneOf(-1, 0)).not.toBe('boundary');
   });
@@ -39,7 +70,7 @@ describe('zoneOf — the scrub zone a timeline row falls into', () => {
 
 describe('the event strip tick geometry never lays a tick outside its container', () => {
   // The real defect: on a 206-event run the old CSS gave every `.etick` a hard `min-width: 3px`
-  // floor plus a fixed `2px` gap, with no ceiling on how many ticks could exist — 206×3 + 205×2 ≈
+  // floor plus a fixed `2px` gap, with no ceiling on how many ticks could exist: 206×3 + 205×2 ≈
   // 1028px demanded against a strip only ~316px wide (the Scrubber's fixed 340px side column,
   // minus its padding), so most ticks rendered off the right edge of the container and of the
   // viewport (a mid-tick measured at x=1444 on a 1280px viewport). `estripTickBox` models the
@@ -88,7 +119,7 @@ describe('the event strip tick geometry never lays a tick outside its container'
     const { widthPct } = estripTickBox(0, 10);
     // ~340px is the Scrubber panel's own documented width (inspector.css .inspector grid column);
     // this asserts the PERCENT is generous, not a literal pixel measurement (no DOM in this test).
-    expect(widthPct).toBeGreaterThan(9); // ~30px+ at a typical strip width — plenty for a mouse
+    expect(widthPct).toBeGreaterThan(9); // ~30px+ at a typical strip width, plenty for a mouse
   });
 
   it('a dense strip (206 ticks, the proven defect count) compresses but still tiles exactly, never overflowing', () => {

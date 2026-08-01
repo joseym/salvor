@@ -21,45 +21,45 @@
     }
   </div>
 
-  <!-- Once abandoned, this card's whole reason for being (the stall evidence below) is stale —
-       the run is no longer "no driver attached", it is retired — so the body swaps to just the
+  <!-- Once abandoned, this card's whole reason for being (the stall evidence below) is stale:
+       the run is no longer "no driver attached", it is retired, so the body swaps to just the
        receipt the embedded abandon-action already renders in its own slot (see stalled-card.ts's
        EXIT note). -->
   @if (!abandoned()) {
-    <!-- THE EXPERT'S EXACT PHRASING FAMILY: "<resting state> — last event 10m ago, no driver
+    <!-- THE EXPERT'S EXACT PHRASING FAMILY: "<resting state>: last event 10m ago, no driver
          attached." Every clause is recorded fact: the folded status, the newest envelope's age, and
          the server's own liveness evidence. The resting state is the run's ACTUAL fold (e.g.
-         "awaiting model" for a run that died mid model-call) — the in-progress family this card
+         "awaiting model" for a run that died mid model-call): the in-progress family this card
          covers is wider than literal "running" (see stalled-card.ts). -->
     <p class="question" data-stalled-headline>
-      <span class="mono">{{ restingLabel() }}</span> — last event <b>{{ lastAge() }}</b> ago, no driver attached.
+      <span class="mono">{{ restingLabel() }}</span>: last event <b>{{ lastAge() }}</b> ago, no driver attached.
     </p>
 
     <dl class="evidence">
-      <div><dt>folded status</dt><dd><span class="mono">{{ restingLabel() }}</span> — mid-flight and drivable</dd></div>
-      <div><dt>last_recorded_at</dt><dd>{{ row().lastRecordedAt ?? '—' }} <span class="null">({{ lastAge() }} ago)</span></dd></div>
-      <div><dt>driver</dt><dd class="null">none — no task is running it and no client lease is current</dd></div>
+      <div><dt>folded status</dt><dd><span class="mono">{{ restingLabel() }}</span>: mid-flight and drivable</dd></div>
+      <div><dt>last_recorded_at</dt><dd>{{ row().lastRecordedAt ?? '-' }} <span class="null">({{ lastAge() }} ago)</span></dd></div>
+      <div><dt>driver</dt><dd class="null">none: no task is running it and no client lease is current</dd></div>
     </dl>
 
     <p class="reason">
       <b>No driver is attached to this run.</b> A run that folds to <span class="mono">{{ restingLabel() }}</span>
       is asserting motion, but the server sees no one driving it: it was resolved and never re-driven,
-      its driver crashed, or its client abandoned it. Restart the driver that owns it — or, if this run
+      its driver crashed, or its client abandoned it. Restart the driver that owns it, or, if this run
       is dead forever, abandon it below.
     </p>
 
     <!-- NO RESTART BUTTON, on purpose: the driver is a host process outside this browser, so there is
          no call this dashboard can make to UN-STALL the run. Abandon is the one thing it can honestly
-         do — a retirement, not a fix (see stalled-card.ts). -->
+         do: a retirement, not a fix (see stalled-card.ts). -->
     <p class="offramp-why">
       A run's driver is the process that started it (a server task, or an SDK / browser tab holding
-      the drive-token lease) — it lives in a host, never here in the dashboard. This view cannot
+      the drive-token lease). It lives in a host, never here in the dashboard. This view cannot
       restart it; it can take you to the run's evidence, or retire the run for good.
     </p>
   }
 
   <!-- The stalled card's action row, same anatomy as every sibling card's: primary first (here,
-       abandon — the card's ONE real in-app action, so it wears the same .btn.serious weight the
+       abandon: the card's ONE real in-app action, so it wears the same .btn.serious weight the
        other cards' abandon-off-ramp already uses for a destructive confirm), the subordinate link
        beside it, and the endpoint tucked behind "show API" rather than floating loose. -->
   <div class="actions">

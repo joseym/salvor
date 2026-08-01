@@ -67,7 +67,11 @@ const helpPaths = {
   run: "run",
   fork: "fork",
   serve: "serve",
+  agent: "agent",
+  "agent-hash": "agent hash",
+  "agent-validate": "agent validate",
   graph: "graph",
+  "graph-edit": "graph edit",
   "graph-validate": "graph validate",
   "graph-run": "graph run",
 };

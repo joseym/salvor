@@ -1,0 +1,19 @@
+{
+  "// graph documents": [
+    "The document format sets deny_unknown_fields and the schema's root is closed,",
+    "so a graph cannot carry a $schema key of its own: adding one makes the file",
+    "fail salvor graph validate. Editors are pointed at the schema by file pattern",
+    "instead, which is what this mapping does. docs/graph-schema.json is generated",
+    "from the Rust types and gated against drift, so it always describes the format",
+    "the binary in your PATH actually accepts."
+  ],
+  "json.schemas": [
+    {
+      "fileMatch": ["/examples/graphs/*.json"],
+      "url": "./docs/graph-schema.json"
+    }
+  ],
+  "files.associations": {
+    "*.tape": "shellscript"
+  }
+}

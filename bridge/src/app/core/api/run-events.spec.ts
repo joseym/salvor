@@ -22,7 +22,7 @@ function endFrame(status: unknown, detached = false): string {
   return `event: end\ndata: ${JSON.stringify({ status, detached })}\n\n`;
 }
 
-/** A one-shot SSE body: enqueues every frame then closes the stream — simulating either a
+/** A one-shot SSE body: enqueues every frame then closes the stream, simulating either a
  * clean server close (when the last frame is an `end` frame) or a dropped connection
  * (when it just stops, which is exactly what a mid-tail network drop looks like to a
  * `fetch` reader: `done: true` with no `event: end` ever seen). */
@@ -60,7 +60,7 @@ describe('RunEventsService (reconnect)', () => {
       const url = input.toString();
       requestedUrls.push(url);
       if (requestedUrls.length === 1) {
-        // First connect (?from_seq=0): two events, then the raw byte stream just stops —
+        // First connect (?from_seq=0): two events, then the raw byte stream just stops:
         // no `event: end` frame. That is what a dropped connection looks like to the
         // reader, and it is the ONLY way this test induces a drop: no internal SDK hook
         // is touched, the SDK's own `streamEvents` retry loop is exercised unmodified.
@@ -95,7 +95,7 @@ describe('RunEventsService (reconnect)', () => {
     await waitFor(() => expect(channel.state().kind).toBe('connected'));
     expect(channel.state().label).toBe('Live');
 
-    // The drop is invisible to this channel — the SDK's own reconnect absorbs it, so the
+    // The drop is invisible to this channel: the SDK's own reconnect absorbs it, so the
     // pill does not flicker back to Snapshot on a transient drop it successfully recovered
     // from. It settles Ended only once the real terminal frame arrives.
     await waitFor(() => expect(channel.state().kind).toBe('ended'));

@@ -1,7 +1,7 @@
 import { Injectable, type Signal, signal } from '@angular/core';
 
 /**
- * A fork the operator asked for from OUTSIDE the canvas — the Inspector's scrubber offer or the
+ * A fork the operator asked for from OUTSIDE the canvas: the Inspector's scrubber offer or the
  * Runs detail panel. Both go through this ONE door so the canvas is the only place that decides
  * what a fork request means (which graph, which run, whether a node still has to be picked) and
  * `openFork` stays the only owner of every refusal. A second copy of the parked-origin rule is

@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "nodes": [
+    {
+      "kind": "agent",
+      "payload": {
+        "id": "research",
+        "agent_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+      }
+    },
+    {
+      "kind": "tool",
+      "payload": {
+        "id": "assess",
+        "tool": "assess"
+      }
+    },
+    {
+      "kind": "branch",
+      "payload": {
+        "id": "route",
+        "on": "assess.score",
+        "agent_hash": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+        "cases": [
+          { "name": "high", "when": { "kind": "expression", "value": "score >= 0.8" } },
+          { "name": "review", "when": { "kind": "model_decision" } }
+        ]
+      }
+    },
+    {
+      "kind": "gate",
+      "payload": {
+        "id": "approve",
+        "prompt": "Approve this high-scoring draft for publication?",
+        "approval_schema": {
+          "type": "object",
+          "properties": { "approved": { "type": "boolean" } },
+          "required": ["approved"]
+        }
+      }
+    },
+    {
+      "kind": "tool",
+      "payload": {
+        "id": "publish",
+        "tool": "http_post"
+      }
+    },
+    {
+      "kind": "tool",
+      "payload": {
+        "id": "escalate",
+        "tool": "notify"
+      }
+    }
+  ],
+  "edges": [
+    { "from": "research", "to": "assess" },
+    { "from": "assess", "to": "route" },
+    { "from": "route", "to": "approve", "label": "high" },
+    { "from": "approve", "to": "publish" },
+    { "from": "route", "to": "escalate", "label": "review" }
+  ]
+}

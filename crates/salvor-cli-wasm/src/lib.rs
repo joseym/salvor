@@ -61,9 +61,9 @@
 #![warn(missing_docs)]
 
 use salvor_cli_core::cli::{
-    AbandonArgs, BuildArgs, Cli, Command, CompletionsArgs, ForkArgs, GraphCommand, GraphRunArgs,
-    GraphValidateArgs, HistoryArgs, ListArgs, ReplayArgs, ResolveArgs, ResumeArgs, RunArgs,
-    ServeArgs,
+    AbandonArgs, AgentCommand, AgentHashArgs, AgentValidateArgs, BuildArgs, Cli, Command,
+    CompletionsArgs, ForkArgs, GraphCommand, GraphEditArgs, GraphRunArgs, GraphValidateArgs,
+    HistoryArgs, ListArgs, ReplayArgs, ResolveArgs, ResumeArgs, RunArgs, ServeArgs,
 };
 use salvor_cli_core::render;
 use salvor_replay::RunSummary;
@@ -218,19 +218,37 @@ enum CommandDto {
         kill: Option<String>,
         dev: bool,
         demo_tools: bool,
+        client_tools: Vec<String>,
     },
     Build {
         install: bool,
+    },
+    Agent {
+        command: AgentCommandDto,
     },
     Graph {
         command: GraphCommandDto,
     },
 }
 
+/// The verbs under `salvor agent`, tagged like their parent.
+#[derive(Serialize)]
+#[serde(tag = "agent_verb", rename_all = "kebab-case")]
+enum AgentCommandDto {
+    Hash { agents: Vec<String> },
+    Validate { agents: Vec<String> },
+}
+
 /// The verbs under `salvor graph`, tagged like their parent.
 #[derive(Serialize)]
 #[serde(tag = "graph_verb", rename_all = "kebab-case")]
 enum GraphCommandDto {
+    Edit {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        script: Option<String>,
+    },
     Validate {
         path: String,
     },
@@ -338,16 +356,34 @@ impl From<&Command> for CommandDto {
                 kill,
                 dev,
                 demo_tools,
+                client_tools,
             }) => CommandDto::Serve {
                 bind: bind.clone(),
                 auth_token: auth_token.clone(),
                 kill: kill.clone(),
                 dev: *dev,
                 demo_tools: *demo_tools,
+                client_tools: paths(client_tools),
             },
             Command::Build(BuildArgs { install }) => CommandDto::Build { install: *install },
+            Command::Agent { command } => CommandDto::Agent {
+                command: command.into(),
+            },
             Command::Graph { command } => CommandDto::Graph {
                 command: command.into(),
+            },
+        }
+    }
+}
+
+impl From<&AgentCommand> for AgentCommandDto {
+    fn from(command: &AgentCommand) -> Self {
+        match command {
+            AgentCommand::Hash(AgentHashArgs { agents }) => AgentCommandDto::Hash {
+                agents: paths(agents),
+            },
+            AgentCommand::Validate(AgentValidateArgs { agents }) => AgentCommandDto::Validate {
+                agents: paths(agents),
             },
         }
     }
@@ -356,6 +392,10 @@ impl From<&Command> for CommandDto {
 impl From<&GraphCommand> for GraphCommandDto {
     fn from(command: &GraphCommand) -> Self {
         match command {
+            GraphCommand::Edit(GraphEditArgs { path: file, script }) => GraphCommandDto::Edit {
+                path: file.as_deref().map(path),
+                script: script.as_deref().map(path),
+            },
             GraphCommand::Validate(GraphValidateArgs { path: file }) => {
                 GraphCommandDto::Validate { path: path(file) }
             }

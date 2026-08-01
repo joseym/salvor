@@ -25,15 +25,15 @@ describe('Inbox', () => {
 
   /**
    * Poll (bounded, real-timer via `vi.waitFor`) until `condition` is true, running change
-   * detection on every attempt. The mocked `fetch()`'s promise chain — fetch resolution, the
-   * real `Response` body read, `JSON.parse`, the signal write, the zoneless render — takes a
+   * detection on every attempt. The mocked `fetch()`'s promise chain (fetch resolution, the
+   * real `Response` body read, `JSON.parse`, the signal write, the zoneless render) takes a
    * number of microtask hops that is NOT a fixed constant: it depends on the Node/undici/Angular
    * versions in play and, empirically, grows under CPU contention (many worker threads/files
    * competing for the event loop lengthen exactly the internal stream-buffering hops that decide
    * how many `.then()`s the chain needs). A fixed `for (let i = 0; i < N; i++) await
    * Promise.resolve()` loop bakes in a guess at that hop count; under load the guess undercounts
-   * and the assertion below sees stale (pre-fetch) DOM. Waiting on the actual condition — never a
-   * tick count — is the only version of this that is true regardless of how many hops the chain
+   * and the assertion below sees stale (pre-fetch) DOM. Waiting on the actual condition, never a
+   * tick count, is the only version of this that is true regardless of how many hops the chain
    * happens to need on a given run.
    */
   async function settle(
@@ -172,8 +172,8 @@ describe('Inbox', () => {
     (el.querySelector('[data-abandon-submit]') as HTMLButtonElement).click();
     await settle(fixture, () => el.querySelector('[data-abandon-receipt]') !== null);
 
-    // PINNED: the receipt survived the post-commit refresh that reclassified the run as terminal —
-    // the old bug was exactly this card vanishing the instant that refresh landed.
+    // PINNED: the receipt survived the post-commit refresh that reclassified the run as terminal.
+    // The old bug was exactly this card vanishing the instant that refresh landed.
     expect(el.querySelector('[data-stalled="r-stalled"]'), 'the card is still present, pinned').toBeTruthy();
     expect(el.querySelector('[data-abandon-receipt]')?.textContent).toContain('Appended RunAbandoned at seq 9');
     // the stale "no driver attached" evidence is gone, replaced by the compact receipt-only body
@@ -183,17 +183,17 @@ describe('Inbox', () => {
     expect(wrapper, 'the card is wrapped for its fold-away exit').toBeTruthy();
     expect(wrapper.classList.contains('is-leaving'), 'not leaving until dismissed').toBe(false);
 
-    // dismiss ("Done"): starts the fold-away, but the card is NOT yet removed — only the CSS class
+    // dismiss ("Done"): starts the fold-away, but the card is NOT yet removed: only the CSS class
     // is applied; removal waits for the exit transition's own transitionend.
     (el.querySelector('[data-abandon-done]') as HTMLButtonElement).click();
     fixture.detectChanges();
     expect(wrapper.classList.contains('is-leaving'), 'the fold-away starts on Done').toBe(true);
     expect(el.querySelector('[data-stalled="r-stalled"]'), 'still present mid-exit').toBeTruthy();
 
-    // the exit transition genuinely finishes — never a guessed timer. Requirement change (staged
+    // the exit transition genuinely finishes, never a guessed timer. Requirement change (staged
     // exit, motion polish 2026-07-21): the wrapper's fold-away is now two stages (a quick content
     // fade, then the real `grid-template-rows` height collapse), so removal is keyed on the HEIGHT
-    // property specifically — a bare `transitionend` (as the fade stage's own event would also be)
+    // property specifically: a bare `transitionend` (as the fade stage's own event would also be)
     // must NOT drop the card early.
     wrapper.dispatchEvent(new TransitionEvent('transitionend', { bubbles: true, propertyName: 'grid-template-rows' }));
     fixture.detectChanges();
@@ -221,7 +221,7 @@ describe('Inbox', () => {
       jsonResponse({ run: 'r-susp', abandoned: true, appended_seq: 2, status: { state: 'abandoned' } }),
     );
     // onCommitted -> RunsService.refresh(): a suspension card is permanent via shownCards regardless,
-    // so no second GET is even required for it to survive — but the refresh still happens.
+    // so no second GET is even required for it to survive, but the refresh still happens.
     fetchMock.mockResolvedValueOnce(
       jsonResponse({ runs: [{ run: 'r-susp', status: { state: 'abandoned' }, event_count: 2 }] }),
     );

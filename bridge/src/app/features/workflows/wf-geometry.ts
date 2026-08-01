@@ -1,7 +1,7 @@
-import type { WfEdge, WfGraph } from './wf-model';
+import { bodyLinks, type WfEdge, type WfGraph } from './wf-model';
 
 /**
- * THE CANVAS GEOMETRY — the pure math the pan/zoom surface runs on, lifted from the prototype so it
+ * THE CANVAS GEOMETRY: the pure math the pan/zoom surface runs on, lifted from the prototype so it
  * can be unit-tested without a DOM. A node is {@link NODE_W}x{@link NODE_H}; columns sit a
  * {@link PITCH} apart. Positions come from a layered topological layout (server graphs carry no
  * layout sidecar, so the drawing is derived from the edges, never guessed).
@@ -13,22 +13,22 @@ export const PITCH_Y = 160;
 
 /**
  * THE DUPLICATE-STACK OFFSET. Two nodes claiming the same id cannot be placed apart by an id-keyed
- * layout, so the renderer nudges each successive one down-and-right by this much — the consequence
+ * layout, so the renderer nudges each successive one down-and-right by this much: the consequence
  * of the duplicate, made visible rather than hidden. Larger than the prototype's 16px so the
  * under-card's kind eyebrow and title stay readable under the top card, and paired on the canvas
  * with the {@link WfDupStack} caption chip so the overlap READS as a shared id, not a glitch.
  */
 export const DUP_STACK_OFFSET = 24;
 
-/** The corner radius an orthogonal trace turns with — the prototype's `r`, one value everywhere. */
+/** The corner radius an orthogonal trace turns with: the prototype's `r`, one value everywhere. */
 const CORNER_R = 10;
-/** The gap below the whole node band where a rerouted trace runs its horizontal — clear of every
+/** The gap below the whole node band where a rerouted trace runs its horizontal: clear of every
  * card by this margin, so a channel run never grazes a node. */
 const CHANNEL_MARGIN = 40;
 /** Parallel channel traces are stacked this far apart, so two reroutes never merge into one rule. */
 const LANE_STEP = 28;
 /** The horizontal a rerouted trace steps into the column GAP by, on the way out of the source and
- * into the target — half the layered gap (PITCH_X − NODE_W = 92), so the vertical runs sit clear of
+ * into the target: half the layered gap (PITCH_X − NODE_W = 92), so the vertical runs sit clear of
  * both the node they leave and the node they enter. */
 const CHANNEL_STUB = 46;
 
@@ -87,7 +87,7 @@ export function wfTopo(g: WfGraph): string[] {
 export type WfLayout = Record<string, { readonly x: number; readonly y: number }>;
 
 /**
- * THE SIDECAR, ported from the prototype. Coordinates live here, keyed by the graph's own key —
+ * THE SIDECAR, ported from the prototype. Coordinates live here, keyed by the graph's own key:
  * NEVER inside the hashed document, so moving a node can never change a graph's identity. The
  * prototype hand-authored a layout for each fixture graph; the one graph this build ships with a
  * known key is the seeded `refund-sweep` draft, so its positions are ported verbatim. A published
@@ -96,7 +96,7 @@ export type WfLayout = Record<string, { readonly x: number; readonly y: number }
  * The clean left-to-right spine is exactly what a computed longest-path layout could NOT produce
  * for this graph: its dangling edge and its cycle scramble the topological columns (the fetch node
  * lands five columns out, past every node it feeds), which is the overlap the operator reported.
- * The two `n_charge` nodes share an id on purpose — the duplicate-id defect — so they share this
+ * The two `n_charge` nodes share an id on purpose, the duplicate-id defect, so they share this
  * one entry and the renderer nudges the second into view.
  */
 export const LAYOUTS: Record<string, WfLayout> = {
@@ -115,14 +115,20 @@ export const LAYOUTS: Record<string, WfLayout> = {
  * else the computed {@link layeredLayout}. Ported from the prototype's `wfLayout()` fallthrough.
  */
 export function layoutFor(g: WfGraph): WfLayout {
-  return LAYOUTS[g.key] ?? layeredLayout(g);
+  const sidecar = LAYOUTS[g.key];
+  // A hand-authored sidecar describes a specific set of nodes. The moment an author adds one it no
+  // longer describes this graph, and a node the sidecar has never heard of would be drawn at the
+  // origin, on top of whatever the sidecar put there. So the sidecar is used only while it still
+  // covers the whole graph; past that the layout is derived, which is collision-free by construction.
+  if (sidecar && g.nodes.every((n) => sidecar[n.id] !== undefined)) return sidecar;
+  return layeredLayout(g);
 }
 
 /**
  * A layered left-to-right layout derived from the topological order: a node's COLUMN is the longest
  * path from any entry to it (so an edge always points rightward), and rows within a column stack
  * downward. Distinct ids never share a (column, row), so a computed graph is collision-free by
- * construction — the honest stand-in for a hand-authored sidecar, which only the fixture graphs had.
+ * construction: the honest stand-in for a hand-authored sidecar, which only the fixture graphs had.
  */
 export function layeredLayout(g: WfGraph): WfLayout {
   const order = wfTopo(g);
@@ -145,7 +151,38 @@ export function layeredLayout(g: WfGraph): WfLayout {
     rowInCol[col] = row + 1;
     layout[id] = { x: col * PITCH_X, y: row * PITCH_Y };
   });
-  return layout;
+  return placeBodyNodes(g, layout);
+}
+
+/**
+ * Pull each body-referenced node up beside the map or fold that names it, when that node is
+ * otherwise unconnected. A body is referenced by id inside its referencer's payload, not by an edge,
+ * so the layered layout (which sees only edges) has no trace to draw the body toward and drops it in
+ * column 0, reading as a stray orphan. A node that ALSO carries a real edge keeps its edge-derived
+ * slot untouched; only a body-only node is moved, to the first free slot directly below its
+ * referencer, so the relocation can never manufacture an overlap. Distinct from the drawn body link:
+ * this places the card, the link connects the two, and neither touches the document.
+ */
+function placeBodyNodes(g: WfGraph, layout: WfLayout): WfLayout {
+  const linked = new Set<string>();
+  g.edges.forEach((e) => {
+    linked.add(e.from);
+    linked.add(e.to);
+  });
+  const next: WfLayout = { ...layout };
+  const occupied = new Set(Object.values(next).map((p) => `${p.x},${p.y}`));
+  for (const link of bodyLinks(g)) {
+    if (linked.has(link.to)) continue; // it has a real edge: keep its edge-derived column
+    const at = next[link.from];
+    const old = next[link.to];
+    if (at === undefined || old === undefined) continue;
+    occupied.delete(`${old.x},${old.y}`);
+    let y = at.y + PITCH_Y;
+    while (occupied.has(`${at.x},${y}`)) y += PITCH_Y;
+    next[link.to] = { x: at.x, y };
+    occupied.add(`${at.x},${y}`);
+  }
+  return next;
 }
 
 export interface WfEdgePath {
@@ -181,14 +218,14 @@ export interface WfPathCtx {
 }
 
 /**
- * THE POLYLINE a trace follows, in graph coordinates — the ordered corner points, before any corner
+ * THE POLYLINE a trace follows, in graph coordinates: the ordered corner points, before any corner
  * radius is applied. This is the single source the drawn `d`, the arrowhead, and the node-clearance
  * check all derive from, so what is tested for intersections is exactly what is drawn.
  *
  * - A same-rank forward edge is two points: a straight rule.
  * - A rerouted edge ({@link WfPathCtx.channelY} set) leaves the source toward the target, steps into
  *   the adjacent column gap, drops to the channel below the whole band, runs across it, rises in the
- *   gap before the target, and enters the target's LEFT port horizontally — so the arrowhead stays
+ *   gap before the target, and enters the target's LEFT port horizontally, so the arrowhead stays
  *   the same fine horizontal triangle on every route. Back-edges leave the LEFT port (the trace then
  *   flows leftward and never doubles back across its own card); forward edges leave the RIGHT port.
  * - Otherwise it is the prototype's elbow: out the right port, to the halfway column, up or down,
@@ -229,7 +266,7 @@ export function edgePoints(a: WfBox, b: WfBox, ctx?: WfPathCtx): Pt[] {
   ];
 }
 
-/** The fine horizontal arrowhead at a target's left port — one triangle, the prototype's exactly. */
+/** The fine horizontal arrowhead at a target's left port: one triangle, the prototype's exactly. */
 function arrowAt(x: number, y: number): string {
   return `M ${x - 7} ${y - 4} L ${x} ${y} L ${x - 7} ${y + 4} Z`;
 }
@@ -269,7 +306,7 @@ function round(n: number): number {
  * a reroute context this is the prototype's elbow (out the right port, to the halfway column, into
  * the left port) or a straight same-rank rule. With {@link WfPathCtx.channelY} set it runs the
  * clear below-band channel {@link wfRoutes} assigned it. The stroke, the single fine arrowhead, and
- * the label knockout are the prototype's — only the geometry is aware of the cards now.
+ * the label knockout are the prototype's; only the geometry is aware of the cards now.
  */
 export function wfPath(a: WfBox, b: WfBox, ctx?: WfPathCtx): WfEdgePath {
   const pts = edgePoints(a, b, ctx);
@@ -291,7 +328,29 @@ export function wfPath(a: WfBox, b: WfBox, ctx?: WfPathCtx): WfEdgePath {
   return { d, arrow, lx, ly };
 }
 
-/** Every axis-aligned segment of a route, as [start, end] pairs — what a node-clearance check walks. */
+/**
+ * THE BODY LINK path: the dashed connector a map or fold draws to the node its payload names as its
+ * body. A body is referenced by id inside the node rather than through an edge, so this is a
+ * rendering affordance drawn in a DISTINCT grammar from a real trace. When the body sits directly
+ * below its referencer (where {@link placeBodyNodes} slots a body-only node) it is a straight
+ * vertical dropped from the source's bottom port into the target's top port, with a downward
+ * arrowhead, so it reads unmistakably as "this node's body is that node". A body placed anywhere else
+ * (one that also carries real edges kept its own slot) falls back to the ordinary elbow, so a link
+ * always connects. Pure, like every path here; nothing about it enters the document.
+ */
+export function wfBodyPath(a: WfBox, b: WfBox): WfEdgePath {
+  const below = Math.abs(b.x - a.x) < 1 && b.y > a.y;
+  if (!below) return wfPath(a, b);
+  const cx = a.x + NODE_W / 2;
+  const y1 = a.y + NODE_H;
+  const y2 = b.y;
+  const d = `M ${cx} ${y1} L ${cx} ${y2}`;
+  const arrow = `M ${cx - 4} ${y2 - 7} L ${cx} ${y2} L ${cx + 4} ${y2 - 7} Z`;
+  // The label rides beside the drop, so its paper-knockout clears the rule instead of splitting it.
+  return { d, arrow, lx: cx + 16, ly: (y1 + y2) / 2 };
+}
+
+/** Every axis-aligned segment of a route, as [start, end] pairs: what a node-clearance check walks. */
 export function edgeSegments(a: WfBox, b: WfBox, ctx?: WfPathCtx): [Pt, Pt][] {
   const pts = edgePoints(a, b, ctx);
   const segs: [Pt, Pt][] = [];
@@ -337,7 +396,7 @@ export function routeHitsForeignNode(
  * that elbow is clear; a back-edge, or a forward edge whose elbow would cut through an intervening
  * card, is rerouted through a horizontal channel below the whole node band. Reroutes get their own
  * stacked lanes so two never merge, and each still enters the target's left port horizontally so the
- * arrowhead and the visual grammar are unchanged — only the geometry now clears the cards.
+ * arrowhead and the visual grammar are unchanged; only the geometry now clears the cards.
  *
  * Pure: derived entirely from the graph and its layout, so it is unit-testable without a DOM.
  */
@@ -425,7 +484,7 @@ export function wfZoom(view: WfView, mult: number, cx: number, cy: number): WfVi
   };
 }
 
-/** The reset-to-100% view, centred on the entry node — the `#wf-reset` control. */
+/** The reset-to-100% view, centred on the entry node: the `#wf-reset` control. */
 export function wfReset(g: WfGraph, layout: WfLayout, box: { readonly width: number; readonly height: number }, firstEntered?: string): WfView {
   const at = layout[entryNode(g, layout, firstEntered)] ?? { x: 0, y: 0 };
   return { k: 1, x: box.width / 2 - (at.x + NODE_W / 2), y: box.height / 2 - (at.y + NODE_H / 2) };

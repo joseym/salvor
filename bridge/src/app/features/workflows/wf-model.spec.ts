@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
 import type { Graph } from '@salvor-run/client';
-import { fromServerGraph } from './wf-model';
+import { bodyLinks, fromServerGraph } from './wf-model';
 
 /**
  * `fromServerGraph`'s node-name fallback: a server document's node payload may carry its own
  * optional `name` (the graph format's optional node display name); when it does the canvas must
- * show that display name, and when it does not the node's id is the honest fallback — never an
+ * show that display name, and when it does not the node's id is the honest fallback: never an
  * invented sentence. Both facts must hold in the SAME document, since a document can name some
  * nodes and not others.
  */
@@ -25,7 +25,7 @@ const doc: Graph = {
   edges: [{ from: 'research', to: 'approve' }],
 };
 
-describe('fromServerGraph — node display name fallback', () => {
+describe('fromServerGraph: node display name fallback', () => {
   it('renders a node payload name when the document carries one', () => {
     const graph = fromServerGraph('sha256:abc', doc);
     const research = graph.nodes.find((n) => n.id === 'research');
@@ -49,7 +49,7 @@ describe('fromServerGraph — node display name fallback', () => {
   });
 });
 
-describe('fromServerGraph — fold node', () => {
+describe('fromServerGraph: fold node', () => {
   const foldDoc: Graph = {
     schema_version: 1,
     nodes: [
@@ -78,5 +78,52 @@ describe('fromServerGraph — fold node', () => {
     expect(refine?.stopWhen).toBe('score >= 0.85');
     expect(refine?.join).toBe('keeps the best by score');
     expect(refine?.body?.node).toBe('tailor');
+  });
+});
+
+describe('bodyLinks: a body-by-id reference becomes a synthetic link, never a document edge', () => {
+  const mapDoc: Graph = {
+    schema_version: 1,
+    nodes: [
+      {
+        kind: 'map',
+        payload: {
+          id: 'pay_each',
+          over: 'roster',
+          concurrency: 1,
+          body: { kind: 'node', value: 'pay_employee' },
+        },
+      },
+      { kind: 'tool', payload: { id: 'pay_employee', tool: 'pay_employee' } },
+    ],
+    edges: [],
+  };
+
+  it('a map naming a body by id yields one link from the map to that node', () => {
+    const links = bodyLinks(fromServerGraph('sha256:map', mapDoc));
+    expect(links).toEqual([{ from: 'pay_each', to: 'pay_employee' }]);
+  });
+
+  it('a document with no map or fold yields no links', () => {
+    expect(bodyLinks(fromServerGraph('sha256:abc', doc))).toEqual([]);
+  });
+
+  it('a body naming a node this document does not hold yields no link', () => {
+    const dangling: Graph = {
+      schema_version: 1,
+      nodes: [
+        {
+          kind: 'map',
+          payload: {
+            id: 'pay_each',
+            over: 'roster',
+            concurrency: 1,
+            body: { kind: 'node', value: 'nobody' },
+          },
+        },
+      ],
+      edges: [],
+    };
+    expect(bodyLinks(fromServerGraph('sha256:x', dangling))).toEqual([]);
   });
 });

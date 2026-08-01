@@ -1,7 +1,7 @@
 //! The per-node projection: a pure fold from a graph run's event log to the
 //! progress of each node the walk has reached.
 //!
-//! [`crate::derive_state`] folds a log to the run-level [`crate::RunState`] —
+//! [`crate::derive_state`] folds a log to the run-level [`crate::RunState`]:
 //! one status for the whole run, the same vocabulary an agent run uses. This
 //! module answers the orthogonal question a graph run raises: *where in the
 //! graph is it, and what has each node done so far*. The two are deliberately
@@ -29,7 +29,7 @@
 //!
 //! # Purity
 //!
-//! No IO, no clock, no randomness, and — critically — no dependency on
+//! No IO, no clock, no randomness, and, critically, no dependency on
 //! `salvor-graph`. The projection names nodes by the opaque string ids the log
 //! carries; it never loads or interprets the graph document. That is what keeps
 //! this crate a leaf that compiles to `wasm32-unknown-unknown`, so the browser
@@ -91,8 +91,8 @@ pub struct MapProgress {
 
 /// One iteration (revision pass) of a fold node's loop.
 ///
-/// A fold's passes run sequentially in the one log, so — unlike a
-/// [`MapIteration`] — there is no child run: an iteration is just its index and
+/// A fold's passes run sequentially in the one log, so (unlike a
+/// [`MapIteration`]) there is no child run: an iteration is just its index and
 /// whether it has folded back into the accumulated value yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FoldIteration {
@@ -158,7 +158,7 @@ pub struct GraphProjection {
     /// ordinary (non-forked) run. Carried straight through from the head.
     pub forked_from: Option<ForkOrigin>,
     /// The nodes the walk has reached, in first-mention (execution) order. A
-    /// node that appears in no event is absent — "not yet reached", which the
+    /// node that appears in no event is absent: "not yet reached", which the
     /// dashboard distinguishes from a [`NodeState::Skipped`] node by zipping
     /// this list against the frozen document's node list.
     pub nodes: Vec<NodeProgress>,

@@ -12,18 +12,18 @@
       <bridge-run-ref [id]="row().run" />
     </div>
     <dl class="evidence">
-      <div><dt>seq</dt><dd>{{ r.seq ?? '—' }}</dd></div>
+      <div><dt>seq</dt><dd>{{ r.seq ?? '-' }}</dd></div>
       <div><dt>event.kind</dt><dd>{{ r.kind }}</dd></div>
-      <div><dt>recorded_at</dt><dd>{{ r.recordedAt ?? '—' }}</dd></div>
+      <div><dt>recorded_at</dt><dd>{{ r.recordedAt ?? '-' }}</dd></div>
       <div><dt>payload</dt><dd [innerHTML]="jsonHiCompact(r.payload)"></dd></div>
       <div><dt>status now</dt><dd>{{ r.statusState }}</dd></div>
     </dl>
     <p class="reason">
-      <b>Nothing was edited.</b> The run's status was not set — it was re-derived from
+      <b>Nothing was edited.</b> The run's status was not set; it was re-derived from
       <span class="mono">GET /v1/runs/{{ ns() }}…</span> after this append. That is why it can never
       disagree with the runtime: it is the runtime's own fold.
       @if (r.unconfirmed) {
-        The appended event's own sequence could not be confirmed in time — the status above is
+        The appended event's own sequence could not be confirmed in time; the status above is
         still a fresh, independent read.
       }
     </p>
@@ -47,8 +47,8 @@
     </div>
     <p class="reason">{{ reason() }}</p>
 
-    <!-- GATE DECISION EVIDENCE: the run's recent substance at the decision point — the last thing it
-         said and did, and what resuming continues into — so a true/false is made against evidence,
+    <!-- GATE DECISION EVIDENCE: the run's recent substance at the decision point (the last thing it
+         said and did, and what resuming continues into), so a true/false is made against evidence,
          not a bare form. Bounded excerpts, each with an honest "from seq N" provenance, expandable. -->
     @if (evidenceLoaded() && (hasEvidence() || continuesInto()?.length)) {
       <section class="gate-evidence" data-gate-evidence aria-label="What this run recently did">
@@ -98,7 +98,7 @@
     @if (showProvenance()) {
       <p class="provenance">
         Prefilled values were <b>proposed by this run</b>, carried on its recorded
-        <span class="mono">input_schema</span>. Confirming them is the approval — change anything
+        <span class="mono">input_schema</span>. Confirming them is the approval: change anything
         that is wrong.
       </p>
     }
@@ -110,7 +110,7 @@
         >
         <p class="desc">
           This run's recorded <span class="mono">input_schema</span> could not be turned into a
-          form — see the reason above. Paste the resume input as JSON instead.
+          form: see the reason above. Paste the resume input as JSON instead.
         </p>
         <textarea
           [id]="ns() + '-raw'"
@@ -178,7 +178,7 @@
                     [value]="valueOf(f)"
                     (change)="setValue(f.key, $any($event.target).value)"
                   >
-                    <option value="">— select —</option>
+                    <option value="">(select)</option>
                     @for (opt of f.enumOptions; track opt) {
                       <option [value]="opt">{{ opt }}</option>
                     }

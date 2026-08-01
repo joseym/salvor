@@ -75,8 +75,16 @@ pub enum Command {
     /// Build the whole product from a salvor checkout: the web dashboard, then
     /// the release binary that embeds it.
     Build(BuildArgs),
-    /// Author-time graph document tools: validate a document, or print its
-    /// JSON Schema. These read no store and drive no run.
+    /// Author-time agent definition tools: print the content hash a graph
+    /// `agent` node has to reference. Reads no store and drives no run.
+    Agent {
+        /// The agent subcommand to run.
+        #[command(subcommand)]
+        command: AgentCommand,
+    },
+    /// Graph document tools. `edit`, `validate` and `schema` are author-time:
+    /// they read no store and drive no run. `run` drives a document over the
+    /// store, exactly as `salvor run` drives an agent run.
     Graph {
         /// The graph subcommand to run.
         #[command(subcommand)]
@@ -84,9 +92,81 @@ pub enum Command {
     },
 }
 
+/// The verbs under `salvor agent`.
+//
+// Grouped by the document a verb reads, matching `salvor graph`: a hash is a
+// fact about an agent definition, so it belongs beside the agent file rather
+// than under a verb-first `salvor hash` that would then have to house the graph
+// document's own hash too.
+#[derive(Debug, Subcommand)]
+pub enum AgentCommand {
+    /// Print an agent definition's content hash, the `sha256:<64 hex>` string a
+    /// graph `agent` node references.
+    ///
+    /// A graph names an agent by hash and never by path, because a run's log
+    /// records only the hash and a replay has to mean the same agent. This is
+    /// how an author learns that hash before writing the node.
+    ///
+    /// The hash covers the BUILT definition (model, system prompt, tool
+    /// schemas, budgets, pricing), not the file's bytes, so any MCP server the
+    /// file declares is connected to collect its tool schemas, exactly as a run
+    /// would. Nothing is written and no run is started.
+    Hash(AgentHashArgs),
+    /// Build an agent definition and report what it declares, or the precise
+    /// field-level error that stops it from building.
+    ///
+    /// This runs the exact build every other verb that takes `--agent` runs:
+    /// a strict parse (an unknown field, a missing `model`, or a wrong type
+    /// names the offending field) followed by a connection to every declared
+    /// MCP server to collect its tool contracts, so a server that will not
+    /// start is caught here rather than at run time. Nothing about the check
+    /// differs from `salvor agent hash`; this verb only exists to be asked
+    /// for by name and to report more than a hash.
+    Validate(AgentValidateArgs),
+}
+
+/// Arguments to `agent hash`.
+#[derive(Debug, Args)]
+pub struct AgentHashArgs {
+    /// An agent definition (TOML) to hash. Repeatable.
+    ///
+    /// One file prints the bare hash and nothing else, so it reads straight
+    /// into a shell substitution: `--arg h "$(salvor agent hash a.toml)"`.
+    /// Several files print `<path>: <hash>` per line, in the order given,
+    /// because then the question being asked is which file carries which hash.
+    #[arg(value_name = "FILE", required = true)]
+    pub agents: Vec<PathBuf>,
+}
+
+/// Arguments to `agent validate`.
+#[derive(Debug, Args)]
+pub struct AgentValidateArgs {
+    /// An agent definition (TOML) to validate. Repeatable.
+    ///
+    /// Each file is built independently: one file that fails to build does
+    /// not stop the rest from being checked. Every file is reported, in the
+    /// order given, and the command exits non-zero if any one of them fails.
+    #[arg(value_name = "FILE", required = true)]
+    pub agents: Vec<PathBuf>,
+}
+
 /// The verbs under `salvor graph`.
 #[derive(Debug, Subcommand)]
 pub enum GraphCommand {
+    /// Build a graph document one line at a time, reading commands from stdin.
+    ///
+    /// The document is a fold of the commands applied to it, so `undo` steps
+    /// back without any command needing an inverse, and `history` dumps the
+    /// session as a script that rebuilds it. Type `help` at the prompt for the
+    /// grammar; it is printed from the same table the parser is written
+    /// against, so the editor documents itself.
+    ///
+    /// Nothing is saved until a line names a file, and the only files touched
+    /// are the ones a line names: `read <PATH>`, `write <PATH>`, and an agent
+    /// node's `--file <PATH>`, which is resolved to a definition hash by
+    /// building the agent exactly as `salvor agent hash` does. No store is
+    /// opened and no run is driven.
+    Edit(GraphEditArgs),
     /// Validate a graph document JSON file: parse it strictly and run every
     /// check, printing a summary on success or the precise node/edge errors on
     /// failure.
@@ -98,6 +178,37 @@ pub enum GraphCommand {
     /// file (keyed by its computed definition hash), and each `tool` node
     /// resolves from the tools those agents carry.
     Run(GraphRunArgs),
+}
+
+/// Arguments to `graph edit`.
+///
+/// Two ways to start somewhere other than an empty document, and they compose:
+/// the positional FILE is the document to begin from, `--script` is the
+/// commands to apply to it. Both are applied in that order before the first
+/// line is read from stdin, which is the order the two mean together (open a
+/// document, then edit it).
+///
+/// There is no flag for the commands themselves: they arrive on stdin, so a
+/// person types them and a script is redirected in, with no second grammar for
+/// the difference. Nor is there one for the output document, because `write
+/// <PATH>` is a line of that grammar already.
+#[derive(Debug, Args)]
+pub struct GraphEditArgs {
+    /// An existing graph document (JSON) to open. Applied as the `read <FILE>`
+    /// line the author would otherwise type first, so it is recorded in the
+    /// history like any other command and `undo` steps back across it. Omit to
+    /// start from an empty document.
+    #[arg(value_name = "FILE")]
+    pub path: Option<PathBuf>,
+    /// A file of editor commands to apply before reading stdin, in the form
+    /// `history` dumps.
+    ///
+    /// Every line is applied as if typed, so a dumped session replays into the
+    /// identical document and the author carries on from where it left off.
+    /// Because a dumped script only ever names already-resolved values, it
+    /// replays with no agent definition present.
+    #[arg(long, value_name = "FILE")]
+    pub script: Option<PathBuf>,
 }
 
 /// Arguments to `graph validate`.
@@ -593,4 +704,24 @@ pub struct ServeArgs {
     /// `--no-default-features` build refuses this flag).
     #[arg(long)]
     pub demo_tools: bool,
+    /// A client-performed tool DECLARATION (TOML) to load. Repeatable, the
+    /// same way `--agent` is repeatable on `graph run`.
+    ///
+    /// The tool named in the file is one the CLIENT runs, in its own process,
+    /// with its own secrets; this server holds no code for it. The file says
+    /// what the operator is willing to accept about such a call: its name, its
+    /// effect class, the schema its input must satisfy, the schema its reported
+    /// completion must satisfy, and whether the client may close the call
+    /// itself (`trust_completion`, false unless the file opts in, so a
+    /// declaration silent about trust settles every call by hand), plus any
+    /// fields whose reported value must equal what the intent recorded
+    /// (`require_equal`).
+    ///
+    /// It is a file the operator passes here, and there is no endpoint that
+    /// accepts one, on purpose. The effect class fixes whether an unsettled
+    /// call surfaces for a human; a client that could declare its own tool
+    /// would be deciding that about its own writes. See
+    /// `salvor_server::client_tools` for the argument in full.
+    #[arg(long = "client-tool", value_name = "FILE")]
+    pub client_tools: Vec<PathBuf>,
 }

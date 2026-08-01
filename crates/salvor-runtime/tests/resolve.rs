@@ -250,6 +250,7 @@ async fn resolve_refuses_every_non_reconciliation_state() {
             input: json!({"q": "otters"}),
             effect: Effect::Read,
             idempotency_key: None,
+            performed_by: None,
         },
     ])
     .await;

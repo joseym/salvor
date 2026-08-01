@@ -6,7 +6,7 @@ import { costOfPrefix } from './state-model';
 
 /**
  * The timeline renderer (`rowOf`/`groupsOf`/`renderTimeline`/`renderStrip`). Pure functions that
- * take the run's decoded log and return HTML strings — the Inspector component injects them and
+ * take the run's decoded log and return HTML strings; the Inspector component injects them and
  * wires event delegation. Kept as string-building rather than Angular template so the DOM stays
  * byte-faithful (the `.levent` grid, the kchip dots, the effect badges, the highlighted `<pre>`
  * panes) instead of drifting through template diffing.
@@ -39,14 +39,14 @@ function kindMeta(kind: string): { dot: string; cat: string } {
   return KINDS[kind] ?? { dot: 'k-observe', cat: 'context' };
 }
 
-/** The dot class for an event — a write tool call gets the hollow amber ring. */
+/** The dot class for an event. A write tool call gets the hollow amber ring. */
 export function dotOf(e: SalvorEvent): string {
   return e.kind === 'ToolCallRequested' && e.payload['effect'] === 'write'
     ? 'k-write'
     : kindMeta(e.kind).dot;
 }
 
-/** UTC HH:MM:SSZ — every time in this app is evidence (the `recorded_at` the log carries), pinned
+/** UTC HH:MM:SSZ: every time in this app is evidence (the `recorded_at` the log carries), pinned
  *  to UTC and stamped Z so two operators never quote different times for the same event. */
 const UTC_HMS = new Intl.DateTimeFormat('en-GB', {
   timeZone: 'UTC',
@@ -71,10 +71,10 @@ function costLabel(c: { complete: boolean; usd: number | null }): string {
   return c.complete ? usd(c.usd ?? 0) : 'tokens only';
 }
 
-/** A budget figure formatted by its kind — dollars for a cost ceiling, a counted noun for tokens
- *  or steps, the bare count otherwise. An em dash when the amount is absent, never `NaN`. */
+/** A budget figure formatted by its kind: dollars for a cost ceiling, a counted noun for tokens
+ *  or steps, the bare count otherwise. A hyphen when the amount is absent, never `NaN`. */
 function budgetAmount(kind: string, n: unknown): string {
-  if (typeof n !== 'number' || Number.isNaN(n)) return '—';
+  if (typeof n !== 'number' || Number.isNaN(n)) return '-';
   switch (kind) {
     case 'cost_usd':
       return usd(n);
@@ -88,7 +88,7 @@ function budgetAmount(kind: string, n: unknown): string {
 }
 
 /**
- * A fork's inherited prefix marker, if any — the first `ForkedFrom` in the log. Real runs from
+ * A fork's inherited prefix marker, if any: the first `ForkedFrom` in the log. Real runs from
  * this build's server carry none (there is no fork runtime yet), so this returns null and nothing
  * renders as inherited; the code path exists for when v0.4 writes real `ForkedFrom` markers.
  */
@@ -99,8 +99,8 @@ export function forkOf(events: readonly SalvorEvent[]): SalvorEvent | null {
 /**
  * The scrub zone a timeline row falls into, given the fold prefix length `n` (the scrubber's
  * `prefix`, i.e. `derive_state(&log[0..n])`): `folded` (already inside the derived state),
- * `boundary` (seq n−1 — the event under the playhead, the LAST folded one), or `beyond` (seq ≥
- * n — in the log but not yet folded). Pure, so `renderScrubber`'s DOM class toggle and its unit
+ * `boundary` (seq n−1: the event under the playhead, the LAST folded one), or `beyond` (seq ≥
+ * n: in the log but not yet folded). Pure, so `renderScrubber`'s DOM class toggle and its unit
  * tests share one source of truth for the boundary math. This replaces the old bug of accenting
  * seq === n (the first EXCLUDED event) instead of the one actually under the playhead.
  */
@@ -137,19 +137,19 @@ export function rowOf(e: SalvorEvent, events: readonly SalvorEvent[], arrivedSeq
       try {
         derivedFloat = (Number(BigInt(bits) >> 11n) / 2 ** 53).toFixed(7);
       } catch {
-        derivedFloat = '—';
+        derivedFloat = '-';
       }
       detail = `bits = <b>${esc(bits)}</b> <span style="color:var(--faint)">· u64</span>`;
       body =
         pane('payload', p) +
         `<p class="ev-honest">The recorded value is the raw u64. Any float a caller uses
            (here <span class="mono">${derivedFloat}</span>, derived as
-           <span class="mono">bits &gt;&gt; 11 / 2^53</span>) is computed caller-side and never enters the log —
+           <span class="mono">bits &gt;&gt; 11 / 2^53</span>) is computed caller-side and never enters the log,
            which is why replay reproduces it exactly.</p>`;
       break;
     }
     case 'ModelCallRequested': {
-      // The event carries a request_hash but no discrete model id — the same absent-model-id
+      // The event carries a request_hash but no discrete model id: the same absent-model-id
       // truth that leaves cost unpriceable. Name it honestly rather than printing String(undefined).
       const reqModel = p['model'] !== undefined ? `<b>${esc(String(p['model']))}</b>` : `<span class="tokens-only">no model id recorded</span>`;
       const reqHash = String(p['request_hash'] ?? '');
@@ -177,17 +177,24 @@ export function rowOf(e: SalvorEvent, events: readonly SalvorEvent[], arrivedSeq
             ? `<p class="ev-honest"><span class="mono">${esc(modelId)}</span> is not in the price table,
         so every dollar figure for this run degrades to tokens-only rather than omitting this call's spend.</p>`
             : `<p class="ev-honest">This call records token counts but no model id, so its dollar cost cannot be
-        priced — every dollar figure for this run degrades to tokens-only rather than being guessed.</p>`;
+        priced; every dollar figure for this run degrades to tokens-only rather than being guessed.</p>`;
       break;
     }
     case 'ToolCallRequested': {
       const effect = String(p['effect']);
+      // Absent (the field's default, and every call recorded before it existed) means salvor
+      // performed the call itself: the common case, so it gets no badge. Only a recorded
+      // `performed_by: "client"` renders one, spelling out the field's own wire word rather
+      // than inventing separate wording (the CLI's `[Client]` marker in salvor-replay's
+      // render.rs makes the identical choice).
+      const performer =
+        p['performed_by'] === 'client' ? ` <span class="badge perf-client">client</span>` : '';
       const key = p['idempotency_key']
         ? ` · <span class="mono">${esc(String(p['idempotency_key']))}</span>`
         : effect === 'write'
           ? ` · <span class="mono tokens-only">idempotency_key: null</span>`
           : '';
-      detail = `<b>${esc(String(p['tool']))}</b> <span class="badge e-${effect}">${esc(effect)}</span>${key}`;
+      detail = `<b>${esc(String(p['tool']))}</b> <span class="badge e-${effect}">${esc(effect)}</span>${performer}${key}`;
       body = pane('input', p['input']);
       if (effect === 'write') cls = 'attn';
       break;
@@ -195,14 +202,14 @@ export function rowOf(e: SalvorEvent, events: readonly SalvorEvent[], arrivedSeq
     case 'ToolCallCompleted': {
       const output = p['output'] as Record<string, unknown> | undefined;
       // The completion does not repeat the tool name; it references its ToolCallRequested by
-      // payload.seq. Read the name from that paired intent — recorded structure, not a guess — and
+      // payload.seq. Read the name from that paired intent (recorded structure, not a guess) and
       // fall back to a nameless honest phrase if the pair is not in the loaded prefix.
       const paired = p['seq'] !== undefined ? events.find((x) => x.seq === p['seq']) : undefined;
       const toolName = (paired?.payload['tool'] ?? p['tool']) as string | undefined;
       const toolRef = toolName !== undefined ? `<b>${esc(String(toolName))}</b>` : 'A tool call';
       detail =
         output && output['ok'] === false
-          ? `${toolRef} returned a failure — recorded, not thrown`
+          ? `${toolRef} returned a failure: recorded, not thrown`
           : `${toolRef} returned`;
       body = pane('output', p['output']);
       break;
@@ -214,11 +221,11 @@ export function rowOf(e: SalvorEvent, events: readonly SalvorEvent[], arrivedSeq
       break;
     case 'Resumed':
       detail = 'resumed with recorded input';
-      body = `<p class="ev-honest">The event carries the input only — no actor. There is no user model
+      body = `<p class="ev-honest">The event carries the input only: no actor. There is no user model
                 (single tenant), so there is no actor to record.</p>${pane('input', p['input'])}`;
       break;
     case 'BudgetExceeded': {
-      // The event records the ceiling as { budget: { kind, limit }, observed } — a budget can be
+      // The event records the ceiling as { budget: { kind, limit }, observed }; a budget can be
       // measured in dollars, tokens, steps or wall time, so format by kind rather than assuming USD.
       const budget = (p['budget'] ?? {}) as { kind?: string; limit?: unknown };
       const kind = budget.kind ?? '';
@@ -258,7 +265,7 @@ export function rowOf(e: SalvorEvent, events: readonly SalvorEvent[], arrivedSeq
       <div><span class="kchip ${dotOf(e)}">${esc(kind)}</span></div>
       <div class="ldetail">${detail}${
         inh && fk
-          ? `<span class="inh-tag" title="Copied from run ${esc(String(fk.payload['origin_run_id'] ?? '').slice(0, 8))} and replayed — this call did not run a second time.">inherited</span>`
+          ? `<span class="inh-tag" title="Copied from run ${esc(String(fk.payload['origin_run_id'] ?? '').slice(0, 8))} and replayed. This call did not run a second time.">inherited</span>`
           : ''
       }</div>
       <div class="ltime">${clock(e.recordedAt)}</div>
@@ -327,7 +334,7 @@ export function groupsOf(events: readonly SalvorEvent[]): Turn[] {
   return gs;
 }
 
-/** The full timeline HTML — turns with heads and their rows. */
+/** The full timeline HTML: turns with heads and their rows. */
 export function renderTimelineHtml(events: readonly SalvorEvent[], arrivedSeq: number | null): string {
   return groupsOf(events)
     .map(
@@ -345,32 +352,32 @@ export function renderTimelineHtml(events: readonly SalvorEvent[], arrivedSeq: n
 }
 
 /**
- * The event strip's tick geometry: N ticks packed onto a fixed 0–100% axis so the strip ALWAYS
- * tiles exactly to its container's width, at any event count — the CSS-percentage parallel to the
+ * The event strip's tick geometry: N ticks packed onto a fixed 0-100% axis so the strip ALWAYS
+ * tiles exactly to its container's width, at any event count: the CSS-percentage parallel to the
  * Spend histogram's SVG viewBox scaling (`activity.ts`'s `step`). The old CSS gave every tick a
  * hard `min-width: 3px` floor plus a fixed `2px` gap with no ceiling on how many ticks could
  * exist: on a 206-event run in the Scrubber's ~316px column that demanded 206×3 + 205×2 ≈ 1028px,
  * over three times the available width, so most of the strip rendered off the right edge of its
- * own container (and of the viewport) — the true root of the suite's longest-standing flake,
+ * own container (and of the viewport): the true root of the suite's longest-standing flake,
  * p2-14 "tick-targets" (a pointerdown at a tick's CENTER sometimes landed off-screen).
  *
- * The fix keeps the prototype's explicit contract for this strip — "the tick→seq mapping stays
- * 1:1", no bucketing — by never merging events: `renderStripHtml` below still emits exactly one
+ * The fix keeps the prototype's explicit contract for this strip ("the tick→seq mapping stays
+ * 1:1", no bucketing) by never merging events: `renderStripHtml` below still emits exactly one
  * `<button>` per event. What changes is that the gap between ticks no longer comes from a fixed
  * CSS pixel value; it is computed HERE, in percent of the strip's own width, capped so `n − 1`
- * gaps can never consume more than {@link ESTRIP_GAP_BUDGET_PCT} of the axis regardless of `n` —
+ * gaps can never consume more than {@link ESTRIP_GAP_BUDGET_PCT} of the axis regardless of `n`:
  * the same "partition the axis; do not let a per-item floor multiply past the container" principle
  * commit f63a7f0 used for the Spend histogram's `.hhit` click targets. Tick WIDTH is never set
  * explicitly: with the floor gone (`min-width: 0` in `inspector.css`), equal `flex: 1 1 0%` ticks
  * divide whatever percent the gaps leave over exactly evenly, so the row is provably ≤ 100% of
- * the container at any `n` — see the property test in `event-model.spec.ts` sweeping n = 1..500,
+ * the container at any `n`: see the property test in `event-model.spec.ts` sweeping n = 1..500,
  * and {@link estripTickBox}, which models that same flex arithmetic as a pure function so the
  * property test can check it without a real layout engine.
  */
 export const ESTRIP_GAP_BUDGET_PCT = 12; // total strip width, in percent, ever ceded to gaps
-export const ESTRIP_GAP_MAX_PCT = 0.55; // one seam's own ceiling — ~2px at the panel's usual ~340px width
+export const ESTRIP_GAP_MAX_PCT = 0.55; // one seam's own ceiling: ~2px at the panel's usual ~340px width
 
-/** The `.estrip` container's `gap`, in percent of its own width, for `n` ticks — set inline by
+/** The `.estrip` container's `gap`, in percent of its own width, for `n` ticks, set inline by
  *  `Inspector#renderStrip` on every render. Bounded so `(n - 1) * estripGapPct(n) <=
  *  ESTRIP_GAP_BUDGET_PCT` for every `n >= 1`: the strip can never be asked to spend more than that
  *  share of its own width on gaps, however dense the log, so there is always width left for the
@@ -380,7 +387,7 @@ export function estripGapPct(n: number): number {
   return Math.min(ESTRIP_GAP_MAX_PCT, ESTRIP_GAP_BUDGET_PCT / (n - 1));
 }
 
-/** The tick at index `i` of `n`'s computed box on the strip's 0–100% axis — the same arithmetic
+/** The tick at index `i` of `n`'s computed box on the strip's 0-100% axis; the same arithmetic
  *  `display: flex` performs once `.estrip`'s `gap` is {@link estripGapPct} and every `.etick` is
  *  an equal `flex: 1 1 0%` item with no min-width floor: the `n - 1` gaps come off the top first,
  *  and whatever percent remains splits `n` ways, evenly. Exported so a property test can verify
@@ -392,7 +399,7 @@ export function estripTickBox(i: number, n: number): { leftPct: number; widthPct
   return { leftPct: i * (widthPct + gap), widthPct };
 }
 
-/** The event strip's ticks — one button per event, sized/hued by kind. */
+/** The event strip's ticks: one button per event, sized/hued by kind. */
 export function renderStripHtml(events: readonly SalvorEvent[], arrivedSeq: number | null): string {
   return events
     .map(

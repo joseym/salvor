@@ -424,6 +424,16 @@
             "global": false,
             "help": "Register a small set of deterministic demo tools (`lookup_invoice` read, `issue_refund` write, `send_email` idempotent) instead of the stock empty tool registry",
             "possible_values": null
+          },
+          {
+            "long": "--client-tool",
+            "short": null,
+            "value_name": "FILE",
+            "required": false,
+            "repeatable": true,
+            "global": false,
+            "help": "A client-performed tool DECLARATION (TOML) to load. Repeatable, the same way `--agent` is repeatable on `graph run`",
+            "possible_values": null
           }
         ],
         "subcommands": []
@@ -447,11 +457,90 @@
         "subcommands": []
       },
       {
-        "name": "graph",
-        "about": "Author-time graph document tools: validate a document, or print its JSON Schema. These read no store and drive no run",
+        "name": "agent",
+        "about": "Author-time agent definition tools: print the content hash a graph `agent` node has to reference. Reads no store and drives no run",
         "hidden": false,
         "args": [],
         "subcommands": [
+          {
+            "name": "hash",
+            "about": "Print an agent definition's content hash, the `sha256:<64 hex>` string a graph `agent` node references",
+            "hidden": false,
+            "args": [
+              {
+                "long": null,
+                "short": null,
+                "value_name": "FILE",
+                "required": true,
+                "repeatable": true,
+                "global": false,
+                "help": "An agent definition (TOML) to hash. Repeatable",
+                "possible_values": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "validate",
+            "about": "Build an agent definition and report what it declares, or the precise field-level error that stops it from building",
+            "hidden": false,
+            "args": [
+              {
+                "long": null,
+                "short": null,
+                "value_name": "FILE",
+                "required": true,
+                "repeatable": true,
+                "global": false,
+                "help": "An agent definition (TOML) to validate. Repeatable",
+                "possible_values": null
+              }
+            ],
+            "subcommands": []
+          },
+          {
+            "name": "help",
+            "about": "Print this message or the help of the given subcommand(s)",
+            "hidden": false,
+            "args": [],
+            "subcommands": []
+          }
+        ]
+      },
+      {
+        "name": "graph",
+        "about": "Graph document tools. `edit`, `validate` and `schema` are author-time: they read no store and drive no run. `run` drives a document over the store, exactly as `salvor run` drives an agent run",
+        "hidden": false,
+        "args": [],
+        "subcommands": [
+          {
+            "name": "edit",
+            "about": "Build a graph document one line at a time, reading commands from stdin",
+            "hidden": false,
+            "args": [
+              {
+                "long": null,
+                "short": null,
+                "value_name": "FILE",
+                "required": false,
+                "repeatable": false,
+                "global": false,
+                "help": "An existing graph document (JSON) to open. Applied as the `read <FILE>` line the author would otherwise type first, so it is recorded in the history like any other command and `undo` steps back across it. Omit to start from an empty document",
+                "possible_values": null
+              },
+              {
+                "long": "--script",
+                "short": null,
+                "value_name": "FILE",
+                "required": false,
+                "repeatable": false,
+                "global": false,
+                "help": "A file of editor commands to apply before reading stdin, in the form `history` dumps",
+                "possible_values": null
+              }
+            ],
+            "subcommands": []
+          },
           {
             "name": "validate",
             "about": "Validate a graph document JSON file: parse it strictly and run every check, printing a summary on success or the precise node/edge errors on failure",

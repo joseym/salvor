@@ -11,6 +11,7 @@ A salvor is whoever goes out after the wreck and brings the ship back, which is 
 - **The log is the run.** State is a pure fold over events: the same code in the runtime, in `salvor replay`, and in the browser via wasm.
 - **Hard budgets.** Ceilings on steps, tokens, dollars, and wall time, enforced by the runtime rather than suggested to the model. Wall time is measured between recorded clock observations, never against the ambient clock.
 - **One static binary.** The event store and the web UI ship inside it.
+- **Graphs are documents.** A workflow is a JSON document: nodes are agents, tools, gates, branches and maps, edges are the topology. The engine walks it over the same store, so a graph run resumes after a kill the way a single run does.
 
 **Status:** published on crates.io, PyPI and npm; see the [releases](https://github.com/joseym/salvor/releases) for the current version. Rust 1.95 or newer.
 
@@ -61,13 +62,26 @@ Five events, each written before the run moved past it. Even the clock reading i
 ### Now kill it
 
 ```sh
-# starts in the background and prints its run id before the first step executes
 salvor run --agent demo/agent.toml --input @demo/input.json &
+sleep 6                  # the run prints its id, then findings start landing
 kill -9 $!
 salvor resume <run-id> --agent demo/agent.toml
 ```
 
-The demo's MCP server appends one line per real write, so `wc -l` on that file before the kill and after the resume is the zero-duplicate proof. [`demo/README.md`](demo/README.md) has the full walkthrough, including an offline mock-model mode that needs no key and no network, the same mode that records the GIF above.
+The `sleep` is load-bearing: the run id you paste into `resume` is the `run <uuid>` line the backgrounded process printed, and killing instantly would beat it to the terminal. Killing a few seconds in also lands the crash mid-work, which is the point.
+
+That block sends model calls to the public Anthropic endpoint and needs `ANTHROPIC_API_KEY`. With no key, run these two lines first, then the block above works the same, with no network:
+
+```sh
+salvor-demo-model --port 18900 --delay-ms 1000 &   # from a checkout: ./target/debug/salvor-demo-model
+export SALVOR_DEMO_BASE_URL=http://127.0.0.1:18900
+```
+
+The delay paces the scripted turns like a real endpoint; without it the whole run finishes inside the `sleep` and the kill lands after the work instead of during it.
+
+`demo/agent.toml` routes its model calls through `SALVOR_DEMO_BASE_URL` (its `base_url_env` hook), so the run reaches the scripted server instead of the network. This is the offline mock-model mode that records the GIF above. One honest limit: the scripted server replays a fixed conversation written for `demo/agent.toml`, so an agent of your own gets the demo's answers, not a model. `salvor-demo-model --script <FILE>` serves a conversation you script instead; its `--help` documents the format.
+
+The demo's MCP server appends one line per real write to a findings file (`findings.txt` in the working directory, or the path `SALVOR_DEMO_FINDINGS` names), so `wc -l` on that file before the kill and after the resume is the zero-duplicate proof. [`demo/README.md`](demo/README.md) has the full walkthrough.
 
 For the same story against real tools, [`examples/web-research/`](examples/web-research/) runs an agent over the official fetch and filesystem MCP servers, killing it between real HTTP fetches and a real file write.
 
@@ -76,6 +90,8 @@ The smallest version of all of this is [`examples/hero/`](examples/hero/), the r
 ```sh
 salvor run --fixture examples/hero
 ```
+
+The hero agent's one tool, `salvor-hero-tools`, is a prebuilt Rust binary, but an agent's tools are MCP servers, not Rust code, and a tool written in Python or TypeScript works identically. [`examples/python-tools/`](examples/python-tools/) and [`examples/typescript-tools/`](examples/typescript-tools/) build one in each language: an MCP server of a few lines of Python or Node, wired into an agent the same way.
 
 ## Shell completion
 
@@ -133,11 +149,49 @@ The ledger sorts runs that need a human to the top, and the inbox states the one
 
 A graph is a document: nodes are agents, tools, gates and branches, and the canvas authors them and forks real runs from any node a run entered.
 
-![The workflow canvas: an eight-node invoice-dispute graph with a branch on refund amount and a human gate above $500](docs/bridge-workflows.png)
+![The payroll pay-run desk on the Bridge canvas: the pull_roster and flag_exceptions tool nodes, the route branch, the review_exceptions gate, the pay_each map fanning out over the roster, and the notify_summary agent node, joined by the pay_all and review branch edges, with a dashed body link running from pay_each down to the pay_employee node it names as its body. It is the same document the terminal editor builds line by line in the gif below.](docs/bridge-workflows.png)
 
 There is also a spend view.
 
 Working on the UI from a checkout? `salvor serve --dev` runs the API and the Angular dev server together with hot reload, and `Ctrl-C` stops both.
+
+## Graphs
+
+A graph is a JSON document: nodes are agents (referenced by content hash), tools, gates, branches and maps, and edges are the topology. Validation is strict, an unknown key is rejected, and an error names the node or edge at fault.
+
+![salvor graph edit builds the payroll pay-run desk line by line in the terminal editor: the pull_roster and flag_exceptions tool nodes, the route branch and its two cases, the review_exceptions gate with its approval schema, the pay_each map over the roster with pay_employee as its body, the notify_summary agent node whose --file path resolves to a content hash on screen, the labeled edges, the validator naming a typoed edge target and then passing once it is fixed, and the finished document written to disk. It is the same document shown on the Bridge canvas above.](docs/graph-edit.gif)
+
+```sh
+salvor graph validate examples/graphs/invalid-dangling-edge.json
+```
+
+names the dangling edge: ``edge `research` -> `aprove` references unknown node id `aprove` (did you mean `approve`?)``
+
+`salvor graph run` drives a document over the store exactly as `salvor run` drives an agent run: each walked node is recorded, a branch records `BranchTaken` while the losing arm records `NodeSkipped`, and a gate parks the run durably until a human answers. The kill-and-resume guarantee is the one from the top of this file, unchanged. Typed builders exist in Rust, TypeScript and Python, each reducing to the same document, and `salvor graph schema` emits the JSON Schema checked in at [`docs/graph-schema.json`](docs/graph-schema.json) for editor completion.
+
+Over HTTP the durability has one edge: a run's events are in the store, but the submitted document is not. `salvor serve` keeps it in a process-local memory registry, so a restart drops it and it has to be resubmitted before a run or fork references it again (see [Operating it](#operating-it)).
+
+An `agent` node references its agent by content hash, and `salvor agent hash <FILE>` prints the hash that node's `agent_hash` field carries; the example READMEs walk that loop from an agent file to a graph. With no SDK installed, `salvor graph edit` builds a document at a prompt with no Python at all: `add agent <ID> --file <FILE>` resolves the hash itself, and `help` prints the grammar. In Python the builder reads as one chain, each call adding a node or an edge, and `build()` freezes the document:
+
+```python
+from salvor import GraphBuilder
+
+# research_hash = salvor agent hash research-agent.toml
+graph = (
+    GraphBuilder()
+    .agent("research", research_hash, output_schema={"type": "object"})
+    .gate(
+        "approve",
+        {"type": "object", "properties": {"approved": {"type": "boolean"}}, "required": ["approved"]},
+        prompt="Publish this draft?",
+    )
+    .edge("research", "approve")
+    .build()
+)
+print(graph.to_json(indent=2))     # the same JSON a hand-written file would parse to
+```
+
+The showcase is [`examples/payroll/`](examples/payroll/): a payroll run that fans a `map` out over twelve employees, parks at a human gate when the batch looks wrong, gets `kill -9`ed mid-batch with four paid, and recovers with every employee paid exactly once at the amounts the approver signed. `bash examples/payroll/run.sh` proves it offline, no key and no network. Three more carry the detail: [`examples/graphs/`](examples/graphs/) is the documents and the builders, [`examples/graph-service/`](examples/graph-service/) drives a refund dispute end to end from the CLI with a mid-run kill, and [`examples/graph-clients/`](examples/graph-clients/) drives that same desk from Python, TypeScript and Rust application code over a stock `salvor serve`.
 
 ## Control plane
 
@@ -156,6 +210,10 @@ Full contract, every route, status code, and event shape, in [`crates/salvor-ser
 
 A container image is published to `ghcr.io/joseym/salvor` on tagged releases, API-only with no bundled UI. See [`docs/CONTAINER.md`](docs/CONTAINER.md) for the `docker run` command and why the store volume is mandatory.
 
+### Operating it
+
+The durable state is one SQLite file, at the path `--store` names (plus its `-wal` and `-shm` side files while a writer holds it open). Runs and their event logs live there and survive a restart, the same store whether the process is driving `salvor run` or `salvor serve`. A submitted graph document is the exception: `salvor serve` holds it in a process-local, in-memory registry, so a restart drops it and it has to be resubmitted before a run or fork can reference it again (see [`examples/graph-clients/README.md`](examples/graph-clients/README.md#submitted-graphs-live-in-memory)). Auth is an optional shared-secret bearer token: pass `serve --auth-token <ENV_VAR>` naming an environment variable that holds it, and every `/v1` route then requires `Authorization: Bearer <token>`; leave it unset and the server trusts its caller, expecting a reverse proxy to guard it. Until a token or a proxy sits in front of it, anyone who can reach the port can start runs and read every log, so an unauthenticated server belongs on loopback or behind that proxy, never on an open interface. Backing it up is copying the store file, safest with the server stopped so the `-wal` and `-shm` side files are quiescent. Against a live store, sqlite3's `.backup` command does the same job without stopping anything. A backup carries the runs and their logs, not the in-memory graph registry: a client that submits a graph document keeps the ability to resubmit it, because no store restore brings it back.
+
 ### Clients
 
 Thin clients over the control plane: register an agent, start a run, stream events, resume. A few hundred lines each, and the durability stays in the one Rust process.
@@ -165,7 +223,26 @@ npm install @salvor-run/client     # TypeScript
 pip install salvor                 # Python
 ```
 
-Both also drive the client-owned mode above. See [`sdks/typescript`](sdks/typescript) and [`sdks/python`](sdks/python).
+The Python client registers an agent, starts a run, and reads the state the run settled into:
+
+```python
+from salvor import Client
+
+with Client("http://127.0.0.1:8080") as client:
+    agent = client.register_agent(open("agent.toml").read())
+    run_id = client.start_run(agent, {"question": "..."})
+    for event in client.stream_events(run_id):
+        print(event.seq, event.kind)
+    print(client.get_run(run_id).status.state)
+```
+
+The TypeScript client mirrors this surface call for call. Both also drive the client-owned mode above. See [`sdks/typescript`](sdks/typescript) and [`sdks/python`](sdks/python).
+
+### Client-performed tools
+
+Some tools have to run in the client's own process, under credentials the server never holds. An operator declares one in a TOML file and starts the server with `salvor serve --client-tool <FILE>`; the declaration carries a name, an effect class, an input schema, an output schema, and a `trust_completion` flag. There is no code behind it on the server and no HTTP endpoint that registers one.
+
+The client fetches the declarations from `GET /v1/client-tools`, opens an intent whose input the server checks against the declared schema and records before anything happens, performs the call in its own process with its own credentials, and reports the result, which the server checks against the declared output schema before it becomes part of the record. The idempotency key is derived by the server from the run, the position, and the tool name, never accepted from the caller, so an honest retry gets the identical key and a duplicate cannot be smuggled in by presenting a fresh one. A declaration silent about trust may not self-complete: `trust_completion` defaults to `false`, every call settles by hand through the existing resolve endpoint, and `trust_completion = true` is the explicit opt-in for a tool whose report the operator will take. Even then the output schema checks shape, not truth: an intent for 5000 cents would accept a well-shaped completion claiming 50000. `require_equal = ["amount_cents"]` closes that gap, refusing any report whose named fields differ from what the intent recorded, and a refused or absent completion leaves the intent as the log's last word, so the run derives to needs-reconciliation until a person settles it. Worked end to end in [`examples/client-tools/`](examples/client-tools/).
 
 ### As a Rust library
 

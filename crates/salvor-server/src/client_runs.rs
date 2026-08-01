@@ -68,9 +68,13 @@ use axum::http::header::ACCEPT;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use salvor_core::{Effect, Event, EventEnvelope, LogValidator, RunId, SequenceNumber, TokenUsage};
+use salvor_core::{
+    Effect, Event, EventEnvelope, LogValidator, Performer, RunId, SequenceNumber, TokenUsage,
+};
 use salvor_llm::{ContentDelta, MessageAccumulator, StreamEvent};
-use salvor_runtime::{RuntimeError, hash_value, response_value, usage_of, validate_labels};
+use salvor_runtime::{
+    RuntimeError, hash_value, response_value, usage_of, validate_against_schema, validate_labels,
+};
 use salvor_tools::{ToolCtx, ToolOutcome};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -169,6 +173,33 @@ struct ToolStepRequest {
     #[serde(default)]
     #[allow(dead_code)]
     effect: Option<Effect>,
+}
+
+/// The body of `POST /v1/client-runs/{id}/client-tool-intent`.
+///
+/// Notice what is NOT here, next to [`ToolStepRequest`]: no `effect` and no
+/// `idempotency_key`. Both come from the operator's declaration or from the
+/// server's own derivation, so there is no field for a caller to fill in.
+#[derive(Debug, Deserialize)]
+struct ClientToolIntentRequest {
+    /// The log position the client's cursor reserved for the tool intent.
+    seq: u64,
+    /// The declared client-performed tool's name. Undeclared is an error, and
+    /// no intent is written.
+    tool: String,
+    /// The input the client is about to perform the call with, checked against
+    /// the declared `input_schema` and then recorded on the intent verbatim.
+    input: Value,
+}
+
+/// The body of `POST /v1/client-runs/{id}/client-tool-completion`.
+#[derive(Debug, Deserialize)]
+struct ClientToolCompletionRequest {
+    /// The intent's position, which must be the pending intent at the log's end.
+    seq: u64,
+    /// What the client reports the call returned, checked against the declared
+    /// `output_schema` before it is recorded.
+    output: Value,
 }
 
 /// The body of `POST /v1/client-runs/{id}/resolve`.
@@ -849,6 +880,7 @@ pub async fn tool_step(
                         input: input.clone(),
                         effect,
                         idempotency_key: exec_key.clone(),
+                        performed_by: None,
                     },
                 );
                 let mut validator = LogValidator::new(log);
@@ -991,6 +1023,7 @@ fn intent_evidence(envelope: &EventEnvelope) -> Value {
         input,
         effect,
         idempotency_key,
+        ..
     } = &envelope.event
     else {
         return Value::Null;
@@ -1075,9 +1108,366 @@ pub async fn resolve(
     }
 }
 
+/// The idempotency key a CLIENT-performed tool call presents: derived by this
+/// server from where the call sits in the run (run id, sequence, tool name),
+/// never supplied by the caller.
+///
+/// This deliberately differs from the server-performed [`tool_step`], where the
+/// client supplies `idempotency_key` on the request body and the server records
+/// what it was given. The difference is not an oversight, and the older
+/// endpoint should not be "fixed" to match.
+///
+/// There, salvor performs the call. The party choosing the key is not the party
+/// making the write, and a key chosen badly costs the caller nothing but its own
+/// retry failing to collapse. Here the client both chooses the key and performs
+/// the write, in a process salvor never sees. That is the one case where the
+/// party choosing the key is also the party who benefits from a duplicate
+/// landing: a client that wants to be paid twice supplies a fresh key for the
+/// second attempt and the provider, seeing two distinct calls, honors both,
+/// while salvor's log shows two honest-looking intents. Deriving the key removes
+/// the choice. The same (run, seq, tool) always derives the same key, so an
+/// honest retry after a dropped response presents the identical key the first
+/// attempt did and the provider collapses the pair, and a second attempt cannot
+/// present a different one.
+///
+/// Shaped after `salvor_engine`'s `fork_safe_idempotency_key`: a canonical hash
+/// of a small JSON object, using the same `hash_value` the rest of the workspace
+/// hashes with, so the key is reproducible across processes and languages and a
+/// client can derive it independently to check the server's work.
+fn client_tool_idempotency_key(run_id: RunId, seq: u64, tool: &str) -> String {
+    hash_value(&json!({
+        "run": run_id.as_uuid().to_string(),
+        "seq": seq,
+        "tool": tool,
+    }))
+}
+
+/// `POST /v1/client-runs/{id}/client-tool-intent`: open a client-performed tool
+/// call.
+///
+/// The counterpart of [`tool_step`] for a tool salvor holds no code for. The
+/// client is about to run the call in its OWN process, with its own secrets;
+/// this endpoint records that it is about to, so the intent is in the log before
+/// the effect happens, exactly as the write-ahead rule demands of a call salvor
+/// performs itself. Requires the `X-Drive-Token` header, like every other
+/// driving endpoint.
+///
+/// What the server takes from the operator's declaration rather than the
+/// request: the [`Effect`] (so a caller cannot up- or down-grade its own write
+/// into a freely retried read), the input schema the input is checked against
+/// before anything is written, and the idempotency key, which is DERIVED here
+/// (see [`client_tool_idempotency_key`]). The client supplies only the position,
+/// the name, and the input.
+///
+/// The intent goes through the same [`LogValidator`] guard every other append on
+/// this surface uses, so ordering and correlation stay enforced: an intent at a
+/// position the log is not ready for is a `409 divergence` and nothing is
+/// written. A byte-identical re-post at an already-recorded position is a `200`
+/// that re-derives the same key and writes nothing, the safe retry a dropped
+/// response leaves behind.
+///
+/// The response carries the derived key and a `settled` flag: `true` when the
+/// intent at this position already has its completion recorded, so a caller
+/// re-posting an intent it believes it already opened can tell "safe to
+/// perform" from "already done" without reading the log. The client performs
+/// the work under the key and then posts [`client_tool_completion`].
+pub async fn client_tool_intent(
+    State(state): State<AppState>,
+    Path(run_id_text): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<Value>, ApiError> {
+    let run_id = parse_run_id(&run_id_text)?;
+    authorize_drive(&state, run_id, &headers)?;
+
+    if body.len() > MAX_EVENTS_BODY {
+        return Err(ApiError::PayloadTooLarge(format!(
+            "client-tool-intent body is {} bytes, over the {MAX_EVENTS_BODY}-byte cap",
+            body.len()
+        )));
+    }
+    let request: ClientToolIntentRequest = parse_body(&body)?;
+
+    // The declaration is looked up before anything is written. Declarations are
+    // loaded by the operator and never registered over HTTP (see
+    // `crate::client_tools`), so an unknown name is a `404` the operator fixes,
+    // not something a caller can create for itself.
+    let decls = state.client_tools();
+    let decl = decls.get(&request.tool).ok_or_else(|| {
+        ApiError::UnknownTool(format!(
+            "no client-performed tool named `{}` is declared on this server; declarations are \
+             loaded by the operator (`salvor serve --client-tool <FILE>`) and are never \
+             registered over HTTP",
+            request.tool
+        ))
+    })?;
+
+    // The input is checked against the OPERATOR's schema before the intent is
+    // recorded, so a malformed call never becomes history: on the failure path
+    // this endpoint writes nothing at all and the run is untouched.
+    validate_against_schema(&request.input, &decl.input_schema).map_err(|error| {
+        ApiError::BadRequest(format!(
+            "the input does not match the declared input_schema for `{}`: {error}",
+            request.tool
+        ))
+    })?;
+    let effect = decl.effect;
+
+    let key = client_tool_idempotency_key(run_id, request.seq, &request.tool);
+    let intent = EventEnvelope::new(
+        run_id,
+        SequenceNumber::new(request.seq),
+        state.now(),
+        Event::ToolCallRequested {
+            seq: SequenceNumber::new(request.seq),
+            tool: request.tool.clone(),
+            input: request.input.clone(),
+            effect,
+            idempotency_key: Some(key.clone()),
+            // The whole point of the stage: the log says who performed this, so
+            // a later reader can tell a call salvor witnessed from a call it was
+            // told about.
+            performed_by: Some(Performer::Client),
+        },
+    );
+
+    let log = state.store().read_log(run_id).await.map_err(store_error)?;
+    if (request.seq as usize) < log.len() {
+        // An already-recorded position. The derivation is a pure function of
+        // (run, seq, tool), so an identical re-post re-derives the recorded key
+        // and can simply be handed it back: the client retries its own call
+        // under the same key and the provider collapses the duplicate. Compare
+        // the events rather than the envelopes, because `recorded_at` is this
+        // store's stamp from the first attempt and would never match a fresh one.
+        let recorded = &log[request.seq as usize];
+        if recorded.event == intent.event {
+            let settled = intent_is_settled(&log, request.seq);
+            return Ok(Json(intent_body(request.seq, &key, effect, settled)));
+        }
+        return Err(ApiError::Divergence(format!(
+            "seq {} already holds a different event; it is not this client-tool intent's position",
+            request.seq
+        )));
+    }
+
+    // The same append-guard the generic append and both server-performed steps
+    // push through: it decides whether this is the legal next event.
+    let mut validator = LogValidator::new(log);
+    validator
+        .push(intent.clone())
+        .map_err(|error| ApiError::Divergence(error.to_string()))?;
+    state.store().append(&intent).await.map_err(append_error)?;
+    // A freshly-recorded intent can never already be settled: the append above
+    // just placed it at the log's new end, with nothing after it yet.
+    Ok(Json(intent_body(request.seq, &key, effect, false)))
+}
+
+/// Whether the tool intent at `seq` already has its `ToolCallCompleted`
+/// recorded in `log`. The append-guard only ever admits a completion for the
+/// same `seq` immediately after its intent (see [`append_tool_completion`]),
+/// so it is enough to check the very next slot.
+fn intent_is_settled(log: &[EventEnvelope], seq: u64) -> bool {
+    log.get(seq as usize + 1).is_some_and(|envelope| {
+        matches!(
+            &envelope.event,
+            Event::ToolCallCompleted { seq: completed_seq, .. } if completed_seq.get() == seq
+        )
+    })
+}
+
+/// The `200` client-tool-intent body: the position, the DERIVED idempotency key
+/// the client must perform under, the operator-declared effect it was
+/// recorded with, and whether this position's completion is ALREADY recorded.
+///
+/// `settled` exists for a caller re-posting an intent it already believes it
+/// opened, most pointedly a payments caller checking a write before it acts on
+/// the response: without it, a retried intent and a fresh one look identical
+/// (same `200`, same key), and a caller cannot tell "safe to perform" from
+/// "already done, do not perform it again" without separately reading the log.
+/// On a freshly-recorded intent it is always `false`; on a byte-identical
+/// re-post it reflects whether the completion has landed since.
+fn intent_body(seq: u64, idempotency_key: &str, effect: Effect, settled: bool) -> Value {
+    json!({
+        "seq": seq,
+        "idempotency_key": idempotency_key,
+        "effect": effect,
+        "settled": settled,
+    })
+}
+
+/// `POST /v1/client-runs/{id}/client-tool-completion`: record that a
+/// client-performed tool call finished.
+///
+/// The client ran the call in its own process and is now reporting the result.
+/// Salvor did not witness it, so everything this endpoint can check, it checks
+/// before the report becomes history. Requires the `X-Drive-Token` header.
+///
+/// It refuses, recording nothing, when:
+///
+/// - the log does not end at a tool intent, or ends at one whose `seq` is not
+///   the one this request names (`409 divergence`);
+/// - the pending intent was performed by the SERVER (`403`): a client must not
+///   close a call salvor made, since salvor holds the real result;
+/// - the declaration says `trust_completion = false` (`403`);
+/// - the declaration carries no `output_schema` (`403`): with nothing to check
+///   the report against, the completion is unfalsifiable, which is exactly what
+///   the schema exists to prevent;
+/// - the reported output fails the declared `output_schema` (`400`);
+/// - a `require_equal` field's reported value differs from the value the intent
+///   recorded (`403`): the output schema is a shape check and cannot know what
+///   was authorized, so a client report may not alter a pinned field.
+///
+/// The checks run in that order: the trust refusal fires before any value is
+/// compared, then the output shape, then the per-field equality.
+///
+/// # Where a refused completion leaves the run, and why nothing else changes
+///
+/// A refusal is not a dead end and needed no new state to express. The log still
+/// ends at the recorded `ToolCallRequested`, and for an `Effect::Write` the pure
+/// fold in `salvor-replay` ALREADY reports that as
+/// [`RunStatus::NeedsReconciliation`](salvor_replay::RunStatus), because an
+/// uncompleted write intent as the log's last word is precisely what that status
+/// means. `POST /v1/client-runs/{id}/resolve` already exists to settle it by
+/// hand, once a person has verified externally whether the call landed.
+///
+/// So `trust_completion = false` is fully implemented here, at the completion
+/// boundary, and deliberately NOT in `derive_state`. That fold is a pure
+/// function of the log with no access to declarations, and it must stay that
+/// way: a log has to mean the same thing to a replay on another machine that
+/// has never seen this server's `--client-tool` files. A later reader who goes
+/// looking for the strict mode in the fold will not find it, and that is the
+/// design, not an omission.
+pub async fn client_tool_completion(
+    State(state): State<AppState>,
+    Path(run_id_text): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<Value>, ApiError> {
+    let run_id = parse_run_id(&run_id_text)?;
+    authorize_drive(&state, run_id, &headers)?;
+
+    if body.len() > MAX_EVENTS_BODY {
+        return Err(ApiError::PayloadTooLarge(format!(
+            "client-tool-completion body is {} bytes, over the {MAX_EVENTS_BODY}-byte cap",
+            body.len()
+        )));
+    }
+    let request: ClientToolCompletionRequest = parse_body(&body)?;
+
+    // A completion settles the log's LAST event, which must be the intent this
+    // request names. Anything else and the client and the log disagree about
+    // what is outstanding.
+    let log = state.store().read_log(run_id).await.map_err(store_error)?;
+    let pending = log.last().ok_or_else(|| {
+        ApiError::Divergence(format!(
+            "run {} has recorded nothing, so it has no client-performed tool call to complete",
+            run_id.as_uuid()
+        ))
+    })?;
+    let Event::ToolCallRequested {
+        seq: intent_seq,
+        tool,
+        input: intent_input,
+        performed_by,
+        ..
+    } = &pending.event
+    else {
+        return Err(ApiError::Divergence(format!(
+            "run {} does not end at a tool intent, so there is no tool call to complete",
+            run_id.as_uuid()
+        )));
+    };
+    if intent_seq.get() != request.seq {
+        return Err(ApiError::Divergence(format!(
+            "the pending tool intent is at seq {}, not the seq {} this completion names",
+            intent_seq.get(),
+            request.seq
+        )));
+    }
+    // A client may close only a call a client made. The server-performed
+    // tool-step records its own completion from the output it saw, so a client
+    // completion there would be overwriting a witnessed fact with a claim.
+    if *performed_by != Some(Performer::Client) {
+        return Err(ApiError::ClientCompletionRefused(format!(
+            "the pending tool call at seq {} was performed by this server, not by the client, so \
+             a client may not record its completion",
+            request.seq
+        )));
+    }
+    let tool = tool.clone();
+
+    let decls = state.client_tools();
+    let decl = decls.get(&tool).ok_or_else(|| {
+        ApiError::UnknownTool(format!(
+            "no client-performed tool named `{tool}` is declared on this server, so the completion \
+             reported for the intent at seq {} cannot be checked",
+            request.seq
+        ))
+    })?;
+
+    if !decl.trust_completion {
+        return Err(ApiError::ClientCompletionRefused(format!(
+            "tool `{tool}` is declared with trust_completion = false, so a client may not record \
+             its own completion for it; verify the call externally, then settle it by hand with \
+             POST /v1/client-runs/{}/resolve",
+            run_id.as_uuid()
+        )));
+    }
+    let Some(output_schema) = &decl.output_schema else {
+        return Err(ApiError::ClientCompletionRefused(format!(
+            "tool `{tool}` declares no output_schema, so a client-reported completion carries \
+             nothing this server can check; declare an output_schema for it, or settle the call \
+             by hand with POST /v1/client-runs/{}/resolve",
+            run_id.as_uuid()
+        )));
+    };
+    validate_against_schema(&request.output, output_schema).map_err(|error| {
+        ApiError::BadRequest(format!(
+            "the reported output does not match the declared output_schema for `{tool}`: {error}"
+        ))
+    })?;
+
+    // The output schema is a shape check and cannot know what was authorized, so
+    // a report claiming a different amount than the intent recorded passes it. A
+    // require_equal field closes that gap: the reported value must be JSON-equal
+    // to the value the intent recorded. The load-time rule guarantees each named
+    // field is required on both sides, so both values are present to compare.
+    for field in &decl.require_equal {
+        let authorized = intent_input.get(field).unwrap_or(&Value::Null);
+        let reported = request.output.get(field).unwrap_or(&Value::Null);
+        if authorized != reported {
+            return Err(ApiError::ClientCompletionRefused(format!(
+                "tool `{tool}` reported `{field}` as {reported} for the intent at seq {}, but the \
+                 intent recorded {authorized}; a client report may not alter a require_equal field. \
+                 If the provider genuinely did something different, settle it by hand with POST \
+                 /v1/client-runs/{}/resolve",
+                request.seq,
+                run_id.as_uuid()
+            )));
+        }
+    }
+
+    // The completion goes through the same guard and the same helper the
+    // server-performed tool step records its own completion with, so the two
+    // surfaces write byte-identical `ToolCallCompleted` events.
+    append_tool_completion(&state, run_id, request.seq, &request.output).await?;
+    Ok(Json(json!({
+        "seq": request.seq,
+        "completed": true,
+    })))
+}
+
 /// Refuses a model or tool event on the generic append: those are recorded
-/// through the server-performed model-step and tool-step endpoints,
-/// never hand-appended here.
+/// through the server-performed model-step and tool-step endpoints, or, for a
+/// call the CLIENT performs in its own process, through the client-tool-intent
+/// and client-tool-completion endpoints. All four kinds stay refused here.
+///
+/// A client-performed tool call is possible, in other words; it is just not
+/// possible by hand-appending an event. That is the same rule the server-
+/// performed steps live under, and for the same reason: the effect class, the
+/// input check, and the idempotency key are the server's to decide from an
+/// operator's declaration, and an event submitted whole would carry the caller's
+/// answers to all three.
 fn reject_side_effecting_kind(candidate: &EventEnvelope) -> Result<(), ApiError> {
     use salvor_core::Event;
     let kind = match &candidate.event {
@@ -1120,7 +1510,7 @@ fn authorize_drive(
         Some(_) => {
             // The driver presented its current token: it is alive. Refresh the
             // lease's `last_seen` so the liveness evidence on GET /v1/runs reads
-            // "attached". This is the whole heartbeat — it rides on the real
+            // "attached". This is the whole heartbeat: it rides on the real
             // guarded operation, never a separate ping.
             state.touch_client_run(run_id);
             Ok(lease)

@@ -168,8 +168,8 @@ pub fn validate_next(
     }
 
     let Some(last) = log.last() else {
-        // Empty log: the candidate opens the run. It must be a run head —
-        // `RunStarted` for an agent run or `GraphRunStarted` for a graph run —
+        // Empty log: the candidate opens the run. It must be a run head
+        // (`RunStarted` for an agent run or `GraphRunStarted` for a graph run)
         // and its position (already checked to be `expected_seq` == 0) stands
         // in for any run id, since there is no prior event to match against.
         return match &candidate.event {
@@ -422,6 +422,7 @@ mod tests {
             input: serde_json::json!({"src": "x"}),
             effect,
             idempotency_key: None,
+            performed_by: None,
         }
     }
 

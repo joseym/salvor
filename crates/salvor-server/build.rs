@@ -33,7 +33,7 @@
 //! changes, OR untracked files sitting in the tree) appends `-dirty` to the
 //! hash; this is a snapshot taken when the build script last ran, not a live
 //! fact, because Cargo only reruns a build script when its declared
-//! `rerun-if-changed` inputs change — here, `.git/HEAD` and `.git/index`
+//! `rerun-if-changed` inputs change: here, `.git/HEAD` and `.git/index`
 //! (checkouts, commits, and staged/unstaged
 //! changes to already-tracked files all touch one of the two). Editing a
 //! tracked file without staging it will not by itself trigger a rerun; this

@@ -45,7 +45,7 @@
 //!   work inline, and records `MapIterationJoined`. The joined output is the
 //!   per-element outputs as a list in index order. Iterations run
 //!   **inline and sequentially** in the parent's own log: the `concurrency` cap is
-//!   accepted (the validator requires it be at least 1) but not honored — a
+//!   accepted (the validator requires it be at least 1) but not honored: a
 //!   deliberate v0.4 choice that costs only wall-clock and changes no event shape,
 //!   so the whole fan-out is proven by the same single-log replay machinery
 //!   already proven for linear and branching graphs. Concurrent child runs are
@@ -62,17 +62,17 @@
 //!
 //! After the last node the engine records the single terminal `RunCompleted`.
 //! There is no ambient clock or randomness in any decision: everything the
-//! engine feeds forward — the walk order, each node's input, the branch route, a
+//! engine feeds forward (the walk order, each node's input, the branch route, a
 //! map's resolved item list and its per-iteration child ids, an idempotent tool's
-//! idempotency key — is a pure function of the document or of values the `RunCtx`
+//! idempotency key) is a pure function of the document or of values the `RunCtx`
 //! recorded, so a second drive over the recorded log replays with no live calls
 //! and produces a byte-identical log. A map iteration's child-run id is
 //! `sha256:` over the parent run id, the node id, and the index (see
-//! [`map_child_run_id`]) — pure recorded data, so replay reconstructs the
+//! [`map_child_run_id`]): pure recorded data, so replay reconstructs the
 //! identical id without storing anything extra. The idempotency
 //! key is derived from the call's position in the graph (graph hash, node id,
 //! call index) rather than from drawn randomness, which is what lets a FORK of a
-//! run re-walk a segment and present the same key its origin recorded — see
+//! run re-walk a segment and present the same key its origin recorded. See
 //! [`fork_safe_idempotency_key`] and the `salvor-server` fork endpoint.
 //!
 //! # Data flow
@@ -257,7 +257,7 @@ pub async fn run_graph(
         let id = node.id();
         // A node used as a map body is not walked independently: it runs only as
         // its map's per-item worker, inline in the fan-out below. Nothing is
-        // recorded for it here — it is map-owned, not "skipped".
+        // recorded for it here: it is map-owned, not "skipped".
         if map_body_targets.contains(id) {
             continue;
         }
@@ -313,8 +313,8 @@ pub async fn run_graph(
                 })?;
                 ctx.node_entered(id).await?;
                 // An idempotent tool's key is a PURE function of WHERE the call
-                // sits in the graph — the graph hash, the node id, the call index
-                // within the node — not of drawn randomness. That is what makes it
+                // sits in the graph (the graph hash, the node id, the call index
+                // within the node), not of drawn randomness. That is what makes it
                 // fork-safe: a fork re-walks the segment from its fork node and
                 // re-executes the idempotent calls in it live, and this derivation
                 // hands each of them the IDENTICAL key its origin recorded, so the
@@ -615,7 +615,7 @@ async fn run_map_body(
                         tool: tool_node.tool.clone(),
                     })?;
             // Each iteration is a distinct call of the MAP node, so its idempotent
-            // key is derived from the map node id and the index — the "several
+            // key is derived from the map node id and the index: the "several
             // calls within one node" case `fork_safe_idempotency_key`'s call-index
             // parameter exists for. A fork re-walking the fan-out presents each
             // iteration's identical key; Read/Write carry none.
@@ -688,8 +688,8 @@ fn map_child_run_id(parent_run: RunId, node_id: &str, index: u64) -> String {
 /// The reference uses the same path grammar and missing-path semantics the branch
 /// expressions use (see [`salvor_graph::expr::parse_reference`]). A reference that
 /// fails to parse is a [`EngineError::MalformedGraph`] that does not arise for a
-/// validated document; one that resolves to anything but a JSON array — including
-/// a missing path — is a typed [`EngineError::MapOverNotAList`].
+/// validated document; one that resolves to anything but a JSON array, including
+/// a missing path, is a typed [`EngineError::MapOverNotAList`].
 fn resolve_over(node_id: &str, over: &str, routed: &Value) -> Result<Vec<Value>, EngineError> {
     let reference =
         salvor_graph::expr::parse_reference(over).map_err(|error| EngineError::MalformedGraph {
@@ -707,8 +707,8 @@ fn resolve_over(node_id: &str, over: &str, routed: &Value) -> Result<Vec<Value>,
 }
 
 /// The idempotency key a graph `tool` node's [`Effect::Idempotent`] call
-/// presents: a pure function of the call's POSITION in the graph — the graph
-/// hash, the node id, and the call index within the node — never of drawn
+/// presents: a pure function of the call's POSITION in the graph (the graph
+/// hash, the node id, and the call index within the node), never of drawn
 /// randomness.
 ///
 /// This is what makes an idempotent tool fork-safe. A fork re-walks the segment

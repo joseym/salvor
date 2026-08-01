@@ -7,7 +7,7 @@ import { errorMessage } from './errors';
 
 /**
  * One run's live event surface: `GET /v1/runs/{id}/events` (server-sent events), wrapped
- * around `SalvorClient.streamEvents`. This channel does not reimplement reconnect — the
+ * around `SalvorClient.streamEvents`. This channel does not reimplement reconnect: the
  * SDK's `streamEvents` already resumes a dropped connection with `?from_seq` and merges
  * the result into one gap-free, duplicate-free sequence (see `sdks/typescript/src/client.ts`,
  * `generate()`); this channel's job is to surface that merged sequence as a signal and to
@@ -17,7 +17,7 @@ import { errorMessage } from './errors';
  */
 export interface RunEventsChannel {
   readonly runId: string;
-  /** The pill's sole authority for this channel. Read-only by construction — see
+  /** The pill's sole authority for this channel. Read-only by construction: see
    * `connection-state.ts`; nothing on this interface can set it. */
   readonly state: Signal<ConnectionState>;
   /** Every event received so far, in sequence order, gap-free and duplicate-free across

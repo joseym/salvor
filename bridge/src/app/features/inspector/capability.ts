@@ -8,7 +8,7 @@ import { CapabilityProbeService } from '../../core/api';
  *
  * Since the canvas landed, this token is wired to the REAL probe of `GET /v1/capabilities`
  * (`core/api/capabilities.ts`'s {@link CapabilityProbeService}): the graph canvas now exists, so
- * a fork offer has somewhere to send the operator. The probe degrades honestly — an unreachable
+ * a fork offer has somewhere to send the operator. The probe degrades honestly: an unreachable
  * or pre-v0.4 control plane resolves to `{ fork: false }` with nothing thrown and nothing logged,
  * and the offer simply stays hidden.
  */
@@ -22,7 +22,7 @@ export const NO_FORK_CAPABILITIES: ServerCapabilities = { fork: false };
 
 /**
  * The gate itself, as a pure function so it can be unit-tested both ways independently of Angular.
- * The offer is shown only when fork is genuinely advertised — never inferred, never defaulted on.
+ * The offer is shown only when fork is genuinely advertised: never inferred, never defaulted on.
  */
 export function forkOffered(caps: ServerCapabilities): boolean {
   return caps.fork === true;
@@ -31,7 +31,7 @@ export function forkOffered(caps: ServerCapabilities): boolean {
 /**
  * Injected capabilities, as a SIGNAL: the probe answers asynchronously, and a consumer reading a
  * one-shot snapshot would freeze the pre-probe default forever. The factory also fires the probe,
- * so injecting the token is enough — no consumer has to remember to ask.
+ * so injecting the token is enough: no consumer has to remember to ask.
  */
 export const SERVER_CAPABILITIES = new InjectionToken<Signal<ServerCapabilities>>('SERVER_CAPABILITIES', {
   providedIn: 'root',

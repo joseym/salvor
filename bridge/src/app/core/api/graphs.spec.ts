@@ -26,7 +26,7 @@ describe('GraphsService', () => {
     vi.unstubAllGlobals();
   });
 
-  describe('refresh — GET /v1/graphs', () => {
+  describe('refresh: GET /v1/graphs', () => {
     it('decodes the catalog and exposes it as a signal', async () => {
       fetchMock.mockResolvedValueOnce(
         jsonResponse({
@@ -65,7 +65,7 @@ describe('GraphsService', () => {
     });
   });
 
-  describe('get — GET /v1/graphs/{hash}', () => {
+  describe('get: GET /v1/graphs/{hash}', () => {
     it('reads one stored document back', async () => {
       const document = { schema_version: 1, nodes: [], edges: [] };
       fetchMock.mockResolvedValueOnce(jsonResponse({ graph: 'sha256:g1', document }));
@@ -89,7 +89,7 @@ describe('GraphsService', () => {
     });
   });
 
-  describe('validate — POST /v1/graphs/validate', () => {
+  describe('validate: POST /v1/graphs/validate', () => {
     it('a valid document resolves valid:true with the summary counts', async () => {
       fetchMock.mockResolvedValueOnce(
         jsonResponse({
@@ -114,7 +114,7 @@ describe('GraphsService', () => {
       expect(JSON.parse((init as RequestInit).body as string)).toEqual(document);
     });
 
-    it('an invalid document resolves valid:false with the full node/edge-precise error list — never throws', async () => {
+    it('an invalid document resolves valid:false with the full node/edge-precise error list; never throws', async () => {
       fetchMock.mockResolvedValueOnce(
         jsonResponse({
           valid: false,
@@ -141,7 +141,7 @@ describe('GraphsService', () => {
         edge: { from: 'approve', to: 'ghost' },
         missing: 'ghost',
       });
-      // an explicit null suggestion decodes to null, not undefined — absent-vs-null matters here
+      // an explicit null suggestion decodes to null, not undefined: absent-vs-null matters here
       expect(result.errors[0]!.suggestion).toBeNull();
     });
 

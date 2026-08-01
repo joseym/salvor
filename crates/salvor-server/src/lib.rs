@@ -39,6 +39,7 @@
 pub mod agents;
 pub mod auth;
 pub mod client_runs;
+pub mod client_tools;
 pub mod dispatch;
 pub mod error;
 pub mod executor;
@@ -56,6 +57,7 @@ use axum::middleware::from_fn_with_state;
 use axum::routing::{get, post};
 use tokio::net::TcpListener;
 
+pub use client_tools::{ClientToolDecl, ClientToolRegistry};
 pub use dispatch::{Disposition, ResumeKind, classify};
 pub use error::ApiError;
 pub use executor::{LlmModelExecutor, ModelExecutor, ModelStream};
@@ -92,6 +94,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/graphs/validate", post(graph::validate_only))
         .route("/v1/graphs/{hash}", get(graph::get))
         .route("/v1/graph-runs", post(graph::start_run))
+        .route("/v1/client-tools", get(client_tools::list))
         .route("/v1/client-runs", post(client_runs::open))
         .route("/v1/client-runs/{id}/log", get(client_runs::get_log))
         .route("/v1/client-runs/{id}/events", post(client_runs::append))
@@ -102,6 +105,14 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/v1/client-runs/{id}/tool-step",
             post(client_runs::tool_step),
+        )
+        .route(
+            "/v1/client-runs/{id}/client-tool-intent",
+            post(client_runs::client_tool_intent),
+        )
+        .route(
+            "/v1/client-runs/{id}/client-tool-completion",
+            post(client_runs::client_tool_completion),
         )
         .route("/v1/client-runs/{id}/resolve", post(client_runs::resolve))
         .layer(from_fn_with_state(state.clone(), auth::require_bearer));

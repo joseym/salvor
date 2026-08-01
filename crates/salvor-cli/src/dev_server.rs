@@ -11,11 +11,11 @@
 //! committed `bridge/proxy.conf.json`, which is a convenience default for a
 //! plain `ng serve`/`npm start` against the CLI's own default bind and is
 //! not read on this path), so a custom `--bind` is always proxied correctly.
-//! Both of the app's streamed HTTP surfaces under `/v1` — the run-events SSE
+//! Both of the app's streamed HTTP surfaces under `/v1`, the run-events SSE
 //! tail and the client SDK's fetch-based model-step stream (see
 //! `sdks/typescript/src/sse.ts`; the app never uses a browser `EventSource`,
 //! since one of those two endpoints is a POST, which `EventSource` cannot
-//! issue) — proxy through untouched: Vite's proxy streams the response body
+//! issue), proxy through untouched: Vite's proxy streams the response body
 //! by default, and neither surface needs a WebSocket upgrade, so no `ws:
 //! true` is required in the generated config.
 //!
@@ -27,7 +27,7 @@
 //! tracks is `ng serve` itself, not a shell sitting above it. On Unix that
 //! process is also made the leader of a fresh process group
 //! (`process_group(0)`), detached from this CLI's own terminal group, so a
-//! Ctrl-C at the terminal does not casually reach it — shutdown is instead
+//! Ctrl-C at the terminal does not casually reach it: shutdown is instead
 //! always explicit, through [`DevServer::shutdown`], which signals the whole
 //! group (not just the tracked pid), reaching any subprocess `ng serve`
 //! spawns of its own (esbuild's persistent build-service process) too.

@@ -7,7 +7,7 @@ function ev(kind: string, recordedAt: string, seq = 0): SalvorEvent {
 }
 
 describe('bucketEvents', () => {
-  it('is undefined for no events — nothing to draw', () => {
+  it('is undefined for no events: nothing to draw', () => {
     expect(bucketEvents([])).toBeUndefined();
     expect(bucketEvents([[]])).toBeUndefined();
   });
@@ -46,8 +46,8 @@ describe('bucketEvents', () => {
 describe('a very wide PLAUSIBLE window does not overflow the call stack', () => {
   // Two real, plausible events years apart (the owner's store also holds long-running data,
   // not just the epoch-zero case below) still stretch the window to tens of thousands of hourly
-  // buckets. Spreading that many buckets into `Math.max(...)` — as the render/desc/extent code
-  // once did — throws `RangeError: Maximum call stack size exceeded`. These fold the whole
+  // buckets. Spreading that many buckets into `Math.max(...)` (as the render/desc/extent code
+  // once did) throws `RangeError: Maximum call stack size exceeded`. These fold the whole
   // pipeline over that window and must simply return, iteratively, regardless of the exclusion
   // rule below (both stamps here are plausible, so nothing is excluded).
   const wide = bucketEvents([
@@ -73,7 +73,7 @@ describe('a very wide PLAUSIBLE window does not overflow the call stack', () => 
 });
 
 describe('disclose and exclude: implausible recorded_at stamps', () => {
-  // The real bug: a production store held events stamped 1970-01-01T00:00:00Z — the client's own
+  // The real bug: a production store held events stamped 1970-01-01T00:00:00Z: the client's own
   // placeholder, trusted verbatim until the server started stamping recorded_at itself. Beside a
   // real 2026 event this used to stretch the window to 56 years and collapse every real bar onto
   // the right edge. Now the epoch stamp is excluded from the window entirely and disclosed.
@@ -84,15 +84,15 @@ describe('disclose and exclude: implausible recorded_at stamps', () => {
     ])!;
     expect(win).toBeDefined();
     expect(win.excluded).toBe(1);
-    expect(win.nBuckets).toBe(1); // just the one plausible hour — no 56-year stretch
+    expect(win.nBuckets).toBe(1); // just the one plausible hour: no 56-year stretch
     expect(win.buckets[0].model).toBe(1);
 
     const html = renderActivityHtml(win, () => 1, undefined);
     expect((html.match(/class="hbucket/g) ?? []).length).toBe(1); // one real bar, drawn cleanly
 
-    expect(activityExclusionNote(win)).toBe('1 event carries no plausible timestamp — excluded from the timeline.');
+    expect(activityExclusionNote(win)).toBe('1 event carries no plausible timestamp: excluded from the timeline.');
     expect(activityDescText(win, () => 1)).toContain(
-      '1 event carries no plausible timestamp — excluded from the timeline.',
+      '1 event carries no plausible timestamp: excluded from the timeline.',
     );
   });
 
@@ -106,7 +106,7 @@ describe('disclose and exclude: implausible recorded_at stamps', () => {
     expect(beforeFloor.nBuckets).toBe(0);
   });
 
-  it('an all-plausible window discloses nothing — zero-vs-absent, no note at all', () => {
+  it('an all-plausible window discloses nothing: zero-vs-absent, no note at all', () => {
     const win = bucketEvents([[ev('ModelCallCompleted', '2026-07-17T09:00:00Z')]])!;
     expect(win.excluded).toBe(0);
     expect(activityExclusionNote(win)).toBeUndefined();
@@ -127,29 +127,29 @@ describe('disclose and exclude: implausible recorded_at stamps', () => {
     expect(win.nBuckets).toBe(0);
     expect(win.buckets).toEqual([]);
 
-    // nothing to draw — renderActivityHtml must not fabricate a window from lo=hi=0
+    // nothing to draw: renderActivityHtml must not fabricate a window from lo=hi=0
     expect(renderActivityHtml(win, () => 1, undefined)).toBe('');
 
-    expect(activityExclusionNote(win)).toBe('3 events carry no plausible timestamp — there is nothing to chart.');
+    expect(activityExclusionNote(win)).toBe('3 events carry no plausible timestamp. There is nothing to chart.');
     expect(activityDescText(win, () => 1)).toBe(
-      '3 events carry no plausible timestamp — there is nothing to chart.',
+      '3 events carry no plausible timestamp. There is nothing to chart.',
     );
   });
 
-  it('bucketEvents is still undefined when there are no events at all — a different absence than all-implausible', () => {
+  it('bucketEvents is still undefined when there are no events at all: a different absence than all-implausible', () => {
     expect(bucketEvents([])).toBeUndefined();
     expect(bucketEvents([[]])).toBeUndefined();
   });
 });
 
 describe('.hhit click-target geometry partitions the axis', () => {
-  // The real defect: at real density (the owner's store — 167 hourly buckets, step ≈ 2.59px) the
-  // old hit rect was built `bw+2` wide where `bw = Math.max(3, step-2)` — once step dropped under
+  // The real defect: at real density (the owner's store, 167 hourly buckets, step ≈ 2.59px) the
+  // old hit rect was built `bw+2` wide where `bw = Math.max(3, step-2)`: once step dropped under
   // the 3px bar floor, `bw+2` (5px) stayed wider than `step` itself, so adjacent hit rects
   // overlapped by up to ~48% of a bucket and a center-click on one bucket could resolve to its
   // NEIGHBOR (elementFromPoint proven against the real store). The fix ties the hit geometry to
   // `step` alone, so it tiles the axis exactly regardless of density. Swept across nBuckets 1..400
-  // — sparse windows included — because the fix must not trade a dense-window bug for a sparse-
+  // (sparse windows included) because the fix must not trade a dense-window bug for a sparse-
   // window regression.
   const HOUR = 3600_000;
 
@@ -163,7 +163,7 @@ describe('.hhit click-target geometry partitions the axis', () => {
       x: parseFloat(m[1]),
       w: parseFloat(m[2]),
     }));
-    expect(rects.length).toBe(n); // every bucket here has exactly one event — every bar renders
+    expect(rects.length).toBe(n); // every bucket here has exactly one event: every bar renders
     return rects;
   }
 
@@ -228,7 +228,7 @@ describe('renderActivityHtml', () => {
     expect(html).toContain('class="hbucket pick sel"');
   });
 
-  it('escapes the label — no raw HTML from a hostile hour string reaches the DOM', () => {
+  it('escapes the label: no raw HTML from a hostile hour string reaches the DOM', () => {
     // hourTermOf's own output is always a safe ISO shape; this proves the esc() call is real
     // by checking the title/label carries no unescaped angle brackets under normal input.
     const html = renderActivityHtml(win, () => 1, undefined);

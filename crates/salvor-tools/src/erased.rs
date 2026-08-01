@@ -34,6 +34,10 @@ pub struct ToolDescriptor {
     pub effect: Effect,
     /// The JSON Schema the tool's input must satisfy.
     pub input_schema: Value,
+    /// The JSON Schema a completion for this tool must satisfy, if the tool
+    /// declares one. See [`DynTool::output_schema`] for what this is for and
+    /// why it is `None` unless a tool opts in.
+    pub output_schema: Option<Value>,
 }
 
 /// A tool with its types erased: `Value` in, `Value` out, dispatched by name.
@@ -67,6 +71,20 @@ pub trait DynTool: Send + Sync {
     /// The JSON Schema the tool's input must satisfy.
     fn input_schema(&self) -> Value;
 
+    /// The JSON Schema a completion for this tool must satisfy, if the tool
+    /// declares one. Provided, defaulting to `None`, so no existing
+    /// implementor of this trait breaks.
+    ///
+    /// See [`ToolHandler::output_schema`](crate::ToolHandler::output_schema)
+    /// for what this is for: it declares the shape a completion for this
+    /// tool must have, which is the mechanism by which a tool call performed
+    /// outside the salvor process can be required to carry a verifiable
+    /// receipt rather than a bare claim. Stage one only declares it; nothing
+    /// in this crate validates a completion against it yet.
+    fn output_schema(&self) -> Option<Value> {
+        None
+    }
+
     /// Dispatches the tool with JSON input, returning JSON output or a
     /// suspension.
     ///
@@ -83,13 +101,14 @@ pub trait DynTool: Send + Sync {
     -> Result<ToolOutcome<Value>, ToolError>;
 
     /// A cloneable metadata snapshot for handing to a model. Provided; built
-    /// from the four accessors above.
+    /// from the accessors above.
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: self.name().to_owned(),
             description: self.description().to_owned(),
             effect: self.effect(),
             input_schema: self.input_schema(),
+            output_schema: self.output_schema(),
         }
     }
 }
@@ -132,6 +151,10 @@ impl<H: ToolHandler> DynTool for TypedTool<H> {
 
     fn input_schema(&self) -> Value {
         H::input_schema()
+    }
+
+    fn output_schema(&self) -> Option<Value> {
+        H::output_schema()
     }
 
     async fn call_json(

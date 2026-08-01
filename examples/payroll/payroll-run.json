@@ -1,0 +1,106 @@
+{
+  "schema_version": 1,
+  "nodes": [
+    {
+      "kind": "tool",
+      "payload": {
+        "id": "pull_roster",
+        "tool": "pull_roster"
+      }
+    },
+    {
+      "kind": "tool",
+      "payload": {
+        "id": "flag_exceptions",
+        "tool": "flag_exceptions"
+      }
+    },
+    {
+      "kind": "branch",
+      "payload": {
+        "id": "route",
+        "cases": [
+          {
+            "name": "pay_all",
+            "when": {
+              "kind": "expression",
+              "value": "structuredContent.flagged_count == 0"
+            }
+          },
+          {
+            "name": "review",
+            "when": {
+              "kind": "expression",
+              "value": "structuredContent.flagged_count > 0"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "gate",
+      "payload": {
+        "id": "review_exceptions",
+        "prompt": "This roster has rows flagged as far off the median (see the flagged list on the routed value). Answer with the amended roster to pay: an object `structuredContent` holding a `roster` array of every employee to pay, each with id, name, and the corrected amount_cents and pay_period, plus an `approver`. The amounts you send are the amounts that get paid. The run stays parked until you answer.",
+        "approval_schema": {
+          "type": "object",
+          "properties": {
+            "structuredContent": {
+              "type": "object",
+              "properties": {
+                "roster": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": { "type": "string" },
+                      "name": { "type": "string" },
+                      "amount_cents": { "type": "integer" },
+                      "pay_period": { "type": "string" }
+                    },
+                    "required": ["id", "amount_cents"]
+                  }
+                }
+              },
+              "required": ["roster"]
+            },
+            "approver": { "type": "string" },
+            "note": { "type": "string" }
+          },
+          "required": ["structuredContent", "approver"]
+        }
+      }
+    },
+    {
+      "kind": "map",
+      "payload": {
+        "id": "pay_each",
+        "over": "structuredContent.roster",
+        "concurrency": 1,
+        "body": { "kind": "node", "value": "pay_employee" }
+      }
+    },
+    {
+      "kind": "tool",
+      "payload": {
+        "id": "pay_employee",
+        "tool": "pay_employee"
+      }
+    },
+    {
+      "kind": "agent",
+      "payload": {
+        "id": "notify_summary",
+        "agent_hash": "sha256:a3d44fe7b1a00365f92b2f0472be1b8f5fab03a4a69c5e3bfc49f9faa4a5aff4"
+      }
+    }
+  ],
+  "edges": [
+    { "from": "pull_roster", "to": "flag_exceptions" },
+    { "from": "flag_exceptions", "to": "route" },
+    { "from": "route", "to": "pay_each", "label": "pay_all" },
+    { "from": "route", "to": "review_exceptions", "label": "review" },
+    { "from": "review_exceptions", "to": "pay_each" },
+    { "from": "pay_each", "to": "notify_summary" }
+  ]
+}

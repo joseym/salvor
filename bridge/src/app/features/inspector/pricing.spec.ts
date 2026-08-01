@@ -26,7 +26,7 @@ describe('usd formatting', () => {
   });
 });
 
-describe('costOf — honest about unpriced models', () => {
+describe('costOf: honest about unpriced models', () => {
   it('sums a fully-priced prefix and reports complete', () => {
     const calls: CompletedCall[] = [
       { model: 'claude-sonnet-4-5', inputTokens: 1842, outputTokens: 96 },
@@ -41,7 +41,7 @@ describe('costOf — honest about unpriced models', () => {
     );
   });
 
-  it('does NOT add a zero for an unpriced model — the whole figure goes incomplete', () => {
+  it('does NOT add a zero for an unpriced model: the whole figure goes incomplete', () => {
     const calls: CompletedCall[] = [
       { model: 'claude-sonnet-4-5', inputTokens: 1000, outputTokens: 100 },
       { model: 'mystery-model', inputTokens: 5000, outputTokens: 900 },

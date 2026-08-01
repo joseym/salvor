@@ -69,9 +69,25 @@ from `ANTHROPIC_API_KEY` and never appears in any file.
 ## Rehearsal mode (mock model, no key, no network)
 
 For rehearsing the demo (or recording it repeatably), point the same
-`agent.toml` at a scripted model instead: export `SALVOR_DEMO_BASE_URL` with
-the URL of any server speaking the Messages API wire shape, and the agent
-file's `base_url_env` hook routes requests there. No key is needed.
+`agent.toml` at a scripted model instead. `salvor-demo-model` is that server, a
+small HTTP process serving the twenty-turn conversation. Start it, export its
+URL, and the agent file's `base_url_env` hook routes requests there with no key:
+
+```sh
+salvor-demo-model --port 18900 &        # from a checkout: ./target/debug/salvor-demo-model
+export SALVOR_DEMO_BASE_URL=http://127.0.0.1:18900
+export SALVOR_DEMO_FINDINGS=/tmp/salvor-demo-findings.txt
+rm -f "$SALVOR_DEMO_FINDINGS"
+
+salvor --store /tmp/salvor-demo.db \
+    run --agent demo/agent.toml --input @demo/input.json &
+SALVOR_PID=$!
+```
+
+Kill and resume exactly as the real-model walkthrough above does; nothing here
+needs a key or a network. `SALVOR_DEMO_BASE_URL` names the endpoint the hook
+reads: any server speaking the Messages API wire shape works there, and
+`salvor-demo-model` is the one this repository ships.
 
 The integration test `crates/salvor-cli/tests/demo_run.rs` is exactly this
 harness: it mounts a wiremock server scripted with all twenty turns (each

@@ -76,6 +76,7 @@ fn all_event_kinds() -> Vec<Event> {
             input: serde_json::json!({"title": "bug"}),
             effect: Effect::Write,
             idempotency_key: Some("key-123".into()),
+            performed_by: None,
         },
         Event::ToolCallCompleted {
             seq: SequenceNumber::new(2),

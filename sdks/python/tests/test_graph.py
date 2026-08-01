@@ -19,7 +19,14 @@ import unittest
 from pathlib import Path
 
 from salvor import GraphBuilder
-from salvor.graph import BranchCase, best_by, expression, fold_node, map_node
+from salvor.graph import (
+    BranchCase,
+    best_by,
+    expression,
+    fold_node,
+    map_node,
+    model_decision,
+)
 
 CANONICAL = (
     Path(__file__).resolve().parents[3]
@@ -30,6 +37,13 @@ CANONICAL = (
 
 FOLD_FIXTURE = (
     Path(__file__).resolve().parents[3] / "examples" / "graphs" / "fold-refine.json"
+)
+
+BRANCH_MODEL_DECISION_FIXTURE = (
+    Path(__file__).resolve().parents[3]
+    / "examples"
+    / "graphs"
+    / "branch-model-decision.json"
 )
 
 DRAFT_SCHEMA = {
@@ -93,6 +107,40 @@ def build_canonical_flow():
     )
 
 
+def build_branch_model_decision_flow():
+    return (
+        GraphBuilder()
+        .agent("research", f"sha256:{'1' * 64}")
+        .tool("assess", "assess")
+        .branch(
+            "route",
+            [
+                BranchCase("high", expression("score >= 0.8")),
+                BranchCase("review", model_decision()),
+            ],
+            on="assess.score",
+            agent_hash=f"sha256:{'4' * 64}",
+        )
+        .gate(
+            "approve",
+            {
+                "type": "object",
+                "properties": {"approved": {"type": "boolean"}},
+                "required": ["approved"],
+            },
+            prompt="Approve this high-scoring draft for publication?",
+        )
+        .tool("publish", "http_post")
+        .tool("escalate", "notify")
+        .edge("research", "assess")
+        .edge("assess", "route")
+        .edge("route", "approve", label="high")
+        .edge("approve", "publish")
+        .edge("route", "escalate", label="review")
+        .build()
+    )
+
+
 class BuildsCanonicalDocument(unittest.TestCase):
     def test_authoring_does_not_require_httpx(self):
         # Importing the builder must not pull in httpx, the client's dependency:
@@ -125,6 +173,11 @@ class BuildsCanonicalDocument(unittest.TestCase):
     def test_matches_fold_fixture(self):
         built = json.loads(json.dumps(build_fold_flow().to_dict()))
         canonical = json.loads(FOLD_FIXTURE.read_text())
+        self.assertEqual(built, canonical)
+
+    def test_matches_branch_model_decision_fixture(self):
+        built = json.loads(json.dumps(build_branch_model_decision_flow().to_dict()))
+        canonical = json.loads(BRANCH_MODEL_DECISION_FIXTURE.read_text())
         self.assertEqual(built, canonical)
 
     def test_every_node_kind_accepts_an_optional_display_name(self):
@@ -168,6 +221,42 @@ class BuildsCanonicalDocument(unittest.TestCase):
         unnamed = GraphBuilder().gate("approve", {"type": "object"}).build()
         self.assertEqual(
             list(unnamed.nodes[0]["payload"].keys()), ["id", "approval_schema"]
+        )
+
+    def test_gate_accepts_an_intentionally_empty_schema(self):
+        graph = GraphBuilder().gate("approve", {}).build()
+        self.assertEqual(graph.nodes[0]["payload"]["approval_schema"], {})
+
+    def test_gate_rejects_a_non_object_approval_schema(self):
+        builder = GraphBuilder()
+        for bad_schema in ("approved", None, ["approved"], 1, True):
+            with self.assertRaises(ValueError, msg=repr(bad_schema)) as caught:
+                builder.gate("approve", bad_schema)
+            self.assertIn("plain JSON object", str(caught.exception))
+
+    def test_gate_rejects_the_swapped_argument_case(self):
+        builder = GraphBuilder()
+        with self.assertRaises(ValueError) as caught:
+            builder.gate("approve", {"prompt": "Approve this?"})
+        self.assertIn("GateOptions-shaped keys", str(caught.exception))
+
+        with self.assertRaises(ValueError) as caught:
+            builder.gate(
+                "approve", {"name": "Approve the draft", "prompt": "Approve this?"}
+            )
+        self.assertIn("GateOptions-shaped keys", str(caught.exception))
+
+        # A schema that happens to use "name" as an ordinary JSON Schema
+        # property key alongside "type"/"properties" is not ambiguous and
+        # must still pass.
+        graph = (
+            GraphBuilder()
+            .gate("approve", {"type": "object", "properties": {"name": {"type": "string"}}})
+            .build()
+        )
+        self.assertEqual(
+            graph.nodes[0]["payload"]["approval_schema"],
+            {"type": "object", "properties": {"name": {"type": "string"}}},
         )
 
 

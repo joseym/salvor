@@ -1,0 +1,28 @@
+Build a graph document one line at a time, reading commands from stdin.
+
+The document is a fold of the commands applied to it, so `undo` steps back without any command needing an inverse, and `history` dumps the session as a script that rebuilds it. Type `help` at the prompt for the grammar; it is printed from the same table the parser is written against, so the editor documents itself.
+
+Nothing is saved until a line names a file, and the only files touched are the ones a line names: `read <PATH>`, `write <PATH>`, and an agent node's `--file <PATH>`, which is resolved to a definition hash by building the agent exactly as `salvor agent hash` does. No store is opened and no run is driven.
+
+Usage: salvor graph edit [OPTIONS] [FILE]
+
+Arguments:
+  [FILE]
+          An existing graph document (JSON) to open. Applied as the `read <FILE>` line the author would otherwise type first, so it is recorded in the history like any other command and `undo` steps back across it. Omit to start from an empty document
+
+Options:
+      --script <FILE>
+          A file of editor commands to apply before reading stdin, in the form `history` dumps.
+          
+          Every line is applied as if typed, so a dumped session replays into the identical document and the author carries on from where it left off. Because a dumped script only ever names already-resolved values, it replays with no agent definition present.
+
+      --store <PATH>
+          Path to the SQLite event store.
+          
+          The precedence is flag, then the `SALVOR_STORE` environment variable, then the default: an explicit `--store` wins, else `SALVOR_STORE`, else `./salvor.db`.
+          
+          [env: SALVOR_STORE=]
+          [default: ./salvor.db]
+
+  -h, --help
+          Print help (see a summary with '-h')

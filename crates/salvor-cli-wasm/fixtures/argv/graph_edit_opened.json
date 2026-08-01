@@ -1,0 +1,8 @@
+[
+  "salvor",
+  "graph",
+  "edit",
+  "flow.json",
+  "--script",
+  "session.salvor"
+]

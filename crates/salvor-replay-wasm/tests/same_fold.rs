@@ -1,4 +1,4 @@
-//! The same-fold proof, native side — and the generator for its fixtures.
+//! The same-fold proof, native side, and the generator for its fixtures.
 //!
 //! One test file with two jobs, so the reference logs are defined once:
 //!
@@ -12,8 +12,8 @@
 //!   (the inputs cannot silently drift), then folds every committed log at every
 //!   prefix natively and asserts the result equals `fixtures/expected` byte for
 //!   byte. This keeps the committed native side live-verified on every
-//!   `cargo test`, so the Node harness (`js/same-fold.mjs`) — which asserts the
-//!   *wasm* fold equals that same committed expected — completes the chain:
+//!   `cargo test`, so the Node harness (`js/same-fold.mjs`), which asserts the
+//!   *wasm* fold equals that same committed expected, completes the chain:
 //!   native == committed == wasm, all three checked live.
 //!
 //! The reference logs deliberately touch every event kind and every derived
@@ -94,6 +94,7 @@ fn reference_logs() -> Vec<(&'static str, Vec<EventEnvelope>)> {
                 input: json!({"q": "otters"}),
                 effect: Effect::Read,
                 idempotency_key: None,
+                performed_by: None,
             },
         ]),
     ));
@@ -108,6 +109,7 @@ fn reference_logs() -> Vec<(&'static str, Vec<EventEnvelope>)> {
                 input: json!({"doc": 7}),
                 effect: Effect::Idempotent,
                 idempotency_key: Some("key-7".into()),
+                performed_by: None,
             },
         ]),
     ));
@@ -122,6 +124,7 @@ fn reference_logs() -> Vec<(&'static str, Vec<EventEnvelope>)> {
                 input: json!({"title": "bug"}),
                 effect: Effect::Write,
                 idempotency_key: None,
+                performed_by: None,
             },
         ]),
     ));
@@ -136,6 +139,7 @@ fn reference_logs() -> Vec<(&'static str, Vec<EventEnvelope>)> {
                 input: json!({"title": "bug"}),
                 effect: Effect::Write,
                 idempotency_key: Some("idem-1".into()),
+                performed_by: None,
             },
             Event::ToolCallCompleted {
                 seq: SequenceNumber::new(1),
@@ -271,7 +275,7 @@ fn fixtures_dir() -> PathBuf {
 
 /// The native fold at every prefix `0..=len`, as the exact canonical JSON
 /// strings `fold_prefix_to_json` emits. These are the bytes that cross the wasm
-/// boundary, so the proof compares them byte for byte — the expected fixture
+/// boundary, so the proof compares them byte for byte: the expected fixture
 /// stores one canonical line per prefix (JSONL), no re-normalization.
 fn native_expected(events: &[EventEnvelope]) -> Vec<String> {
     let compact = serde_json::to_string(events).unwrap();

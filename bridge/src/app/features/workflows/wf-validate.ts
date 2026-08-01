@@ -1,14 +1,18 @@
-import type { WfEdge, WfGraph, WfNode } from './wf-model';
+import { type WfEdge, type WfGraph, type WfNode, withDocFields } from './wf-model';
 
 /**
  * THE CLIENT-SIDE VALIDATOR. Publish is gated on this list, the canvas marks the same offenders
- * the panel names, and the panel head IS the verdict — so there is exactly ONE error list per
+ * the panel names, and the panel head IS the verdict, so there is exactly ONE error list per
  * render, derived from the graph, never cached. Each error class is a different kind of failure:
  * a duplicate id (the join key every edge references stops being unique), a dangling edge (a
- * reference to nothing), a malformed agent hash, a zero-worker fan-out, an unrealized branch
- * case, a model-decision case with no agent to decide it, an oversized or blank display name, a
- * case label on a non-branch edge, and a cycle (reported WITH its path — "there is a cycle" is a
- * rumour, not an error message).
+ * reference to nothing), a map or fold body naming a node the document does not have, a malformed
+ * agent hash, a zero-worker fan-out, an unrealized branch case, a model-decision case with no agent
+ * to decide it, an oversized or blank display name, a case label on a non-branch edge, and a cycle
+ * (reported WITH its path: "there is a cycle" is a rumour, not an error message).
+ *
+ * It is also what a STRUCTURAL edit is answerable to. Deleting a node leaves the edges that named it
+ * in the document on purpose (see wf-edit.ts), so each one lands here as a dangling edge naming what
+ * it used to reach, rather than disappearing with the node.
  *
  * Aligned to the server's own rules (`salvor_graph::validate`, sync-ledger item 4): the agent
  * hash check accepts only a full `sha256:<64 hex>` string (no transitional short form), a
@@ -25,6 +29,7 @@ export interface WfFix {
     | 'rename_dupe'
     | 'set_concurrency'
     | 'repoint'
+    | 'repoint_body'
     | 'drop_label'
     | 'drop_edge'
     | 'complete_hash'
@@ -35,7 +40,7 @@ export interface WfFix {
   readonly edge?: number;
   readonly end?: 'from' | 'to';
   readonly to?: string;
-  /** The donor agent hash an `attach_agent` fix reuses — always a hash already present on some
+  /** The donor agent hash an `attach_agent` fix reuses: always a hash already present on some
    * other node in the same document, never invented. */
   readonly hash?: string;
 }
@@ -51,11 +56,12 @@ export interface WfError {
     | 'name_too_long'
     | 'name_empty'
     | 'dangling_edge'
+    | 'dangling_body'
     | 'edge_type'
     | 'cycle';
   readonly msg: string;
   readonly node?: string;
-  /** The offending case name, set only alongside `model_decision_without_agent` — the same
+  /** The offending case name, set only alongside `model_decision_without_agent`: the same
    * node/case precision the server's own error carries. */
   readonly case?: string;
   readonly edge?: number;
@@ -64,12 +70,12 @@ export interface WfError {
 
 /** The server's rule, not this app's own: a full sha256 digest, 64 lowercase hex characters, no
  * matter how short a draft's own short-hash tooling elsewhere spells one. An agent hash names
- * someone else's document — all 32 bytes of it are the pin, or none are. Sync-ledger item 4: the
+ * someone else's document: all 32 bytes of it are the pin, or none are. Sync-ledger item 4: the
  * 16-hex transitional tolerance is gone; the server never accepted it either. */
 export const HASH_RE = /^sha256:[0-9a-f]{64}$/;
 
 /** The server's ceiling on a node's display name, in characters (mirrors
- * `salvor_graph::validate::MAX_NODE_NAME_LEN`). A name field that IS set must carry real text —
+ * `salvor_graph::validate::MAX_NODE_NAME_LEN`). A name field that IS set must carry real text;
  * empty or all-whitespace says nothing a missing field wouldn't say more honestly. */
 const NODE_NAME_MAX = 64;
 
@@ -92,7 +98,7 @@ function lev(a: string, b: string): number {
 }
 
 /** The one UNAMBIGUOUS near-miss for a dangling reference: within edit distance 2 and strictly
- * closer than every other candidate — otherwise no suggestion, never a guess. */
+ * closer than every other candidate; otherwise no suggestion, never a guess. */
 export function nearestId(name: string, ids: readonly string[]): string | null {
   const scored = ids.map((id) => ({ id, d: lev(name, id) })).sort((x, y) => x.d - y.d);
   return scored[0] && scored[0].d <= 2 && (!scored[1] || scored[1].d > scored[0].d)
@@ -105,7 +111,7 @@ export function validateGraph(g: WfGraph): WfError[] {
   const ids = g.nodes.map((n) => n.id);
   const known = new Set(ids);
 
-  // duplicate node id — an edge that references it points at two things at once
+  // duplicate node id: an edge that references it points at two things at once
   const seen = new Set<string>();
   const dupes = new Set<string>();
   ids.forEach((id) => (seen.has(id) ? dupes.add(id) : seen.add(id)));
@@ -121,14 +127,14 @@ export function validateGraph(g: WfGraph): WfError[] {
   g.nodes.forEach((n) => {
     if (n.kind === 'agent' && !HASH_RE.test(n.agentHash ?? '')) {
       // A short-but-valid hex hash can be COMPLETED (padded out to length); a hash that is not
-      // hex at all cannot — there is nothing honest to pad. That distinction is what decides
+      // hex at all cannot: there is nothing honest to pad. That distinction is what decides
       // whether this error gets a one-click fix or sends the author to the field by hand.
       const hex = (n.agentHash ?? '').replace(/^sha256:/, '');
       const canComplete = /^[0-9a-f]{1,63}$/.test(hex);
       errs.push({
         code: 'bad_agent_hash',
         node: n.id,
-        msg: `${n.id} references an agent by a malformed hash (${n.agentHash}). An agent node carries a full sha256: hash — 64 hex characters — and nothing else: no prompt, no model.`,
+        msg: `${n.id} references an agent by a malformed hash (${n.agentHash}). An agent node carries a full sha256: hash (64 hex characters) and nothing else: no prompt, no model.`,
         ...(canComplete ? { fix: { label: 'Complete to 64 hex characters', kind: 'complete_hash', id: n.id } } : {}),
       });
     }
@@ -138,6 +144,23 @@ export function validateGraph(g: WfGraph): WfError[] {
         node: n.id,
         msg: `${n.id} has concurrency ${n.concurrency}. A fan-out over a list needs at least one worker.`,
         fix: { label: 'Set concurrency to 1', kind: 'set_concurrency', id: n.id },
+      });
+    }
+    // A map's or fold's body names a node in THIS document (the format's other form, an embedded
+    // subgraph, names no id and so has nothing to dangle). The server checks this at submit
+    // (`dangling_map_body`, `dangling_fold_body`), so a client that did not would call a document
+    // publishable and then watch the server refuse it, which is worse than not checking at all.
+    // It is also what a delete leaves behind: removing the node a body runs never removes the body.
+    if ((n.kind === 'map' || n.kind === 'fold') && n.body?.node !== undefined && !known.has(n.body.node)) {
+      const what = n.kind === 'map' ? 'maps each element through' : 'runs each pass through';
+      const sug = nearestId(n.body.node, ids);
+      errs.push({
+        code: 'dangling_body',
+        node: n.id,
+        msg: n.body.node
+          ? `${n.id} ${what} ${n.body.node}, which is not a node in this graph.`
+          : `${n.id} names no body: pick the node it ${what}.`,
+        ...(sug ? { fix: { label: `Point the body at ${sug}`, kind: 'repoint_body', id: n.id, to: sug } } : {}),
       });
     }
     if (n.kind === 'tool' && n.effect !== undefined && !['read', 'write', 'idempotent'].includes(n.effect)) {
@@ -159,14 +182,14 @@ export function validateGraph(g: WfGraph): WfError[] {
           }),
         );
 
-      // A model-decided case is not realized by an edge label at all — it is realized by an
+      // A model-decided case is not realized by an edge label at all; it is realized by an
       // agent's judgement at run time, every time the node runs. That agent has to be NAMED on
-      // the node, by hash, the same as an agent node names one — or the case is a promise with
+      // the node, by hash, the same as an agent node names one, or the case is a promise with
       // no one behind it.
       const modelCases = n.modelCases ?? [];
       if (modelCases.length && !HASH_RE.test(n.agentHash ?? '')) {
         // Never fabricate an agent. Offer the fix only when the graph already names a real one
-        // elsewhere — attaching that is reusing evidence already in the document, not guessing.
+        // elsewhere: attaching that is reusing evidence already in the document, not guessing.
         const donor = g.nodes.find((x) => x.kind === 'agent' && HASH_RE.test(x.agentHash ?? ''));
         modelCases.forEach((c) =>
           errs.push({
@@ -180,8 +203,8 @@ export function validateGraph(g: WfGraph): WfError[] {
       }
     }
 
-    // The name is optional in the server document — a node need not carry one. But WfNode always
-    // carries a `name` (the id, honestly, when the document set none — see wf-model.ts), and a
+    // The name is optional in the server document: a node need not carry one. But WfNode always
+    // carries a `name` (the id, honestly, when the document set none: see wf-model.ts), and a
     // value that IS present has to be a name: within the server's character ceiling, and not
     // empty or whitespace masquerading as one. Two node-precise errors, not one, so a fix targets
     // the actual problem.
@@ -213,7 +236,7 @@ export function validateGraph(g: WfGraph): WfError[] {
         ...(sug ? { fix: { label: `Point it at ${sug}`, kind: 'repoint', edge: i, end, to: sug } } : {}),
       });
     });
-    // edge type mismatch: a case label is a BRANCH's vocabulary — anywhere else it is a lie about
+    // edge type mismatch: a case label is a BRANCH's vocabulary; anywhere else it is a lie about
     // how the edge is chosen
     const src = g.nodes.find((n) => n.id === e.from);
     if (src && src.kind === 'branch') {
@@ -277,10 +300,10 @@ export function validateGraph(g: WfGraph): WfError[] {
   return errs;
 }
 
-/** The panel-head verdict — one sentence, derived from the error count every render. */
+/** The panel-head verdict: one sentence, derived from the error count every render. */
 export function verdictOf(errs: readonly WfError[]): string {
   return errs.length
-    ? `${errs.length} error${errs.length === 1 ? '' : 's'} — publish is blocked`
+    ? `${errs.length} error${errs.length === 1 ? '' : 's'}: publish is blocked`
     : 'No errors · this graph can be published';
 }
 
@@ -300,13 +323,27 @@ export function applyFix(g: WfGraph, fix: WfFix): WfGraph {
     case 'set_concurrency':
       return {
         ...g,
-        nodes: g.nodes.map((n) => (n.id === fix.id ? { ...n, concurrency: 1 } : n)),
+        nodes: g.nodes.map((n) =>
+          n.id === fix.id ? withDocFields({ ...n, concurrency: 1 }, { concurrency: 1 }) : n,
+        ),
       };
     case 'repoint':
       return {
         ...g,
         edges: g.edges.map((e, i) =>
           i === fix.edge && fix.end && fix.to ? { ...e, [fix.end]: fix.to } : e,
+        ),
+      };
+    case 'repoint_body':
+      return {
+        ...g,
+        nodes: g.nodes.map((n) =>
+          n.id === fix.id && fix.to !== undefined
+            ? withDocFields(
+                { ...n, body: { ...(n.body ?? {}), node: fix.to } },
+                { body: { kind: 'node', value: fix.to } },
+              )
+            : n,
         ),
       };
     case 'drop_label':
@@ -322,33 +359,45 @@ export function applyFix(g: WfGraph, fix: WfFix): WfGraph {
       return { ...g, edges: g.edges.filter((_, i) => i !== fix.edge) };
     case 'complete_hash':
       // Mechanical, not invented: the hex the author already typed, padded out to the length the
-      // server requires. It looks exactly as fake as it is — a real hash still has to come from
-      // the real agent — but it gets the field past "malformed" and into "author, keep going".
+      // server requires. It looks exactly as fake as it is: a real hash still has to come from
+      // the real agent, but it gets the field past "malformed" and into "author, keep going".
       return {
         ...g,
-        nodes: g.nodes.map((n) =>
-          n.id === fix.id
-            ? { ...n, agentHash: `sha256:${(n.agentHash ?? '').replace(/^sha256:/, '').padEnd(64, '0')}` }
-            : n,
-        ),
+        nodes: g.nodes.map((n) => {
+          if (n.id !== fix.id) return n;
+          const hash = `sha256:${(n.agentHash ?? '').replace(/^sha256:/, '').padEnd(64, '0')}`;
+          return withDocFields({ ...n, agentHash: hash }, { agent_hash: hash });
+        }),
       };
     case 'attach_agent':
       return {
         ...g,
-        nodes: g.nodes.map((n) => (n.id === fix.id && fix.hash !== undefined ? { ...n, agentHash: fix.hash } : n)),
+        nodes: g.nodes.map((n) =>
+          n.id === fix.id && fix.hash !== undefined
+            ? withDocFields({ ...n, agentHash: fix.hash }, { agent_hash: fix.hash })
+            : n,
+        ),
       };
     case 'truncate_name':
       return {
         ...g,
-        nodes: g.nodes.map((n) => (n.id === fix.id ? { ...n, name: n.name.slice(0, NODE_NAME_MAX) } : n)),
+        nodes: g.nodes.map((n) => {
+          if (n.id !== fix.id) return n;
+          const name = n.name.slice(0, NODE_NAME_MAX);
+          return withDocFields({ ...n, name }, { name });
+        }),
       };
     case 'clear_name':
-      // WfNode's `name` is required (unlike the server document's optional field — see
-      // wf-model.ts), so "clear" means revert to the same honest fallback fromServerNode uses
+      // WfNode's `name` is required (unlike the server document's optional field: see
+      // wf-model.ts), so "clear" means revert to the same honest fallback documentNode uses
       // when a document sets none at all: the node's own id.
+      // The document's field is OMITTED, not set to the id: an absent name is what a document
+      // that never named the node says, and it is what publish must write back.
       return {
         ...g,
-        nodes: g.nodes.map((n) => (n.id === fix.id ? { ...n, name: n.id } : n)),
+        nodes: g.nodes.map((n) =>
+          n.id === fix.id ? withDocFields({ ...n, name: n.id }, { name: undefined }) : n,
+        ),
       };
   }
 }

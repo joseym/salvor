@@ -10,7 +10,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 /* Mirrors the real seeded fixture (bridge/e2e-serve.sh's tiny-budget agent): a STEPS budget, not
- * cost_usd — the honest-per-dimension divergence from the prototype's USD-only BudgetCard. */
+ * cost_usd: the honest-per-dimension divergence from the prototype's USD-only BudgetCard. */
 const BUDGET_ROW: RunSummary = {
   run: 'run-budget-1',
   status: {
@@ -69,7 +69,7 @@ describe('BudgetCard', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('resumes with {extend:{steps: v}} — the real extend-key mapping, not a USD-only one', async () => {
+  it('resumes with {extend:{steps: v}}: the real extend-key mapping, not a USD-only one', async () => {
     const fixture = TestBed.createComponent(BudgetCard);
     fixture.componentRef.setInput('row', BUDGET_ROW);
     fixture.detectChanges();
@@ -138,7 +138,7 @@ describe('BudgetCard', () => {
       expect(el.querySelector('[data-abandon-receipt]'), 'the abandon receipt lands').toBeTruthy();
 
       // Simulate the parent's `onCommitted` -> `RunsService.refresh()`: the same run id, now
-      // reclassified away from `budget_exceeded` with no readable budget object — exactly the
+      // reclassified away from `budget_exceeded` with no readable budget object: exactly the
       // refresh that used to make `budget()` go undefined and tear the abandon-action (and its
       // still-unread receipt) out from under the operator, before Done was ever reachable.
       fixture.componentRef.setInput('row', {
@@ -154,13 +154,13 @@ describe('BudgetCard', () => {
       ).toBeTruthy();
       expect(el.querySelector('[data-abandon-receipt]')?.textContent).toContain('Appended RunAbandoned at seq 9');
 
-      // "Done": the receipt is untouched, but this card's job is done — it reports retire upward
+      // "Done": the receipt is untouched, but this card's job is done; it reports retire upward
       // and leaves the fold-away animation and actual removal to the parent (inbox.ts).
       const done = el.querySelector('[data-abandon-done]') as HTMLButtonElement;
       done.click();
       fixture.detectChanges();
       expect(retired).toBe(1);
-      expect(el.querySelector('[data-abandon-receipt]'), 'still rendered — Done does not itself remove it').toBeTruthy();
+      expect(el.querySelector('[data-abandon-receipt]'), 'still rendered: Done does not itself remove it').toBeTruthy();
     },
   );
 });

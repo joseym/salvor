@@ -1,0 +1,68 @@
+# The customer-notice agent: the last node on the escalated arm of the graph.
+#
+# By the time this agent runs, the refund is already out the door: the graph's
+# `settle` tool node executed the write and the log recorded it. All this agent
+# does is tell the customer, in one `send_notice` call, and report back. That
+# split is deliberate. Money moves at a tool node the graph controls; prose is
+# the model's job, and the model is never the thing deciding whether to pay.
+#
+# Paths below are relative to the DIRECTORY SALVOR IS INVOKED FROM, not to this
+# file, so run everything from the repository root (`run.sh` does).
+#
+# The graph references this agent by content hash, never by path. Learn it with:
+#     salvor agent hash examples/graph-service/agents/customer-notice.toml
+
+name = "customer-notice"
+
+model = "claude-opus-4-8"
+
+# The first line names this agent, and that name is load-bearing offline: the
+# scripted model in `model-script.json` selects a conversation by finding its
+# name as a substring of the system prompt it was sent. Two agent nodes both
+# make their first model call carrying exactly one message, so the message
+# count alone cannot tell them apart; the system prompt can. Keep the phrase
+# `customer-notice` here and out of the other agent's prompt, or the script
+# server refuses the request rather than guessing which conversation to serve.
+system_prompt = """
+You are the customer-notice writer on an invoice disputes desk.
+
+The refund has already been issued and recorded. Your input is the refund
+receipt. Do exactly this, one tool call per turn:
+
+1. Call `send_notice` once, with the dispute id from the receipt and a short,
+   plain message telling the customer the refund was approved and issued.
+2. Reply with one sentence confirming the notice went out, and stop.
+
+Never call `issue_refund`. Refunds are not yours to make.
+"""
+
+[llm]
+# SALVOR_DEMO_BASE_URL, when exported and non-empty, overrides the endpoint;
+# unset means the public Anthropic endpoint. The API key is read from
+# ANTHROPIC_API_KEY and is optional for a mock or local endpoint, which is what
+# lets this same file run offline against the scripted model and against a real
+# one with nothing changed but that variable.
+base_url_env = "SALVOR_DEMO_BASE_URL"
+
+[budgets]
+# One notice and one confirmation is two model calls. Ten steps leaves room for
+# a retry or a clarifying turn against a real model while still parking a run
+# that has clearly gone in circles. A budget in Salvor suspends a run rather
+# than killing it, so crossing this rail costs nothing already recorded.
+steps = 10
+tokens = 100000
+
+[[mcp_servers]]
+# The disputes-desk tools. Both agents in this example, and the graph's own
+# tool nodes, resolve their tools from this one server: `salvor graph run` has
+# no standalone tool inventory, so a `tool` node's name resolves against the
+# tools the supplied `--agent` files carry.
+command = "python3"
+args = ["examples/graph-service/server.py"]
+# `issue_refund` carries no MCP annotation, so the conservative default already
+# reads it as a Write. Pinning it records the operator's own decision instead of
+# inheriting one: an interrupted refund surfaces for a human to reconcile rather
+# than being retried blind. `send_notice` is left alone on purpose, because its
+# `idempotentHint` is honest (it upserts one key), and `lookup_dispute` is left
+# alone because `readOnlyHint` is honest too.
+effect_overrides = { issue_refund = "write" }

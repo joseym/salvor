@@ -33,7 +33,7 @@
 //! agent is a long-lived identity that a run keeps replaying under the same
 //! hash while an operator relabels it, so a rename must not mint a new
 //! identity (see `salvor_runtime::Agent::def_hash`). A graph document has no
-//! such identity to protect — it IS its hash, the whole reason `POST
+//! such identity to protect: it IS its hash, the whole reason `POST
 //! /v1/graphs` stores it content-addressed. So a node's `name` gets NO
 //! special treatment: it is an ordinary field on the payload struct, present
 //! on the wire exactly when set (`skip_serializing_if = "Option::is_none"`),
@@ -45,7 +45,8 @@
 use std::collections::BTreeMap;
 
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 /// The schema version stamped onto every graph document.
@@ -351,7 +352,7 @@ pub struct BranchCase {
 /// Adjacently tagged (`{"kind": "...", "value": ...}`) so it stays additive:
 /// a future condition kind is a new variant, which does not change how an
 /// existing document encodes.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Serialize, JsonSchema)]
 #[serde(
     tag = "kind",
     content = "value",
@@ -365,6 +366,80 @@ pub enum BranchCondition {
     /// The case is chosen by a model decision at run time, recorded as an event.
     /// Carries no author-time data.
     ModelDecision,
+}
+
+/// The wire shape [`BranchCondition`] parses as: the exact same
+/// tag/content/deny_unknown_fields attributes as the type it mirrors, so
+/// what this accepts and rejects is unchanged. It exists only as a target for
+/// [`BranchCondition`]'s hand-written `Deserialize` impl below, so a
+/// malformed `when` can be reported in product language instead of serde's
+/// "adjacently tagged enum" internals.
+#[derive(Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum BranchConditionShape {
+    Expression(String),
+    ModelDecision,
+}
+
+impl From<BranchConditionShape> for BranchCondition {
+    fn from(shape: BranchConditionShape) -> Self {
+        match shape {
+            BranchConditionShape::Expression(expr) => BranchCondition::Expression(expr),
+            BranchConditionShape::ModelDecision => BranchCondition::ModelDecision,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for BranchCondition {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // Buffer as generic JSON first, then parse that buffer through the
+        // identical adjacently tagged shape the derive would have used.
+        // Acceptance does not change: a value [`BranchConditionShape`]
+        // rejects was always rejected. Only the failure message changes, from
+        // serde's enum-internals wording to a product-language description of
+        // the two accepted shapes with the offending value echoed back.
+        let value = Value::deserialize(deserializer)?;
+        serde_json::from_value::<BranchConditionShape>(value.clone())
+            .map(Into::into)
+            .map_err(|_| D::Error::custom(describe_branch_condition_error(&value)))
+    }
+}
+
+/// Build the error text for a `when` that failed to parse as a
+/// [`BranchCondition`]: the two accepted shapes, then what was actually
+/// found, so a bare string (the obvious skim-and-adapt mistake, writing
+/// `"when": "value > 10000"` instead of the object form) reads as data
+/// against the expected shape rather than a serde internals error.
+fn describe_branch_condition_error(value: &Value) -> String {
+    format!(
+        "a branch condition must be an object shaped \
+         `{{\"kind\": \"expression\", \"value\": \"<expr>\"}}` or \
+         `{{\"kind\": \"model_decision\"}}`; got {}",
+        describe_json_value(value)
+    )
+}
+
+/// Describe a JSON value's shape and content for an error message: a bare
+/// string echoes as `a bare string "..."`, an object as `an object {...}`,
+/// and so on.
+fn describe_json_value(value: &Value) -> String {
+    let text = serde_json::to_string(value).unwrap_or_else(|_| "<unrepresentable>".to_string());
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(_) => format!("a bare boolean {text}"),
+        Value::Number(_) => format!("a bare number {text}"),
+        Value::String(_) => format!("a bare string {text}"),
+        Value::Array(_) => format!("a bare array {text}"),
+        Value::Object(_) => format!("an object {text}"),
+    }
 }
 
 /// A `map` node: fan-out a sub-run per element of a typed list, with a
@@ -439,7 +514,7 @@ pub struct FoldNode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// What each pass runs: a node already in this document, or an embedded
-    /// sub-graph. Not implemented exactly as [`MapBody`]'s subgraph form is not —
+    /// sub-graph. Not implemented exactly as [`MapBody`]'s subgraph form is not:
     /// the shape is legal, but no engine runs it yet.
     pub body: FoldBody,
     /// The iteration bound: the most passes the loop may run. Must be at least
@@ -695,6 +770,132 @@ mod tests {
         assert!(
             error.to_string().contains("extra"),
             "error should name the stray key: {error}"
+        );
+    }
+
+    /// A `when` written as a bare string, the obvious skim-and-adapt mistake
+    /// (copying `"value > 10000"` straight in instead of wrapping it in the
+    /// `{"kind": "expression", "value": ...}` object), gets a product-language
+    /// error naming both accepted shapes and echoing the string back, not
+    /// serde's "adjacently tagged enum" internals.
+    #[test]
+    fn bare_string_branch_condition_names_accepted_shapes() {
+        let text = r#"{"name":"big","when":"value > 10000"}"#;
+        let error = serde_json::from_str::<BranchCase>(text).expect_err("must reject");
+        let message = error.to_string();
+        assert!(
+            !message.contains("adjacently tagged enum"),
+            "error should not leak serde internals: {message}"
+        );
+        assert!(
+            message.contains(r#"{"kind": "expression", "value": "<expr>"}"#)
+                && message.contains(r#"{"kind": "model_decision"}"#),
+            "error should name both accepted shapes: {message}"
+        );
+        assert!(
+            message.contains(r#"a bare string "value > 10000""#),
+            "error should echo the offending value: {message}"
+        );
+    }
+
+    /// A `when` written as some other wrong type (here, a bare number) also
+    /// reads sensibly: same two accepted shapes, with the actual value
+    /// described instead of a string-specific phrasing.
+    #[test]
+    fn non_string_branch_condition_also_names_accepted_shapes() {
+        let text = r#"{"name":"big","when":10000}"#;
+        let error = serde_json::from_str::<BranchCase>(text).expect_err("must reject");
+        let message = error.to_string();
+        assert!(
+            !message.contains("adjacently tagged enum"),
+            "error should not leak serde internals: {message}"
+        );
+        assert!(
+            message.contains("a bare number 10000"),
+            "error should describe the actual value: {message}"
+        );
+    }
+
+    /// A `when` object with an unrecognized `kind` (a wrong-shaped object,
+    /// not a bare scalar) still reads as an error about the object found,
+    /// not serde internals.
+    #[test]
+    fn wrong_kind_branch_condition_names_accepted_shapes() {
+        let text = r#"{"name":"big","when":{"kind":"regex","value":"x"}}"#;
+        let error = serde_json::from_str::<BranchCase>(text).expect_err("must reject");
+        let message = error.to_string();
+        assert!(
+            !message.contains("adjacently tagged enum"),
+            "error should not leak serde internals: {message}"
+        );
+        assert!(
+            message.contains("an object"),
+            "error should describe the value as an object: {message}"
+        );
+    }
+
+    /// The two valid `when` shapes still parse exactly as before: the custom
+    /// `Deserialize` impl only changes the message on rejection, never
+    /// acceptance.
+    #[test]
+    fn valid_branch_conditions_still_round_trip() {
+        let expression = BranchCase {
+            name: "big".into(),
+            when: BranchCondition::Expression("value > 10000".into()),
+        };
+        let json = serde_json::to_string(&expression).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"name":"big","when":{"kind":"expression","value":"value > 10000"}}"#
+        );
+        let restored: BranchCase = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(expression, restored, "round trip changed the value: {json}");
+
+        let model_decision = BranchCase {
+            name: "review".into(),
+            when: BranchCondition::ModelDecision,
+        };
+        let json = serde_json::to_string(&model_decision).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"name":"review","when":{"kind":"model_decision"}}"#
+        );
+        let restored: BranchCase = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(
+            model_decision, restored,
+            "round trip changed the value: {json}"
+        );
+    }
+
+    /// A full document carrying a branch node serializes to the same bytes
+    /// before and after this change, since only the `Deserialize` error path
+    /// moved; `Serialize` is still the plain derive.
+    #[test]
+    fn branch_node_document_serializes_byte_identical() {
+        let mut graph = sample();
+        graph.nodes.push(Node::Branch(BranchNode {
+            id: "route".into(),
+            name: None,
+            on: None,
+            agent_hash: None,
+            cases: vec![
+                BranchCase {
+                    name: "big".into(),
+                    when: BranchCondition::Expression("value > 10000".into()),
+                },
+                BranchCase {
+                    name: "small".into(),
+                    when: BranchCondition::ModelDecision,
+                },
+            ],
+        }));
+        let json = serde_json::to_string(&graph).expect("serialize");
+        let restored: Graph = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(graph, restored, "round trip changed the value: {json}");
+        let json_again = serde_json::to_string(&restored).expect("re-serialize");
+        assert_eq!(
+            json, json_again,
+            "serialization is not byte-identical across a round trip"
         );
     }
 }

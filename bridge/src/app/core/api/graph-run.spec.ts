@@ -42,7 +42,7 @@ describe('GraphRunService', () => {
     });
   });
 
-  describe('loadProjection — GET /v1/runs/{id}/graph', () => {
+  describe('loadProjection: GET /v1/runs/{id}/graph', () => {
     it('decodes a full projection, absent-vs-present per node', async () => {
       fetchMock.mockResolvedValueOnce(
         jsonResponse({
@@ -161,7 +161,7 @@ describe('GraphRunService', () => {
     });
   });
 
-  describe('fork — the write_replay_hazard typed surface', () => {
+  describe('fork: the write_replay_hazard typed surface', () => {
     it('a REAL fork (not dry_run) that hits a 409 write_replay_hazard resolves to a typed hazard outcome, never a thrown string', async () => {
       fetchMock.mockResolvedValueOnce(
         jsonResponse(
@@ -240,7 +240,7 @@ describe('GraphRunService', () => {
       });
     });
 
-    it('dry_run: true resolves to a typed preview, even when it reports it would not proceed — never thrown', async () => {
+    it('dry_run: true resolves to a typed preview, even when it reports it would not proceed; never thrown', async () => {
       fetchMock.mockResolvedValueOnce(
         jsonResponse({
           dry_run: true,

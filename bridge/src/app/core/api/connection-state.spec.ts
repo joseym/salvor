@@ -33,7 +33,7 @@ describe('createConnectionStateMachine', () => {
 
   it('exposes state as a Signal with no set/update at the type level (the "no public setter" invariant)', () => {
     const { state } = createConnectionStateMachine();
-    // Compile-time proof: `Signal<ConnectionState>` has no `.set` — this line only
+    // Compile-time proof: `Signal<ConnectionState>` has no `.set`; this line only
     // typechecks because `state` is NOT typed as WritableSignal. If a future edit widens
     // the export to a WritableSignal, `tsc` fails here before any runtime check does.
     const readonlyState: Signal<ConnectionState> = state;

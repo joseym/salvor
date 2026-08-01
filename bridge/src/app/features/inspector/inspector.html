@@ -4,7 +4,7 @@
 <div id="inspector-empty" [hidden]="hasRun()">
   <div class="empty-state">
     <h4>Pick a run</h4>
-    <p>Open a row from the Runs table or a card from the Inbox — or press <kbd class="kbd">⌘K</kbd> to jump to a run by id.</p>
+    <p>Open a row from the Runs table or a card from the Inbox, or press <kbd class="kbd">⌘K</kbd> to jump to a run by id.</p>
   </div>
   <p class="mechanism">
     An id resolves against <code>GET /v1/runs/&#123;id&#125;/events</code> first and falls back to
@@ -52,10 +52,10 @@
 
     <div #timelineEl id="timeline"></div>
 
-    <!-- Four facts, so a .notes and not a .caption — labelled once for the whole apparatus. -->
+    <!-- Four facts, so a .notes and not a .caption, labelled once for the whole apparatus. -->
     <div class="notes">
       <p><b>Every row is a pinned envelope.</b> <code>seq</code>, <code>recorded_at</code>,
-        <code>event.kind</code>, <code>event.payload</code> — an <code>EventEnvelope</code>, exactly as recorded.</p>
+        <code>event.kind</code>, <code>event.payload</code>: an <code>EventEnvelope</code>, exactly as recorded.</p>
       <p><b>Rows group by model turn.</b> Each group's subtotal is that turn's recorded usage.</p>
       <p><b>Grey rows are past the scrubber prefix.</b> They exist in the log but not in the derived state.</p>
       <p><b>Filtering never changes the fold.</b> It hides rows; the fold always runs over the whole prefix.</p>
@@ -76,7 +76,7 @@
       <div #scrubEl class="scrub" id="scrub">
         <div #stripEl class="estrip" id="estrip" role="group" aria-label="Fold through an event"></div>
         <div #playheadEl class="playhead" id="playhead" hidden></div>
-        <label class="sr" for="prefix">Prefix length — the number of events folded</label>
+        <label class="sr" for="prefix">Prefix length: the number of events folded</label>
         <input #prefixEl type="range" class="scrub-range" id="prefix" min="0" [max]="eventCount()" [value]="prefixN()" step="1" (input)="onRangeInput($event)" (pointerdown)="onRangeGrab()" (keydown)="onRangeGrab()" (pointerup)="onRangeRelease()" (pointercancel)="onRangeRelease()" (keyup)="onRangeRelease()" (blur)="onRangeRelease()" />
         <div class="scrub-ends">
           <span>seq 0</span>
@@ -90,14 +90,14 @@
 
       <dl #derivedEl class="derived" id="derived" role="status" aria-live="polite"></dl>
 
-      <!-- Fork, offered where the decision is made — capability-gated OFF (the server has no fork
+      <!-- Fork, offered where the decision is made, capability-gated OFF (the server has no fork
            runtime yet). Rendered from the fold so it names the node under the playhead. -->
       <div #forkHereEl id="fork-here" (click)="onForkHere($event)"></div>
 
       <p class="mechanism">
         <b>derive_state(&amp;log[0..n])</b><br />
         The same pure fold the runtime runs, compiled to wasm32. No server round-trip per drag; the log is
-        immutable once past. A client-driven run's log folds identically — same envelopes, same fold.
+        immutable once past. A client-driven run's log folds identically: same envelopes, same fold.
       </p>
     </div>
   </aside>

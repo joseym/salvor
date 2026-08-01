@@ -54,7 +54,7 @@ pub async fn static_handler(method: Method, uri: Uri) -> Response {
         return (
             StatusCode::OK,
             [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-            "salvor was built without the dashboard — run salvor build to embed it\n",
+            "salvor was built without the dashboard: run salvor build to embed it\n",
         )
             .into_response();
     }
@@ -127,7 +127,7 @@ fn content_type(name: &str) -> HeaderValue {
 /// `index.html` (and the shell served for a client route) must never be cached:
 /// it is the one file that names the current hashed chunks, so a stale copy
 /// pins the browser to a past build. A content-hashed chunk is immutable by
-/// construction — a new build gets a new name — so it caches for a year.
+/// construction (a new build gets a new name), so it caches for a year.
 /// Everything else (a favicon, an unhashed asset) takes a conservative default.
 fn cache_control(name: &str) -> HeaderValue {
     if name == "index.html" {

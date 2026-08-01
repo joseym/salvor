@@ -42,7 +42,8 @@ use salvor_runtime::{
 };
 use salvor_server::dispatch::{Disposition, classify};
 use salvor_server::{
-    AgentDefinition, AgentFactory, AppState, BuiltAgent, DefFormat, LlmModelExecutor, ToolRegistry,
+    AgentDefinition, AgentFactory, AppState, BuiltAgent, ClientToolDecl, ClientToolRegistry,
+    DefFormat, LlmModelExecutor, ToolRegistry,
 };
 use salvor_store::{EventStore, SqliteStore};
 use salvor_tools::DynTool;
@@ -54,8 +55,9 @@ use uuid::Uuid;
 use crate::agent_config::{self, AgentConfig};
 use crate::checkout;
 use crate::cli::{
-    AbandonArgs, BuildArgs, CompletionsArgs, ForkArgs, GraphRunArgs, GraphValidateArgs,
-    HistoryArgs, ListArgs, ReplayArgs, ResolveArgs, ResumeArgs, RunArgs, ServeArgs,
+    AbandonArgs, AgentHashArgs, AgentValidateArgs, BuildArgs, CompletionsArgs, ForkArgs,
+    GraphRunArgs, GraphValidateArgs, HistoryArgs, ListArgs, ReplayArgs, ResolveArgs, ResumeArgs,
+    RunArgs, ServeArgs,
 };
 use crate::dev_server::DevServer;
 use crate::render;
@@ -66,7 +68,7 @@ use crate::serve_kill;
 /// `--fixture <DIR>` is the offline variant: the agent, the input, and a
 /// recorded model conversation all come from one directory, and a scripted
 /// model is stood up locally to serve that conversation (see [`crate::fixture`]).
-/// It changes only where those three things come from — everything below the
+/// It changes only where those three things come from: everything below the
 /// resolution is the same store, the same runtime, and the same event log a
 /// `--agent`/`--input` run gets.
 pub async fn run(store_path: &Path, args: RunArgs) -> Result<u8> {
@@ -662,7 +664,7 @@ pub async fn serve(store_path: &Path, args: ServeArgs) -> Result<u8> {
         .context("building the model client for the client-driven model step")?;
 
     // The tool registry: EMPTY by default (the mechanism is wired, but
-    // salvor serve ships no tools of its own — a tool-step or a graph `tool`
+    // salvor serve ships no tools of its own; a tool-step or a graph `tool`
     // node for any name is a clean `unknown_tool` until a host registers
     // one, mirroring how the model executor is wired), or the deterministic
     // demo set when `--demo-tools` opts in. This is the one place that flag
@@ -673,7 +675,7 @@ pub async fn serve(store_path: &Path, args: ServeArgs) -> Result<u8> {
         {
             tracing::info!(
                 "demo tools registered: lookup_invoice (read), issue_refund (write), send_email \
-                 (idempotent) — see salvor_cli::demo_tools"
+                 (idempotent); see salvor_cli::demo_tools"
             );
             crate::demo_tools::registry()
         }
@@ -687,9 +689,33 @@ pub async fn serve(store_path: &Path, args: ServeArgs) -> Result<u8> {
     } else {
         ToolRegistry::new()
     };
+    // The client-performed tool declarations, one TOML file per `--client-tool`.
+    // These are tools the CLIENT runs in its own process; this server holds no
+    // code for any of them, only the operator's word about the effect class, the
+    // two schemas, and whether a client may close its own call. Empty without
+    // the flag, and an empty set answers every client-tool intent with a clean
+    // `unknown_tool`, exactly as an empty `ToolRegistry` does for a tool step.
+    //
+    // Loaded here and nowhere else on purpose: there is no endpoint that accepts
+    // a declaration, because a declaration fixes the effect class and a client
+    // that could write its own would be deciding whether its own writes are
+    // subject to the write-ahead rule.
+    let mut client_tools = ClientToolRegistry::new();
+    for path in &args.client_tools {
+        client_tools.declare(load_client_tool(path)?);
+    }
+    if !client_tools.is_empty() {
+        tracing::info!(
+            tools = ?client_tools.names(),
+            "client-performed tool declarations loaded; salvor records these calls, it does not \
+             perform them"
+        );
+    }
+
     let mut state = AppState::new(store, factory)
         .with_model_executor(Arc::new(LlmModelExecutor::new(model_client)))
-        .with_tool_registry(Arc::new(tool_registry));
+        .with_tool_registry(Arc::new(tool_registry))
+        .with_client_tools(Arc::new(client_tools));
     // The client-driven-run lease TTL: how long a client run reports an attached
     // driver after its last guarded operation. Default 60s (set in AppState);
     // `SALVOR_CLIENT_LEASE_TTL_SECS`, when a positive integer, shortens it so a
@@ -761,6 +787,21 @@ pub async fn serve(store_path: &Path, args: ServeArgs) -> Result<u8> {
     Ok(0)
 }
 
+/// Reads one `--client-tool` file and parses the declaration it holds.
+///
+/// One file, one declaration, mirroring `--agent`. The format itself belongs to
+/// `salvor_server::ClientToolDecl` (which carries the `Deserialize` derive);
+/// this reads the bytes off disk and names the file in every failure, exactly
+/// as the agent-definition path does. A malformed or unreadable declaration
+/// stops `serve` before a port is bound, so an operator learns about a typo
+/// immediately rather than when a client's first call is refused.
+fn load_client_tool(path: &Path) -> Result<ClientToolDecl> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading the client tool declaration {}", path.display()))?;
+    toml::from_str(&text)
+        .with_context(|| format!("parsing the client tool declaration {}", path.display()))
+}
+
 /// Waits for Ctrl-C (`SIGINT`) or, on Unix, `SIGTERM` (what `salvor serve
 /// --kill` sends). Only [`serve`]'s `--dev` path awaits this: it is the one
 /// case that needs to run cleanup code before the process exits, rather than
@@ -829,6 +870,100 @@ fn install_dir() -> PathBuf {
     } else {
         PathBuf::from("~/.cargo/bin")
     }
+}
+
+/// `salvor agent hash <FILE>...`: print each agent definition's content hash.
+///
+/// The value printed is [`Agent::def_hash`], the same string a run records in
+/// `RunStarted` and the same key [`graph_run`] resolves an `agent` node
+/// against. It is produced by BUILDING each definition through
+/// [`build_agents`], the way every other verb that takes `--agent` does, rather
+/// than by hashing the file's bytes: tool schemas are part of the definition
+/// and an MCP server supplies its own, so a byte hash of the TOML would be a
+/// number no graph node could ever resolve.
+///
+/// One file prints the bare hash and nothing else, so `$(salvor agent hash
+/// a.toml)` is usable as a value. Several print `<path>: <hash>` a line, in the
+/// order given, since the question several files ask is which hash belongs to
+/// which file.
+///
+/// This reads no store and starts no run. The MCP sessions the build opened are
+/// closed before anything is printed, so stdout carries the hashes alone.
+pub async fn agent_hash(args: AgentHashArgs) -> Result<u8> {
+    let (agents, servers) = build_agents(&args.agents).await?;
+    close_servers(servers).await;
+
+    let bare = agents.len() == 1;
+    for (path, agent) in args.agents.iter().zip(&agents) {
+        if bare {
+            println!("{}", agent.def_hash());
+        } else {
+            println!("{}: {}", path.display(), agent.def_hash());
+        }
+    }
+    Ok(0)
+}
+
+/// `salvor agent validate <FILE>...`: build each agent definition and report
+/// what it declares, or the precise error that stopped it from building.
+///
+/// This is the same build [`agent_hash`] runs, named for what it is worth
+/// asking on its own: is this file good, and what does it commit an operator
+/// to. Each file is built through [`build_agents`] one at a time, rather than
+/// all at once, so a file that fails to build does not stop the rest from
+/// being checked, matching `graph validate`'s exit-code contract at the
+/// per-file level: `Ok(0)` only when every file built, `Ok(1)` when any one
+/// of them did not. A single file's report carries no path prefix, since
+/// there is nothing to disambiguate; several files each get one, on both the
+/// success line and the error line, for the same reason `agent hash` prefixes
+/// its multi-file output.
+///
+/// The MCP sessions each build opens are closed before the next file starts,
+/// so no session outlives the file it was opened to validate, let alone the
+/// command.
+///
+/// This reads no store and starts no run.
+pub async fn agent_validate(args: AgentValidateArgs) -> Result<u8> {
+    let bare = args.agents.len() == 1;
+    let mut any_failed = false;
+
+    for path in &args.agents {
+        match build_agents(std::slice::from_ref(path)).await {
+            Ok((agents, servers)) => {
+                let agent = agents
+                    .first()
+                    .expect("build_agents built exactly one agent");
+                let report = render::agent_summary(agent, servers.len());
+                close_servers(servers).await;
+                if bare {
+                    print!("{report}");
+                } else {
+                    print!("{}: {report}", path.display());
+                }
+            }
+            Err(error) => {
+                any_failed = true;
+                if bare {
+                    eprintln!("{error:#}");
+                } else {
+                    eprintln!("{}: {error:#}", path.display());
+                }
+            }
+        }
+    }
+
+    Ok(u8::from(any_failed))
+}
+
+/// `salvor graph edit`: fold typed lines into a graph document.
+///
+/// The editor itself is [`salvor_cli_core::graph_editor`], which performs no IO;
+/// everything host-shaped about a session (the prompt, the streams, the three
+/// lines that name a file) is [`crate::graph_edit`]. This handler is the seam
+/// between the parse tree and that loop, and it takes no store, because an
+/// author building a document has not started a run.
+pub async fn graph_edit(args: crate::cli::GraphEditArgs) -> Result<u8> {
+    crate::graph_edit::edit(args).await
 }
 
 /// `salvor graph validate <path>`: parse a graph document strictly and run
@@ -903,7 +1038,7 @@ pub fn graph_schema() -> Result<u8> {
 /// An `agent` node resolves to a provided `--agent` file by that file's
 /// definition hash; a hash matching none of them is a precise error listing what
 /// was provided. A `tool` node resolves from the tools the provided agents
-/// carry — the local counterpart of the server's tool registry, keeping one
+/// carry, the local counterpart of the server's tool registry, keeping one
 /// honest story: a tool no provided agent carries is refused, named, before the
 /// walk reaches it (as [`run_graph`] does through the resolver).
 pub async fn graph_run(store_path: &Path, args: GraphRunArgs) -> Result<u8> {
@@ -1002,7 +1137,7 @@ async fn resume_graph(
 
 /// A [`ToolResolver`] over the provided agents' own tools: a graph `tool` node
 /// resolves to the first provided agent that carries a tool of that name. This
-/// is the local counterpart of the server's tool registry — the CLI has no
+/// is the local counterpart of the server's tool registry: the CLI has no
 /// standalone tool inventory, so the tools come from the real agent definitions
 /// the operator supplied.
 struct AgentTools<'a>(&'a HashMap<String, Agent>);
@@ -1033,17 +1168,33 @@ fn load_and_validate_graph(path: &Path) -> Result<Graph> {
     }
 }
 
-/// Builds every provided agent file, keyed by its computed definition hash, and
-/// collects their MCP sessions for the caller to keep alive and close.
-async fn build_graph_agents(paths: &[PathBuf]) -> Result<(HashMap<String, Agent>, Vec<McpServer>)> {
-    let mut agents: HashMap<String, Agent> = HashMap::new();
+/// Builds every provided agent file, in the order given, and collects their MCP
+/// sessions for the caller to keep alive and close.
+///
+/// The one place a `--agent` path becomes a live [`Agent`], so what
+/// [`agent_hash`] prints, what [`build_graph_agents`] keys a graph node
+/// against, and what `graph edit` resolves an `add agent --file` line to cannot
+/// be three different numbers.
+pub(crate) async fn build_agents(paths: &[PathBuf]) -> Result<(Vec<Agent>, Vec<McpServer>)> {
+    let mut agents: Vec<Agent> = Vec::with_capacity(paths.len());
     let mut servers: Vec<McpServer> = Vec::new();
     for path in paths {
         let config = AgentConfig::load(path)?;
         let (agent, agent_servers) = agent_config::build_agent(&config, path).await?;
-        agents.insert(agent.def_hash().to_owned(), agent);
+        agents.push(agent);
         servers.extend(agent_servers);
     }
+    Ok((agents, servers))
+}
+
+/// Builds every provided agent file, keyed by its computed definition hash, and
+/// collects their MCP sessions for the caller to keep alive and close.
+async fn build_graph_agents(paths: &[PathBuf]) -> Result<(HashMap<String, Agent>, Vec<McpServer>)> {
+    let (built, servers) = build_agents(paths).await?;
+    let agents = built
+        .into_iter()
+        .map(|agent| (agent.def_hash().to_owned(), agent))
+        .collect();
     Ok((agents, servers))
 }
 
@@ -1338,7 +1489,7 @@ async fn shutdown_model(model: Option<crate::fixture::FixtureModel>) {
 
 /// Closes every MCP server session tidily. Errors are logged, not propagated:
 /// the run already finished, so a teardown hiccup must not fail the command.
-async fn close_servers(servers: Vec<salvor_tools::mcp::McpServer>) {
+pub(crate) async fn close_servers(servers: Vec<salvor_tools::mcp::McpServer>) {
     for server in servers {
         if let Err(error) = server.close().await {
             tracing::warn!(%error, "MCP server did not shut down cleanly");

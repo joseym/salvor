@@ -24,9 +24,10 @@
 //! cover every status label the STATUS column can print (each one takes a
 //! different colour branch), an unrecognised label, an empty table, and a wide
 //! row. The help pages cover the root, a flat verb, a verb with a positional,
-//! and both nested `graph` verbs. The parse cases cover every refusal shape the
-//! CLI has, including the two custom `did you mean` tips that a plain
-//! `value_parser` would have replaced with clap's string-similarity guess.
+//! both nested groups, and the nested verbs under them. The parse cases cover
+//! every refusal shape the CLI has, including the two custom `did you mean`
+//! tips that a plain `value_parser` would have replaced with clap's
+//! string-similarity guess.
 
 use std::fs;
 use std::path::PathBuf;
@@ -171,7 +172,11 @@ fn reference_help_paths() -> Vec<(&'static str, &'static str)> {
         ("run", "run"),
         ("fork", "fork"),
         ("serve", "serve"),
+        ("agent", "agent"),
+        ("agent-hash", "agent hash"),
+        ("agent-validate", "agent validate"),
         ("graph", "graph"),
+        ("graph-edit", "graph edit"),
         ("graph-validate", "graph validate"),
         ("graph-run", "graph run"),
     ]
@@ -320,6 +325,41 @@ fn reference_argvs() -> Vec<(&'static str, Vec<&'static str>)> {
         ),
         ("build_install", vec!["salvor", "build", "--install"]),
         (
+            "agent_hash",
+            vec!["salvor", "agent", "hash", "agents/writer.toml"],
+        ),
+        // The repeatable positional, which parses into a vector rather than
+        // into one value.
+        (
+            "agent_hash_many",
+            vec![
+                "salvor",
+                "agent",
+                "hash",
+                "agents/writer.toml",
+                "agents/reviewer.toml",
+            ],
+        ),
+        (
+            "agent_validate",
+            vec!["salvor", "agent", "validate", "agents/writer.toml"],
+        ),
+        // The verb with no required argument at all, and the same verb with
+        // both of its optional ones: the two ends of an argument list that is
+        // entirely optional, which no other verb here has.
+        ("graph_edit", vec!["salvor", "graph", "edit"]),
+        (
+            "graph_edit_opened",
+            vec![
+                "salvor",
+                "graph",
+                "edit",
+                "flow.json",
+                "--script",
+                "session.salvor",
+            ],
+        ),
+        (
             "graph_validate",
             vec!["salvor", "graph", "validate", "flow.json"],
         ),
@@ -359,6 +399,13 @@ fn reference_argvs() -> Vec<(&'static str, Vec<&'static str>)> {
         ("unknown_flag", vec!["salvor", "list", "--nope"]),
         ("unknown_verb", vec!["salvor", "lst"]),
         ("missing_required", vec!["salvor", "run"]),
+        // A required POSITIONAL, missing: a different clap arm from the missing
+        // required flag above, and the reason `agent hash` cannot be asked to
+        // hash nothing.
+        (
+            "missing_required_positional",
+            vec!["salvor", "agent", "hash"],
+        ),
         (
             "conflicting_flags",
             vec![

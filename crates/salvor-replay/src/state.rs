@@ -193,6 +193,7 @@ pub fn derive_state(log: &[EventEnvelope]) -> RunState {
                 input,
                 effect,
                 idempotency_key,
+                ..
             } => {
                 state.pending_call = Some(PendingCall::Tool {
                     seq: *seq,
@@ -262,7 +263,7 @@ pub fn derive_state(log: &[EventEnvelope]) -> RunState {
             }
             // A graph run's head. It stands where an agent run's `RunStarted`
             // does: the run is now under way, so the status becomes `Running`.
-            // No new `RunStatus` variant is minted for graph runs — the whole
+            // No new `RunStatus` variant is minted for graph runs: the whole
             // point of this fold's graph handling is that a graph run reads
             // through the same agent-run status vocabulary. Between its
             // recorded steps it is `Running`; a dangling model or tool call
@@ -383,6 +384,7 @@ mod tests {
                 input: serde_json::json!({"q": "otters"}),
                 effect: Effect::Read,
                 idempotency_key: None,
+                performed_by: None,
             },
         ]));
         assert_eq!(state.status, RunStatus::AwaitingTool);
@@ -400,6 +402,7 @@ mod tests {
                 input: serde_json::json!({"doc": 1}),
                 effect: Effect::Idempotent,
                 idempotency_key: Some("key-7".into()),
+                performed_by: None,
             },
         ]));
         assert_eq!(state.status, RunStatus::AwaitingTool);
@@ -423,6 +426,7 @@ mod tests {
                 input: serde_json::json!({"title": "bug"}),
                 effect: Effect::Write,
                 idempotency_key: None,
+                performed_by: None,
             },
         ]));
         assert_eq!(state.status, RunStatus::NeedsReconciliation);
@@ -446,6 +450,7 @@ mod tests {
                 input: serde_json::json!({"title": "bug"}),
                 effect: Effect::Write,
                 idempotency_key: None,
+                performed_by: None,
             },
             Event::ToolCallCompleted {
                 seq: SequenceNumber::new(1),
@@ -583,6 +588,7 @@ mod tests {
                 input: serde_json::json!({"title": "bug"}),
                 effect: Effect::Write,
                 idempotency_key: None,
+                performed_by: None,
             },
             Event::RunAbandoned {
                 reason: None,

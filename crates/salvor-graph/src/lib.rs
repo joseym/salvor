@@ -20,14 +20,16 @@
 //!
 //! # What this crate is NOT
 //!
-//! There is no run-time execution here. No engine drives a graph, no scheduler
-//! fans out a `map`, and no server endpoint submits one. Validation PARSES a
-//! branch condition (so a bad one fails at submit) but never EVALUATES one
-//! against a routed value; the evaluator [`expr::Expr::eval`] exists and is
-//! total, but it is the future engine that calls it, not this crate. Keeping
-//! this crate to format-plus-validation is what keeps it a pure, IO-free leaf:
-//! it depends only on `serde`, `serde_json`, `schemars`, and `thiserror`, drags
-//! in no runtime, and so stays usable from a future wasm dashboard projection.
+//! There is no run-time execution here. `salvor-engine` is the crate that
+//! drives a graph, fans a `map` out, and backs the `POST /v1/graphs` and
+//! `POST /v1/graph-runs` endpoints in `salvor-server`; none of that lives in
+//! this one. Validation PARSES a branch condition (so a bad one fails at
+//! submit) but never EVALUATES one against a routed value; the evaluator
+//! [`expr::Expr::eval`] exists and is total, but it is `salvor-engine` that
+//! calls it, not this crate. Keeping this crate to format-plus-validation is
+//! what keeps it a pure, IO-free leaf: it depends only on `serde`,
+//! `serde_json`, `schemars`, and `thiserror`, drags in no runtime, and so
+//! stays usable from a future wasm dashboard projection.
 //!
 //! # Strict in, additive out
 //!

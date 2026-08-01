@@ -1,0 +1,107 @@
+{
+  "happy-path": [
+    {
+      "id": "msg_happy_1",
+      "model": "salvor-demo-model",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "tu_happy_refund",
+          "name": "refund_card",
+          "input": {
+            "order_id": "ORD-7781",
+            "amount_cents": 4200,
+            "currency": "USD",
+            "reason": "Item arrived damaged; customer kept the replacement."
+          }
+        }
+      ],
+      "stop_reason": "tool_use",
+      "usage": { "input_tokens": 260, "output_tokens": 52 }
+    },
+    {
+      "id": "msg_happy_2",
+      "model": "salvor-demo-model",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Refunded $42.00 to the card on ORD-7781. The provider has the refund on file."
+        }
+      ],
+      "stop_reason": "end_turn",
+      "usage": { "input_tokens": 330, "output_tokens": 26 }
+    }
+  ],
+  "missing-evidence": [
+    {
+      "id": "msg_evidence_1",
+      "model": "salvor-demo-model",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "tu_evidence_refund",
+          "name": "refund_card",
+          "input": {
+            "order_id": "ORD-8120",
+            "amount_cents": 15900,
+            "currency": "USD",
+            "reason": "Duplicate charge on a single subscription renewal."
+          }
+        }
+      ],
+      "stop_reason": "tool_use",
+      "usage": { "input_tokens": 264, "output_tokens": 54 }
+    },
+    {
+      "id": "msg_evidence_2",
+      "model": "salvor-demo-model",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Refunded $159.00 on ORD-8120 against the duplicate renewal charge."
+        }
+      ],
+      "stop_reason": "end_turn",
+      "usage": { "input_tokens": 340, "output_tokens": 24 }
+    }
+  ],
+  "untrusted-payout": [
+    {
+      "id": "msg_payout_1",
+      "model": "salvor-demo-model",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "tu_payout_wire",
+          "name": "wire_payout",
+          "input": {
+            "payee_account": "****4417",
+            "amount_cents": 240000,
+            "currency": "USD",
+            "reference": "Card expired before the refund window; paying out by transfer."
+          }
+        }
+      ],
+      "stop_reason": "tool_use",
+      "usage": { "input_tokens": 272, "output_tokens": 58 }
+    },
+    {
+      "id": "msg_payout_2",
+      "model": "salvor-demo-model",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Sent $2,400.00 by bank transfer to ****4417, settled by the payments team."
+        }
+      ],
+      "stop_reason": "end_turn",
+      "usage": { "input_tokens": 352, "output_tokens": 27 }
+    }
+  ]
+}

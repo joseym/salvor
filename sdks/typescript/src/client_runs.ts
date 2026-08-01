@@ -91,6 +91,38 @@ function parseModelStepResult(obj: Record<string, unknown>): ModelStepResult {
 }
 
 /**
+ * The receipt from opening a client-performed tool call: the position, the
+ * DERIVED idempotency key the client must perform under, the
+ * operator-declared effect the intent was recorded with, and whether this
+ * position's completion is already recorded.
+ *
+ * `settled` is `true` when the intent at `seq` already has its completion
+ * recorded, `false` otherwise. A payments caller retrying `clientToolIntent`
+ * after a dropped response gets back the same key either way; `settled` is
+ * what lets it tell "safe to perform the call" from "already done, do not
+ * perform it again" without separately reading the log.
+ */
+export interface ClientToolIntentResult {
+  seq: number;
+  idempotencyKey: string;
+  effect: string;
+  settled: boolean;
+  raw: Record<string, unknown>;
+}
+
+function parseClientToolIntentResult(
+  obj: Record<string, unknown>,
+): ClientToolIntentResult {
+  return {
+    seq: obj.seq as number,
+    idempotencyKey: obj.idempotency_key as string,
+    effect: obj.effect as string,
+    settled: obj.settled as boolean,
+    raw: obj,
+  };
+}
+
+/**
  * Open a fresh client-driven run, or re-open (resume) an existing one.
  *
  * Passing a `runId` this server already holds re-opens it: the recorded log
@@ -300,6 +332,71 @@ export class ClientRunDriver {
     }
     const obj = await this.send("POST", `/v1/client-runs/${this.runId}/tool-step`, body);
     return obj.output;
+  }
+
+  /**
+   * Open a tool call the CLIENT performs, in its own process, with its own
+   * secrets. `seq` is the log position the client's cursor reserved for the
+   * intent; `tool` names a tool an operator declared with `salvor serve
+   * --client-tool <FILE>` (never registered over HTTP; see
+   * {@link SalvorClient.listClientTools} to fetch what is declared); `input`
+   * is checked against the declaration's input schema before anything is
+   * written.
+   *
+   * The returned `idempotencyKey` comes FROM the server, not from the caller.
+   * It is a derived hash of `(run, seq, tool)`, and the client must perform
+   * its call under that exact key. This is why: it is what stops a retry
+   * becoming a second charge, so the party who would benefit from a duplicate
+   * landing does not get to choose the key that lets one through. This is the
+   * one place this driver differs from {@link toolStep} on purpose: there the
+   * caller supplies the key, because salvor performs the call itself and
+   * handing it the key is safe; here the client both performs the call and
+   * stands to gain from a duplicate, so the server derives the key instead of
+   * accepting one.
+   *
+   * The returned `settled` is `true` when the intent at `seq` already has its
+   * completion recorded, `false` otherwise. A payments caller retrying this
+   * call after a dropped response gets back the same key either way;
+   * `settled` is what lets it tell "safe to perform the call" from "already
+   * done, do not perform it again" without a separate log read.
+   *
+   * Throws `SalvorApiError` with code `unknown_tool` for an undeclared tool,
+   * or `bad_request` when `input` fails the declaration's schema; a `seq` the
+   * log is not ready for, or a different event already recorded there, throws
+   * {@link DivergenceError}.
+   */
+  async clientToolIntent(
+    seq: number,
+    tool: string,
+    input: unknown,
+  ): Promise<ClientToolIntentResult> {
+    const obj = await this.send(
+      "POST",
+      `/v1/client-runs/${this.runId}/client-tool-intent`,
+      { seq, tool, input },
+    );
+    return parseClientToolIntentResult(obj);
+  }
+
+  /**
+   * Report what a client-performed tool call returned. `seq` must name the
+   * pending intent at the end of the log; `output` is checked against the
+   * declaration's output schema before it is recorded.
+   *
+   * Refused, recording nothing, as a `SalvorApiError` with code
+   * `client_completion_refused` when: the declaration was written with
+   * `trust_completion = false`, or it carries no output schema at all. Either
+   * way there is nothing this call can trust, so settle it by hand instead
+   * with {@link resolve} once you have verified the result externally. A
+   * reported `output` that fails the declared schema is `bad_request`; there
+   * the fix is the output, not the call.
+   */
+  async clientToolCompletion(seq: number, output: unknown): Promise<void> {
+    await this.send(
+      "POST",
+      `/v1/client-runs/${this.runId}/client-tool-completion`,
+      { seq, output },
+    );
   }
 
   /**
