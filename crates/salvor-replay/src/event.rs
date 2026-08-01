@@ -54,6 +54,12 @@ use crate::id::{RunId, SequenceNumber};
 /// default, so an unlabeled run's `RunStarted` serializes byte for byte as it
 /// did before the field existed, and the version stays 1 for the same reason.
 ///
+/// The optional `deduplicated_from` on [`Event::ToolCallCompleted`] is the
+/// third instance of the same contract. A call that executed normally, which
+/// is every tool call ever recorded before the field existed, omits the key
+/// entirely and serializes byte for byte as it did before, so a log recorded
+/// by an earlier binary replays unchanged and the version stays 1.
+///
 /// # Why the graph events do not bump this
 ///
 /// The graph-run events ([`Event::GraphRunStarted`] and the node/branch/map/fold
@@ -101,6 +107,32 @@ pub enum Performer {
     /// that it happened. The log entry is the client's claim, not something
     /// salvor witnessed directly.
     Client,
+}
+
+/// Where a deduplicated tool call took its recorded output from: the run and
+/// the log position of the completion that already committed this call's
+/// effect.
+///
+/// Recorded on [`Event::ToolCallCompleted`] when a live call resolved as a
+/// duplicate of a call another run (or an earlier run of the same work)
+/// already committed under the same tool name and idempotency key. The call
+/// that carries this origin **executed nothing**: its output is a copy of the
+/// origin's, and the origin is named so the copy is never mistaken for a
+/// second execution.
+///
+/// This is audit data, not replay input. Replay reads the `output` on the
+/// completion exactly as it reads any other completion's, and never follows
+/// this pointer: a log replays with no lookup outside its own events, which is
+/// what keeps replay pure. See
+/// [`RunCtx::tool_call`](../../salvor_runtime/struct.RunCtx.html#method.tool_call)
+/// for where the live decision is made.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct DedupOrigin {
+    /// The run whose log holds the committed completion this call copied.
+    pub run_id: RunId,
+    /// The position of that completion's intent, which is also the correlation
+    /// sequence of its [`Event::ToolCallCompleted`].
+    pub seq: SequenceNumber,
 }
 
 /// One record in a run's append-only log.
@@ -282,6 +314,24 @@ pub enum Event {
         seq: SequenceNumber,
         /// The tool's output.
         output: serde_json::Value,
+        /// Set when this call executed nothing because an equal call had
+        /// already committed elsewhere in the store, naming the completion the
+        /// `output` above was copied from. See [`DedupOrigin`].
+        ///
+        /// `#[serde(default, skip_serializing_if = "Option::is_none")]` under
+        /// the same additive-optional contract `request_body` on
+        /// [`Event::ModelCallRequested`] and `performed_by` on
+        /// [`Event::ToolCallRequested`] set (see the [`SCHEMA_VERSION`] docs
+        /// for the full argument): a call that executed normally omits the key
+        /// entirely, so its completion serializes byte for byte as it did
+        /// before this field existed, and a log written before the field
+        /// deserializes with it defaulted to `None`.
+        ///
+        /// Replay never reads this field. It exists so a reader of the log can
+        /// tell a copied output from a witnessed one, and can go and find the
+        /// execution it was copied from.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deduplicated_from: Option<DedupOrigin>,
     },
     /// The value `ctx.now()` returned, captured once while the run executed
     /// live. On replay the recorded value is returned again, bit for bit; the
@@ -743,6 +793,7 @@ mod tests {
         assert_round_trips(Event::ToolCallCompleted {
             seq: SequenceNumber::new(2),
             output: serde_json::json!({"id": "TICKET-1"}),
+            deduplicated_from: None,
         });
         assert_round_trips(Event::NowObserved {
             now: datetime!(2026-07-09 12:00:00.123456789 UTC),
@@ -962,6 +1013,68 @@ mod tests {
             panic!("expected ToolCallRequested");
         };
         assert_eq!(performed_by, None);
+    }
+
+    /// A call that executed normally serializes its completion with no
+    /// `deduplicated_from` key at all: byte for byte what it produced before
+    /// the field existed. Every tool call recorded by an earlier binary is
+    /// this case, so this is the proof that adding cross-run dedup changed no
+    /// recorded log.
+    #[test]
+    fn tool_call_completed_without_dedup_origin_serializes_to_pinned_json() {
+        let env = envelope(Event::ToolCallCompleted {
+            seq: SequenceNumber::new(2),
+            output: serde_json::json!({"id": "TICKET-1"}),
+            deduplicated_from: None,
+        });
+        let json = serde_json::to_string(&env).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"ToolCallCompleted","payload":{"seq":2,"output":{"id":"TICKET-1"}}}}"#
+        );
+        assert!(
+            !json.contains("deduplicated_from"),
+            "a call that executed must not emit the key: {json}"
+        );
+    }
+
+    /// With an origin recorded, the key rides after `output` and names the run
+    /// and position the output was copied from.
+    #[test]
+    fn tool_call_completed_with_dedup_origin_serializes_to_pinned_json() {
+        let env = envelope(Event::ToolCallCompleted {
+            seq: SequenceNumber::new(2),
+            output: serde_json::json!({"id": "TICKET-1"}),
+            deduplicated_from: Some(DedupOrigin {
+                run_id: RunId::from_uuid(
+                    Uuid::parse_str("00000000-0000-4000-8000-0000000000ff").expect("uuid"),
+                ),
+                seq: SequenceNumber::new(7),
+            }),
+        });
+        let json = serde_json::to_string(&env).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"ToolCallCompleted","payload":{"seq":2,"output":{"id":"TICKET-1"},"deduplicated_from":{"run_id":"00000000-0000-4000-8000-0000000000ff","seq":7}}}}"#
+        );
+    }
+
+    /// A `ToolCallCompleted` JSON that predates `deduplicated_from` (no such
+    /// key in the payload) deserializes with the field defaulted to `None`.
+    /// This is the load-bearing backward-compatibility proof: every log
+    /// recorded before cross-run dedup existed reads back as a witnessed
+    /// execution, which is what it was.
+    #[test]
+    fn tool_call_completed_without_dedup_key_deserializes_to_none() {
+        let json = r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"ToolCallCompleted","payload":{"seq":2,"output":{"id":"TICKET-1"}}}}"#;
+        let restored: EventEnvelope = serde_json::from_str(json).expect("deserialize");
+        let Event::ToolCallCompleted {
+            deduplicated_from, ..
+        } = restored.event
+        else {
+            panic!("expected ToolCallCompleted");
+        };
+        assert_eq!(deduplicated_from, None);
     }
 
     /// `Performer` round-trips through the envelope in both variants.

@@ -85,6 +85,34 @@ pub trait DynTool: Send + Sync {
         None
     }
 
+    /// The idempotency key this tool declares for `input`, if it declares one.
+    /// Provided, defaulting to `None`, so no existing implementor breaks.
+    ///
+    /// This is the tool naming the effect a call *is*, in its own terms:
+    /// `"pay_claim:wreck-9931"` says "this is the payout for claim 9931",
+    /// whoever asks for it and whenever. That is a stronger statement than the
+    /// keys the runtime derives on a tool's behalf, which only ever say "this
+    /// is the same attempt as that attempt" within one run, and it is the
+    /// statement the runtime needs before it can promise that a second run will
+    /// not pay the claim again. See
+    /// [`RunCtx::tool_call`](../../salvor_runtime/struct.RunCtx.html#method.tool_call)
+    /// for what the runtime does with it.
+    ///
+    /// The key must be a pure function of `input`: the same input yields the
+    /// same key, on this process and the next one, or the promise it carries is
+    /// worth nothing. Do not fold a clock, a counter, or randomness into it.
+    /// Return `None` for a call that has no business identity, which is the
+    /// honest answer for most tools and the default here.
+    ///
+    /// A key naming an effect that money or people depend on should be as
+    /// specific as the effect is. `"pay_claim"` alone would collapse every
+    /// payout the system ever makes into one; the claim id is what makes the
+    /// key mean one payment.
+    fn idempotency_key(&self, input: &Value) -> Option<String> {
+        let _ = input;
+        None
+    }
+
     /// Dispatches the tool with JSON input, returning JSON output or a
     /// suspension.
     ///
@@ -155,6 +183,21 @@ impl<H: ToolHandler> DynTool for TypedTool<H> {
 
     fn output_schema(&self) -> Option<Value> {
         H::output_schema()
+    }
+
+    /// Forwards to the typed [`ToolHandler::idempotency_key`], which sees the
+    /// deserialized input rather than raw JSON.
+    ///
+    /// The input is deserialized a second time here, once per keyed dispatch,
+    /// because the key is needed *before*
+    /// [`call_json`](DynTool::call_json) runs and that is where the first
+    /// deserialization happens. Input that does not deserialize yields `None`:
+    /// the dispatch below is about to reject it as
+    /// [`ToolError::InvalidInput`](crate::ToolError::InvalidInput) anyway, and a
+    /// call that cannot run has no effect to name.
+    fn idempotency_key(&self, input: &Value) -> Option<String> {
+        let typed: H::Input = serde_json::from_value(input.clone()).ok()?;
+        self.0.idempotency_key(&typed)
     }
 
     async fn call_json(

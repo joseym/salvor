@@ -146,6 +146,19 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 async-trait = "0.1"
 sha2 = "0.10"
 schemars = "1"
+# Real JSON Schema validation, for the one place a schema has to be ENFORCED
+# rather than emitted: a graph gate's `approval_schema`, checked against the
+# resume input at the accept edge before a `Resumed` event is recorded. schemars
+# stays generation-only and does not validate anything; this is the other half.
+# Verified against crates.io on 2026-08-01; 0.49.2 was the latest release. It
+# implements drafts 4, 6, 7, 2019-09, and 2020-12, and defaults to 2020-12 when
+# a schema declares no `$schema`, which is the draft the graph document's own
+# schemars output speaks. Taken with `default-features = false`, which drops
+# `resolve-http` (and with it reqwest, rustls, and the aws-lc-rs TLS backend)
+# and `resolve-file`: a gate's approval schema is a self-contained inline
+# document, and a validator that could fetch a remote `$ref` while adjudicating
+# an approval would put the network on the accept edge of a durable decision.
+jsonschema = { version = "0.49", default-features = false }
 # Property-based testing for salvor-graph's condition-language parser/evaluator:
 # generate thousands of arbitrary and near-miss inputs to prove the parser never
 # panics and eval is total. Dev-only, so it adds nothing to any shipped tree.

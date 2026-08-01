@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use salvor_core::{
     Budget, BudgetKind, Effect, Event, EventEnvelope, RunId, SequenceNumber, TokenUsage,
 };
-use salvor_store::{EventStore, StoreError};
+use salvor_store::{CallClaim, CallClaimant, EventStore, StoreError};
 use time::OffsetDateTime;
 
 /// A store under test, plus the one door the kit needs to play attacker
@@ -118,6 +118,7 @@ fn all_event_kinds() -> Vec<Event> {
         Event::ToolCallCompleted {
             seq: SequenceNumber::new(2),
             output: serde_json::json!({"id": "TICKET-1"}),
+            deduplicated_from: None,
         },
         Event::NowObserved {
             now: OffsetDateTime::from_unix_timestamp(1_700_000_000).expect("timestamp in range"),
@@ -542,6 +543,233 @@ pub async fn tamper_is_confined_to_its_run<H: TamperHarness>(harness: H) {
     );
 }
 
+/// A claimant for `tool` under `key`, on behalf of `run`'s intent at `seq`.
+fn claimant<'a>(tool: &'a str, key: &'a str, run: RunId, seq: u64) -> CallClaimant<'a> {
+    CallClaimant {
+        tool,
+        idempotency_key: key,
+        run_id: run,
+        intent_seq: SequenceNumber::new(seq),
+    }
+}
+
+/// Call commitment, the exclusivity clause: an identity has exactly one owner,
+/// a second run is told who that owner is, the owner may re-claim its own
+/// identity, and `lookup_call` reports all of it without creating anything.
+///
+/// The re-claim case is the one that is easy to get wrong and expensive to get
+/// wrong: a run that crashed inside its own call and came back must be told
+/// `Claimed`, not `Held`, or it can never finish the call it started.
+pub async fn call_claim_is_exclusive<S: EventStore>(store: S) {
+    let owner = RunId::new();
+    let rival = RunId::new();
+
+    assert_eq!(
+        store.lookup_call("pay", "claim-1").await.expect("lookup"),
+        None,
+        "an unclaimed identity must look up as None"
+    );
+
+    let first = store
+        .claim_call(claimant("pay", "claim-1", owner, 4))
+        .await
+        .expect("first claim");
+    assert_eq!(first, CallClaim::Claimed, "the first claim must win");
+
+    let again = store
+        .claim_call(claimant("pay", "claim-1", owner, 4))
+        .await
+        .expect("re-claim");
+    assert_eq!(
+        again,
+        CallClaim::Claimed,
+        "a claimant must be able to re-claim the identity it already holds"
+    );
+
+    let lost = store
+        .claim_call(claimant("pay", "claim-1", rival, 9))
+        .await
+        .expect("rival claim");
+    match lost {
+        CallClaim::Held(commitment) => {
+            assert_eq!(commitment.run_id, owner, "the holder must be the first run");
+            assert_eq!(commitment.intent_seq, SequenceNumber::new(4));
+            assert_eq!(
+                commitment.completion_seq, None,
+                "an unfinished call must report no completion"
+            );
+        }
+        CallClaim::Claimed => panic!("a second run must not be granted a held identity"),
+    }
+
+    // The identity is the pair. Neither half alone collides.
+    assert_eq!(
+        store
+            .claim_call(claimant("refund", "claim-1", rival, 9))
+            .await
+            .expect("other tool"),
+        CallClaim::Claimed,
+        "the same key under a different tool is a different identity"
+    );
+    assert_eq!(
+        store
+            .claim_call(claimant("pay", "claim-2", rival, 9))
+            .await
+            .expect("other key"),
+        CallClaim::Claimed,
+        "a different key under the same tool is a different identity"
+    );
+
+    let looked_up = store
+        .lookup_call("pay", "claim-1")
+        .await
+        .expect("lookup")
+        .expect("the identity is claimed");
+    assert_eq!(looked_up.run_id, owner);
+    assert_eq!(looked_up.intent_seq, SequenceNumber::new(4));
+    assert_eq!(
+        store
+            .lookup_call("pay", "never-claimed")
+            .await
+            .expect("lookup"),
+        None,
+        "lookup must not create the commitment it was asked about"
+    );
+}
+
+/// Call commitment, the settlement clause: settling appends the completion and
+/// marks the commitment in one indivisible step, a run that does not hold the
+/// identity cannot settle it, and a refused settlement appends nothing.
+///
+/// The "appends nothing" half is what makes this worth a check of its own. A
+/// backend that appended first and then discovered it could not settle would
+/// leave a completion in a log with no commitment behind it, which is the exact
+/// state the mechanism exists to prevent.
+pub async fn settling_append_is_atomic<S: EventStore>(store: S) {
+    let owner = RunId::new();
+    let rival = RunId::new();
+
+    store
+        .append(&envelope(owner, 1, fail("intent stand-in")))
+        .await
+        .expect("append");
+    store
+        .claim_call(claimant("pay", "claim-1", owner, 1))
+        .await
+        .expect("claim");
+
+    let completion = envelope(owner, 2, fail("completion stand-in"));
+    store
+        .append_settling_call(&completion, claimant("pay", "claim-1", owner, 1))
+        .await
+        .expect("settle");
+
+    let commitment = store
+        .lookup_call("pay", "claim-1")
+        .await
+        .expect("lookup")
+        .expect("claimed");
+    assert_eq!(
+        commitment.completion_seq,
+        Some(SequenceNumber::new(2)),
+        "settlement must record where the completion landed"
+    );
+    let log = store.read_log(owner).await.expect("read log");
+    assert_eq!(
+        seqs(&log),
+        vec![1, 2],
+        "the settling append must have landed like any other append"
+    );
+
+    // A run that does not hold the identity cannot settle it, and its append
+    // must not survive the refusal.
+    store
+        .append(&envelope(rival, 1, fail("rival intent")))
+        .await
+        .expect("append");
+    let stolen = envelope(rival, 2, fail("rival completion"));
+    let refused = store
+        .append_settling_call(&stolen, claimant("pay", "claim-1", rival, 1))
+        .await;
+    assert!(
+        refused.is_err(),
+        "settling an identity another run holds must fail"
+    );
+    assert_eq!(
+        seqs(&store.read_log(rival).await.expect("read log")),
+        vec![1],
+        "a refused settlement must append nothing"
+    );
+}
+
+/// Concurrency, the arbitration clause: many tasks race to claim one identity.
+/// Exactly one must be told `Claimed`, every other must be told `Held` naming
+/// that same winner, and the recorded commitment must be the winner's.
+///
+/// This is the sibling of [`concurrent_single_position_has_one_winner`], run
+/// against the other uniqueness constraint in the store, and it is the one that
+/// decides whether two live runs can pay the same invoice at the same instant.
+/// A [`tokio::sync::Barrier`] releases the racers together so they contend for
+/// real.
+pub async fn concurrent_call_claims_have_one_winner<S: EventStore + 'static>(store: S) {
+    const RACERS: usize = 16;
+
+    let store = Arc::new(store);
+    let gate = Arc::new(tokio::sync::Barrier::new(RACERS));
+    let runs: Vec<RunId> = (0..RACERS).map(|_| RunId::new()).collect();
+
+    let mut handles = Vec::with_capacity(RACERS);
+    for (racer, run) in runs.iter().copied().enumerate() {
+        let store = Arc::clone(&store);
+        let gate = Arc::clone(&gate);
+        handles.push(tokio::spawn(async move {
+            gate.wait().await;
+            let claim = store
+                .claim_call(claimant("pay", "contested", run, racer as u64 + 1))
+                .await;
+            (run, claim)
+        }));
+    }
+
+    let mut winners = Vec::new();
+    let mut held = Vec::new();
+    for handle in handles {
+        let (run, claim) = handle.await.expect("racer task joined");
+        match claim.expect("a claim must not error") {
+            CallClaim::Claimed => winners.push(run),
+            CallClaim::Held(commitment) => held.push(commitment),
+        }
+    }
+
+    assert_eq!(
+        winners.len(),
+        1,
+        "exactly one racer may be granted the identity"
+    );
+    let winner = winners[0];
+    assert_eq!(held.len(), RACERS - 1, "every loser must be told it lost");
+    for commitment in &held {
+        assert_eq!(
+            commitment.run_id, winner,
+            "every loser must be pointed at the one winner"
+        );
+        assert_eq!(
+            commitment.completion_seq, None,
+            "the winner had not finished, so no loser may be told it had"
+        );
+    }
+
+    let recorded = store
+        .lookup_call("pay", "contested")
+        .await
+        .expect("lookup")
+        .expect("claimed");
+    assert_eq!(
+        recorded.run_id, winner,
+        "the stored commitment must belong to the racer whose claim returned Claimed"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     //! Self-test: the kit runs against an in-crate reference store built on a
@@ -554,8 +782,8 @@ mod tests {
     use std::sync::Mutex;
 
     use async_trait::async_trait;
-    use salvor_store::RunSummary;
     use salvor_store::chain::{self, ChainHead, ChainRow};
+    use salvor_store::{CallCommitment, RunSummary};
 
     use super::*;
 
@@ -584,12 +812,19 @@ mod tests {
     #[derive(Default)]
     struct VecStore {
         runs: Mutex<HashMap<RunId, Vec<Row>>>,
+        /// One entry per `(tool, idempotency_key)` identity. Behind the *same*
+        /// lock discipline as the rows, and taken in the same order, so that a
+        /// settlement writes the completion and the commitment as one step.
+        commitments: Mutex<HashMap<(String, String), CallCommitment>>,
     }
 
-    #[async_trait]
-    impl EventStore for VecStore {
-        async fn append(&self, envelope: &EventEnvelope) -> Result<(), StoreError> {
-            let mut runs = self.runs.lock().expect("lock");
+    impl VecStore {
+        /// Writes one row into an already-locked run map: the append body, with
+        /// the lock hoisted so a settlement can hold it across two writes.
+        fn write_row(
+            runs: &mut HashMap<RunId, Vec<Row>>,
+            envelope: &EventEnvelope,
+        ) -> Result<(), StoreError> {
             let rows = runs.entry(envelope.run_id).or_default();
             if rows.iter().any(|row| row.seq == envelope.seq) {
                 return Err(StoreError::Conflict {
@@ -612,6 +847,14 @@ mod tests {
                 row_hash,
             });
             Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl EventStore for VecStore {
+        async fn append(&self, envelope: &EventEnvelope) -> Result<(), StoreError> {
+            let mut runs = self.runs.lock().expect("lock");
+            Self::write_row(&mut runs, envelope)
         }
 
         async fn read_log(&self, run_id: RunId) -> Result<Vec<EventEnvelope>, StoreError> {
@@ -663,6 +906,83 @@ mod tests {
                         .expect("non-empty"),
                 })
                 .collect())
+        }
+
+        /// The whole arbitration, in the shortest correct form: one lock held
+        /// across the look and the write, so no rival can slip between them.
+        /// A real backend gets this from a unique constraint instead.
+        async fn claim_call(&self, claimant: CallClaimant<'_>) -> Result<CallClaim, StoreError> {
+            let mut commitments = self.commitments.lock().expect("lock");
+            let identity = (
+                claimant.tool.to_owned(),
+                claimant.idempotency_key.to_owned(),
+            );
+            match commitments.get(&identity) {
+                // Already ours and unfinished: this is the same call coming
+                // back, not a rival, so it keeps the right to execute.
+                Some(held)
+                    if held.run_id == claimant.run_id
+                        && held.intent_seq == claimant.intent_seq
+                        && held.completion_seq.is_none() =>
+                {
+                    Ok(CallClaim::Claimed)
+                }
+                Some(held) => Ok(CallClaim::Held(*held)),
+                None => {
+                    commitments.insert(
+                        identity,
+                        CallCommitment {
+                            run_id: claimant.run_id,
+                            intent_seq: claimant.intent_seq,
+                            completion_seq: None,
+                        },
+                    );
+                    Ok(CallClaim::Claimed)
+                }
+            }
+        }
+
+        async fn lookup_call(
+            &self,
+            tool: &str,
+            idempotency_key: &str,
+        ) -> Result<Option<CallCommitment>, StoreError> {
+            let commitments = self.commitments.lock().expect("lock");
+            Ok(commitments
+                .get(&(tool.to_owned(), idempotency_key.to_owned()))
+                .copied())
+        }
+
+        /// Both locks are held across both writes, so the completion and the
+        /// settlement land together or not at all. Ownership is checked before
+        /// the row is written, so a refusal appends nothing.
+        async fn append_settling_call(
+            &self,
+            envelope: &EventEnvelope,
+            claimant: CallClaimant<'_>,
+        ) -> Result<(), StoreError> {
+            let mut runs = self.runs.lock().expect("lock");
+            let mut commitments = self.commitments.lock().expect("lock");
+            let identity = (
+                claimant.tool.to_owned(),
+                claimant.idempotency_key.to_owned(),
+            );
+            let held = commitments.get_mut(&identity).filter(|held| {
+                held.run_id == claimant.run_id
+                    && held.intent_seq == claimant.intent_seq
+                    && held.completion_seq.is_none()
+            });
+            let Some(held) = held else {
+                return Err(StoreError::Backend(format!(
+                    "run {} does not hold an unsettled commitment for tool `{}` key `{}`",
+                    claimant.run_id.as_uuid(),
+                    claimant.tool,
+                    claimant.idempotency_key
+                )));
+            };
+            Self::write_row(&mut runs, envelope)?;
+            held.completion_seq = Some(envelope.seq);
+            Ok(())
         }
     }
 
@@ -738,5 +1058,20 @@ mod tests {
     #[tokio::test]
     async fn reference_store_passes_tamper_confinement() {
         tamper_is_confined_to_its_run(VecStore::default()).await;
+    }
+
+    #[tokio::test]
+    async fn reference_store_passes_call_claim_exclusivity() {
+        call_claim_is_exclusive(VecStore::default()).await;
+    }
+
+    #[tokio::test]
+    async fn reference_store_passes_settling_append() {
+        settling_append_is_atomic(VecStore::default()).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn reference_store_passes_claim_arbitration() {
+        concurrent_call_claims_have_one_winner(VecStore::default()).await;
     }
 }

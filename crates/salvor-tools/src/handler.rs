@@ -162,4 +162,27 @@ pub trait ToolHandler: ToolMeta + Send + Sync {
     {
         None
     }
+
+    /// The idempotency key this tool declares for `input`, if it declares one.
+    /// `None` by default.
+    ///
+    /// This is the typed half of
+    /// [`DynTool::idempotency_key`](crate::DynTool::idempotency_key), which is
+    /// where the full argument lives; the wrapper forwards to this method with
+    /// the input already deserialized. It takes `&self` rather than being an
+    /// associated function so a tool configured at construction (an account, a
+    /// tenant, an environment) can fold that into the key.
+    ///
+    /// The key must be a pure function of `input` and `self`, and it should be
+    /// as specific as the effect it names:
+    ///
+    /// ```ignore
+    /// fn idempotency_key(&self, input: &PayClaim) -> Option<String> {
+    ///     Some(format!("pay_claim:{}", input.claim_id))
+    /// }
+    /// ```
+    fn idempotency_key(&self, input: &Self::Input) -> Option<String> {
+        let _ = input;
+        None
+    }
 }

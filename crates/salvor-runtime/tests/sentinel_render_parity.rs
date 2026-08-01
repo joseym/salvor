@@ -167,6 +167,7 @@ fn renderer_matches_runtime_decoders() {
         let event = Event::ToolCallCompleted {
             seq: SequenceNumber::new(0),
             output: output.clone(),
+            deduplicated_from: None,
         };
         assert_eq!(
             event_detail(&event),

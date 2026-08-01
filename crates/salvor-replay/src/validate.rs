@@ -430,6 +430,7 @@ mod tests {
         Event::ToolCallCompleted {
             seq: SequenceNumber::new(seq),
             output: serde_json::json!({"ok": true}),
+            deduplicated_from: None,
         }
     }
 

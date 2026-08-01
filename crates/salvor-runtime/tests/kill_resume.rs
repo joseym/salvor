@@ -95,6 +95,35 @@ impl EventStore for KillStore {
     async fn list_runs(&self) -> Result<Vec<RunSummary>, StoreError> {
         self.inner.list_runs().await
     }
+
+    async fn claim_call(
+        &self,
+        claimant: salvor_store::CallClaimant<'_>,
+    ) -> Result<salvor_store::CallClaim, StoreError> {
+        self.inner.claim_call(claimant).await
+    }
+
+    async fn lookup_call(
+        &self,
+        tool: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<salvor_store::CallCommitment>, StoreError> {
+        self.inner.lookup_call(tool, idempotency_key).await
+    }
+
+    /// Counted against the same budget as `append`, because it is one: a kill
+    /// budget that let settling appends through would cut the run somewhere
+    /// other than where the test asked for.
+    async fn append_settling_call(
+        &self,
+        envelope: &EventEnvelope,
+        claimant: salvor_store::CallClaimant<'_>,
+    ) -> Result<(), StoreError> {
+        if self.remaining.fetch_sub(1, Ordering::SeqCst) <= 0 {
+            return Err(StoreError::Backend("simulated crash".to_owned()));
+        }
+        self.inner.append_settling_call(envelope, claimant).await
+    }
 }
 
 /// The scripted three-turn conversation shared by every scenario.

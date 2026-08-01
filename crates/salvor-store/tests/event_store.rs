@@ -101,6 +101,29 @@ impl EventStore for SqliteHarness {
     async fn list_runs(&self) -> Result<Vec<RunSummary>, StoreError> {
         self.store.list_runs().await
     }
+
+    async fn claim_call(
+        &self,
+        claimant: salvor_store::CallClaimant<'_>,
+    ) -> Result<salvor_store::CallClaim, StoreError> {
+        self.store.claim_call(claimant).await
+    }
+
+    async fn lookup_call(
+        &self,
+        tool: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<salvor_store::CallCommitment>, StoreError> {
+        self.store.lookup_call(tool, idempotency_key).await
+    }
+
+    async fn append_settling_call(
+        &self,
+        envelope: &EventEnvelope,
+        claimant: salvor_store::CallClaimant<'_>,
+    ) -> Result<(), StoreError> {
+        self.store.append_settling_call(envelope, claimant).await
+    }
 }
 
 #[async_trait]
@@ -412,7 +435,7 @@ async fn a_store_written_before_the_chain_opens_reads_and_verifies() {
                 |row| row.get(0),
             )
             .expect("chain_spec recorded");
-        assert_eq!(version, "2");
+        assert_eq!(version, "3");
         assert_eq!(spec, "salvor.chain.v1");
     }
 

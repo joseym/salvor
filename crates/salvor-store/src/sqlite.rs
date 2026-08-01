@@ -14,6 +14,8 @@
 //!     PRIMARY KEY (run_id, seq)
 //! chain_heads(run_id PRIMARY KEY, chain_len, head_hash)
 //! store_meta(key PRIMARY KEY, value)
+//! call_commitments(tool, idempotency_key, run_id, intent_seq, completion_seq)
+//!     PRIMARY KEY (tool, idempotency_key)
 //! ```
 //!
 //! `chain_idx` is the row's position in its run's *append* order, which is the
@@ -24,6 +26,19 @@
 //! the whole log, so removing rows from the end is detectable and an external
 //! anchor has a single thing to sign. `store_meta` records `schema_version`
 //! and the `chain_spec` the rows were hashed under.
+//!
+//! `call_commitments` is the store-wide arbiter behind cross-run
+//! deduplication: one row per `(tool, idempotency_key)` identity, naming the
+//! run that owns it and, once its call finishes, the position of the completion
+//! that settled it. The composite primary key is both the uniqueness constraint
+//! that decides a race and the index every lookup uses, so a claim and a lookup
+//! are each one index probe rather than a scan. The table holds pointers only:
+//! no output, no payload, nothing a caller could read *instead of* going
+//! through [`read_log`](SqliteStore::read_log) and its chain verification.
+//!
+//! A database written before this table simply lacks it and gains it, empty, on
+//! open. That is exactly right: no call recorded before commitments existed was
+//! ever claimed, so no later call may deduplicate against one.
 //!
 //! # Append-only guards
 //!
@@ -59,12 +74,14 @@ use uuid::Uuid;
 
 use crate::chain::{self, ChainHead, ChainRow};
 use crate::error::StoreError;
-use crate::store::{EventStore, RunSummary};
+use crate::store::{CallClaim, CallClaimant, CallCommitment, EventStore, RunSummary};
 
 /// The schema this build writes, recorded in `store_meta`. Version 1 was the
 /// four-column `events` table with no chain; version 2 adds the chain columns,
-/// `chain_heads`, and this metadata table itself.
-const SCHEMA_VERSION: &str = "2";
+/// `chain_heads`, and this metadata table itself; version 3 adds
+/// `call_commitments`, which is the store-wide arbiter behind cross-run
+/// deduplication.
+const SCHEMA_VERSION: &str = "3";
 
 /// The tables, created on every open and unchanged if they already exist.
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS events (
@@ -85,6 +102,14 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS events (
      CREATE TABLE IF NOT EXISTS store_meta (
          key   TEXT NOT NULL PRIMARY KEY,
          value TEXT NOT NULL
+     );
+     CREATE TABLE IF NOT EXISTS call_commitments (
+         tool            TEXT    NOT NULL,
+         idempotency_key TEXT    NOT NULL,
+         run_id          TEXT    NOT NULL,
+         intent_seq      INTEGER NOT NULL,
+         completion_seq  INTEGER,
+         PRIMARY KEY (tool, idempotency_key)
      );";
 
 /// The append-only guards. `RAISE(ABORT)` rolls back the statement and hands
@@ -346,26 +371,28 @@ impl SqliteStore {
             .lock()
             .map_err(|_| StoreError::Backend("connection mutex poisoned".to_owned()))
     }
-}
 
-#[async_trait]
-impl EventStore for SqliteStore {
-    async fn append(&self, envelope: &EventEnvelope) -> Result<(), StoreError> {
+    /// Writes one envelope and advances its run's chain head, inside a
+    /// transaction the caller owns.
+    ///
+    /// Factored out of [`append`](EventStore::append) so that
+    /// [`append_settling_call`](EventStore::append_settling_call) can put the
+    /// identical row write and a commitment settlement in *one* transaction.
+    /// Both callers therefore chain rows the same way by construction, rather
+    /// than by two copies of the logic agreeing.
+    ///
+    /// Returns the row's `(run_id, seq)` conflict as
+    /// [`StoreError::Conflict`]; the caller rolls back by dropping the
+    /// transaction unwritten.
+    fn write_row(tx: &Connection, envelope: &EventEnvelope) -> Result<(), StoreError> {
         let run_id = envelope.run_id;
         let seq = envelope.seq;
-
         let run_id_text = run_id.as_uuid().to_string();
         let seq_col = i64::try_from(seq.get())
             .map_err(|_| StoreError::Backend("sequence number exceeds i64 range".to_owned()))?;
         let recorded_at = i64::try_from(envelope.recorded_at.unix_timestamp_nanos())
             .map_err(|_| StoreError::Backend("recorded_at timestamp out of range".to_owned()))?;
         let wire_json = serde_json::to_string(envelope)?;
-
-        let mut guard = self.conn()?;
-        // The row and the run's new chain head move together or not at all: a
-        // committed row whose head was left behind would read back as a
-        // tampered log, so this is one transaction rather than two statements.
-        let tx = guard.transaction().map_err(backend)?;
 
         let head: Option<(i64, String)> = tx
             .query_row(
@@ -418,6 +445,47 @@ impl EventStore for SqliteStore {
         )
         .map_err(backend)?;
 
+        Ok(())
+    }
+
+    /// Reads the commitment recorded for one identity, inside a transaction the
+    /// caller owns.
+    fn read_commitment(
+        tx: &Connection,
+        tool: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<CallCommitment>, StoreError> {
+        let row: Option<(String, i64, Option<i64>)> = tx
+            .query_row(
+                "SELECT run_id, intent_seq, completion_seq FROM call_commitments
+                 WHERE tool = ?1 AND idempotency_key = ?2",
+                params![tool, idempotency_key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(backend)?;
+        let Some((run_id_text, intent_seq, completion_seq)) = row else {
+            return Ok(None);
+        };
+        Ok(Some(CallCommitment {
+            run_id: parse_run_id(&run_id_text)?,
+            intent_seq: SequenceNumber::new(seq_to_u64(intent_seq)?),
+            completion_seq: completion_seq
+                .map(|value| seq_to_u64(value).map(SequenceNumber::new))
+                .transpose()?,
+        }))
+    }
+}
+
+#[async_trait]
+impl EventStore for SqliteStore {
+    async fn append(&self, envelope: &EventEnvelope) -> Result<(), StoreError> {
+        let mut guard = self.conn()?;
+        // The row and the run's new chain head move together or not at all: a
+        // committed row whose head was left behind would read back as a
+        // tampered log, so this is one transaction rather than two statements.
+        let tx = guard.transaction().map_err(backend)?;
+        Self::write_row(&tx, envelope)?;
         tx.commit().map_err(backend)?;
         Ok(())
     }
@@ -544,6 +612,121 @@ impl EventStore for SqliteStore {
             });
         }
         Ok(summaries)
+    }
+
+    /// Claims an identity by inserting its commitment row, letting the primary
+    /// key on `(tool, idempotency_key)` be the arbiter.
+    ///
+    /// `ON CONFLICT DO NOTHING` is what makes this atomic against a rival: the
+    /// insert either creates the row or does not, with no window between
+    /// checking and writing that a second connection could slip into. When it
+    /// does nothing, the existing row is read back inside the same transaction
+    /// and reported as the holder. A row already owned by this same claimant
+    /// and still unsettled is reported as `Claimed`, so a run re-entering its
+    /// own unfinished call is not told it lost to itself.
+    async fn claim_call(&self, claimant: CallClaimant<'_>) -> Result<CallClaim, StoreError> {
+        let run_id_text = claimant.run_id.as_uuid().to_string();
+        let intent_seq = i64::try_from(claimant.intent_seq.get())
+            .map_err(|_| StoreError::Backend("intent sequence exceeds i64 range".to_owned()))?;
+
+        let mut guard = self.conn()?;
+        let tx = guard.transaction().map_err(backend)?;
+
+        let inserted = tx
+            .execute(
+                "INSERT INTO call_commitments (tool, idempotency_key, run_id, intent_seq, completion_seq)
+                 VALUES (?1, ?2, ?3, ?4, NULL)
+                 ON CONFLICT(tool, idempotency_key) DO NOTHING",
+                params![
+                    claimant.tool,
+                    claimant.idempotency_key,
+                    run_id_text,
+                    intent_seq
+                ],
+            )
+            .map_err(backend)?;
+
+        let claim = if inserted == 1 {
+            CallClaim::Claimed
+        } else {
+            let held = Self::read_commitment(&tx, claimant.tool, claimant.idempotency_key)?
+                .ok_or_else(|| {
+                    StoreError::Backend(
+                        "call commitment vanished between insert and read".to_owned(),
+                    )
+                })?;
+            if held.run_id == claimant.run_id
+                && held.intent_seq == claimant.intent_seq
+                && held.completion_seq.is_none()
+            {
+                CallClaim::Claimed
+            } else {
+                CallClaim::Held(held)
+            }
+        };
+
+        tx.commit().map_err(backend)?;
+        Ok(claim)
+    }
+
+    async fn lookup_call(
+        &self,
+        tool: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<CallCommitment>, StoreError> {
+        let guard = self.conn()?;
+        Self::read_commitment(&guard, tool, idempotency_key)
+    }
+
+    /// Appends the completion and settles the commitment in one transaction, so
+    /// no crash can leave a committed completion whose commitment still reads
+    /// unfinished.
+    ///
+    /// The `UPDATE` is narrowed to the claimant's own run and intent position
+    /// and to a commitment that is not already settled, so settling one that
+    /// belongs to somebody else, or settling twice, matches no row and is
+    /// refused before the append is committed.
+    async fn append_settling_call(
+        &self,
+        envelope: &EventEnvelope,
+        claimant: CallClaimant<'_>,
+    ) -> Result<(), StoreError> {
+        let run_id_text = claimant.run_id.as_uuid().to_string();
+        let intent_seq = i64::try_from(claimant.intent_seq.get())
+            .map_err(|_| StoreError::Backend("intent sequence exceeds i64 range".to_owned()))?;
+        let completion_seq = i64::try_from(envelope.seq.get())
+            .map_err(|_| StoreError::Backend("sequence number exceeds i64 range".to_owned()))?;
+
+        let mut guard = self.conn()?;
+        let tx = guard.transaction().map_err(backend)?;
+
+        Self::write_row(&tx, envelope)?;
+
+        let settled = tx
+            .execute(
+                "UPDATE call_commitments SET completion_seq = ?1
+                 WHERE tool = ?2 AND idempotency_key = ?3
+                   AND run_id = ?4 AND intent_seq = ?5 AND completion_seq IS NULL",
+                params![
+                    completion_seq,
+                    claimant.tool,
+                    claimant.idempotency_key,
+                    run_id_text,
+                    intent_seq
+                ],
+            )
+            .map_err(backend)?;
+        if settled != 1 {
+            return Err(StoreError::Backend(format!(
+                "run {} does not hold an unsettled commitment for tool `{}` key `{}`",
+                claimant.run_id.as_uuid(),
+                claimant.tool,
+                claimant.idempotency_key
+            )));
+        }
+
+        tx.commit().map_err(backend)?;
+        Ok(())
     }
 }
 

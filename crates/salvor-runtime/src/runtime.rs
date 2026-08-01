@@ -33,7 +33,7 @@ use std::sync::Arc;
 use salvor_core::{
     Event, EventEnvelope, PendingCall, RunId, RunStatus, UnresolvedWrite, derive_state,
 };
-use salvor_store::EventStore;
+use salvor_store::{CallClaimant, EventStore};
 use serde_json::Value;
 
 // `ParkReason` is a plain value over the event vocabulary, so it lives in the
@@ -244,6 +244,13 @@ impl Runtime {
     /// appended. `output` is recorded verbatim as the tool's output; nothing
     /// executes and nothing else is driven.
     ///
+    /// When the resolved call held a cross-run commitment for its
+    /// `(tool, idempotency key)`, this completion settles it, in the same
+    /// atomic step. A human resolving a payment is the moment that payment
+    /// stops being in flight, and the store has to learn it from somewhere;
+    /// leaving the commitment open would refuse every later run under that key
+    /// forever, with nothing anywhere to say why.
+    ///
     /// # Errors
     ///
     /// [`RuntimeError::UnknownRun`] when the id has no history;
@@ -255,8 +262,16 @@ impl Runtime {
         let state = derive_state(&log);
         // Only a dangling write derives to NeedsReconciliation, and it always
         // carries the pending tool intent whose completion is missing.
-        let intent_seq = match (&state.status, &state.pending_call) {
-            (RunStatus::NeedsReconciliation, Some(PendingCall::Tool { seq, .. })) => *seq,
+        let (intent_seq, tool, idempotency_key) = match (&state.status, &state.pending_call) {
+            (
+                RunStatus::NeedsReconciliation,
+                Some(PendingCall::Tool {
+                    seq,
+                    tool,
+                    idempotency_key,
+                    ..
+                }),
+            ) => (*seq, tool.clone(), idempotency_key.clone()),
             (other, _) => {
                 return Err(RuntimeError::NotReconcilable {
                     run_id,
@@ -270,9 +285,42 @@ impl Runtime {
         let completion = Event::ToolCallCompleted {
             seq: intent_seq,
             output,
+            // A human reconciled this write by hand. Nothing was copied from
+            // another run, so there is no origin to name.
+            deduplicated_from: None,
         };
         let envelope = EventEnvelope::new(run_id, state.next_seq, (self.clock)(), completion);
-        self.store.append(&envelope).await?;
+
+        // If this call held a cross-run commitment, the human's completion is
+        // the one that settles it. Skipping this would leave the key held by a
+        // run that is finished, and every future call under it refused forever:
+        // the human resolved the write and would have no way to tell that the
+        // key was still stuck.
+        let held = match &idempotency_key {
+            Some(key) => self.store.lookup_call(&tool, key).await?,
+            None => None,
+        };
+        let unsettled_here = held.is_some_and(|commitment| {
+            commitment.run_id == run_id
+                && commitment.intent_seq == intent_seq
+                && commitment.completion_seq.is_none()
+        });
+        if unsettled_here {
+            let key = idempotency_key.as_deref().expect("checked above");
+            self.store
+                .append_settling_call(
+                    &envelope,
+                    CallClaimant {
+                        tool: &tool,
+                        idempotency_key: key,
+                        run_id,
+                        intent_seq,
+                    },
+                )
+                .await?;
+        } else {
+            self.store.append(&envelope).await?;
+        }
         crate::progress::emit_step(run_id, envelope.seq, &envelope.event);
         Ok(run_id)
     }

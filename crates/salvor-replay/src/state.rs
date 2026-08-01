@@ -455,6 +455,7 @@ mod tests {
             Event::ToolCallCompleted {
                 seq: SequenceNumber::new(1),
                 output: serde_json::json!({"id": "TICKET-1"}),
+                deduplicated_from: None,
             },
         ]));
         assert_eq!(state.status, RunStatus::Running);

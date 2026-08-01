@@ -48,6 +48,22 @@
 //! provider call for the same reason (though a dangling model intent is
 //! safely re-issued rather than reconciled).
 //!
+//! # Nothing happens twice, across runs as well as within one
+//!
+//! Replay is what keeps a resumed run from repeating itself: a recorded
+//! completion is read back, never re-executed. Two *independent* runs share no
+//! log, so replay has nothing to say about them, and something else has to
+//! hold the line. That something is the idempotency key, arbitrated by the
+//! store.
+//!
+//! The whole decision happens in [`tool_call`](RunCtx::tool_call), live,
+//! before the intent is written and before the tool runs; see that method for
+//! the mechanism and its boundaries. What matters here is the boundary it does
+//! not cross: **replay never consults the store about another run.** A
+//! recorded log is a complete description of its run, and folding it back
+//! produces the same result on a machine that has never seen the store the run
+//! was recorded against.
+//!
 //! # Retries inside one tool call
 //!
 //! One `tool_call` is one intent/completion pair, so retries of a failed
@@ -64,11 +80,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use salvor_core::{
-    Budget, Emitted, EventEnvelope, ModelReply, Outcome, ReplayCursor, RunId, SequenceNumber,
-    TokenUsage,
+    Budget, DedupOrigin, Effect, Emitted, Event, EventEnvelope, ModelReply, Outcome, PendingCall,
+    ReplayCursor, RunId, SequenceNumber, TokenUsage,
 };
 use salvor_llm::{Client, MessageAccumulator, MessageRequest, MessageResponse, StreamEvent};
-use salvor_store::EventStore;
+use salvor_store::{CallClaim, CallClaimant, CallCommitment, EventStore};
 use salvor_tools::{DynTool, RetryPolicy, Suspension, ToolCtx, ToolError, ToolOutcome};
 use serde_json::Value;
 use time::OffsetDateTime;
@@ -250,6 +266,23 @@ impl RunCtx {
     /// `await_resume` reports [`Resumption::Parked`].
     pub fn set_resume_input(&mut self, input: Value) {
         self.resume_input = Some(input);
+    }
+
+    /// The resume input staged by [`set_resume_input`](Self::set_resume_input)
+    /// and not yet consumed, without consuming it.
+    ///
+    /// This is the read-only half of the accept edge. A driver that needs to
+    /// vet a resume input against something only it knows (the graph engine
+    /// checks a gate's declared `approval_schema`) has to see the value BEFORE
+    /// [`await_resume`](Self::await_resume) turns it into a `Resumed` event,
+    /// because after that it is history and refusing it would mean an appended
+    /// event the run has to live with. Peeking here and refusing leaves the log
+    /// untouched and the run parked exactly as it was.
+    ///
+    /// `None` once `await_resume` has taken the value, or when none was staged.
+    #[must_use]
+    pub fn staged_resume_input(&self) -> Option<&Value> {
+        self.resume_input.as_ref()
     }
 
     /// The run this context drives.
@@ -699,13 +732,99 @@ impl RunCtx {
     ///
     /// `idempotency_key` is the key for a *fresh* call; the built-in loop
     /// derives it from [`random`](Self::random) for `Idempotent` tools so it
-    /// reproduces on replay. For a re-executed recorded intent the recorded
-    /// key wins, whatever is passed here must match it (the cursor checks).
+    /// reproduces on replay. A key the tool declares for itself
+    /// ([`DynTool::idempotency_key`]) takes precedence over the one passed
+    /// here, because only the tool can say what effect a call *is*. For a
+    /// re-executed recorded intent the recorded key wins, and whatever is
+    /// presented must match it (the cursor checks).
+    ///
+    /// # Cross-run deduplication
+    ///
+    /// Within one run, nothing happens twice because a recorded completion is
+    /// replayed rather than re-executed. Across independent runs there is no
+    /// log to replay, so something else has to hold the line, and that
+    /// something is the idempotency key.
+    ///
+    /// ## Which keys count
+    ///
+    /// Only a key the tool **declares** for itself, through
+    /// [`DynTool::idempotency_key`], is an identity to deduplicate on. A key
+    /// the runtime derives on a tool's behalf is not, and the difference is not
+    /// a technicality.
+    ///
+    /// A declared key is a statement about the world: `"pay_claim:wreck-9931"`
+    /// means *this is the payout for claim 9931*, and two calls carrying it are
+    /// the same payment no matter which run asked for them. A derived key says
+    /// something much weaker. The built-in loop draws one from recorded
+    /// randomness so a retry within a run reuses it; the graph engine derives
+    /// one from a node's position so a fork re-executing a node reuses it.
+    /// Both are *attempt* identifiers, scoped to one run or one lineage, and
+    /// two unrelated runs can hold the same derived key over completely
+    /// different arguments. Treating one as an effect identity would let a
+    /// second run collect the first run's output for a call it never made,
+    /// which is a worse failure than the duplicate execution this is meant to
+    /// stop.
+    ///
+    /// So a derived key keeps doing exactly what it always did, at the provider
+    /// and inside its own run, and is recorded exactly as before. Cross-run
+    /// deduplication waits for a tool to say what its calls *are*.
+    ///
+    /// A declared key is also what a call records, in preference to a derived
+    /// one, since only the tool can name its own effect.
+    ///
+    /// ## The mechanism
+    ///
+    /// **The decision is made here, live, before the intent is recorded and
+    /// before the tool runs.** For a [`Effect::Write`] or
+    /// [`Effect::Idempotent`] call carrying a declared key, this method claims
+    /// the identity `(tool name, idempotency key)` in the store
+    /// ([`EventStore::claim_call`](salvor_store::EventStore::claim_call)),
+    /// which is the arbiter:
+    ///
+    /// - **Claimed.** This run is the one execution. The intent is recorded,
+    ///   the tool runs, and the completion is appended *and* settles the
+    ///   commitment as one atomic step, so no crash can leave a committed
+    ///   completion the store still calls unfinished.
+    /// - **Held, and settled.** An equal call is already committed. The origin
+    ///   run's log is read back (through
+    ///   [`read_log`](salvor_store::EventStore::read_log), so its hash chain is
+    ///   verified before a single byte is copied), its recorded input is
+    ///   checked against this call's, and its output becomes this call's
+    ///   output. The intent is still recorded, because an intent that resolves
+    ///   as a duplicate is an honest thing to have recorded, and the completion
+    ///   carries a [`DedupOrigin`] naming what it copied. **The tool does not
+    ///   run.**
+    /// - **Held, and unfinished.** Refused with
+    ///   [`RuntimeError::CallInFlight`], before anything is recorded. See that
+    ///   variant for why refusing beats guessing.
+    ///
+    /// A call with no declared key is untouched by any of this: there is no
+    /// identity to deduplicate on, so a keyless write behaves exactly as it
+    /// always has, and so does a write carrying only a derived key. So does
+    /// every [`Effect::Read`], which has no effect worth naming.
+    ///
+    /// **Replay never participates.** A recorded completion replays from the
+    /// log, whether it was witnessed or copied, with no store lookup of any
+    /// kind; the [`DedupOrigin`] on it is read by humans and audits, never by
+    /// the cursor. That is what keeps a recorded log a self-contained
+    /// description of a run.
+    ///
+    /// The one place resume consults the store is the gap a crash can leave
+    /// between a deduplicated intent and its copied completion. That intent
+    /// executed nothing (this run never held the identity, so it never held the
+    /// right to execute), and the store can prove it, so the call is finished
+    /// as the duplicate it was rather than parked for a human. Every other
+    /// dangling write still parks: see [`recover_deduplicated_intent`](Self::recover_deduplicated_intent).
     ///
     /// # Errors
     ///
     /// [`RuntimeError::Replay`] on divergence or a dangling write intent;
-    /// [`RuntimeError::Store`] when persistence fails. A failing *tool* is
+    /// [`RuntimeError::Store`] when persistence fails;
+    /// [`RuntimeError::CallInFlight`] when another run holds this call's
+    /// identity and has not finished with it;
+    /// [`RuntimeError::IdempotencyKeyCollision`] when one key names two
+    /// different calls; [`RuntimeError::CommitmentUnreadable`] when the store
+    /// points at a completion its own log does not hold. A failing *tool* is
     /// not an `Err`: it returns [`ToolCallResult::Failed`], because the
     /// failure is a recorded outcome the orchestration must handle
     /// deterministically.
@@ -716,15 +835,84 @@ impl RunCtx {
         idempotency_key: Option<&str>,
     ) -> Result<ToolCallResult, RuntimeError> {
         let effect = tool.effect();
-        match self
-            .cursor
-            .tool_call(tool.name(), input, effect, idempotency_key)?
+        let declared = tool.idempotency_key(input);
+        // What is recorded on the wire: the tool's own declaration when it
+        // makes one, otherwise the attempt key the caller derived.
+        let recorded = declared
+            .clone()
+            .or_else(|| idempotency_key.map(ToOwned::to_owned));
+        let key = recorded.as_deref();
+        // What deduplication is arbitrated on: a declared key only. See the
+        // method docs for why an attempt key is not an identity.
+        let identity = declared.as_deref().filter(|_| deduplicates(effect));
+
+        // Before the cursor is asked to take a step, because `tool_call` either
+        // advances it or fails, with nothing in between where a store lookup
+        // could go.
+        if let Some(resolved) = self
+            .recover_deduplicated_intent(tool, input, effect, identity)
+            .await?
         {
+            return Ok(resolved);
+        }
+
+        match self.cursor.tool_call(tool.name(), input, effect, key)? {
             Outcome::Replayed(output) => Ok(decode_tool_output(output)),
             Outcome::Live(permit) => {
+                // THE DECISION POINT. Live, before the write-ahead intent is
+                // persisted and before the tool is touched. Nothing below this
+                // block consults the store about other runs, and replay never
+                // reaches it at all.
+                let claimant = identity.map(|key| CallClaimant {
+                    tool: tool.name(),
+                    idempotency_key: key,
+                    run_id: self.run_id,
+                    intent_seq: permit.seq(),
+                });
+                let mut copied = None;
+                if let Some(claimant) = claimant {
+                    match self.store.claim_call(claimant).await? {
+                        // This run is the one execution.
+                        CallClaim::Claimed => {}
+                        CallClaim::Held(commitment) if commitment.completion_seq.is_some() => {
+                            copied = Some(
+                                committed_call(
+                                    self.store.as_ref(),
+                                    tool.name(),
+                                    claimant.idempotency_key,
+                                    commitment,
+                                    input,
+                                )
+                                .await?,
+                            );
+                        }
+                        // Held by a run that has not finished. Nothing is
+                        // recorded, so this run can simply be run again once
+                        // the holder is resolved.
+                        CallClaim::Held(commitment) => {
+                            return Err(RuntimeError::CallInFlight {
+                                tool: tool.name().to_owned(),
+                                idempotency_key: claimant.idempotency_key.to_owned(),
+                                holder: commitment.run_id,
+                                holder_seq: commitment.intent_seq.get(),
+                            });
+                        }
+                    }
+                }
+
+                // Write-ahead, on both paths. An intent that resolves as a
+                // duplicate is still an honest record of what this run asked
+                // for.
                 if let Some(intent) = permit.intent().cloned() {
                     persist(self.store.as_ref(), self.run_id, &self.clock, &intent).await?;
                 }
+
+                if let Some((output, origin)) = copied {
+                    let completion = permit.record_deduplicated(output.clone(), origin);
+                    persist(self.store.as_ref(), self.run_id, &self.clock, &completion).await?;
+                    return Ok(decode_tool_output(output));
+                }
+
                 let key = permit.idempotency_key().map(ToOwned::to_owned);
                 let tool_ctx = ToolCtx::new(key);
                 let policy = RetryPolicy::for_effect(effect);
@@ -760,10 +948,98 @@ impl RunCtx {
                     }
                 };
                 let completion = permit.record(output);
-                persist(self.store.as_ref(), self.run_id, &self.clock, &completion).await?;
+                match claimant {
+                    // The completion and the settlement land together, so the
+                    // store never believes an identity is still in flight when
+                    // its result is already recorded.
+                    Some(claimant) => {
+                        persist_settling(
+                            self.store.as_ref(),
+                            self.run_id,
+                            &self.clock,
+                            &completion,
+                            claimant,
+                        )
+                        .await?;
+                    }
+                    None => {
+                        persist(self.store.as_ref(), self.run_id, &self.clock, &completion).await?;
+                    }
+                }
                 Ok(result)
             }
         }
+    }
+
+    /// Finishes a deduplicated call whose process died between recording the
+    /// intent and recording the copied completion, or reports that this is not
+    /// that situation.
+    ///
+    /// This is the only place a resume consults the store about another run,
+    /// and it turns on a fact the store can settle: a call executes only under
+    /// a claim, so an identity held by a **different** run is proof that this
+    /// run never executed. The intent it left behind is then not a dangling
+    /// write at all, it is an unfinished copy, and parking it would ask a human
+    /// to reconcile an effect that provably never happened.
+    ///
+    /// Every other reading falls through to [`tool_call`](Self::tool_call)'s
+    /// normal path and its normal consequences. In particular an identity held
+    /// by *this* run is exactly the reconciliation hazard it has always been:
+    /// this run did hold the right to execute, so nobody can say from the
+    /// outside whether it did, and the run parks with
+    /// [`ReplayError::NeedsReconciliation`](salvor_core::ReplayError::NeedsReconciliation).
+    ///
+    /// Returns `Ok(None)` when the situation does not apply, which is the
+    /// overwhelmingly common case.
+    async fn recover_deduplicated_intent(
+        &mut self,
+        tool: &dyn DynTool,
+        input: &Value,
+        effect: Effect,
+        key: Option<&str>,
+    ) -> Result<Option<ToolCallResult>, RuntimeError> {
+        let Some(key) = key.filter(|_| deduplicates(effect)) else {
+            return Ok(None);
+        };
+        let Some(PendingCall::Tool {
+            tool: recorded_tool,
+            input: recorded_input,
+            effect: recorded_effect,
+            idempotency_key: Some(recorded_key),
+            ..
+        }) = self.cursor.dangling_intent()
+        else {
+            return Ok(None);
+        };
+        // Only the call the orchestration is asking for right now. Anything
+        // else is a divergence for the cursor to report, not ours to smooth
+        // over.
+        if recorded_tool != tool.name()
+            || recorded_input != *input
+            || recorded_effect != effect
+            || recorded_key != key
+        {
+            return Ok(None);
+        }
+
+        let Some(commitment) = self.store.lookup_call(tool.name(), key).await? else {
+            return Ok(None);
+        };
+        // The proof, and the whole reason this is safe: the identity belongs to
+        // some other run, and that run finished. This run never held it, so it
+        // never had the right to execute, so it did not.
+        if commitment.run_id == self.run_id || commitment.completion_seq.is_none() {
+            return Ok(None);
+        }
+
+        let (output, origin) =
+            committed_call(self.store.as_ref(), tool.name(), key, commitment, input).await?;
+        let permit = self
+            .cursor
+            .resume_unexecuted_tool_call(tool.name(), input, effect, key)?;
+        let completion = permit.record_deduplicated(output.clone(), origin);
+        persist(self.store.as_ref(), self.run_id, &self.clock, &completion).await?;
+        Ok(Some(decode_tool_output(output)))
     }
 
     /// Parks the run: records `Suspended { reason, input_schema }`. Follow
@@ -882,6 +1158,98 @@ async fn persist(
     // the cursor's early return above and never reach this edge, so they never
     // re-emit. The detail is truncated (see `crate::progress`), so no full
     // payload rides the progress stream.
+    crate::progress::emit_step(run_id, envelope.seq, &envelope.event);
+    Ok(())
+}
+
+/// Whether an effect class participates in cross-run deduplication at all.
+///
+/// A [`Effect::Read`] performs nothing worth naming, so there is nothing for a
+/// second run to avoid repeating. The other two classes both do something to
+/// the world, and a key on them is a claim about which something.
+fn deduplicates(effect: Effect) -> bool {
+    matches!(effect, Effect::Write | Effect::Idempotent)
+}
+
+/// Reads back the call a commitment points at, and checks it really is the same
+/// call.
+///
+/// The read goes through [`EventStore::read_log`], never around it, so the
+/// origin run's hash chain is verified before any of its recorded bytes are
+/// copied into this run's log. A commitment is a pointer and nothing else,
+/// which is what makes that unavoidable rather than merely encouraged.
+///
+/// The input check is what keeps a key honest. If the origin's recorded input
+/// differs from this call's, one key is naming two different calls, and both
+/// available answers are wrong: copying would return an output computed from
+/// somebody else's arguments, executing would repeat an effect the key says has
+/// already happened. So neither happens.
+async fn committed_call(
+    store: &dyn EventStore,
+    tool: &str,
+    idempotency_key: &str,
+    commitment: CallCommitment,
+    input: &Value,
+) -> Result<(Value, DedupOrigin), RuntimeError> {
+    let log = store.read_log(commitment.run_id).await?;
+    let correlation = commitment.intent_seq;
+    let unreadable = || RuntimeError::CommitmentUnreadable {
+        tool: tool.to_owned(),
+        idempotency_key: idempotency_key.to_owned(),
+        origin: commitment.run_id,
+        origin_seq: correlation.get(),
+    };
+
+    let recorded_input = log
+        .iter()
+        .find_map(|envelope| match &envelope.event {
+            Event::ToolCallRequested {
+                seq,
+                tool: recorded_tool,
+                input,
+                ..
+            } if *seq == correlation && recorded_tool == tool => Some(input),
+            _ => None,
+        })
+        .ok_or_else(unreadable)?;
+    if recorded_input != input {
+        return Err(RuntimeError::IdempotencyKeyCollision {
+            tool: tool.to_owned(),
+            idempotency_key: idempotency_key.to_owned(),
+            origin: commitment.run_id,
+            origin_seq: correlation.get(),
+        });
+    }
+
+    let output = log
+        .iter()
+        .find_map(|envelope| match &envelope.event {
+            Event::ToolCallCompleted { seq, output, .. } if *seq == correlation => Some(output),
+            _ => None,
+        })
+        .ok_or_else(unreadable)?
+        .clone();
+
+    Ok((
+        output,
+        DedupOrigin {
+            run_id: commitment.run_id,
+            seq: correlation,
+        },
+    ))
+}
+
+/// Persists a completion and settles its call commitment in one indivisible
+/// store operation. The settling counterpart of [`persist`].
+async fn persist_settling(
+    store: &dyn EventStore,
+    run_id: RunId,
+    clock: &ClockFn,
+    emitted: &Emitted,
+    claimant: CallClaimant<'_>,
+) -> Result<(), RuntimeError> {
+    let envelope = EventEnvelope::new(run_id, emitted.seq, (clock)(), emitted.event.clone());
+    store.append_settling_call(&envelope, claimant).await?;
     crate::progress::emit_step(run_id, envelope.seq, &envelope.event);
     Ok(())
 }

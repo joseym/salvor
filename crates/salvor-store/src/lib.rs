@@ -44,4 +44,4 @@ mod store;
 
 pub use error::StoreError;
 pub use sqlite::SqliteStore;
-pub use store::{EventStore, RunSummary};
+pub use store::{CallClaim, CallClaimant, CallCommitment, EventStore, RunSummary};

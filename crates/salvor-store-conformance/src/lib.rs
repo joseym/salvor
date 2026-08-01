@@ -82,6 +82,17 @@
 //! [`StoreError::TamperEvident`](salvor_store::StoreError::TamperEvident)
 //! naming the run and position, while its untouched neighbors still read.
 //!
+//! It also demonstrates the call-commitment clauses, which are what let the
+//! layer above promise that a tool call carrying an idempotency key happens
+//! once across independent runs rather than once per run: an identity has
+//! exactly one owner, a second run is told who that owner is, the owner may
+//! re-claim its own unfinished call, a lookup reports all of that without
+//! creating anything, a settlement lands its completion and its commitment
+//! together or not at all, and a pack of runs racing for one identity produces
+//! exactly one winner. A backend that gets any of this wrong lets the same
+//! payment go out twice, which is why it is in the kit rather than in
+//! SQLite's own tests.
+//!
 //! Tamper evidence is not optional here. It is in [`run_all`] and in the
 //! macro, so a backend cannot claim conformance while serving whatever bytes
 //! its storage happens to hold. What the kit checks is the guarantee, not a
@@ -126,11 +137,12 @@
 mod checks;
 
 pub use checks::{
-    TamperHarness, concurrent_single_position_has_one_winner, duplicate_append_conflicts,
+    TamperHarness, call_claim_is_exclusive, concurrent_call_claims_have_one_winner,
+    concurrent_single_position_has_one_winner, duplicate_append_conflicts,
     list_runs_reports_each_run_once, ordering_independent_of_append_order,
     recorded_log_verifies_when_untouched, round_trip_all_event_kinds, runs_are_isolated,
-    tamper_is_confined_to_its_run, unknown_run_reads_empty, usable_as_arc_dyn_event_store,
-    valid_json_tamper_is_detected,
+    settling_append_is_atomic, tamper_is_confined_to_its_run, unknown_run_reads_empty,
+    usable_as_arc_dyn_event_store, valid_json_tamper_is_detected,
 };
 
 use core::future::Future;
@@ -164,6 +176,9 @@ where
     recorded_log_verifies_when_untouched(new_store().await).await;
     valid_json_tamper_is_detected(new_store().await).await;
     tamper_is_confined_to_its_run(new_store().await).await;
+    call_claim_is_exclusive(new_store().await).await;
+    settling_append_is_atomic(new_store().await).await;
+    concurrent_call_claims_have_one_winner(new_store().await).await;
 }
 
 /// Generates one `#[tokio::test]` per conformance check against a fresh store.
@@ -239,6 +254,21 @@ macro_rules! conformance_tests {
         #[::tokio::test]
         async fn tamper_is_confined_to_its_run() {
             $crate::tamper_is_confined_to_its_run($factory).await;
+        }
+
+        #[::tokio::test]
+        async fn call_claim_is_exclusive() {
+            $crate::call_claim_is_exclusive($factory).await;
+        }
+
+        #[::tokio::test]
+        async fn settling_append_is_atomic() {
+            $crate::settling_append_is_atomic($factory).await;
+        }
+
+        #[::tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn concurrent_call_claims_have_one_winner() {
+            $crate::concurrent_call_claims_have_one_winner($factory).await;
         }
     };
 }

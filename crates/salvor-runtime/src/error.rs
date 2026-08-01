@@ -110,6 +110,80 @@ pub enum RuntimeError {
         status: String,
     },
 
+    /// A keyed call could not proceed because another run holds the same
+    /// `(tool, idempotency key)` identity and has not finished with it.
+    ///
+    /// The holder is either running right now or died mid-call. Either way the
+    /// effect may or may not have happened, and this run has no way to find out
+    /// and no right to try: proceeding would be exactly the second execution
+    /// the key exists to prevent. So the call refuses, and it refuses *before*
+    /// recording anything, which leaves this run's log untouched and the run
+    /// re-runnable once the holder is finished or reconciled.
+    ///
+    /// The resolution lives in the holding run, never here. Finish it, or
+    /// reconcile its dangling write with `salvor resolve`, and then run this
+    /// one again.
+    #[error(
+        "tool `{tool}` under idempotency key `{idempotency_key}` is held by run {holder:?} at seq {holder_seq}, which has not recorded a completion; nothing was executed and nothing was recorded. Finish or reconcile that run before running this one again"
+    )]
+    CallInFlight {
+        /// The tool whose identity is held.
+        tool: String,
+        /// The idempotency key naming the effect.
+        idempotency_key: String,
+        /// The run holding the identity.
+        holder: RunId,
+        /// The position of the holder's intent for this call.
+        holder_seq: u64,
+    },
+
+    /// Two different calls presented the same `(tool, idempotency key)`
+    /// identity with different inputs.
+    ///
+    /// The key is a promise that two calls are the same call. Different inputs
+    /// under one key break that promise, and there is no safe reading of it:
+    /// deduplicating would hand this call an output computed from somebody
+    /// else's arguments, and executing would perform an effect the key says has
+    /// already been performed. So neither happens and the key's author is told.
+    ///
+    /// The fix is in the key, not here. A key must be specific enough to name
+    /// one effect: `"pay_claim:wreck-9931"`, not `"pay_claim"`.
+    #[error(
+        "tool `{tool}` was called under idempotency key `{idempotency_key}` with an input that differs from the call run {origin:?} already committed at seq {origin_seq}; the key names two different calls, so neither deduplicating nor executing is safe"
+    )]
+    IdempotencyKeyCollision {
+        /// The tool whose key collided.
+        tool: String,
+        /// The key that named two different calls.
+        idempotency_key: String,
+        /// The run holding the committed call.
+        origin: RunId,
+        /// The position of the committed call's intent.
+        origin_seq: u64,
+    },
+
+    /// A commitment pointed at a completion that its run's log does not hold.
+    ///
+    /// The store said an identity was settled at a position, and reading that
+    /// run's log (chain verification included) did not produce the completion
+    /// there. That is a damaged store, not a race: a settlement and its
+    /// completion are written as one unit, so one cannot exist without the
+    /// other. Reported rather than worked around, because the alternative would
+    /// be executing an effect the store believes already happened.
+    #[error(
+        "run {origin:?} was committed to tool `{tool}` under idempotency key `{idempotency_key}` at seq {origin_seq}, but its log holds no such completion; the store disagrees with itself and nothing was executed"
+    )]
+    CommitmentUnreadable {
+        /// The tool named by the commitment.
+        tool: String,
+        /// The key named by the commitment.
+        idempotency_key: String,
+        /// The run the commitment pointed at.
+        origin: RunId,
+        /// The position the commitment pointed at.
+        origin_seq: u64,
+    },
+
     /// `abandon` was called on a run that already reached a terminal event
     /// (completed, failed, or previously abandoned). A terminal run is already
     /// at rest; there is nothing left to retire, so the operator action is
