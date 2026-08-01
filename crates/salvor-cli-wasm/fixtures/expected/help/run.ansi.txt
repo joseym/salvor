@@ -20,7 +20,7 @@ Start a fresh run of an agent
       [1m--fixture[0m <DIR>
           Run a self-contained fixture directory offline: no API key, no network.
           
-          The directory holds `agent.toml`, `input.json`, and `model.json` (the recorded model conversation). Salvor serves that conversation from an in-process HTTP server on a free local port and points the agent's declared `[llm] base_url_env` variable at it, so the agent file needs no edit to switch between the fixture and a real model. Everything after that is an ordinary run: the same store, the same event log, the same kill/resume guarantee. See [`crate::fixture`].
+          The directory holds `agent.toml`, `input.json`, and `model.json` (the recorded model conversation). Salvor serves that conversation from an in-process HTTP server on a free local port and points the agent's declared `[llm] base_url_env` variable at it, so the agent file needs no edit to switch between the fixture and a real model. Everything after that is an ordinary run: the same store, the same event log, the same kill/resume guarantee.
 
   [1m-h[0m, [1m--help[0m
           Print help (see a summary with '-h')

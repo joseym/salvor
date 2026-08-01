@@ -275,7 +275,7 @@ async fn build_and_verify_agents(
     for (node_id, file) in AGENT_FILES {
         let path = Path::new(file);
         let config = AgentConfig::load(path)?;
-        let (agent, agent_servers) = agent_config::build_agent(&config, path).await?;
+        let (agent, agent_servers) = agent_config::build_agent(&config, path, false).await?;
         servers.extend(agent_servers);
 
         let declared = declared_agent_hash(graph, node_id)?;

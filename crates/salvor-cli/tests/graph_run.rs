@@ -207,3 +207,85 @@ fn graph_run_with_an_unprovided_agent_lists_what_was_provided() {
         "lists what was provided: {stderr}"
     );
 }
+
+/// A loose gate schema: `required` and `properties` with no `type`, the shape
+/// that plain JSON Schema semantics leave satisfied by any non-object.
+const LOOSE_GATE_GRAPH: &str = r#"{
+  "schema_version": 1,
+  "nodes": [
+    { "kind": "gate", "payload": { "id": "approve", "approval_schema": {
+      "required": ["approved"],
+      "properties": { "approved": { "type": "boolean" } }
+    } } }
+  ],
+  "edges": []
+}"#;
+
+/// `salvor resume` refuses a `--input` that the gate's `approval_schema` does
+/// not describe: it names the gate, lists every violation, shows what a
+/// conforming approval satisfies, and appends nothing, so the corrected input
+/// resumes the very same parked run.
+#[test]
+fn resume_refuses_an_approval_the_gate_schema_does_not_describe() {
+    let dir = tempdir().expect("tempdir");
+    let store = dir.path().join("salvor.db");
+    let graph = write(dir.path(), "gate.json", LOOSE_GATE_GRAPH);
+
+    let output = salvor(&store)
+        .args(["graph", "run"])
+        .arg(&graph)
+        .args(["--input", r#"{"topic":"otters"}"#])
+        .output()
+        .expect("runs");
+    assert!(output.status.success(), "graph run parks: {output:?}");
+    let run = run_id_from(&String::from_utf8_lossy(&output.stdout));
+
+    for bad in ["null", "42", r#""nope""#, "{}"] {
+        let output = salvor(&store)
+            .args(["resume", &run])
+            .arg("--graph")
+            .arg(&graph)
+            .args(["--input", bad])
+            .output()
+            .expect("runs");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "resuming with {bad} must be refused: {output:?}"
+        );
+        assert!(
+            stderr.contains("gate `approve`'s approval_schema"),
+            "the refusal names the gate for {bad}: {stderr}"
+        );
+        assert!(
+            stderr.contains("$"),
+            "the refusal lists a violation path for {bad}: {stderr}"
+        );
+        assert!(
+            stderr.contains("still parked at that gate"),
+            "the refusal says the run survives, for {bad}: {stderr}"
+        );
+        assert!(
+            stderr.contains("A conforming approval satisfies:"),
+            "the refusal shows the shape wanted, for {bad}: {stderr}"
+        );
+    }
+
+    // The run never moved, so the corrected approval still resumes it.
+    let output = salvor(&store)
+        .args(["resume", &run])
+        .arg("--graph")
+        .arg(&graph)
+        .args(["--input", r#"{"approved":true}"#])
+        .output()
+        .expect("runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "the corrected approval resumes: {output:?}"
+    );
+    assert!(
+        stdout.contains("\"approved\": true"),
+        "the gate's output is the approval: {stdout}"
+    );
+}

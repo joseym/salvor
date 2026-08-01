@@ -11,7 +11,7 @@ Commands:
   list         List runs in the store, newest activity last. Filters narrow what is printed; with none, every run is listed
   completions  Print a shell completion script for `salvor` on stdout
   history      Print a run's event log
-  replay       Re-derive a run's state from its log without executing anything
+  replay       Re-derive a run's state from its log without executing anything. The only mode; nothing is ever executed
   serve        Run the control-plane HTTP + server-sent-events server over the store
   build        Build the whole product from a salvor checkout: the web dashboard, then the release binary that embeds it
   agent        Author-time agent definition tools: print the content hash a graph `agent` node has to reference. Reads no store and drives no run

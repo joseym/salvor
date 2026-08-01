@@ -184,6 +184,9 @@ enum CommandDto {
     Resolve {
         run_id: String,
         output: String,
+        agents: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        graph: Option<String>,
     },
     Abandon {
         run_id: String,
@@ -235,8 +238,13 @@ enum CommandDto {
 #[derive(Serialize)]
 #[serde(tag = "agent_verb", rename_all = "kebab-case")]
 enum AgentCommandDto {
-    Hash { agents: Vec<String> },
-    Validate { agents: Vec<String> },
+    Hash {
+        agents: Vec<String>,
+    },
+    Validate {
+        agents: Vec<String>,
+        no_connect: bool,
+    },
 }
 
 /// The verbs under `salvor graph`, tagged like their parent.
@@ -320,9 +328,16 @@ impl From<&Command> for CommandDto {
                 acknowledge_writes: acknowledge_writes.clone(),
                 dry_run: *dry_run,
             },
-            Command::Resolve(ResolveArgs { run_id, output }) => CommandDto::Resolve {
+            Command::Resolve(ResolveArgs {
+                run_id,
+                output,
+                agents,
+                graph,
+            }) => CommandDto::Resolve {
                 run_id: run_id.clone(),
                 output: output.clone(),
+                agents: paths(agents),
+                graph: graph.as_deref().map(path),
             },
             Command::Abandon(AbandonArgs { run_id, reason }) => CommandDto::Abandon {
                 run_id: run_id.clone(),
@@ -382,9 +397,12 @@ impl From<&AgentCommand> for AgentCommandDto {
             AgentCommand::Hash(AgentHashArgs { agents }) => AgentCommandDto::Hash {
                 agents: paths(agents),
             },
-            AgentCommand::Validate(AgentValidateArgs { agents }) => AgentCommandDto::Validate {
-                agents: paths(agents),
-            },
+            AgentCommand::Validate(AgentValidateArgs { agents, no_connect }) => {
+                AgentCommandDto::Validate {
+                    agents: paths(agents),
+                    no_connect: *no_connect,
+                }
+            }
         }
     }
 }

@@ -168,6 +168,28 @@ impl Fixture {
                 model_path.display()
             );
         }
+        for turn in &script.turns {
+            // `response` is stored and served as a bare `Value` (the model
+            // returns it verbatim, unknown fields and all), but a value that
+            // does not even carry the fields every Messages API response has
+            // would otherwise fail far from here: deep in `salvor-llm`'s own
+            // decode, with no mention of `model.json` or which turn. Catching
+            // it here, at load, is what makes the failure point at the file a
+            // reader can actually fix, the same way a malformed `turns` key
+            // does above.
+            serde_json::from_value::<salvor_llm::MessageResponse>(turn.response.clone())
+                .with_context(|| {
+                    format!(
+                        "{}: turn for {} message(s) has a \"response\" that is not a valid \
+                         Messages API response (expected {{ \"id\": \"...\", \"model\": \"...\", \
+                         \"role\": \"assistant\", \"content\": [ {{ \"type\": \"text\", \"text\": \
+                         \"...\" }} ], \"usage\": {{ \"input_tokens\": <n>, \"output_tokens\": \
+                         <n> }} }})",
+                        model_path.display(),
+                        turn.messages
+                    )
+                })?;
+        }
 
         Ok(Self {
             agent_path,
@@ -332,4 +354,59 @@ async fn messages(
             }
         })),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Writes a fixture directory with the three required files (`agent.toml`
+    /// gets a minimal but valid body; the caller supplies `model.json`'s
+    /// text), and returns it for [`Fixture::load`].
+    fn write_fixture(model_json: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join(AGENT_FILE), "model = \"claude-opus-4-8\"\n")
+            .expect("write agent.toml");
+        std::fs::write(dir.path().join(INPUT_FILE), "\"hello\"").expect("write input.json");
+        std::fs::write(dir.path().join(MODEL_FILE), model_json).expect("write model.json");
+        dir
+    }
+
+    /// A turn's `response` that is missing fields every Messages API response
+    /// has (here, `usage`) fails at load, naming `model.json`, the turn (by
+    /// its message count), and the expected minimal shape, exactly as a
+    /// malformed `turns` key already does for the whole file.
+    #[test]
+    fn a_response_missing_required_fields_teaches_the_expected_shape() {
+        let dir = write_fixture(
+            r#"{"turns": [{"messages": 1, "response": {"id": "msg_1", "model": "m", "role": "assistant", "content": []}}]}"#,
+        );
+        let error = match Fixture::load(dir.path()) {
+            Ok(_) => panic!("a response with no usage must fail"),
+            Err(error) => error,
+        };
+        let message = format!("{error:#}");
+        assert!(message.contains(MODEL_FILE), "names the file: {message}");
+        assert!(
+            message.contains("\"response\""),
+            "names the field: {message}"
+        );
+        assert!(
+            message.contains("\"usage\""),
+            "teaches the expected shape: {message}"
+        );
+    }
+
+    /// A turn whose `response` has every required field loads cleanly.
+    #[test]
+    fn a_well_formed_response_loads() {
+        let dir = write_fixture(
+            r#"{"turns": [{"messages": 1, "response": {
+                "id": "msg_1", "model": "m", "role": "assistant",
+                "content": [{"type": "text", "text": "hi"}],
+                "usage": {"input_tokens": 1, "output_tokens": 1}
+            }}]}"#,
+        );
+        Fixture::load(dir.path()).expect("a well-formed response must load");
+    }
 }

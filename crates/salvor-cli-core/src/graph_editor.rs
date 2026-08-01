@@ -55,7 +55,7 @@
 //! edge <FROM> <TO> [--label NAME]
 //! case <BRANCH-ID> <CASE-NAME> --when EXPR | --model
 //! rm node <ID> | rm edge <FROM> <TO> | rm case <BRANCH-ID> <CASE-NAME>
-//! show [<ID>] | validate | read | write | undo | history | help
+//! show [<ID>] | validate | read | write | undo | history | help | exit | quit
 //! ```
 //!
 //! Every node kind's optional `--name`, `--input-schema`, `--output-schema`,
@@ -181,6 +181,14 @@ pub enum Command {
         /// The command to explain, or `None` for the overview.
         topic: Option<String>,
     },
+    /// End the session cleanly, exactly as end of input (`Ctrl-D`, or the last
+    /// line of a redirected script) already does. Not recorded: a dumped
+    /// script never contains it, the same way it never contains `history` or
+    /// `help`. `exit` and `quit` both parse to this one command, so a typed
+    /// word and end of input are the SAME way to leave, not two, which is
+    /// what lets both work identically whether the session is a terminal or a
+    /// script.
+    Quit,
 }
 
 /// What a [`Command::Remove`] removes.
@@ -317,6 +325,10 @@ pub enum Status {
     /// with itself. Only `validate` on a document that does not pass produces
     /// this: asking a broken document to validate is not a failed command.
     Invalid,
+    /// `exit` or `quit` was typed: the caller ends the session, exactly as it
+    /// would at end of input. The document is unchanged; nothing here writes
+    /// anything.
+    Exit,
 }
 
 /// What one applied command produced.
@@ -506,6 +518,16 @@ impl Editor {
                 );
                 return (self, Outcome::shown(text));
             }
+            Command::Quit => {
+                return (
+                    self,
+                    Outcome {
+                        text: "goodbye\n".to_owned(),
+                        status: Status::Exit,
+                        document_json: None,
+                    },
+                );
+            }
             Command::Add(_)
             | Command::Edge(_)
             | Command::Case { .. }
@@ -616,7 +638,8 @@ impl Editor {
             | Command::Write
             | Command::Undo
             | Command::History
-            | Command::Help { .. } => Ok(String::new()),
+            | Command::Help { .. }
+            | Command::Quit => Ok(String::new()),
         }
     }
 
@@ -788,7 +811,8 @@ fn derive_document(history: &[Command]) -> Graph {
             | Command::Write
             | Command::Undo
             | Command::History
-            | Command::Help { .. } => {}
+            | Command::Help { .. }
+            | Command::Quit => {}
         }
     }
 
@@ -1173,6 +1197,9 @@ impl Command {
                 Some(topic) => format!("help {}", word(topic)),
                 None => "help".to_owned(),
             },
+            // Never recorded (see [`Command::Quit`]), so this arm is never
+            // actually dumped; "exit" is the canonical spelling if it ever is.
+            Command::Quit => "exit".to_owned(),
         }
     }
 }
@@ -1309,7 +1336,8 @@ fn quote(text: &str) -> String {
 // --- reading a line ---------------------------------------------------------
 
 /// Every command word, in the order `help` lists them.
-const COMMAND_WORDS: &str = "add, case, edge, help, history, read, rm, show, undo, validate, write";
+const COMMAND_WORDS: &str =
+    "add, case, edge, exit, help, history, quit, read, rm, show, undo, validate, write";
 
 /// Every node kind word.
 const KIND_WORDS: &str = "agent, tool, gate, branch, map, fold";
@@ -1679,6 +1707,8 @@ pub fn parse(line: &str) -> Result<Option<Line>, ParseError> {
         "undo" => Line::Command(parse_bare("undo", rest, Command::Undo)?),
         "history" => Line::Command(parse_bare("history", rest, Command::History)?),
         "help" => Line::Command(parse_help(rest)?),
+        "exit" => Line::Command(parse_bare("exit", rest, Command::Quit)?),
+        "quit" => Line::Command(parse_bare("quit", rest, Command::Quit)?),
         word => {
             return Err(ParseError::UnknownCommand {
                 word: word.to_owned(),
@@ -2139,7 +2169,8 @@ struct Topic {
 
 /// Every command's help, in the order the overview lists them: the shaping
 /// commands first, then the queries, then the two that read and write a whole
-/// document, then `undo`, `history`, and `help`.
+/// document, then `undo`, `history`, and `help`, and finally `exit` and
+/// `quit`, which end the session rather than say anything about the document.
 ///
 /// This table is the one place the grammar is written down for a reader, and it
 /// sits beside the parser it describes so the two are edited together.
@@ -2254,6 +2285,23 @@ const TOPICS: &[Topic] = &[
         forms: &["help", "help <COMMAND>"],
         detail: "Bare `help` lists every command with a one-line summary. `help <COMMAND>` \
                  prints that command's grammar and what it means.",
+    },
+    Topic {
+        name: "exit",
+        summary: "end the session; the document is not written anywhere",
+        forms: &["exit"],
+        detail: "Ends the session cleanly, exactly as end of input (Ctrl-D at a terminal, or \
+                 the last line of a redirected script) already does. Nothing is saved: `write` \
+                 first if the document should survive. `quit` is the same command under a \
+                 second name.",
+    },
+    Topic {
+        name: "quit",
+        summary: "end the session; the document is not written anywhere",
+        forms: &["quit"],
+        detail: "The same command as `exit`, under the other name people reach for. Ends the \
+                 session cleanly, exactly as end of input already does. Nothing is saved: \
+                 `write` first if the document should survive.",
     },
 ];
 
@@ -3806,6 +3854,44 @@ mod tests {
         assert!(outcome.text.contains("No commands recorded yet"));
     }
 
+    /// `exit` and `quit` both end the session with [`Status::Exit`], change
+    /// nothing about the document, and are not recorded, so a session that
+    /// built something and then typed one of them dumps a script with no
+    /// trace of it.
+    #[test]
+    fn exit_and_quit_end_the_session_without_touching_the_document() {
+        for word in ["exit", "quit"] {
+            let editor = run("add tool fetch http_get\n");
+            let before = editor.document().clone();
+            let (editor, outcome) = step(editor, word);
+            assert_eq!(
+                outcome.status,
+                Status::Exit,
+                "`{word}` must signal Status::Exit"
+            );
+            assert_eq!(
+                editor.document(),
+                &before,
+                "`{word}` must not change the document"
+            );
+            assert_eq!(
+                editor.history().len(),
+                1,
+                "`{word}` must not be recorded into the history"
+            );
+        }
+    }
+
+    /// A typo, or a leftover shell habit like `:q`, is refused by name and
+    /// pointed at the real commands, `exit` and `quit` included.
+    #[test]
+    fn an_unknown_command_names_exit_and_quit() {
+        let error = parse("bogus").expect_err("`bogus` is not a command");
+        let message = error.to_string();
+        assert!(message.contains("exit"), "the error names exit: {message}");
+        assert!(message.contains("quit"), "the error names quit: {message}");
+    }
+
     /// Every command in the help table has help, every command the parser
     /// accepts is in the table, and the grammar forms are never wrapped, since
     /// a form broken across lines is a form you cannot type.
@@ -3995,7 +4081,7 @@ mod tests {
             words(&editor, ""),
             [
                 "add", "edge", "case", "rm", "show", "validate", "read", "write", "undo",
-                "history", "help",
+                "history", "help", "exit", "quit",
             ]
         );
         // Mid-word, only the commands that start with what is typed, and the

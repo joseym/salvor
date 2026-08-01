@@ -283,6 +283,13 @@ impl ApiKeyKind {
     }
 }
 
+/// The environment variable `[llm] api_key_env` reads from when the agent
+/// file leaves it unset. Named once here so the resolution in
+/// [`AgentConfig::client_config`], the name reported in
+/// [`AgentConfig::api_key_env`], and a 401 error's own message can never
+/// name three different defaults.
+pub const DEFAULT_API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
+
 /// Model transport settings. All optional; the defaults target the public
 /// Anthropic endpoint.
 #[derive(Debug, Default, Deserialize)]
@@ -698,6 +705,18 @@ impl AgentConfig {
         }
     }
 
+    /// The environment variable the API key is read from: `[llm] api_key_env`
+    /// when the file sets it, else [`DEFAULT_API_KEY_ENV`]. Public so a 401
+    /// from the Messages API can be reported against the variable that was
+    /// actually consulted, rather than assuming the default.
+    #[must_use]
+    pub fn api_key_env(&self) -> &str {
+        self.llm
+            .api_key_env
+            .as_deref()
+            .unwrap_or(DEFAULT_API_KEY_ENV)
+    }
+
     /// The client [`Config`] the `[llm]` section resolves to. Reads the API
     /// key from the named environment variable, leaving it unset (fine for
     /// local endpoints) when the variable is unset or empty. When
@@ -717,11 +736,7 @@ impl AgentConfig {
         } else if let Some(base_url) = &self.llm.base_url {
             config = config.with_base_url(base_url);
         }
-        let key_env = self
-            .llm
-            .api_key_env
-            .as_deref()
-            .unwrap_or("ANTHROPIC_API_KEY");
+        let key_env = self.api_key_env();
         if let Ok(key) = std::env::var(key_env)
             && !key.is_empty()
         {
@@ -775,14 +790,25 @@ impl AgentConfig {
 /// `agent_path` is the path the config was loaded from; it fixes the base
 /// directory for a relative `system_prompt_path`.
 ///
+/// `no_connect` skips this step entirely: no MCP server is spawned (a `command`
+/// transport) or dialed (a `url` transport), so a declared server whose command
+/// does not exist, or whose endpoint is unreachable, does not fail the build.
+/// The returned agent then carries no MCP tools and the returned server list
+/// is always empty; the caller is the one that knows how many servers were
+/// declared and skipped (`config.mcp_servers.len()`), since that count is not
+/// otherwise recoverable from the return value. Because MCP tool schemas feed
+/// [`Agent::def_hash`], a `no_connect` build's hash does not match the hash a
+/// real run would record.
+///
 /// # Errors
 ///
 /// Fails when the system prompt file cannot be read, an MCP server cannot be
-/// spawned or initialized, or the builder rejects the definition (a duplicate
-/// tool name, or a cost budget with no pricing).
+/// spawned or initialized (unless `no_connect` is set), or the builder rejects
+/// the definition (a duplicate tool name, or a cost budget with no pricing).
 pub async fn build_agent(
     config: &AgentConfig,
     agent_path: &Path,
+    no_connect: bool,
 ) -> Result<(Agent, Vec<McpServer>)> {
     let agent_dir = agent_path.parent().unwrap_or_else(|| Path::new("."));
 
@@ -811,46 +837,53 @@ pub async fn build_agent(
     builder = builder.record_prompts(config.record_prompts_enabled());
 
     let mut servers = Vec::new();
-    for server_config in &config.mcp_servers {
-        let mut overrides = EffectOverrides::new();
-        for (name, effect) in &server_config.effect_overrides {
-            overrides.insert(name.clone(), *effect);
-        }
-
-        // `validate` (run at load) guarantees exactly one transport is set, so
-        // the `url`-first branch is exhaustive: a config that reaches here with
-        // neither would already have failed to load.
-        let mut server = if let Some(url) = &server_config.url {
-            // The bearer token, if any, is read from the named environment
-            // variable, never the file. An unset or empty variable means no
-            // auth, matching how `api_key_env` treats a missing key.
-            let token = server_config
-                .bearer_token_env
-                .as_deref()
-                .and_then(|name| std::env::var(name).ok())
-                .filter(|t| !t.is_empty());
-            McpServer::connect_http(url, token.as_deref(), &overrides)
-                .await
-                .with_context(|| format!("connecting to MCP server at `{url}`"))?
-        } else {
-            let command_name = server_config
-                .command
-                .as_deref()
-                .expect("validate guarantees a command when there is no url");
-            let mut command = tokio::process::Command::new(command_name);
-            command.args(&server_config.args);
-            for (key, value) in &server_config.env {
-                command.env(key, value);
+    if no_connect {
+        // Field/shape validation only: `AgentConfig::load` already ran
+        // `validate` over every declared server (exactly one transport set,
+        // required fields present), so there is nothing left to check without
+        // spawning a process or dialing a socket. Skip the loop below entirely.
+    } else {
+        for server_config in &config.mcp_servers {
+            let mut overrides = EffectOverrides::new();
+            for (name, effect) in &server_config.effect_overrides {
+                overrides.insert(name.clone(), *effect);
             }
-            McpServer::connect(command, &overrides)
-                .await
-                .with_context(|| format!("connecting to MCP server `{command_name}`"))?
-        };
 
-        for tool in server.take_tools() {
-            builder = builder.tool_dyn(Box::new(tool));
+            // `validate` (run at load) guarantees exactly one transport is set, so
+            // the `url`-first branch is exhaustive: a config that reaches here with
+            // neither would already have failed to load.
+            let mut server = if let Some(url) = &server_config.url {
+                // The bearer token, if any, is read from the named environment
+                // variable, never the file. An unset or empty variable means no
+                // auth, matching how `api_key_env` treats a missing key.
+                let token = server_config
+                    .bearer_token_env
+                    .as_deref()
+                    .and_then(|name| std::env::var(name).ok())
+                    .filter(|t| !t.is_empty());
+                McpServer::connect_http(url, token.as_deref(), &overrides)
+                    .await
+                    .with_context(|| format!("connecting to MCP server at `{url}`"))?
+            } else {
+                let command_name = server_config
+                    .command
+                    .as_deref()
+                    .expect("validate guarantees a command when there is no url");
+                let mut command = tokio::process::Command::new(command_name);
+                command.args(&server_config.args);
+                for (key, value) in &server_config.env {
+                    command.env(key, value);
+                }
+                McpServer::connect(command, &overrides)
+                    .await
+                    .with_context(|| format!("connecting to MCP server `{command_name}`"))?
+            };
+
+            for tool in server.take_tools() {
+                builder = builder.tool_dyn(Box::new(tool));
+            }
+            servers.push(server);
         }
-        servers.push(server);
     }
 
     // Sandboxed wasm tools. One engine (compiler, WASI linker, epoch ticker)
@@ -951,6 +984,41 @@ mod tests {
         ] {
             assert_eq!(parse_record_prompts_env(unset), None, "{unset:?}");
         }
+    }
+
+    /// The `salvor agent validate --no-connect` contract, exercised directly
+    /// against [`build_agent`] rather than the binary: a declared `command`
+    /// that does not exist on this machine fails an ordinary build (the
+    /// process spawn fails), but passes with `no_connect: true`, since that
+    /// mode never spawns anything and checks fields and shape only.
+    #[tokio::test]
+    async fn no_connect_skips_a_command_that_does_not_exist() {
+        let config = AgentConfig::from_toml_str(
+            "model = \"m\"\n\n\
+             [[mcp_servers]]\n\
+             command = \"this-command-does-not-exist-anywhere-on-path\"\n",
+        )
+        .expect("parses: field/shape validation happens at `load`, not `build_agent`");
+        let pseudo_path = Path::new("agent.toml");
+
+        let connected = build_agent(&config, pseudo_path, false).await;
+        assert!(
+            connected.is_err(),
+            "default mode spawns the declared command and must fail when it does not exist"
+        );
+
+        let (agent, servers) = build_agent(&config, pseudo_path, true)
+            .await
+            .expect("--no-connect must not spawn the command, so a missing one still passes");
+        assert!(
+            servers.is_empty(),
+            "no-connect mode connects to nothing, so there are no sessions to keep alive"
+        );
+        assert_eq!(
+            agent.tools().len(),
+            0,
+            "no-connect mode collects no tools, since collecting them needs a connection"
+        );
     }
 
     /// `record_prompts` parses from the agent TOML: absent leaves it `None`, and

@@ -1,5 +1,5 @@
-//! Salvor CLI: `run`, `resume`, `list`, `history`, and `replay --dry-run` over
-//! durable agent runs.
+//! Salvor CLI: `run`, `resume`, `list`, `history`, and `replay` over durable
+//! agent runs.
 //!
 //! This library holds the CLI's logic so it can be unit-tested directly (the
 //! TOML schema, the rendering) while [`main`](../salvor/index.html) stays a

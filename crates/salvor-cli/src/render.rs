@@ -51,6 +51,42 @@ pub fn agent_summary(agent: &Agent, mcp_server_count: usize) -> String {
     )
 }
 
+/// The success report for `salvor agent validate --no-connect`: fields and
+/// shape checked, no MCP server contacted.
+///
+/// Names what was skipped rather than silently reporting fewer tools: `--
+/// no-connect` never spawns or dials a declared MCP server, so `mcp_declared`
+/// (the number of `[[mcp_servers]]` tables the file declared) is printed as
+/// skipped, and the hash line says why it is withheld instead of printing a
+/// number that would not match the hash a real (connecting) build produces.
+#[must_use]
+pub fn agent_summary_no_connect(agent: &Agent, mcp_declared: usize) -> String {
+    let name = agent.name().unwrap_or("(none)");
+    let prompt = match agent.system_prompt() {
+        Some(text) => format!("set ({} chars)", text.chars().count()),
+        None => "(none)".to_owned(),
+    };
+    let mcp_line = if mcp_declared == 0 {
+        "no mcp servers declared".to_owned()
+    } else {
+        format!(
+            "{mcp_declared} mcp server(s) declared, not connected (--no-connect): tools not verified"
+        )
+    };
+    format!(
+        "agent fields ok: model {}, {}\n\
+         name:    {}\n\
+         prompt:  {}\n\
+         budgets: {}\n\
+         hash:    (not computed: depends on MCP tool schemas, which --no-connect does not collect; run without --no-connect for the real hash)\n",
+        agent.model(),
+        mcp_line,
+        name,
+        prompt,
+        budgets_line(agent.budgets()),
+    )
+}
+
 /// The declared budgets, one dimension at a time in the fixed order (steps,
 /// tokens, cost, wall time), or `(none)` when nothing is declared.
 fn budgets_line(budgets: &salvor_runtime::Budgets) -> String {

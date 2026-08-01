@@ -237,10 +237,10 @@ async fn name_does_not_affect_agent_def_hash() {
     let (unnamed, unnamed_file) = load_from_str("model = \"m\"\n");
     let (named, named_file) = load_from_str("model = \"m\"\nname = \"support-triage\"\n");
 
-    let (unnamed_agent, unnamed_servers) = build_agent(&unnamed, unnamed_file.path())
+    let (unnamed_agent, unnamed_servers) = build_agent(&unnamed, unnamed_file.path(), false)
         .await
         .expect("unnamed agent builds");
-    let (named_agent, named_servers) = build_agent(&named, named_file.path())
+    let (named_agent, named_servers) = build_agent(&named, named_file.path(), false)
         .await
         .expect("named agent builds");
 
@@ -259,7 +259,7 @@ async fn name_does_not_affect_agent_def_hash() {
 async fn cost_budget_without_pricing_is_a_clear_error() {
     let toml = "model = \"test-model\"\n\n[budgets]\ncost_usd = 2.0\n";
     let (config, file) = load_from_str(toml);
-    let error = match build_agent(&config, file.path()).await {
+    let error = match build_agent(&config, file.path(), false).await {
         Ok(_) => panic!("cost budget without pricing should fail to build"),
         Err(error) => error,
     };
@@ -634,7 +634,7 @@ input_schema = '{{"type":"object"}}'
     file.write_all(toml.as_bytes()).expect("write toml");
     let config = AgentConfig::load(file.path()).expect("config parses");
 
-    let (agent, servers) = build_agent(&config, file.path())
+    let (agent, servers) = build_agent(&config, file.path(), false)
         .await
         .expect("agent builds with both tool kinds");
 
@@ -695,7 +695,7 @@ async fn wasm_tools_example_guest_runs() {
     let agent_path =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/wasm-tools/agent.toml");
     let config = AgentConfig::load(&agent_path).expect("example agent.toml parses");
-    let (agent, servers) = build_agent(&config, &agent_path)
+    let (agent, servers) = build_agent(&config, &agent_path, false)
         .await
         .expect("example agent builds");
     assert!(servers.is_empty(), "the example declares no MCP servers");
