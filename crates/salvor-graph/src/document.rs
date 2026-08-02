@@ -15,7 +15,7 @@
 //! event log, which stays forward-tolerant because it carries recorded data.
 //!
 //! The one concession the two share is the additive `schema_version`
-//! discipline (see [`SCHEMA_VERSION`]): a graph that was recorded under an
+//! discipline (see `SCHEMA_VERSION`): a graph that was recorded under an
 //! older build must still parse and validate under a newer one. Strict in,
 //! additive-tolerant out.
 //!
@@ -27,7 +27,7 @@
 //! precedent set by the agent definition's own `name`
 //! (`salvor_cli::agent_config::MAX_NAME_LEN`): at most 64 CHARACTERS
 //! (`chars().count()`, not bytes), and, when set, not empty or all
-//! whitespace. [`crate::validate`] enforces both, node-precise.
+//! whitespace. `crate::validate` enforces both, node-precise.
 //!
 //! An agent's `name` is deliberately excluded from its `agent_def_hash`: an
 //! agent is a long-lived identity that a run keeps replaying under the same
@@ -58,7 +58,7 @@ use serde_json::Value;
 ///
 /// This mirrors the reasoning in `salvor-replay`'s event `SCHEMA_VERSION`.
 /// `schema_version` exists so a reader knows how to interpret documents that
-/// were already recorded. Adding a variant to [`Node`] changes nothing about
+/// were already recorded. Adding a variant to `Node` changes nothing about
 /// how any previously written document is encoded: a document written before
 /// the addition contains none of the new kinds, and every node in it parses to
 /// the identical value under the new build. An additive optional field follows
@@ -73,7 +73,7 @@ use serde_json::Value;
 ///
 /// # The strict-in direction
 ///
-/// Because a graph is submitted, not just replayed, [`crate::validate`] also
+/// Because a graph is submitted, not just replayed, `crate::validate` also
 /// rejects a document whose `schema_version` is FROM THE FUTURE (greater than
 /// this constant): a current build cannot promise to understand a shape a newer
 /// writer invented. An older-or-equal version is accepted, which is the
@@ -89,7 +89,7 @@ pub const SCHEMA_VERSION: u32 = 1;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Graph {
-    /// The document schema version. Always [`SCHEMA_VERSION`] for documents
+    /// The document schema version. Always `SCHEMA_VERSION` for documents
     /// this build writes; an older value may appear when reading a recorded
     /// document.
     pub schema_version: u32,
@@ -112,7 +112,7 @@ pub struct Graph {
 /// key other than `kind` and `payload`.
 ///
 /// The stable node id lives inside each payload (every payload struct carries
-/// an `id`), reachable generically through [`Node::id`]. Keeping the id in the
+/// an `id`), reachable generically through `Node::id`. Keeping the id in the
 /// payload is what lets the outer shape stay exactly the two-key adjacent
 /// tagging the event log uses, with no third common field to special-case.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -314,28 +314,28 @@ pub struct BranchNode {
     /// Recorded as DATA; not resolved in this crate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on: Option<String>,
-    /// Content hash of the agent that decides a [`BranchCondition::ModelDecision`]
+    /// Content hash of the agent that decides a `BranchCondition::ModelDecision`
     /// case, in `sha256:<64 lowercase hex>` form. Present only on a branch that
     /// carries a model-decision case: the engine drives this agent with the
     /// routed value and maps its reply to a case name. Additive: absent on the
     /// wire when unset, so a purely expression-driven branch (and every document
     /// written before this field existed) serializes byte for byte as before.
-    /// [`crate::validate`] reports a model-decision case with no agent here as a
+    /// `crate::validate` reports a model-decision case with no agent here as a
     /// node-precise error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_hash: Option<String>,
     /// The cases, each a named condition. An expression condition is evaluated
     /// against the routed value; a model-decision condition is resolved by the
-    /// node's [`agent_hash`](Self::agent_hash) agent. The first matching case in
+    /// node's `agent_hash` agent. The first matching case in
     /// author order wins, and the engine records the choice as a
-    /// [`crate::document`]-external `BranchTaken` event.
+    /// `crate::document`-external `BranchTaken` event.
     pub cases: Vec<BranchCase>,
 }
 
-/// One case of a [`BranchNode`]: a name and the condition that selects it.
+/// One case of a `BranchNode`: a name and the condition that selects it.
 ///
 /// The realized routing (which downstream node a fired case flows to) is
-/// carried by an [`Edge`] whose `label` matches the case `name`, so topology
+/// carried by an `Edge` whose `label` matches the case `name`, so topology
 /// stays entirely in the edge list and a branch has real outbound edges.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -346,7 +346,7 @@ pub struct BranchCase {
     pub when: BranchCondition,
 }
 
-/// How a [`BranchCase`] is selected. Modeled as data; not evaluated in this
+/// How a `BranchCase` is selected. Modeled as data; not evaluated in this
 /// crate.
 ///
 /// Adjacently tagged (`{"kind": "...", "value": ...}`) so it stays additive:
@@ -368,10 +368,10 @@ pub enum BranchCondition {
     ModelDecision,
 }
 
-/// The wire shape [`BranchCondition`] parses as: the exact same
+/// The wire shape `BranchCondition` parses as: the exact same
 /// tag/content/deny_unknown_fields attributes as the type it mirrors, so
 /// what this accepts and rejects is unchanged. It exists only as a target for
-/// [`BranchCondition`]'s hand-written `Deserialize` impl below, so a
+/// `BranchCondition`'s hand-written `Deserialize` impl below, so a
 /// malformed `when` can be reported in product language instead of serde's
 /// "adjacently tagged enum" internals.
 #[derive(Deserialize)]
@@ -402,7 +402,7 @@ impl<'de> Deserialize<'de> for BranchCondition {
     {
         // Buffer as generic JSON first, then parse that buffer through the
         // identical adjacently tagged shape the derive would have used.
-        // Acceptance does not change: a value [`BranchConditionShape`]
+        // Acceptance does not change: a value `BranchConditionShape`
         // rejects was always rejected. Only the failure message changes, from
         // serde's enum-internals wording to a product-language description of
         // the two accepted shapes with the offending value echoed back.
@@ -414,7 +414,7 @@ impl<'de> Deserialize<'de> for BranchCondition {
 }
 
 /// Build the error text for a `when` that failed to parse as a
-/// [`BranchCondition`]: the two accepted shapes, then what was actually
+/// `BranchCondition`: the two accepted shapes, then what was actually
 /// found, so a bare string (the obvious skim-and-adapt mistake, writing
 /// `"when": "value > 10000"` instead of the object form) reads as data
 /// against the expected shape rather than a serde internals error.
@@ -459,7 +459,7 @@ pub struct MapNode {
     /// not resolved in this crate.
     pub over: String,
     /// The maximum number of sub-runs in flight at once. Must be at least 1;
-    /// [`crate::validate`] reports a non-positive cap by node id.
+    /// `crate::validate` reports a non-positive cap by node id.
     pub concurrency: u32,
     /// What each element is mapped through: a node already in this document, or
     /// an embedded sub-graph.
@@ -469,11 +469,11 @@ pub struct MapNode {
     pub output_schema: Option<Value>,
 }
 
-/// The body a [`MapNode`] maps each element through.
+/// The body a `MapNode` maps each element through.
 ///
 /// Adjacently tagged, so adding a third form later is additive. A `node` body
 /// names an existing node by id (checked for existence during validation); a
-/// `subgraph` body embeds a whole [`Graph`].
+/// `subgraph` body embeds a whole `Graph`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(
     tag = "kind",
@@ -500,7 +500,7 @@ pub enum MapBody {
 /// Grounded in the AARG tailor loop the graph wiring models: bounded revisions
 /// (`max_iterations`), a stop predicate over the accumulated score
 /// (`stop_when`, an expression in the same language a branch case uses), and an
-/// argmax winner (`join` = [`FoldJoin::BestBy`] over the score). See the
+/// argmax winner (`join` = `FoldJoin::BestBy` over the score). See the
 /// crate-level docs and the graph wiring plan.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -514,21 +514,21 @@ pub struct FoldNode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// What each pass runs: a node already in this document, or an embedded
-    /// sub-graph. Not implemented exactly as [`MapBody`]'s subgraph form is not:
+    /// sub-graph. Not implemented exactly as `MapBody`'s subgraph form is not:
     /// the shape is legal, but no engine runs it yet.
     pub body: FoldBody,
     /// The iteration bound: the most passes the loop may run. Must be at least
-    /// 1; [`crate::validate`] reports a zero bound by node id.
+    /// 1; `crate::validate` reports a zero bound by node id.
     pub max_iterations: u32,
     /// A boolean expression over the accumulated value that stops the loop when
-    /// it holds. Written in the [`crate::expr`] condition language, the same one
-    /// a [`BranchCondition::Expression`] uses, and validated at submit so a
+    /// it holds. Written in the `crate::expr` condition language, the same one
+    /// a `BranchCondition::Expression` uses, and validated at submit so a
     /// malformed predicate is a node-precise error, never a run-time failure.
     pub stop_when: String,
     /// How the passes are folded into the value the node produces.
     pub join: FoldJoin,
     /// Optional JSON Schema for the accumulated value the loop carries and
-    /// produces. Data only, like an [`AgentNode`]'s `output_schema`: recorded
+    /// produces. Data only, like an `AgentNode`'s `output_schema`: recorded
     /// for authoring and tooling, never wired into the edge type-compatibility
     /// check (a fold's produced-value semantics are not implemented with
     /// its execution). Additive: absent on the wire when unset.
@@ -536,10 +536,10 @@ pub struct FoldNode {
     pub accumulator_schema: Option<Value>,
 }
 
-/// The body a [`FoldNode`] runs each pass. Adjacently tagged, mirroring
-/// [`MapBody`], so adding a third form later stays additive. A `node` body names
+/// The body a `FoldNode` runs each pass. Adjacently tagged, mirroring
+/// `MapBody`, so adding a third form later stays additive. A `node` body names
 /// an existing node by id (checked for existence during validation); a
-/// `subgraph` body embeds a whole [`Graph`] and is deferred exactly as the map's
+/// `subgraph` body embeds a whole `Graph` and is deferred exactly as the map's
 /// subgraph body is.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(
@@ -557,12 +557,12 @@ pub enum FoldBody {
     Subgraph(Box<Graph>),
 }
 
-/// How a [`FoldNode`] folds its passes into the single value it produces.
+/// How a `FoldNode` folds its passes into the single value it produces.
 ///
 /// Adjacently tagged (`{"kind": "...", "value": ...}` for the variant that
 /// carries data, `{"kind": "..."}` for the unit variants) so a future join rule
 /// is a new variant that does not change how an existing document encodes,
-/// exactly like [`BranchCondition`].
+/// exactly like `BranchCondition`.
 ///
 /// The variants are grounded in what the AARG loop actually needs. `best_by` is
 /// the argmax winner the loop's "best draft wins, never the last pass" rule
@@ -579,7 +579,7 @@ pub enum FoldJoin {
     /// Produce the pass whose value MAXIMIZES the given reference (a path into
     /// the accumulated value, `score` or `review.overall_score`). This is the
     /// argmax the AARG loop needs: the best draft wins, never the last. The
-    /// reference is parsed at submit like a [`crate::expr`] path, so a malformed
+    /// reference is parsed at submit like a `crate::expr` path, so a malformed
     /// one is a node-precise error.
     BestBy(String),
     /// Produce the value of the last pass the loop ran.
@@ -601,8 +601,8 @@ pub struct Edge {
     pub from: String,
     /// The destination node id.
     pub to: String,
-    /// Optional label. When the source is a [`BranchNode`], this names the
-    /// [`BranchCase`] this edge realizes. Data only.
+    /// Optional label. When the source is a `BranchNode`, this names the
+    /// `BranchCase` this edge realizes. Data only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
 }

@@ -19,7 +19,8 @@ use std::time::{Duration, Instant};
 
 use salvor_core::Effect;
 use salvor_tools::{
-    DynTool, HandlerError, ToolCtx, ToolError, ToolHandler, ToolMeta, ToolOutcome, ToolSet,
+    DynTool, HandlerError, IdempotencyPath, ToolCtx, ToolError, ToolHandler, ToolMeta, ToolOutcome,
+    ToolSet,
 };
 use salvor_wasm::{
     DirGrant, GrantPerms, LimitExceeded, LimitKind, ToolLimits, WasmEngine, WasmError, WasmTool,
@@ -64,6 +65,7 @@ fn base_spec() -> WasmToolSpec {
         description: "the misbehaving test guest".to_owned(),
         effect: Effect::Read,
         input_schema: json!({ "type": "object" }),
+        idempotency_key: None,
         limits: ToolLimits::default(),
         grants: Vec::new(),
     }
@@ -453,6 +455,63 @@ async fn external_component_proof() {
         "external component proof passed for {} in {:?}",
         path.display(),
         started.elapsed()
+    );
+}
+
+/// A wasm tool the operator keyed derives its idempotency key from the named
+/// input field, in the same `<tool>:<value>` form an MCP tool does. The guest
+/// has no say in it: nothing crosses the boundary to ask.
+#[tokio::test]
+async fn a_declared_key_is_derived_from_the_named_field() {
+    let mut spec = base_spec();
+    spec.effect = Effect::Write;
+    spec.idempotency_key = Some(IdempotencyPath::parse("claim_id").expect("path parses"));
+    let tool = load_fixture(spec);
+
+    assert_eq!(
+        tool.idempotency_key(&json!({"mode": "echo", "claim_id": "wreck-9931"})),
+        Some("fixture:wreck-9931".to_owned())
+    );
+    // A tool with no declaration is keyless, exactly as before.
+    assert_eq!(
+        load_fixture(base_spec()).idempotency_key(&json!({"claim_id": "wreck-9931"})),
+        None
+    );
+}
+
+/// A keyed wasm tool called without the field it is keyed on is refused before
+/// the sandbox is entered, and the refusal names the tool, the path, and the
+/// keys the input carried.
+///
+/// The `fail` mode is the proof that the guest never ran: had it been
+/// instantiated it would have returned its own handler error instead.
+#[tokio::test]
+async fn a_call_missing_the_declared_field_never_reaches_the_guest() {
+    let mut spec = base_spec();
+    spec.effect = Effect::Write;
+    spec.idempotency_key = Some(IdempotencyPath::parse("claim_id").expect("path parses"));
+    let tool = load_fixture(spec);
+
+    let error = call(&tool, json!({ "mode": "fail", "message": "guest ran" }))
+        .await
+        .expect_err("a keyed tool refuses an input with no key");
+    match &error {
+        ToolError::MissingIdempotencyKey { tool, path, detail } => {
+            assert_eq!(tool, "fixture");
+            assert_eq!(path, "claim_id");
+            // Sorted, because that is the order a JSON object's keys come back
+            // in; the message is the same whichever order the caller wrote them.
+            assert!(
+                detail.contains("message, mode"),
+                "names the keys present: {detail}"
+            );
+        }
+        other => panic!("expected MissingIdempotencyKey, got {other:?}"),
+    }
+    assert!(
+        !full_chain(&error).contains("guest failure"),
+        "the guest must not have run: {}",
+        full_chain(&error)
     );
 }
 

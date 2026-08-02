@@ -6,7 +6,9 @@
 //! executable ([`EngineError::UnsupportedMapBody`]), an agent or tool the resolver
 //! could not supply, a graph whose topology is not a well-formed DAG, a branch
 //! that no case matched or whose model decision named no case, a tool that
-//! failed, or a node whose kind is not executable
+//! failed, a gate resumed with an approval that does not satisfy its
+//! `approval_schema` ([`EngineError::ApprovalSchemaViolation`]),
+//! or a node whose kind is not executable
 //! ([`EngineError::UnsupportedNode`], today a `fold`). Most are returned
 //! **before** recording anything for the node they
 //! name, so the log never carries events past the refusal; the two branch-decision
@@ -15,6 +17,7 @@
 //! fails). The second family is [`EngineError::Runtime`], the plain pass-through
 //! of a [`RuntimeError`] from the `RunCtx` operations the engine drives.
 
+use crate::approval::ApprovalViolation;
 use salvor_runtime::RuntimeError;
 use thiserror::Error;
 
@@ -134,6 +137,24 @@ pub enum EngineError {
         node: String,
         /// The recorded failure message.
         message: String,
+    },
+
+    /// A `gate` node was resumed with an input that does not satisfy the gate's
+    /// declared `approval_schema`. Returned from the **accept edge**: after the
+    /// gate's `Suspended` has been replayed and BEFORE `await_resume` can
+    /// append a `Resumed`, so the refusal appends nothing and leaves the run
+    /// parked exactly where it was, ready for a conforming approval. It is
+    /// therefore not reachable on replay at all: a recorded `Resumed` is
+    /// history and is fed to the gate untouched. See [`crate::approval`].
+    #[error(
+        "gate node `{node}`: the approval input does not satisfy the gate's approval_schema ({})",
+        .violations.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")
+    )]
+    ApprovalSchemaViolation {
+        /// The id of the gate node the run is parked at.
+        node: String,
+        /// Every way the input failed the schema, in a stable order.
+        violations: Vec<ApprovalViolation>,
     },
 
     /// The graph document could not be serialized to compute its hash. A graph

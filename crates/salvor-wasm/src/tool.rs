@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use salvor_core::Effect;
-use salvor_tools::{DynTool, HandlerError, ToolCtx, ToolError, ToolOutcome};
+use salvor_tools::{DynTool, HandlerError, IdempotencyPath, ToolCtx, ToolError, ToolOutcome};
 use serde_json::Value;
 
 use crate::engine::{CallFailure, WasmEngine};
@@ -42,6 +42,17 @@ pub struct WasmToolSpec {
     /// Directory preopens, the only capability grant. Empty means the guest
     /// can open nothing.
     pub grants: Vec<DirGrant>,
+    /// The input field whose value identifies the operation a call performs,
+    /// when the operator declares one. `None` means the tool's calls have no
+    /// business identity, which is the default and the honest answer for most
+    /// tools.
+    ///
+    /// Operator-authored like everything else here, and for a sharper reason
+    /// than usual: the guest is the thing being deduplicated, so letting it
+    /// name its own identity would let it name two calls the same, or one call
+    /// twice. See [`IdempotencyPath`] for the key format and what a call
+    /// missing the field gets.
+    pub idempotency_key: Option<IdempotencyPath>,
 }
 
 /// A sandboxed WebAssembly component tool.
@@ -107,6 +118,15 @@ impl WasmTool {
             spec,
         })
     }
+
+    /// The declared key for `input`, or the refusal that says why there is
+    /// none. `Ok(None)` is the ordinary case of a tool with no declaration.
+    fn declared_key(&self, input: &Value) -> Result<Option<String>, ToolError> {
+        match &self.spec.idempotency_key {
+            Some(path) => path.derive(&self.spec.name, input).map(Some),
+            None => Ok(None),
+        }
+    }
 }
 
 #[async_trait]
@@ -127,6 +147,17 @@ impl DynTool for WasmTool {
         self.spec.input_schema.clone()
     }
 
+    /// The key the operator's declaration derives from this input, if the spec
+    /// carries one.
+    ///
+    /// A derivation failure reads as `None` here only because this method has
+    /// no error channel; it is not a fall back to an unkeyed call, since
+    /// [`call_json`](DynTool::call_json) refuses the same input before the
+    /// sandbox is entered.
+    fn idempotency_key(&self, input: &Value) -> Option<String> {
+        self.declared_key(input).ok().flatten()
+    }
+
     async fn call_json(
         &self,
         _ctx: &ToolCtx,
@@ -136,6 +167,11 @@ impl DynTool for WasmTool {
         // parameter to forward it to (same posture as MCP: the key still
         // governs the loop's retry decision from the event log).
         let tool = self.spec.name.clone();
+
+        // A declared key is a precondition, checked before the guest is
+        // instantiated: an input that yields no key means the call the operator
+        // meant to identify cannot be identified, so it does not happen.
+        self.declared_key(&input)?;
 
         // A `Value` always serializes: object keys are strings by
         // construction. The map_err is defensive completeness, not a path

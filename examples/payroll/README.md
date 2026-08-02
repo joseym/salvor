@@ -242,6 +242,19 @@ plain Write body: a Write killed mid-write parks the run for a human to reconcil
 (see [`examples/reconciliation/`](../reconciliation/)), while an Idempotent one
 recovers on its own and is still exactly-once.
 
+This hand-rolled check predates `idempotency_keys`, the config-level mechanism
+`agent_config.rs` documents and the main README's "No duplicate side effects"
+bullet points to. The two are different patterns, worth telling apart. Here the
+tool owns its own identity: `pay_employee` checks `pay_period:id` under its own
+lock before it appends, so it stays exactly-once no matter what calls it or how
+many times. `idempotency_keys` is the runtime owning identity instead: the
+operator declares which input field names the operation, and the store refuses
+a second execution across separate `salvor run` invocations, which is what
+covers a tool that cannot make that promise on its own, most commonly a
+third-party MCP server or a wasm component you did not write. Use
+tool-owns-identity when the tool already sits in front of the durable state it
+is protecting, as this one does. Use runtime-owns-identity when it does not.
+
 ## The tools, and why each effect is what it is
 
 [`server.py`](server.py) is a four-tool MCP server in pure Python standard

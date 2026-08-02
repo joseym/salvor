@@ -27,7 +27,7 @@ use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerInfo};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::{ErrorData, ServerHandler, tool, tool_handler, tool_router};
-use salvor_tools::mcp::{EffectOverrides, McpServer};
+use salvor_tools::mcp::{EffectOverrides, IdempotencyKeys, McpServer};
 use salvor_tools::{DynTool, Effect, ToolCtx, ToolOutcome};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -173,7 +173,7 @@ async fn spawn_server(require_token: bool) -> TestServer {
 
 /// Connects to `url` over HTTP with no auth and no overrides.
 async fn connect(url: &str) -> McpServer {
-    McpServer::connect_http(url, None, &EffectOverrides::new())
+    McpServer::connect_http(url, None, &EffectOverrides::new(), &IdempotencyKeys::new())
         .await
         .expect("the HTTP fixture connects, initializes, and lists tools")
 }
@@ -227,7 +227,7 @@ async fn an_override_beats_the_annotation_over_http() {
     let server = spawn_server(false).await;
     // read_note is annotated read-only, but the operator declares it a Write.
     let overrides = EffectOverrides::new().with("read_note", Effect::Write);
-    let client = McpServer::connect_http(&server.url, None, &overrides)
+    let client = McpServer::connect_http(&server.url, None, &overrides, &IdempotencyKeys::new())
         .await
         .expect("connect with overrides");
 
@@ -301,9 +301,14 @@ async fn a_bearer_token_is_sent_and_accepted() {
     // The server refuses any request without the token; connecting with it
     // proves connect_http puts the credential on the wire.
     let server = spawn_server(true).await;
-    let client = McpServer::connect_http(&server.url, Some(TOKEN), &EffectOverrides::new())
-        .await
-        .expect("connecting with the bearer token succeeds");
+    let client = McpServer::connect_http(
+        &server.url,
+        Some(TOKEN),
+        &EffectOverrides::new(),
+        &IdempotencyKeys::new(),
+    )
+    .await
+    .expect("connecting with the bearer token succeeds");
 
     let outcome = find(&client, "read_note")
         .call_json(&ToolCtx::new(None), json!({}))
@@ -323,7 +328,13 @@ async fn an_unauthenticated_client_is_rejected() {
     // `McpServer` is not `Debug`, so match rather than `expect_err`. It fails at
     // the handshake; the exact rmcp error text is not pinned, only that
     // connecting did not succeed.
-    let result = McpServer::connect_http(&server.url, None, &EffectOverrides::new()).await;
+    let result = McpServer::connect_http(
+        &server.url,
+        None,
+        &EffectOverrides::new(),
+        &IdempotencyKeys::new(),
+    )
+    .await;
     assert!(
         result.is_err(),
         "a gated server rejects an unauthenticated client"

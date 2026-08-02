@@ -103,6 +103,23 @@ pub enum ApiError {
         /// or edge at fault.
         errors: Value,
     },
+    /// A graph run parked at a `gate` was resumed with an approval that does
+    /// not satisfy the gate's declared `approval_schema`. HTTP 400. Carries the
+    /// gate's node id and the full violation list as evidence, in the same
+    /// collect-all spirit as [`InvalidGraph`](Self::InvalidGraph): an operator
+    /// filling an approval form should see every field that is wrong in one
+    /// response, not one per round trip.
+    ///
+    /// Refused synchronously, before the driver task is spawned, so the log is
+    /// untouched and the run stays parked at that gate.
+    ApprovalSchemaViolation {
+        /// The human sentence.
+        message: String,
+        /// The id of the gate node the run is parked at.
+        node: String,
+        /// Each violation as `{ path, message }`, in a stable order.
+        violations: Value,
+    },
     /// No graph is stored under the given hash. HTTP 404.
     UnknownGraph(String),
     /// A graph-only endpoint (the per-run graph projection) was asked for a run
@@ -163,6 +180,9 @@ impl ApiError {
             ApiError::RunExists(_) => (StatusCode::CONFLICT, "run_exists"),
             ApiError::WrongState(_) => (StatusCode::CONFLICT, "wrong_state"),
             ApiError::InvalidGraph { .. } => (StatusCode::BAD_REQUEST, "invalid_graph"),
+            ApiError::ApprovalSchemaViolation { .. } => {
+                (StatusCode::BAD_REQUEST, "approval_schema_violation")
+            }
             ApiError::UnknownGraph(_) => (StatusCode::NOT_FOUND, "unknown_graph"),
             ApiError::NotAGraphRun(_) => (StatusCode::CONFLICT, "not_a_graph_run"),
             ApiError::InvalidForkNode(_) => (StatusCode::CONFLICT, "invalid_fork_node"),
@@ -219,6 +239,7 @@ impl ApiError {
             | ApiError::NotAGraphRun(m)
             | ApiError::InvalidForkNode(m)
             | ApiError::InvalidGraph { message: m, .. }
+            | ApiError::ApprovalSchemaViolation { message: m, .. }
             | ApiError::OriginNeedsReconciliation { message: m, .. }
             | ApiError::WriteReplayHazard { message: m, .. }
             | ApiError::NeedsReconciliation { message: m, .. } => m.clone(),
@@ -242,6 +263,11 @@ impl IntoResponse for ApiError {
             }
             ApiError::InvalidGraph { errors, .. } => {
                 error["details"] = json!({ "errors": errors });
+            }
+            ApiError::ApprovalSchemaViolation {
+                node, violations, ..
+            } => {
+                error["details"] = json!({ "node": node, "violations": violations });
             }
             _ => {}
         }

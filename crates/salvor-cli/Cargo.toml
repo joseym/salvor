@@ -11,10 +11,10 @@ license.workspace = true
 homepage = "https://github.com/joseym/salvor"
 
 # dist metadata for the released artifact. Building with default features OFF
-# drops salvor-cli's `fixture` feature, and with it the four fixture-gated
-# binaries (salvor-mcp-count-fixture, salvor-demo-research, salvor-demo-model,
-# salvor-hero-tools) that exist only for tests, the demo, and the examples/hero
-# fixture. That leaves the real `salvor` binary as the sole artifact. The binary
+# drops salvor-cli's `fixture` feature, and with it the five fixture-gated
+# binaries (salvor-mcp-count-fixture, salvor-mcp-payout-fixture,
+# salvor-demo-research, salvor-demo-model, salvor-hero-tools) that exist only for
+# tests, the demo, and the examples/hero fixture. That leaves the real `salvor` binary as the sole artifact. The binary
 # stays fully functional: MCP-client support and the wasm sandbox arrive through
 # the unconditional lib dependencies (salvor-tools, salvor-wasm), not through
 # this crate's own features. `salvor run --fixture` is likewise unconditional:
@@ -42,17 +42,19 @@ features = ["ui"]
 "*" = ["salvor"]
 
 [features]
-# `fixture` builds the three in-repo MCP servers: the counting server the CLI
-# integration tests spawn (`src/bin/mcp_count_fixture.rs`), the research
-# server behind the demo/ reference agent (`src/bin/demo_research.rs`), and the
-# salvage-claim server behind the examples/hero fixture
-# (`src/bin/hero_tools.rs`). All three pull in the server half of the rmcp SDK
+# `fixture` builds the four in-repo MCP servers: the counting server the CLI
+# integration tests spawn (`src/bin/mcp_count_fixture.rs`), the payout server
+# the cross-run idempotency tests spawn (`src/bin/mcp_payout_fixture.rs`), the
+# research server behind the demo/ reference agent (`src/bin/demo_research.rs`),
+# and the salvage-claim server behind the examples/hero fixture
+# (`src/bin/hero_tools.rs`). All four pull in the server half of the rmcp SDK
 # and schemars only for those binaries. The feature is on by default so a plain
 # `cargo test --workspace` builds them and Cargo sets
-# CARGO_BIN_EXE_salvor-mcp-count-fixture, CARGO_BIN_EXE_salvor-demo-research,
+# CARGO_BIN_EXE_salvor-mcp-count-fixture,
+# CARGO_BIN_EXE_salvor-mcp-payout-fixture, CARGO_BIN_EXE_salvor-demo-research,
 # and CARGO_BIN_EXE_salvor-hero-tools for the tests, exactly the pattern
 # salvor-tools uses for its own fixture. `--no-default-features` drops all
-# three, and with them the server-side rmcp surface, leaving only the client MCP
+# four, and with them the server-side rmcp surface, leaving only the client MCP
 # support the product uses (which arrives transitively through salvor-tools).
 # Adding these deps costs the workspace nothing: salvor-tools already compiles
 # rmcp with the server features on, so feature unification means no new
@@ -73,6 +75,15 @@ path = "src/main.rs"
 [[bin]]
 name = "salvor-mcp-count-fixture"
 path = "src/bin/mcp_count_fixture.rs"
+required-features = ["fixture"]
+
+# The payout MCP fixture server: one `pay_claim` tool with no deduplication of
+# its own, appending one ledger line per real execution, which is what the
+# cross-run idempotency tests count. Test-support only, gated exactly like the
+# counting fixture above.
+[[bin]]
+name = "salvor-mcp-payout-fixture"
+path = "src/bin/mcp_payout_fixture.rs"
 required-features = ["fixture"]
 
 # The research MCP server behind the demo/ reference agent.

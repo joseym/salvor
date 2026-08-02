@@ -87,19 +87,33 @@ async fn resume_reports_then_resolve_records_the_completion() {
         "reconciliation refusal: {stdout}"
     );
 
-    // `resolve` records the completion by hand and exits 0.
+    // `resolve` records the completion by hand and exits 0. Given `--agent`,
+    // its success report prints a COMPLETE resume command (the real path,
+    // not a `--agent <FILE>` placeholder), matching what a graph run's own
+    // parked report already prints.
     salvor(&store_path)
-        .args(["resolve", &uuid, "--output", r#"{"published": true}"#])
+        .args([
+            "resolve",
+            &uuid,
+            "--output",
+            r#"{"published": true}"#,
+            "--agent",
+            "agents/writer.toml",
+        ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("resolved"));
+        .stdout(
+            predicate::str::contains("resolved").and(predicate::str::contains(format!(
+                "salvor resume {uuid} --agent agents/writer.toml\n"
+            ))),
+        );
 
     // Exactly one event was appended, and it is the correlated completion.
     let store = SqliteStore::open(&store_path).expect("store opens");
     let log = store.read_log(run_id).await.expect("log reads");
     assert_eq!(log.len(), 3, "resolve appends exactly one event");
     match &log[2].event {
-        Event::ToolCallCompleted { seq, output } => {
+        Event::ToolCallCompleted { seq, output, .. } => {
             assert_eq!(*seq, SequenceNumber::new(1), "correlates to the intent");
             assert_eq!(*output, json!({"published": true}));
         }

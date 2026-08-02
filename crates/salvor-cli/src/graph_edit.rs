@@ -63,10 +63,15 @@
 //!
 //! # How a session ends
 //!
-//! At end of input, and only there: `Ctrl-D` at a terminal, the last line of a
-//! redirected script. There is deliberately no `quit` command, because the
-//! grammar belongs to the editor and the editor has no loop to leave; a word
-//! this module intercepted would be a word that works here and nowhere else.
+//! Two ways, and both mean exactly the same thing: end of input (`Ctrl-D` at
+//! a terminal, the last line of a redirected script), or typing `exit` or
+//! `quit`. Both belong to the editor's own grammar (see
+//! [`salvor_cli_core::graph_editor::Command::Quit`]), not to this module: a
+//! word this loop intercepted itself would be a word that worked here and
+//! nowhere else (not in a `--script`, not through the wasm boundary a browser
+//! terminal drives), which is the trap a host-side `quit` would set. This
+//! loop's whole part in it is checking [`Session::quit`] after every line and
+//! stopping, the same check it already made for end of input.
 //!
 //! `Ctrl-C` at a terminal throws away the line being typed and prompts again,
 //! which is the only thing it CAN mean once there is a line to throw away. A
@@ -165,6 +170,12 @@ pub async fn edit(args: GraphEditArgs) -> Result<u8> {
                 // have taken.
                 return Ok(1);
             }
+            if session.quit {
+                // `exit`/`quit` in a `--script` ends the session right there,
+                // the same as it does at a prompt: nothing after it runs, and
+                // no further input (interactive or not) is read.
+                return Ok(0);
+            }
         }
     }
 
@@ -220,7 +231,7 @@ async fn read_a_line_at_a_time(session: &mut Session, interactive: bool) -> Resu
             break;
         }
         session.feed(buffer.trim_end_matches(['\n', '\r'])).await;
-        if session.refused && !interactive {
+        if session.quit || (session.refused && !interactive) {
             break;
         }
     }
@@ -251,6 +262,9 @@ async fn read_with_line_editing(session: &mut Session, mut reader: LineReader) -
                     let _ = reader.add_history_entry(line.as_str());
                 }
                 session.feed(line.trim_end_matches(['\n', '\r'])).await;
+                if session.quit {
+                    break;
+                }
             }
             // Ctrl-D on an empty line: end of input, exactly as it is for a
             // script that ran out of lines. The newline closes the line the
@@ -410,6 +424,10 @@ struct Session {
     /// could not use. It only ever goes from false to true: the exit code says
     /// that something in this session did not take, whatever came after it.
     refused: bool,
+    /// True once `exit` or `quit` was typed. Both read loops check this after
+    /// every line and stop, exactly as they already stop at end of input: a
+    /// typed word and Ctrl-D are the SAME way to leave a session, not two.
+    quit: bool,
 }
 
 impl Session {
@@ -419,6 +437,7 @@ impl Session {
             editor: Editor::new(),
             width,
             refused: false,
+            quit: false,
         }
     }
 
@@ -529,6 +548,13 @@ impl Session {
             // An invalid document is an answer to `validate`, not a failed
             // command, so it prints as output and leaves the exit code alone.
             Status::Ok | Status::Invalid => print!("{}", outcome.text),
+            // `exit`/`quit`: shown like any other command, then the loop that
+            // called us checks `quit` and stops, exactly as it would at
+            // end of input.
+            Status::Exit => {
+                print!("{}", outcome.text);
+                self.quit = true;
+            }
         }
     }
 

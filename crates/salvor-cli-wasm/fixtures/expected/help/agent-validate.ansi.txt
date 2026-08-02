@@ -1,6 +1,6 @@
 Build an agent definition and report what it declares, or the precise field-level error that stops it from building.
 
-This runs the exact build every other verb that takes `--agent` runs: a strict parse (an unknown field, a missing `model`, or a wrong type names the offending field) followed by a connection to every declared MCP server to collect its tool contracts, so a server that will not start is caught here rather than at run time. Nothing about the check differs from `salvor agent hash`; this verb only exists to be asked for by name and to report more than a hash.
+By default this CONNECTS: it runs the exact build every other verb that takes `--agent` runs, which is a strict parse (an unknown field, a missing `model`, or a wrong type names the offending field) followed by connecting to each declared MCP server to introspect its tools, so a server that will not start is caught here rather than at run time. `--no-connect` skips that connection step: it checks only that the file parses and its fields have the right shape, and spawns no process and dials no socket, so it also works for a server whose command is not installed on this machine. Nothing else about the check differs from `salvor agent hash`; this verb only exists to be asked for by name and to report more than a hash.
 
 [1m[4mUsage:[0m [1msalvor agent validate[0m [OPTIONS] <FILE>...
 
@@ -11,6 +11,11 @@ This runs the exact build every other verb that takes `--agent` runs: a strict p
           Each file is built independently: one file that fails to build does not stop the rest from being checked. Every file is reported, in the order given, and the command exits non-zero if any one of them fails.
 
 [1m[4mOptions:[0m
+      [1m--no-connect[0m
+          Check fields and shape only; do not connect to any declared MCP server.
+          
+          Without this flag, validation connects to each declared MCP server (spawns a `command` transport, dials a `url` transport) to introspect its tools, the same connection a real run makes. With this flag, no process is spawned and no socket is dialed: only the TOML's fields and shape are checked, so a declared server whose command is not installed on this machine still passes. The report says which MCP servers were skipped this way, and the printed hash is omitted, since an agent's hash depends on MCP tool schemas this mode never collects.
+
       [1m--store[0m <PATH>
           Path to the SQLite event store.
           

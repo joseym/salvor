@@ -195,6 +195,26 @@
             "global": false,
             "help": "The output to record for the dangling write, after verifying externally what it did: a JSON value, or `@path` to read JSON from a file. It is recorded verbatim as the tool's output, so replay never re-runs the write",
             "possible_values": null
+          },
+          {
+            "long": "--agent",
+            "short": null,
+            "value_name": "FILE",
+            "required": false,
+            "repeatable": true,
+            "global": false,
+            "help": "Path to the agent definition (TOML) this run used. Repeatable, same flag `resume` takes. `resolve` neither reads nor builds it: the only use is echoing it back into the resume command printed on success, so that hint is a complete, real command rather than a `--agent <FILE>` placeholder the operator has to fill in by hand",
+            "possible_values": null
+          },
+          {
+            "long": "--graph",
+            "short": null,
+            "value_name": "FILE",
+            "required": false,
+            "repeatable": false,
+            "global": false,
+            "help": "Path to the graph document (JSON) this run used, for the same reason `--agent` is accepted: echoed into the printed resume command for a graph run. Omit for an ordinary agent run",
+            "possible_values": null
           }
         ],
         "subcommands": []
@@ -344,7 +364,7 @@
       },
       {
         "name": "replay",
-        "about": "Re-derive a run's state from its log without executing anything",
+        "about": "Re-derive a run's state from its log without executing anything. The only mode; nothing is ever executed",
         "hidden": false,
         "args": [
           {
@@ -364,7 +384,7 @@
             "required": false,
             "repeatable": false,
             "global": false,
-            "help": "Re-derive state from the log without executing anything. Required in this version: live replay is not yet available",
+            "help": "Accepted and ignored. Re-deriving state without executing anything is the only mode `replay` has ever run in; this flag stays only so a script written against an earlier version that passed it does not break",
             "possible_values": null
           }
         ],
@@ -493,6 +513,16 @@
                 "repeatable": true,
                 "global": false,
                 "help": "An agent definition (TOML) to validate. Repeatable",
+                "possible_values": null
+              },
+              {
+                "long": "--no-connect",
+                "short": null,
+                "value_name": null,
+                "required": false,
+                "repeatable": false,
+                "global": false,
+                "help": "Check fields and shape only; do not connect to any declared MCP server",
                 "possible_values": null
               }
             ],

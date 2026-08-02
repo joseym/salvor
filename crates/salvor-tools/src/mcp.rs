@@ -25,6 +25,11 @@
 //!   below.
 //! - [`EffectOverrides`] and [`effect_for`] decide a tool's [`Effect`] from the
 //!   server's annotation hints, subject to per-tool operator overrides.
+//! - [`IdempotencyKeys`] carries the operator's per-tool declaration of which
+//!   input field identifies a call, which is what lets a server's tool
+//!   participate in cross-run deduplication. See
+//!   [`IdempotencyPath`](crate::IdempotencyPath) for the key format and the
+//!   refusal rule.
 //!
 //! # Effect mapping: hints are not guarantees
 //!
@@ -72,6 +77,8 @@ use std::collections::BTreeMap;
 use rmcp::model::ToolAnnotations;
 use salvor_core::Effect;
 
+use crate::idempotency::IdempotencyPath;
+
 pub use server::{McpError, McpServer};
 pub use tool::McpTool;
 
@@ -112,6 +119,64 @@ impl EffectOverrides {
     }
 
     /// Whether no overrides are set.
+    pub fn is_empty(&self) -> bool {
+        self.by_name.is_empty()
+    }
+}
+
+/// Per-tool idempotency key declarations supplied by the operator at connection
+/// time.
+///
+/// An entry names, for one tool, the input field whose value identifies the
+/// operation the call performs. A `pay_claim` entry of `"claim_id"` says that a
+/// call carrying `{"claim_id": "wreck-9931"}` *is* the payout for that claim,
+/// whichever run asks for it, which is the statement the store needs before it
+/// can let exactly one run execute it (see
+/// [`RunCtx::tool_call`](../../salvor_runtime/struct.RunCtx.html#method.tool_call)).
+///
+/// The declaration is the operator's, not the server's, for the same reason
+/// [`EffectOverrides`] is: a server's own account of its tools is a hint, and
+/// nothing on the wire says which field of a call names the money.
+///
+/// A tool with no entry is untouched: it declares no key, exactly as before.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct IdempotencyKeys {
+    by_name: BTreeMap<String, IdempotencyPath>,
+}
+
+impl IdempotencyKeys {
+    /// An empty declaration set. Every tool is keyless.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Declares `path` as the identifying field for the tool named `name`,
+    /// returning `self` so declarations chain.
+    #[must_use]
+    pub fn with(mut self, name: impl Into<String>, path: IdempotencyPath) -> Self {
+        self.by_name.insert(name.into(), path);
+        self
+    }
+
+    /// Inserts a declaration for `name`, replacing any previous one.
+    pub fn insert(&mut self, name: impl Into<String>, path: IdempotencyPath) {
+        self.by_name.insert(name.into(), path);
+    }
+
+    /// The declared path for `name`, if there is one.
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<&IdempotencyPath> {
+        self.by_name.get(name)
+    }
+
+    /// Every declared tool name, in sorted order. The caller checks these
+    /// against the tools a server actually advertises.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.by_name.keys().map(String::as_str)
+    }
+
+    /// Whether nothing is declared.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.by_name.is_empty()
     }

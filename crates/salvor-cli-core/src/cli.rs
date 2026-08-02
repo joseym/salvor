@@ -68,7 +68,8 @@ pub enum Command {
     Completions(CompletionsArgs),
     /// Print a run's event log.
     History(HistoryArgs),
-    /// Re-derive a run's state from its log without executing anything.
+    /// Re-derive a run's state from its log without executing anything. The
+    /// only mode; nothing is ever executed.
     Replay(ReplayArgs),
     /// Run the control-plane HTTP + server-sent-events server over the store.
     Serve(ServeArgs),
@@ -115,13 +116,17 @@ pub enum AgentCommand {
     /// Build an agent definition and report what it declares, or the precise
     /// field-level error that stops it from building.
     ///
-    /// This runs the exact build every other verb that takes `--agent` runs:
-    /// a strict parse (an unknown field, a missing `model`, or a wrong type
-    /// names the offending field) followed by a connection to every declared
-    /// MCP server to collect its tool contracts, so a server that will not
-    /// start is caught here rather than at run time. Nothing about the check
-    /// differs from `salvor agent hash`; this verb only exists to be asked
-    /// for by name and to report more than a hash.
+    /// By default this CONNECTS: it runs the exact build every other verb
+    /// that takes `--agent` runs, which is a strict parse (an unknown field,
+    /// a missing `model`, or a wrong type names the offending field)
+    /// followed by connecting to each declared MCP server to introspect its
+    /// tools, so a server that will not start is caught here rather than at
+    /// run time. `--no-connect` skips that connection step: it checks only
+    /// that the file parses and its fields have the right shape, and spawns
+    /// no process and dials no socket, so it also works for a server whose
+    /// command is not installed on this machine. Nothing else about the
+    /// check differs from `salvor agent hash`; this verb only exists to be
+    /// asked for by name and to report more than a hash.
     Validate(AgentValidateArgs),
 }
 
@@ -148,6 +153,19 @@ pub struct AgentValidateArgs {
     /// order given, and the command exits non-zero if any one of them fails.
     #[arg(value_name = "FILE", required = true)]
     pub agents: Vec<PathBuf>,
+    /// Check fields and shape only; do not connect to any declared MCP
+    /// server.
+    ///
+    /// Without this flag, validation connects to each declared MCP server
+    /// (spawns a `command` transport, dials a `url` transport) to introspect
+    /// its tools, the same connection a real run makes. With this flag, no
+    /// process is spawned and no socket is dialed: only the TOML's fields and
+    /// shape are checked, so a declared server whose command is not
+    /// installed on this machine still passes. The report says which MCP
+    /// servers were skipped this way, and the printed hash is omitted, since
+    /// an agent's hash depends on MCP tool schemas this mode never collects.
+    #[arg(long = "no-connect")]
+    pub no_connect: bool,
 }
 
 /// The verbs under `salvor graph`.
@@ -275,7 +293,7 @@ pub struct RunArgs {
     /// declared `[llm] base_url_env` variable at it, so the agent file needs
     /// no edit to switch between the fixture and a real model. Everything
     /// after that is an ordinary run: the same store, the same event log, the
-    /// same kill/resume guarantee. See [`crate::fixture`].
+    /// same kill/resume guarantee.
     #[arg(long, value_name = "DIR")]
     pub fixture: Option<PathBuf>,
 }
@@ -349,6 +367,18 @@ pub struct ResolveArgs {
     /// write.
     #[arg(long, value_name = "JSON|@FILE")]
     pub output: String,
+    /// Path to the agent definition (TOML) this run used. Repeatable, same
+    /// flag `resume` takes. `resolve` neither reads nor builds it: the only
+    /// use is echoing it back into the resume command printed on success, so
+    /// that hint is a complete, real command rather than a `--agent <FILE>`
+    /// placeholder the operator has to fill in by hand.
+    #[arg(long = "agent", value_name = "FILE")]
+    pub agents: Vec<PathBuf>,
+    /// Path to the graph document (JSON) this run used, for the same reason
+    /// `--agent` is accepted: echoed into the printed resume command for a
+    /// graph run. Omit for an ordinary agent run.
+    #[arg(long, value_name = "FILE")]
+    pub graph: Option<PathBuf>,
 }
 
 /// Arguments to `abandon`.
@@ -380,8 +410,10 @@ pub struct ReplayArgs {
     /// The run id (a UUID) to re-derive state for.
     #[arg(value_name = "RUN_ID")]
     pub run_id: String,
-    /// Re-derive state from the log without executing anything. Required in
-    /// this version: live replay is not yet available.
+    /// Accepted and ignored. Re-deriving state without executing anything is
+    /// the only mode `replay` has ever run in; this flag stays only so a
+    /// script written against an earlier version that passed it does not
+    /// break.
     #[arg(long)]
     pub dry_run: bool,
 }

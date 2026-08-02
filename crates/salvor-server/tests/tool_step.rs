@@ -461,7 +461,10 @@ async fn dangling_write_reconciles_then_resolve_unsticks() {
 
     let log = read_log(&client, &server.base, &run).await;
     assert_eq!(log.len(), 3, "the intent gained its resolved completion");
-    let Event::ToolCallCompleted { seq: corr, output } = &log[2].event else {
+    let Event::ToolCallCompleted {
+        seq: corr, output, ..
+    } = &log[2].event
+    else {
         panic!("seq 2 is the completion");
     };
     assert_eq!(corr.get(), 1, "correlates to the dangling intent");

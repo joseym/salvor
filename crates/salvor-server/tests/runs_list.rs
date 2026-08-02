@@ -163,12 +163,24 @@ async fn list_omits_folded_fields_for_a_run_whose_log_cannot_be_read() {
     let corrupt_run = run_to_completion(&client, &server, &agent).await;
 
     // Tamper with the corrupt run's first row through a second raw connection
-    // to the same file-backed store -- a stand-in for the "corrupt row on
-    // disk" scenario `read_log` reports as `StoreError::Serialization`. The
-    // aggregate columns `list_runs` reads (`recorded_at`) are untouched, so
-    // the summary projection stays intact; only the JSON payload is broken.
+    // to the same file-backed store -- a stand-in for the "unreadable row on
+    // disk" scenario, which `read_log` now refuses with
+    // `StoreError::TamperEvident` because the row no longer matches the run's
+    // hash chain. The aggregate columns `list_runs` reads (`recorded_at`) are
+    // untouched, so the summary projection stays intact; only the log is
+    // unreadable.
+    //
+    // The store keeps triggers on `events` that refuse UPDATE and DELETE, so
+    // the tamper has to drop them first. That is the point of them: they stop
+    // a casual edit, they do not stop anyone who can write the file, and the
+    // chain is what catches the write either way.
     {
         let raw = rusqlite::Connection::open(&db_path).expect("open raw connection");
+        raw.execute_batch(
+            "DROP TRIGGER IF EXISTS events_refuse_update;
+             DROP TRIGGER IF EXISTS events_refuse_delete;",
+        )
+        .expect("drop the append-only guards");
         let changed = raw
             .execute(
                 "UPDATE events SET envelope = 'not valid json' WHERE run_id = ?1 AND seq = 0",

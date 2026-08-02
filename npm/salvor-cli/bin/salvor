@@ -1,0 +1,16 @@
+#!/usr/bin/env node
+"use strict";
+
+// Fallback relay, used only when postinstall could not replace this file's
+// own bytes with the downloaded `salvor` binary: --ignore-scripts installs,
+// a failed postinstall, or (always) on Windows. See lib/binarylink.js for
+// why the swap is the real fix and what this relay still does (download on
+// first use, forward SIGINT/SIGTERM/SIGHUP, mirror exit status) and cannot
+// do (forward SIGKILL to the child).
+//
+// If you are reading this as plain text, the swap has not happened on this
+// machine. If npm ran `salvor` and you are reading binary garbage instead,
+// it has: this file is now the real binary and this comment is dead code
+// that never executes again.
+
+require("../lib/binarylink").run("salvor");

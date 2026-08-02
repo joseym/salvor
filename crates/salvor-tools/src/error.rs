@@ -65,6 +65,11 @@ impl HandlerError {
 /// - [`ToolError::OutputSerialization`] means the handler succeeded but its
 ///   `Output` value could not be serialized to JSON. This is an internal fault
 ///   in the tool definition, not the model's doing and not a retryable failure.
+/// - [`ToolError::MissingIdempotencyKey`] means the operator declared which
+///   input field identifies this tool's calls and the call does not carry it.
+///   The tool was **not** called, and it will not be called unkeyed. Like
+///   `InvalidInput` this is the arguments being wrong, so the loop feeds it back
+///   to the model rather than retrying it.
 #[derive(Debug, Error)]
 pub enum ToolError {
     /// The model's JSON input did not match the tool's input schema. The
@@ -85,6 +90,23 @@ pub enum ToolError {
         /// The handler's own error.
         #[source]
         source: HandlerError,
+    },
+    /// The tool has a declared idempotency key path and this call's input does
+    /// not yield a key from it. Nothing ran.
+    ///
+    /// See [`IdempotencyPath::derive`](crate::IdempotencyPath::derive) for what
+    /// counts as a key and why falling back to an unkeyed call is not an option
+    /// here.
+    #[error(
+        "tool `{tool}` declares idempotency key path `{path}`, but this call's input yields no key: {detail}. Nothing ran: a tool whose calls carry an identity is never called without one"
+    )]
+    MissingIdempotencyKey {
+        /// The tool whose call was refused.
+        tool: String,
+        /// The declared path, as the operator wrote it.
+        path: String,
+        /// What went wrong at that path, including the keys the input carries.
+        detail: String,
     },
     /// The handler succeeded but its output could not be serialized to JSON.
     #[error("tool `{tool}` produced output that could not be serialized: {source}")]

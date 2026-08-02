@@ -108,6 +108,13 @@ impl ToolFailure {
     pub fn from_error(error: &salvor_tools::ToolError, attempts: u32) -> Self {
         let kind = match error {
             salvor_tools::ToolError::InvalidInput { .. } => ToolFailureKind::InvalidInput,
+            // A call refused for want of its declared idempotency key never
+            // reached the tool, and the fault is in the arguments, which is
+            // exactly what `invalid_input` records. It shares that wire kind
+            // rather than minting a new one: the recorded `kind` strings are a
+            // stable format that replay parses, and this failure needs no new
+            // handling, only its own message.
+            salvor_tools::ToolError::MissingIdempotencyKey { .. } => ToolFailureKind::InvalidInput,
             salvor_tools::ToolError::Handler { .. } => ToolFailureKind::Handler,
             salvor_tools::ToolError::OutputSerialization { .. } => {
                 ToolFailureKind::OutputSerialization

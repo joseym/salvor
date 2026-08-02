@@ -18,11 +18,12 @@ time.workspace = true
 # async barrier (`sync`). `macros` is for the crate's own self-test below. A
 # consumer supplies the runtime; the kit only borrows the current one.
 tokio = { version = "1", features = ["rt", "sync", "macros"] }
+# The kit defines a trait with an async method (`TamperHarness`), the same way
+# `EventStore` itself is defined, so it needs the same rewriting macro.
+async-trait.workspace = true
 
 [dev-dependencies]
 # The self-test drives the checks against an in-crate reference store, and its
 # concurrency check wants real threads, so the multi-threaded scheduler is
-# added here. `async-trait` is only needed to write that reference store's
-# `EventStore` impl, matching how the real backends implement the trait.
+# added here.
 tokio = { version = "1", features = ["rt-multi-thread"] }
-async-trait.workspace = true

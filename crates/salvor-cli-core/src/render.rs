@@ -13,7 +13,7 @@ use salvor_replay::{
     event_detail, event_kind,
 };
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
 
 /// One `history` line: sequence, recorded time, kind, and the detail. The
@@ -234,8 +234,20 @@ pub fn reconciliation_report(
 /// completion by hand: the run has left reconciliation and can be continued.
 /// `width` is the column count its prose wraps to; the command line never
 /// wraps, see [`wrap`].
+///
+/// `agents` and `graph` are the `--agent`/`--graph` values `resolve` itself
+/// was given (see [`crate::cli::ResolveArgs`]); when the operator supplied
+/// them, the printed command is the real, complete one, exactly as a graph
+/// run's own parked report is (see `report_graph_outcome` in
+/// `salvor_cli::commands`). When neither was given, the command falls back to
+/// a `--agent <FILE>` placeholder, since there is nothing real to print.
 #[must_use]
-pub fn resolved_report(run_uuid: &str, width: usize) -> String {
+pub fn resolved_report(
+    run_uuid: &str,
+    agents: &[PathBuf],
+    graph: Option<&Path>,
+    width: usize,
+) -> String {
     let mut out = wrap(
         &format!(
             "Run {run_uuid} resolved: recorded the missing write completion by hand. The run \
@@ -245,9 +257,23 @@ pub fn resolved_report(run_uuid: &str, width: usize) -> String {
         "",
         "",
     );
-    out.push_str(&format!(
-        "\n  salvor resume {run_uuid} --agent <agent.toml>\n"
-    ));
+    let mut command = format!("salvor resume {run_uuid}");
+    if let Some(graph) = graph {
+        command.push_str(&format!(" --graph {}", graph.display()));
+    }
+    if agents.is_empty() && graph.is_none() {
+        command.push_str(" --agent <FILE>");
+    } else {
+        for agent in agents {
+            command.push_str(&format!(" --agent {}", agent.display()));
+        }
+    }
+    // No `--input`: a resolved run is a crashed run whose missing completion
+    // was just recorded by hand, so `resume` recovers it rather than resuming a
+    // parked one, and `recover` ignores `--input` (it warns and drops it). The
+    // command printed here is meant to be copied as it stands, so it carries
+    // only flags that do something.
+    out.push_str(&format!("\n  {command}\n"));
     out
 }
 
@@ -800,8 +826,18 @@ mod tests {
         assert_eq!(words(&narrow), words(&wide));
 
         assert_eq!(
-            words(&resolved_report(UUID, 40)),
-            words(&resolved_report(UUID, 100))
+            words(&resolved_report(
+                UUID,
+                &[PathBuf::from("agent.toml")],
+                None,
+                40
+            )),
+            words(&resolved_report(
+                UUID,
+                &[PathBuf::from("agent.toml")],
+                None,
+                100
+            ))
         );
         assert_eq!(
             words(&abandoned_report(UUID, 12, Some((3, "send_email")), 40)),
@@ -820,12 +856,23 @@ mod tests {
             "the resolve command must survive on one line:\n{report}"
         );
 
-        let report = resolved_report(UUID, 40);
+        let report = resolved_report(UUID, &[PathBuf::from("agents/writer.toml")], None, 40);
         assert!(
             report
                 .lines()
-                .any(|line| line == format!("  salvor resume {UUID} --agent <agent.toml>")),
+                .any(|line| line == format!("  salvor resume {UUID} --agent agents/writer.toml")),
             "the resume command must survive on one line:\n{report}"
+        );
+
+        // A `resolve` that was given no `--agent`/`--graph` still prints a
+        // parseable command, with a bracketed placeholder standing in for the
+        // one thing it does not know.
+        let unfilled = resolved_report(UUID, &[], None, 40);
+        assert!(
+            unfilled
+                .lines()
+                .any(|line| line == format!("  salvor resume {UUID} --agent <FILE>")),
+            "the fallback resume command must survive on one line:\n{unfilled}"
         );
 
         let report = parked_report(
@@ -843,6 +890,41 @@ mod tests {
                     "  salvor resume {UUID} --agent agents/writer.toml --input @resume.json"
                 )),
             "the resume command must survive on one line:\n{report}"
+        );
+    }
+
+    /// The resume command a resolved report prints, when `resolve` was given
+    /// `--agent`/`--graph`, is not just plausible-looking text: it is a real
+    /// command line the same `clap` parse tree accepts, exactly as the resume
+    /// hint a graph run's own parked report prints already is. Feeding it back
+    /// through `Cli::try_parse_from` is the proof.
+    ///
+    /// It also carries no flag the command it names would ignore. `resolve`
+    /// applies only to a run parked at a dangling write, which resumes through
+    /// the recover path, and recovery ignores `--input`. A copy-pasteable
+    /// command that quietly drops one of its own arguments teaches the wrong
+    /// thing about what resume does with input.
+    #[test]
+    fn resolved_report_resume_hint_parses() {
+        use clap::Parser;
+
+        let report = resolved_report(
+            UUID,
+            &[PathBuf::from("agents/writer.toml")],
+            Some(Path::new("flow.json")),
+            80,
+        );
+        let line = report
+            .lines()
+            .find(|line| line.trim_start().starts_with("salvor resume"))
+            .expect("resolved report prints a resume command");
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        crate::cli::Cli::try_parse_from(&tokens).unwrap_or_else(|error| {
+            panic!("printed resume hint does not parse: {error}\nline: {line}")
+        });
+        assert!(
+            !line.contains("--input"),
+            "a resolved run recovers, and recovery ignores --input: {line}"
         );
     }
 
@@ -892,7 +974,7 @@ mod tests {
         let reports = [
             reconciliation_report(UUID, Some(&sample_pending()), sample_recorded_at(), WIDTH),
             reconciliation_report(UUID, None, None, WIDTH),
-            resolved_report(UUID, WIDTH),
+            resolved_report(UUID, &[PathBuf::from("agent.toml")], None, WIDTH),
             abandoned_report(UUID, 12, Some((3, "send_email")), WIDTH),
             abandoned_report(UUID, 12, None, WIDTH),
             parked_report(

@@ -19,6 +19,8 @@ use serde_json::Value;
 use time::OffsetDateTime;
 
 use crate::event::{BudgetKind, Event, Performer};
+#[cfg(test)]
+use crate::id::{RunId, SequenceNumber};
 
 /// The stable `kind` label for one event, matching the enum variant name so
 /// it reads the same as the wire form's `kind` tag.
@@ -103,18 +105,33 @@ pub fn event_detail(event: &Event) -> String {
                 truncate_json(input)
             )
         }
-        Event::ToolCallCompleted { output, .. } => {
+        Event::ToolCallCompleted {
+            output,
+            deduplicated_from,
+            ..
+        } => {
+            // Absent (the field's default, and every completion recorded before
+            // it existed) means this call ran and this output is what it
+            // produced. A recorded origin means the opposite, which a reader
+            // must not have to infer from silence, so it is said out loud.
+            let copied = deduplicated_from.map_or_else(String::new, |origin| {
+                format!(
+                    " (deduplicated: copied from run {} seq {})",
+                    origin.run_id.as_uuid(),
+                    origin.seq
+                )
+            });
             if let Some(reason) = suspension_reason(output) {
-                format!("suspends: {reason}")
+                format!("suspends: {reason}{copied}")
             } else if let Some(failure) = recorded_failure(output) {
                 format!(
-                    "error ({}, {} attempt(s)): {}",
+                    "error ({}, {} attempt(s)): {}{copied}",
                     failure.kind,
                     failure.attempts,
                     truncate_str(failure.message)
                 )
             } else {
-                format!("output {}", truncate_json(output))
+                format!("output {}{copied}", truncate_json(output))
             }
         }
         Event::NowObserved { now } => format_ts(*now),
@@ -325,6 +342,36 @@ fn truncate_str(text: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    use uuid::Uuid;
+
+    /// A completion that copied its output says so, and names what it copied.
+    /// A completion that executed says nothing extra, so every line ever
+    /// rendered before this field existed reads exactly as it did.
+    #[test]
+    fn a_deduplicated_completion_says_what_it_copied() {
+        let origin = crate::event::DedupOrigin {
+            run_id: RunId::from_uuid(
+                Uuid::parse_str("00000000-0000-4000-8000-0000000000aa").expect("uuid"),
+            ),
+            seq: SequenceNumber::new(4),
+        };
+        let executed = event_detail(&Event::ToolCallCompleted {
+            seq: SequenceNumber::new(1),
+            output: json!({"charge_id": "po_1"}),
+            deduplicated_from: None,
+        });
+        assert_eq!(executed, r#"output {"charge_id":"po_1"}"#);
+
+        let copied = event_detail(&Event::ToolCallCompleted {
+            seq: SequenceNumber::new(1),
+            output: json!({"charge_id": "po_1"}),
+            deduplicated_from: Some(origin),
+        });
+        assert_eq!(
+            copied,
+            r#"output {"charge_id":"po_1"} (deduplicated: copied from run 00000000-0000-4000-8000-0000000000aa seq 4)"#
+        );
+    }
 
     /// A long input is truncated, so a raw payload never reaches the stream in
     /// full: the detail line stays capped even for a large value.

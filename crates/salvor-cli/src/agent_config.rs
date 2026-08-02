@@ -69,6 +69,10 @@
 //! # trust decision, since MCP effect annotations are hints a server
 //! # may misstate, so an operator who knows a tool's true side-effect class pins
 //! # it here and the runtime honors it over the wire hints.
+//! #
+//! # `idempotency_keys` is the operator's other per-tool declaration, valid with
+//! # either transport: which input field's value identifies the operation a call
+//! # performs. See "Idempotency keys" below.
 //!
 //! # A local stdio server:
 //! [[mcp_servers]]
@@ -76,6 +80,7 @@
 //! args = ["-m", "my_server"]
 //! env = { API_TOKEN = "..." }
 //! effect_overrides = { delete = "write", fetch = "read" }
+//! idempotency_keys = { pay_claim = "claim_id" }
 //!
 //! # A remote HTTP server. `bearer_token_env` NAMES an env var holding a bearer
 //! # token (never the token itself); when set and non-empty it is sent as
@@ -84,6 +89,7 @@
 //! url = "https://mcp.example.com/mcp"
 //! bearer_token_env = "MY_MCP_TOKEN"
 //! effect_overrides = { delete = "write" }
+//! idempotency_keys = { refund = "payment.charge_id" }
 //!
 //! # Optional, repeatable. Each entry is one sandboxed WebAssembly tool: an
 //! # untrusted component (the `salvor:tool@0.1.0` world) run under wasmtime
@@ -104,6 +110,10 @@
 //! # Exactly one of `input_schema` (inline JSON) or `input_schema_path`
 //! # (a JSON file, resolved relative to this file).
 //! input_schema = '{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}'
+//! # Optional. The input field identifying the operation a call performs, the
+//! # singular of an MCP server's `idempotency_keys` (this table is one tool, and
+//! # already names it). See "Idempotency keys" below.
+//! # idempotency_key = "claim_id"
 //!
 //! [wasm_tools.limits]                 # optional; these are the defaults
 //! wall_time_ms = 5000                 # per-call wall/CPU cap (epoch deadline)
@@ -122,6 +132,66 @@
 //! # accept that.
 //! record_prompts = false
 //! ```
+//!
+//! # Idempotency keys (`idempotency_keys`, `idempotency_key`)
+//!
+//! Within one run, nothing happens twice because a recorded completion replays
+//! instead of executing. Across two separate `salvor run` invocations there is
+//! no shared log to replay, and what holds the line instead is an idempotency
+//! key: a statement that a call *is* a particular operation in the world, so
+//! the store can let exactly one run perform it.
+//!
+//! A hand-written Rust tool makes that statement in code. A tool that arrives
+//! at runtime cannot: an MCP server is not this program and may not be this
+//! machine, and a wasm component is untrusted by construction. What is
+//! available is the call's input and the operator's knowledge of which field
+//! of it names the thing being done. That is what these settings declare.
+//!
+//! On an `[[mcp_servers]]` entry, a map from tool name to field path:
+//!
+//! ```toml
+//! idempotency_keys = { pay_claim = "claim_id", refund = "payment.charge_id" }
+//! ```
+//!
+//! On a `[[wasm_tools]]` entry, the same thing in the singular, since the table
+//! is already one named tool:
+//!
+//! ```toml
+//! idempotency_key = "claim_id"
+//! ```
+//!
+//! The path is a field name, or several joined by `.` to read a nested field.
+//! There is no array indexing and no escaping, so a field name containing a dot
+//! cannot be addressed. An empty path, or one with a leading, trailing, or
+//! doubled dot, is a parse error on the file.
+//!
+//! **The key.** The runtime derives `<tool>:<field value>` at dispatch, so
+//! `pay_claim` called with `{"claim_id": "wreck-9931", ...}` is the identity
+//! `pay_claim:wreck-9931`. The format is fixed and worth relying on: it is
+//! stable across processes and machines (nothing but the input feeds it), and
+//! it stays legible where the key is printed on its own, in `salvor history`,
+//! in a refusal naming the run that holds it, or in a grep of the store. The
+//! tool prefix is redundant against the store's own `(tool, key)` index and
+//! deliberately kept anyway, so the string a human reads says what was done as
+//! well as to what.
+//!
+//! **A missing field is refused, never demoted.** The value must be a non-empty
+//! string or a number. If the field is absent, if the path runs through a
+//! non-object, or if the value is a boolean, a null, an empty string, an array,
+//! or an object, the call fails before the tool is reached, with an error
+//! naming the tool, the path, and the keys the input did carry. The tool does
+//! not run keyless: an operator who declared an identity asked for exactly one
+//! execution, and a call that quietly lost its key is how a claim gets paid
+//! twice.
+//!
+//! **A name that binds to nothing fails the build.** Declaring a key for a tool
+//! the server does not advertise is refused when the agent is built, listing
+//! what the server does advertise. This is stricter than `effect_overrides`,
+//! which ignores an unknown name; an unbound effect override leaves a tool at
+//! the safe default, while an unbound key declaration leaves a tool the
+//! operator meant to protect completely unprotected.
+//!
+//! Tools with no declaration are untouched by all of this.
 //!
 //! # Recording the prompt body (`record_prompts`)
 //!
@@ -163,7 +233,8 @@ use anyhow::{Context, Result, bail};
 use salvor_core::Effect;
 use salvor_llm::{AuthKind, Config};
 use salvor_runtime::{Agent, AgentBuildError, Budgets, Pricing};
-use salvor_tools::mcp::{EffectOverrides, McpServer};
+use salvor_tools::mcp::{EffectOverrides, IdempotencyKeys, McpServer};
+use salvor_tools::{DynTool, IdempotencyPath};
 use salvor_wasm::{DirGrant, WasmEngine, WasmTool, WasmToolSpec};
 use serde::Deserialize;
 
@@ -283,6 +354,13 @@ impl ApiKeyKind {
     }
 }
 
+/// The environment variable `[llm] api_key_env` reads from when the agent
+/// file leaves it unset. Named once here so the resolution in
+/// [`AgentConfig::client_config`], the name reported in
+/// [`AgentConfig::api_key_env`], and a 401 error's own message can never
+/// name three different defaults.
+pub const DEFAULT_API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
+
 /// Model transport settings. All optional; the defaults target the public
 /// Anthropic endpoint.
 #[derive(Debug, Default, Deserialize)]
@@ -373,6 +451,18 @@ pub struct McpServerConfig {
     /// over the server's annotations. Valid with either transport.
     #[serde(default)]
     pub effect_overrides: BTreeMap<String, Effect>,
+    /// Per-tool idempotency key declarations: tool name to the input field
+    /// whose value identifies the operation the call performs, as
+    /// `{ pay_claim = "claim_id" }`. A dotted path (`"payment.claim_id"`) reads
+    /// a nested field. Valid with either transport.
+    ///
+    /// A tool named here declares an identity, and the store then lets exactly
+    /// one run execute a given identity, across separate `salvor run`
+    /// invocations. A tool left out is keyless and behaves as it always has.
+    /// See the module docs for the derived key's format and what a call missing
+    /// the field gets.
+    #[serde(default)]
+    pub idempotency_keys: BTreeMap<String, String>,
 }
 
 impl McpServerConfig {
@@ -407,7 +497,26 @@ impl McpServerConfig {
                 }
             }
         }
+        self.parsed_idempotency_keys()?;
         Ok(())
+    }
+
+    /// The declared key paths, parsed. Run at load (through
+    /// [`validate`](Self::validate)) so a malformed path fails when the file is
+    /// read rather than when a payout is dispatched, and again at build to make
+    /// the set the connection is handed.
+    ///
+    /// # Errors
+    ///
+    /// Fails on an empty path or one with an empty segment, naming the tool.
+    fn parsed_idempotency_keys(&self) -> Result<IdempotencyKeys> {
+        let mut keys = IdempotencyKeys::new();
+        for (tool, path) in &self.idempotency_keys {
+            let parsed = IdempotencyPath::parse(path)
+                .with_context(|| format!("`idempotency_keys` entry for tool `{tool}`"))?;
+            keys.insert(tool.clone(), parsed);
+        }
+        Ok(keys)
     }
 }
 
@@ -452,6 +561,17 @@ pub struct WasmToolConfig {
     /// directory. Exactly one of this and `input_schema` must be set.
     #[serde(default)]
     pub input_schema_path: Option<String>,
+    /// The input field whose value identifies the operation this tool's calls
+    /// perform, as `idempotency_key = "claim_id"`. A dotted path
+    /// (`"payment.claim_id"`) reads a nested field. Absent means the tool's
+    /// calls have no business identity, which is the default.
+    ///
+    /// This is the singular of an MCP server's `idempotency_keys` map, because
+    /// a `[[wasm_tools]]` entry *is* one tool: it already carries the `name`,
+    /// so a map keyed by that same name would only be a second place for it to
+    /// be wrong.
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
     /// Per-call resource caps; defaults apply to any left unset.
     #[serde(default)]
     pub limits: WasmLimitsConfig,
@@ -574,7 +694,25 @@ impl WasmToolConfig {
                 )
             })?;
         }
+        self.parsed_idempotency_key()?;
         Ok(())
+    }
+
+    /// The declared key path, parsed. Run at load through
+    /// [`validate`](Self::validate), so a malformed path fails on the file
+    /// rather than on a call.
+    ///
+    /// # Errors
+    ///
+    /// Fails on an empty path or one with an empty segment, naming the tool.
+    fn parsed_idempotency_key(&self) -> Result<Option<IdempotencyPath>> {
+        self.idempotency_key
+            .as_deref()
+            .map(|path| {
+                IdempotencyPath::parse(path)
+                    .with_context(|| format!("wasm tool `{}`: `idempotency_key`", self.name))
+            })
+            .transpose()
     }
 
     /// The input schema as a JSON value, reading the schema file when
@@ -698,6 +836,18 @@ impl AgentConfig {
         }
     }
 
+    /// The environment variable the API key is read from: `[llm] api_key_env`
+    /// when the file sets it, else [`DEFAULT_API_KEY_ENV`]. Public so a 401
+    /// from the Messages API can be reported against the variable that was
+    /// actually consulted, rather than assuming the default.
+    #[must_use]
+    pub fn api_key_env(&self) -> &str {
+        self.llm
+            .api_key_env
+            .as_deref()
+            .unwrap_or(DEFAULT_API_KEY_ENV)
+    }
+
     /// The client [`Config`] the `[llm]` section resolves to. Reads the API
     /// key from the named environment variable, leaving it unset (fine for
     /// local endpoints) when the variable is unset or empty. When
@@ -717,11 +867,7 @@ impl AgentConfig {
         } else if let Some(base_url) = &self.llm.base_url {
             config = config.with_base_url(base_url);
         }
-        let key_env = self
-            .llm
-            .api_key_env
-            .as_deref()
-            .unwrap_or("ANTHROPIC_API_KEY");
+        let key_env = self.api_key_env();
         if let Ok(key) = std::env::var(key_env)
             && !key.is_empty()
         {
@@ -744,6 +890,31 @@ impl AgentConfig {
     #[must_use]
     pub fn record_prompts_enabled(&self) -> bool {
         resolve_record_prompts(self.record_prompts, env_record_prompts_default())
+    }
+
+    /// Every declared idempotency key across `mcp_servers` and `wasm_tools`,
+    /// merged into one map from tool name to the raw field-path string as the
+    /// file wrote it (not the parsed [`IdempotencyPath`]; this is for display,
+    /// not dispatch).
+    ///
+    /// This reads only the parsed config, so it is available in `--no-connect`
+    /// mode too, where nothing was spawned or dialed to ask a server what it
+    /// advertises. `salvor agent validate` uses it to echo what a file
+    /// declares back to the person checking it.
+    #[must_use]
+    pub fn declared_idempotency_keys(&self) -> BTreeMap<String, String> {
+        let mut keys = BTreeMap::new();
+        for server in &self.mcp_servers {
+            for (tool, path) in &server.idempotency_keys {
+                keys.insert(tool.clone(), path.clone());
+            }
+        }
+        for tool in &self.wasm_tools {
+            if let Some(path) = &tool.idempotency_key {
+                keys.insert(tool.name.clone(), path.clone());
+            }
+        }
+        keys
     }
 
     /// The system prompt text, reading the file when `system_prompt_path` is
@@ -775,14 +946,25 @@ impl AgentConfig {
 /// `agent_path` is the path the config was loaded from; it fixes the base
 /// directory for a relative `system_prompt_path`.
 ///
+/// `no_connect` skips this step entirely: no MCP server is spawned (a `command`
+/// transport) or dialed (a `url` transport), so a declared server whose command
+/// does not exist, or whose endpoint is unreachable, does not fail the build.
+/// The returned agent then carries no MCP tools and the returned server list
+/// is always empty; the caller is the one that knows how many servers were
+/// declared and skipped (`config.mcp_servers.len()`), since that count is not
+/// otherwise recoverable from the return value. Because MCP tool schemas feed
+/// [`Agent::def_hash`], a `no_connect` build's hash does not match the hash a
+/// real run would record.
+///
 /// # Errors
 ///
 /// Fails when the system prompt file cannot be read, an MCP server cannot be
-/// spawned or initialized, or the builder rejects the definition (a duplicate
-/// tool name, or a cost budget with no pricing).
+/// spawned or initialized (unless `no_connect` is set), or the builder rejects
+/// the definition (a duplicate tool name, or a cost budget with no pricing).
 pub async fn build_agent(
     config: &AgentConfig,
     agent_path: &Path,
+    no_connect: bool,
 ) -> Result<(Agent, Vec<McpServer>)> {
     let agent_dir = agent_path.parent().unwrap_or_else(|| Path::new("."));
 
@@ -811,46 +993,59 @@ pub async fn build_agent(
     builder = builder.record_prompts(config.record_prompts_enabled());
 
     let mut servers = Vec::new();
-    for server_config in &config.mcp_servers {
-        let mut overrides = EffectOverrides::new();
-        for (name, effect) in &server_config.effect_overrides {
-            overrides.insert(name.clone(), *effect);
-        }
-
-        // `validate` (run at load) guarantees exactly one transport is set, so
-        // the `url`-first branch is exhaustive: a config that reaches here with
-        // neither would already have failed to load.
-        let mut server = if let Some(url) = &server_config.url {
-            // The bearer token, if any, is read from the named environment
-            // variable, never the file. An unset or empty variable means no
-            // auth, matching how `api_key_env` treats a missing key.
-            let token = server_config
-                .bearer_token_env
-                .as_deref()
-                .and_then(|name| std::env::var(name).ok())
-                .filter(|t| !t.is_empty());
-            McpServer::connect_http(url, token.as_deref(), &overrides)
-                .await
-                .with_context(|| format!("connecting to MCP server at `{url}`"))?
-        } else {
-            let command_name = server_config
-                .command
-                .as_deref()
-                .expect("validate guarantees a command when there is no url");
-            let mut command = tokio::process::Command::new(command_name);
-            command.args(&server_config.args);
-            for (key, value) in &server_config.env {
-                command.env(key, value);
+    if no_connect {
+        // Field/shape validation only: `AgentConfig::load` already ran
+        // `validate` over every declared server (exactly one transport set,
+        // required fields present), so there is nothing left to check without
+        // spawning a process or dialing a socket. Skip the loop below entirely.
+    } else {
+        for server_config in &config.mcp_servers {
+            let mut overrides = EffectOverrides::new();
+            for (name, effect) in &server_config.effect_overrides {
+                overrides.insert(name.clone(), *effect);
             }
-            McpServer::connect(command, &overrides)
-                .await
-                .with_context(|| format!("connecting to MCP server `{command_name}`"))?
-        };
+            // Parsed again here rather than carried from load, because
+            // `build_agent` is reachable from a caller that built the config by
+            // hand; the paths are a handful of strings and parsing is free.
+            let keys = server_config.parsed_idempotency_keys()?;
 
-        for tool in server.take_tools() {
-            builder = builder.tool_dyn(Box::new(tool));
+            // `validate` (run at load) guarantees exactly one transport is set, so
+            // the `url`-first branch is exhaustive: a config that reaches here with
+            // neither would already have failed to load.
+            let mut server = if let Some(url) = &server_config.url {
+                // The bearer token, if any, is read from the named environment
+                // variable, never the file. An unset or empty variable means no
+                // auth, matching how `api_key_env` treats a missing key.
+                let token = server_config
+                    .bearer_token_env
+                    .as_deref()
+                    .and_then(|name| std::env::var(name).ok())
+                    .filter(|t| !t.is_empty());
+                McpServer::connect_http(url, token.as_deref(), &overrides, &keys)
+                    .await
+                    .with_context(|| format!("connecting to MCP server at `{url}`"))?
+            } else {
+                let command_name = server_config
+                    .command
+                    .as_deref()
+                    .expect("validate guarantees a command when there is no url");
+                let mut command = tokio::process::Command::new(command_name);
+                command.args(&server_config.args);
+                for (key, value) in &server_config.env {
+                    command.env(key, value);
+                }
+                McpServer::connect(command, &overrides, &keys)
+                    .await
+                    .with_context(|| format!("connecting to MCP server `{command_name}`"))?
+            };
+
+            check_declared_keys_exist(&keys, &server)?;
+
+            for tool in server.take_tools() {
+                builder = builder.tool_dyn(Box::new(tool));
+            }
+            servers.push(server);
         }
-        servers.push(server);
     }
 
     // Sandboxed wasm tools. One engine (compiler, WASI linker, epoch ticker)
@@ -869,6 +1064,7 @@ pub async fn build_agent(
                     .effect
                     .expect("validate (run at load) guarantees an effect"),
                 input_schema: tool_config.resolved_input_schema(agent_dir)?,
+                idempotency_key: tool_config.parsed_idempotency_key()?,
                 limits: tool_config.limits.tool_limits(),
                 grants: tool_config
                     .grants
@@ -900,6 +1096,47 @@ pub async fn build_agent(
 
     let agent = builder.build().map_err(build_error_context)?;
     Ok((agent, servers))
+}
+
+/// Fails the build when `idempotency_keys` names a tool the connected server
+/// does not advertise.
+///
+/// `effect_overrides` ignores a name it does not find, and that is defensible:
+/// an override that binds to nothing leaves the tool with the effect the
+/// mapping already gave it, which is the safe class. An idempotency key that
+/// binds to nothing is the opposite. The operator declared that a call has an
+/// identity, and silence would leave the tool keyless, which is precisely the
+/// state that lets a second run pay a claim twice. A misspelled tool name in
+/// this table is a payments bug, so it stops the build.
+///
+/// The message lists what the server does advertise, since the usual cause is a
+/// typo or a server whose tool was renamed.
+///
+/// # Errors
+///
+/// Fails naming the tool, the server's advertised tools, and what the entry was
+/// asking for.
+fn check_declared_keys_exist(keys: &IdempotencyKeys, server: &McpServer) -> Result<()> {
+    if keys.is_empty() {
+        return Ok(());
+    }
+    let advertised: Vec<&str> = server.tools().iter().map(DynTool::name).collect();
+    for declared in keys.names() {
+        if !advertised.contains(&declared) {
+            let list = if advertised.is_empty() {
+                "this server advertises no tools at all".to_owned()
+            } else {
+                format!("this server advertises: {}", advertised.join(", "))
+            };
+            bail!(
+                "`idempotency_keys` declares a key for tool `{declared}`, but {list}. A key that \
+                 binds to no tool would leave the tool it was meant for keyless, which is the \
+                 state cross-run deduplication exists to prevent, so this is refused rather than \
+                 ignored. Check the spelling, or drop the entry"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Turns an [`AgentBuildError`] into an actionable message. The cost-budget
@@ -951,6 +1188,41 @@ mod tests {
         ] {
             assert_eq!(parse_record_prompts_env(unset), None, "{unset:?}");
         }
+    }
+
+    /// The `salvor agent validate --no-connect` contract, exercised directly
+    /// against [`build_agent`] rather than the binary: a declared `command`
+    /// that does not exist on this machine fails an ordinary build (the
+    /// process spawn fails), but passes with `no_connect: true`, since that
+    /// mode never spawns anything and checks fields and shape only.
+    #[tokio::test]
+    async fn no_connect_skips_a_command_that_does_not_exist() {
+        let config = AgentConfig::from_toml_str(
+            "model = \"m\"\n\n\
+             [[mcp_servers]]\n\
+             command = \"this-command-does-not-exist-anywhere-on-path\"\n",
+        )
+        .expect("parses: field/shape validation happens at `load`, not `build_agent`");
+        let pseudo_path = Path::new("agent.toml");
+
+        let connected = build_agent(&config, pseudo_path, false).await;
+        assert!(
+            connected.is_err(),
+            "default mode spawns the declared command and must fail when it does not exist"
+        );
+
+        let (agent, servers) = build_agent(&config, pseudo_path, true)
+            .await
+            .expect("--no-connect must not spawn the command, so a missing one still passes");
+        assert!(
+            servers.is_empty(),
+            "no-connect mode connects to nothing, so there are no sessions to keep alive"
+        );
+        assert_eq!(
+            agent.tools().len(),
+            0,
+            "no-connect mode collects no tools, since collecting them needs a connection"
+        );
     }
 
     /// `record_prompts` parses from the agent TOML: absent leaves it `None`, and

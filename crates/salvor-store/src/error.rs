@@ -1,10 +1,14 @@
 //! The error type every [`EventStore`](crate::EventStore) method returns.
 //!
-//! One typed enum, built with `thiserror`. The variant that matters most is
+//! One typed enum, built with `thiserror`. Two variants carry the weight.
 //! [`StoreError::Conflict`]: appending a `(run_id, seq)` pair that already
 //! exists is a named, matchable outcome, never a panic and never a silent
 //! overwrite. Crash-recovery correctness depends on that
 //! conflict being detectable, so it earns its own variant.
+//! [`StoreError::TamperEvident`]: a run whose recorded rows no longer match
+//! their hash chain is refused on read rather than served, and it is a
+//! separate variant from [`StoreError::Serialization`] because the dangerous
+//! case is exactly the one that still parses.
 
 use salvor_core::{RunId, SequenceNumber};
 use thiserror::Error;
@@ -40,6 +44,38 @@ pub enum StoreError {
     /// the storage-backend surface.
     #[error("serialize or deserialize event envelope: {0}")]
     Serialization(#[from] serde_json::Error),
+
+    /// A run's recorded log does not match its hash chain: something rewrote,
+    /// reordered, inserted, or removed a row after it was recorded.
+    ///
+    /// This is the variant that makes the log tamper-*evident* rather than
+    /// merely append-only-by-convention. Every recorded row carries the hash
+    /// of the row before it (see [`crate::chain`] for the normative
+    /// definition), and [`read_log`](crate::EventStore::read_log) recomputes
+    /// the whole chain before returning anything, so a modified row is refused
+    /// instead of served. It is deliberately distinct from
+    /// [`StoreError::Serialization`]: a row rewritten with *valid* JSON
+    /// deserializes perfectly and would otherwise be indistinguishable from
+    /// what was recorded. Getting this error means the bytes changed, whatever
+    /// they now say.
+    ///
+    /// Treat it as an integrity incident, not a transient failure. Retrying
+    /// the read produces the same error, because the stored bytes are the
+    /// problem.
+    #[error(
+        "run {run_id:?} fails its recorded hash chain at seq {seq:?}: expected {expected}, found {found}"
+    )]
+    TamperEvident {
+        /// The run whose log failed verification.
+        run_id: RunId,
+        /// The position of the first row that does not agree with the chain.
+        seq: SequenceNumber,
+        /// The value the chain requires at that point, normally a 64-character
+        /// hex hash.
+        expected: String,
+        /// The value the store actually holds there.
+        found: String,
+    },
 
     /// The storage backend reported a failure that is not a conflict.
     ///

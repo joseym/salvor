@@ -48,6 +48,7 @@ codes:
 | 404 | `unknown_run` | No run under that id |
 | 404 | `unknown_agent` | No agent registered under that id (also: a graph run references an unregistered agent) |
 | 400 | `invalid_graph` | A submitted graph document failed strict validation; `details.errors` carries the complete node/edge-precise list |
+| 400 | `approval_schema_violation` | A graph run parked at a `gate` was resumed with an approval its `approval_schema` does not describe; `details.node` names the gate and `details.violations` lists every violation. Nothing is recorded; the run stays parked |
 | 404 | `unknown_graph` | No graph stored under that hash |
 | 409 | `not_a_graph_run` | The per-run graph projection (or a fork) was asked for an ordinary agent run |
 | 409 | `invalid_fork_node` | A fork named a node the origin never entered |
@@ -428,7 +429,27 @@ the same mapping `salvor resume` uses:
 ```
 
 - `400 bad_request` when a parked run is resumed with no input, or with an
-  input the recorded schema rejects.
+  input the recorded schema rejects. `{"input": null}` is an input of `null`,
+  not an absent one: it reaches validation like any other value.
+- `400 approval_schema_violation` when a graph run parked at a `gate` is resumed
+  with an approval the gate's `approval_schema` does not describe. The check
+  runs before anything is spawned or appended, so the run is still parked at the
+  gate and a corrected approval resumes it:
+
+```json
+{ "error": {
+  "code": "approval_schema_violation",
+  "message": "the approval does not satisfy gate `approve`'s approval_schema; the run is still parked at that gate, so a conforming approval resumes it",
+  "details": {
+    "node": "approve",
+    "violations": [ { "path": "$.approved", "message": "\"yes\" is not of type \"boolean\"" } ]
+  }
+} }
+```
+
+  An `approval_schema` that names `required` or `properties` without a `type` is
+  read as asking for an object, so a bare `null`, number, or string is refused
+  even though plain JSON Schema semantics would let it pass vacuously.
 - `409 needs_reconciliation`:
 
 ```json
@@ -634,7 +655,10 @@ shape [`POST /v1/runs`](#post-v1runs) uses).
 
 A parked graph run (a `gate`, a budget crossing) resumes through the ordinary
 [`POST /v1/runs/{id}/resume`](#post-v1runsidresume): the server re-drives it over
-the engine, looking the graph document back up by the hash the log records.
+the engine, looking the graph document back up by the hash the log records. A run
+parked at a `gate` has its approval checked against that gate's `approval_schema`
+first, and a non-conforming one is `400 approval_schema_violation` naming the node
+and listing every violation, with nothing recorded and the run left parked.
 
 ### GET /v1/runs/{id}/graph
 

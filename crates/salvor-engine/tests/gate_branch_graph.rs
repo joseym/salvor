@@ -24,7 +24,7 @@ use common::{
 };
 use salvor_core::Effect;
 use salvor_engine::{EngineError, GraphOutcome, run_graph};
-use salvor_graph::{BranchCondition, BranchSpec, Graph, GraphBuilder, ToolSpec};
+use salvor_graph::{BranchCondition, BranchSpec, GateSpec, Graph, GraphBuilder, ToolSpec};
 use salvor_replay::{NodeState, derive_graph_projection};
 use salvor_runtime::{Agent, ParkReason, RunCtx};
 use salvor_store::{EventStore, SqliteStore};
@@ -495,5 +495,248 @@ async fn model_decision_branch_with_unknown_reply_refuses() {
         !log.iter()
             .any(|e| matches!(&e.event, salvor_core::Event::BranchTaken { .. })),
         "no route was recorded"
+    );
+}
+
+/// A gate's `approval_schema` is ENFORCED, not merely advertised.
+///
+/// The schema here is the one that used to let everything through: it names
+/// `required` and `properties` but never says `type`, so plain JSON Schema
+/// semantics leave `null`, `42`, and `"nope"` vacuously conforming. Each of the
+/// four is refused now, naming the gate and every violation; each refusal
+/// appends nothing, leaves the log byte-identical, and leaves the run parked at
+/// the same gate. A conforming approval then completes the run, and re-driving
+/// the whole recorded log is a free, byte-identical replay: the recorded
+/// `Resumed` is trusted, never re-judged.
+#[tokio::test]
+async fn a_gate_refuses_every_nonconforming_approval_and_stays_parked() {
+    let (assess, assess_calls) = ConstTool::new("assess", Effect::Read, json!({"score": 0.9}));
+    let (publish, publish_calls) = EchoTool::new("http_post", Effect::Write);
+    let mut tools: HashMap<String, Box<dyn DynTool>> = HashMap::new();
+    tools.insert("assess".to_owned(), Box::new(assess));
+    tools.insert("http_post".to_owned(), Box::new(publish));
+    let agents: HashMap<String, Agent> = HashMap::new();
+
+    let graph = GraphBuilder::new()
+        .tool(ToolSpec::new("assess", "assess"))
+        .gate(
+            GateSpec::new(
+                "approve",
+                json!({
+                    "required": ["approved"],
+                    "properties": {"approved": {"type": "boolean"}}
+                }),
+            )
+            .prompt("Approve this draft for publication?"),
+        )
+        .tool(ToolSpec::new("publish", "http_post"))
+        .edge("assess", "approve")
+        .edge("approve", "publish")
+        .build();
+
+    let input = json!({"topic": "otters"});
+    let run_id = fixed_run_id(15);
+    let store = Arc::new(SqliteStore::in_memory().expect("store opens"));
+
+    // --- Drive 1: run the read tool, then park at the gate. ---
+    let mut ctx = RunCtx::with_hooks(store.clone(), run_id, vec![], fixed_clock(), fixed_random())
+        .expect("ctx builds");
+    let parked = run_graph(&mut ctx, &graph, &input, &agents, &tools)
+        .await
+        .expect("graph parks at the gate");
+    assert!(
+        matches!(&parked, GraphOutcome::Parked { node, .. } if node == "approve"),
+        "expected a park at the gate, got {parked:?}"
+    );
+    let parked_log = store.read_log(run_id).await.expect("log reads");
+    let parked_bytes = serde_json::to_string(&parked_log).expect("the log encodes");
+
+    // --- Each of the four non-conforming approvals is refused for free. ---
+    for bad in [json!(null), json!(42), json!("nope"), json!({})] {
+        let mut refuse_ctx = RunCtx::with_hooks(
+            store.clone(),
+            run_id,
+            parked_log.clone(),
+            fixed_clock(),
+            fixed_random(),
+        )
+        .expect("resume ctx builds");
+        refuse_ctx.set_resume_input(bad.clone());
+        let error = run_graph(&mut refuse_ctx, &graph, &input, &agents, &tools)
+            .await
+            .expect_err("a non-conforming approval is refused");
+        match error {
+            EngineError::ApprovalSchemaViolation { node, violations } => {
+                assert_eq!(node, "approve", "the refusal names the gate");
+                assert!(!violations.is_empty(), "the refusal lists what was wrong");
+            }
+            other => panic!("expected ApprovalSchemaViolation for {bad}, got {other:?}"),
+        }
+        // Nothing was appended, and the run is parked exactly as it was.
+        let after = store.read_log(run_id).await.expect("log reads");
+        assert_eq!(
+            serde_json::to_string(&after).expect("the log encodes"),
+            parked_bytes,
+            "the refusal of {bad} must leave the log untouched"
+        );
+        assert_eq!(
+            publish_calls.load(Ordering::SeqCst),
+            0,
+            "publish still waits"
+        );
+    }
+
+    // --- The conforming approval behaves exactly as it always did. ---
+    let mut ctx2 = RunCtx::with_hooks(
+        store.clone(),
+        run_id,
+        parked_log,
+        fixed_clock(),
+        fixed_random(),
+    )
+    .expect("resume ctx builds");
+    ctx2.set_resume_input(json!({"approved": true}));
+    let done = run_graph(&mut ctx2, &graph, &input, &agents, &tools)
+        .await
+        .expect("a conforming approval drives the run to completion");
+    assert!(matches!(done, GraphOutcome::Completed { .. }));
+
+    let live_log = store.read_log(run_id).await.expect("log reads");
+    assert_eq!(
+        event_kinds(&live_log),
+        [
+            "GraphRunStarted",
+            "NodeEntered", // assess
+            "ToolCallRequested",
+            "ToolCallCompleted",
+            "NodeExited",  // assess
+            "NodeEntered", // approve (gate)
+            "Suspended",
+            "Resumed",
+            "NodeExited",  // approve
+            "NodeEntered", // publish
+            "ToolCallRequested",
+            "ToolCallCompleted",
+            "NodeExited", // publish
+            "RunCompleted",
+        ],
+        "the four refusals left no trace between the Suspended and the Resumed"
+    );
+
+    // --- The replay proof: the recorded approval is trusted, not re-judged. ---
+    let (assess_before, publish_before) = (
+        assess_calls.load(Ordering::SeqCst),
+        publish_calls.load(Ordering::SeqCst),
+    );
+    assert_eq!((assess_before, publish_before), (1, 1));
+    let mut replay_ctx = RunCtx::with_hooks(
+        store.clone(),
+        run_id,
+        live_log.clone(),
+        fixed_clock(),
+        fixed_random(),
+    )
+    .expect("replay ctx builds");
+    let replayed = run_graph(&mut replay_ctx, &graph, &input, &agents, &tools)
+        .await
+        .expect("the approved log replays");
+    assert!(matches!(replayed, GraphOutcome::Completed { .. }));
+    assert!(!replay_ctx.is_replaying(), "history fully consumed");
+    assert_eq!(assess_calls.load(Ordering::SeqCst), assess_before);
+    assert_eq!(publish_calls.load(Ordering::SeqCst), publish_before);
+    assert_eq!(
+        serde_json::to_string(&store.read_log(run_id).await.expect("log reads"))
+            .expect("the log encodes"),
+        serde_json::to_string(&live_log).expect("the log encodes"),
+        "replaying an approved gate rewrites nothing"
+    );
+}
+
+/// The determinism guardrail stated as its own claim: a `Resumed` that is
+/// already in the log is history, and the accept edge does not get to reopen it.
+///
+/// The setup is the one that would bite if validation ever moved to the wrong
+/// side of that edge: a log whose recorded approval is `42`, which the gate's
+/// schema plainly refuses. That log is exactly what an OLD run looks like once
+/// this validator (or a future, stricter one) is in place. Replaying it must
+/// still complete. If it did not, shipping a stricter validator would silently
+/// break every run approved before it, which is the property durable execution
+/// exists to sell.
+#[tokio::test]
+async fn a_recorded_approval_is_never_re_judged_on_replay() {
+    let (publish, publish_calls) = EchoTool::new("http_post", Effect::Write);
+    let mut tools: HashMap<String, Box<dyn DynTool>> = HashMap::new();
+    tools.insert("http_post".to_owned(), Box::new(publish));
+    let agents: HashMap<String, Agent> = HashMap::new();
+
+    let schema = json!({
+        "type": "object",
+        "required": ["approved"],
+        "properties": {"approved": {"type": "boolean"}}
+    });
+    let graph = GraphBuilder::new()
+        .gate(GateSpec::new("approve", schema.clone()))
+        .tool(ToolSpec::new("publish", "http_post"))
+        .edge("approve", "publish")
+        .build();
+
+    let input = json!({"topic": "otters"});
+    let run_id = fixed_run_id(16);
+    let store = Arc::new(SqliteStore::in_memory().expect("store opens"));
+    let mut ctx = RunCtx::with_hooks(store.clone(), run_id, vec![], fixed_clock(), fixed_random())
+        .expect("ctx builds");
+    run_graph(&mut ctx, &graph, &input, &agents, &tools)
+        .await
+        .expect("the graph parks at the gate");
+
+    // The approval this gate would refuse today, recorded as if an older,
+    // laxer Salvor had already accepted it.
+    let stale_approval = json!(42);
+    assert!(
+        !salvor_engine::approval_violations(&stale_approval, &schema).is_empty(),
+        "the accept edge really would refuse this approval"
+    );
+    let mut old_log = store.read_log(run_id).await.expect("log reads");
+    let next_seq = salvor_core::SequenceNumber::new(old_log.len() as u64);
+    old_log.push(salvor_core::EventEnvelope::new(
+        run_id,
+        next_seq,
+        old_log
+            .last()
+            .expect("the parked log is not empty")
+            .recorded_at,
+        salvor_core::Event::Resumed {
+            input: stale_approval,
+        },
+    ));
+
+    // Replay that log from its first byte. The gate must feed the recorded
+    // approval straight through.
+    let fresh = Arc::new(SqliteStore::in_memory().expect("store opens"));
+    let mut replay_ctx = RunCtx::with_hooks(
+        fresh.clone(),
+        run_id,
+        old_log,
+        fixed_clock(),
+        fixed_random(),
+    )
+    .expect("replay ctx builds");
+    let replayed = run_graph(&mut replay_ctx, &graph, &input, &agents, &tools)
+        .await
+        .expect("a recorded Resumed is never re-validated into a refusal");
+    match replayed {
+        GraphOutcome::Completed { output } => {
+            assert_eq!(
+                output,
+                json!({"published": 42}),
+                "the recorded approval passed through the gate unchanged"
+            );
+        }
+        other => panic!("expected completion, got {other:?}"),
+    }
+    assert_eq!(
+        publish_calls.load(Ordering::SeqCst),
+        1,
+        "the run continued past the gate on its recorded approval"
     );
 }

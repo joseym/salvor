@@ -5,8 +5,8 @@
 //!
 //! A handler returns `Ok(0)` for success, `Ok(1)` for a deliberate refusal
 //! that is not an internal error (resuming a run that needs human
-//! reconciliation, or `replay` without `--dry-run`), and `Err(..)` for a
-//! genuine failure the top level reports and turns into a non-zero exit.
+//! reconciliation), and `Err(..)` for a genuine failure the top level reports
+//! and turns into a non-zero exit.
 //! Parking is **not** a failure: a run that suspends or hits a budget exits
 //! `0` with a report telling the operator how to continue it.
 //!
@@ -67,7 +67,8 @@ use crate::serve_kill;
 ///
 /// `--fixture <DIR>` is the offline variant: the agent, the input, and a
 /// recorded model conversation all come from one directory, and a scripted
-/// model is stood up locally to serve that conversation (see [`crate::fixture`]).
+/// model is stood up locally to serve that conversation (see the `fixture`
+/// module in this crate).
 /// It changes only where those three things come from: everything below the
 /// resolution is the same store, the same runtime, and the same event log a
 /// `--agent`/`--input` run gets.
@@ -111,7 +112,7 @@ pub async fn run(store_path: &Path, args: RunArgs) -> Result<u8> {
     // From here the fixture path and the ordinary path are the same code. Any
     // failure between the model starting and the run finishing tears it down
     // first, the way `close_servers` runs regardless of outcome below.
-    let (agent, servers) = match agent_config::build_agent(&config, &agent_path).await {
+    let (agent, servers) = match agent_config::build_agent(&config, &agent_path, false).await {
         Ok(built) => built,
         Err(error) => {
             shutdown_model(model).await;
@@ -141,7 +142,39 @@ pub async fn run(store_path: &Path, args: RunArgs) -> Result<u8> {
     close_servers(servers).await;
     shutdown_model(model).await;
 
-    report_outcome(outcome?, &uuid, &agent_path)
+    report_outcome(
+        outcome.map_err(|error| contextualize_auth_error(error, &config))?,
+        &uuid,
+        &agent_path,
+    )
+}
+
+/// Turns a 401 from the Messages API into a message that names the
+/// configuration, rather than one that only names the HTTP status.
+///
+/// A raw `salvor_llm::Error::Api` with `status: 401` says the request was
+/// rejected; it says nothing about WHERE Salvor read the key from, because
+/// `salvor-llm` builds requests from an already-resolved [`salvor_llm::Config`]
+/// and never sees the agent file's `[llm] api_key_env`. That name lives only in
+/// the [`AgentConfig`] this handler already loaded, so it is added here, at the
+/// one seam where both the error and the config are in scope. Every other
+/// `RuntimeError` passes through unchanged.
+fn contextualize_auth_error(error: RuntimeError, config: &AgentConfig) -> anyhow::Error {
+    let RuntimeError::Model(salvor_llm::Error::Api(ref api)) = error else {
+        return error.into();
+    };
+    if api.status != 401 {
+        return error.into();
+    }
+    let key_env = config.api_key_env();
+    anyhow::anyhow!(
+        "authentication failed calling the Messages API (HTTP 401: {}). This agent's \
+         [llm] block reads the API key from the `{key_env}` environment variable \
+         (the default is `{default}` when `api_key_env` is not set in the file). \
+         Set `{key_env}` to a valid key and try again.",
+        api.message,
+        default = agent_config::DEFAULT_API_KEY_ENV,
+    )
 }
 
 /// `salvor resume`: continue an existing run, dispatching on its derived state.
@@ -229,7 +262,7 @@ pub async fn resume(store_path: &Path, args: ResumeArgs) -> Result<u8> {
     // An agent run rebuilds its one agent. Exactly one `--agent` is expected.
     let agent_path = single_agent(&args.agents)?;
     let config = AgentConfig::load(agent_path)?;
-    let (agent, servers) = agent_config::build_agent(&config, agent_path).await?;
+    let (agent, servers) = agent_config::build_agent(&config, agent_path, false).await?;
     let mut runtime = Runtime::new(store.clone()).with_record_prompts(agent.record_prompts());
     if let Some(labels) = agent.labels() {
         runtime = runtime.with_labels(labels.clone());
@@ -258,7 +291,11 @@ pub async fn resume(store_path: &Path, args: ResumeArgs) -> Result<u8> {
     };
 
     close_servers(servers).await;
-    report_outcome(outcome?, &uuid, agent_path)
+    report_outcome(
+        outcome.map_err(|error| contextualize_auth_error(error, &config))?,
+        &uuid,
+        agent_path,
+    )
 }
 
 /// `salvor fork`: fork a graph run from a node boundary into a NEW run, refusing
@@ -391,7 +428,9 @@ pub async fn fork(store_path: &Path, args: ForkArgs) -> Result<u8> {
 /// recovered automatically: the write may or may not have taken effect. After
 /// a human has verified externally what happened, `resolve` records the
 /// completion they observed, so a later `resume` replays it and never re-runs
-/// the write. It needs no agent and drives nothing.
+/// the write. It builds no agent and drives nothing; `--agent`/`--graph`, if
+/// given, are used only to compose the real resume command the success report
+/// prints, matching what a graph run's own parked report already does.
 pub async fn resolve(store_path: &Path, args: ResolveArgs) -> Result<u8> {
     let run_id = parse_run_id(&args.run_id)?;
     let uuid = run_id.as_uuid().to_string();
@@ -406,7 +445,12 @@ pub async fn resolve(store_path: &Path, args: ResolveArgs) -> Result<u8> {
         Ok(_) => {
             print!(
                 "{}",
-                render::resolved_report(&uuid, render::DEFAULT_REPORT_WIDTH)
+                render::resolved_report(
+                    &uuid,
+                    &args.agents,
+                    args.graph.as_deref(),
+                    render::DEFAULT_REPORT_WIDTH
+                )
             );
             Ok(0)
         }
@@ -570,14 +614,13 @@ pub async fn history(store_path: &Path, args: HistoryArgs) -> Result<u8> {
     Ok(0)
 }
 
-/// `salvor replay --dry-run`: re-derive state from the log, execute nothing.
+/// `salvor replay`: re-derive state from the log, execute nothing.
+///
+/// This is the only mode: replay always re-derives state without executing
+/// anything, and never has run any other way. `--dry-run` is accepted and
+/// ignored, kept only so a script written against an earlier version that
+/// passed it does not break.
 pub async fn replay(store_path: &Path, args: ReplayArgs) -> Result<u8> {
-    if !args.dry_run {
-        eprintln!(
-            "salvor replay only supports --dry-run in this version: it re-derives state from the log without executing anything. Live replay (re-running from a chosen point) arrives in a later version."
-        );
-        return Ok(1);
-    }
     let run_id = parse_run_id(&args.run_id)?;
     let store = open_store(store_path)?;
     let log = store.read_log(run_id).await?;
@@ -909,18 +952,25 @@ pub async fn agent_hash(args: AgentHashArgs) -> Result<u8> {
 ///
 /// This is the same build [`agent_hash`] runs, named for what it is worth
 /// asking on its own: is this file good, and what does it commit an operator
-/// to. Each file is built through [`build_agents`] one at a time, rather than
-/// all at once, so a file that fails to build does not stop the rest from
-/// being checked, matching `graph validate`'s exit-code contract at the
-/// per-file level: `Ok(0)` only when every file built, `Ok(1)` when any one
-/// of them did not. A single file's report carries no path prefix, since
-/// there is nothing to disambiguate; several files each get one, on both the
-/// success line and the error line, for the same reason `agent hash` prefixes
-/// its multi-file output.
+/// to. By default that build CONNECTS: it spawns every declared MCP server
+/// (`command`) or dials every declared one (`url`) to introspect its tools,
+/// exactly as `salvor run` would before starting. `--no-connect` skips that
+/// step entirely and checks fields and shape only: the TOML parses, required
+/// fields are present and well-typed, and each MCP server declaration names
+/// exactly one transport. No process is spawned and no socket is dialed, so a
+/// declared server whose command does not exist on this machine still passes.
 ///
-/// The MCP sessions each build opens are closed before the next file starts,
-/// so no session outlives the file it was opened to validate, let alone the
-/// command.
+/// Each file is built independently, rather than all at once, so a file that
+/// fails to build does not stop the rest from being checked, matching `graph
+/// validate`'s exit-code contract at the per-file level: `Ok(0)` only when
+/// every file built, `Ok(1)` when any one of them did not. A single file's
+/// report carries no path prefix, since there is nothing to disambiguate;
+/// several files each get one, on both the success line and the error line,
+/// for the same reason `agent hash` prefixes its multi-file output.
+///
+/// The MCP sessions each build opens (default mode only) are closed before
+/// the next file starts, so no session outlives the file it was opened to
+/// validate, let alone the command.
 ///
 /// This reads no store and starts no run.
 pub async fn agent_validate(args: AgentValidateArgs) -> Result<u8> {
@@ -928,13 +978,27 @@ pub async fn agent_validate(args: AgentValidateArgs) -> Result<u8> {
     let mut any_failed = false;
 
     for path in &args.agents {
-        match build_agents(std::slice::from_ref(path)).await {
-            Ok((agents, servers)) => {
-                let agent = agents
-                    .first()
-                    .expect("build_agents built exactly one agent");
-                let report = render::agent_summary(agent, servers.len());
-                close_servers(servers).await;
+        let result: Result<String> = async {
+            let config = AgentConfig::load(path)?;
+            let (agent, servers) =
+                agent_config::build_agent(&config, path, args.no_connect).await?;
+            let idempotency_keys = config.declared_idempotency_keys();
+            let report = if args.no_connect {
+                render::agent_summary_no_connect(
+                    &agent,
+                    config.mcp_servers.len(),
+                    &idempotency_keys,
+                )
+            } else {
+                render::agent_summary(&agent, servers.len(), &idempotency_keys)
+            };
+            close_servers(servers).await;
+            Ok(report)
+        }
+        .await;
+
+        match result {
+            Ok(report) => {
                 if bare {
                     print!("{report}");
                 } else {
@@ -1116,7 +1180,18 @@ async fn resume_graph(
             let raw = args.input.as_deref().context(
                 "this run is parked awaiting input; pass --input <json|@file> to resume it",
             )?;
-            ctx.set_resume_input(parse_input(raw)?);
+            let input = parse_input(raw)?;
+            // The gate accept edge, on this layer. The engine enforces the same
+            // rule between its `suspend` and `await_resume` (see
+            // `salvor_engine::approval`); refusing here just means the operator
+            // reads a refusal in the CLI's own voice rather than a drive that
+            // stopped. Either way nothing is appended and the run stays parked
+            // at the gate, so a corrected `--input` resumes it.
+            if let Err(error) = refuse_nonconforming_approval(log, &graph, &input) {
+                close_servers(servers).await;
+                return Err(error);
+            }
+            ctx.set_resume_input(input);
             tracing::info!(run_id = %uuid, "resuming parked graph run");
         }
         _ => {
@@ -1133,6 +1208,37 @@ async fn resume_graph(
     let outcome = run_graph(&mut ctx, &graph, &Value::Null, &agents, &tools).await;
     close_servers(servers).await;
     report_graph_outcome(outcome?, uuid, graph_path, &args.agents)
+}
+
+/// Refuses a `--input` that does not satisfy the `approval_schema` of the gate
+/// the run is parked at, listing every violation and then showing the shape a
+/// conforming approval has.
+///
+/// A run parked anywhere else (a tool suspension, a budget crossing) or being
+/// recovered rather than resumed passes through: this is the gate's rule, and
+/// those inputs already go through the runtime's own recorded-schema check.
+fn refuse_nonconforming_approval(
+    log: &[EventEnvelope],
+    graph: &Graph,
+    input: &Value,
+) -> Result<()> {
+    let Some(gate) = salvor_engine::parked_gate(log, graph) else {
+        return Ok(());
+    };
+    let violations = salvor_engine::approval_violations(input, &gate.approval_schema);
+    if violations.is_empty() {
+        return Ok(());
+    }
+    let listed: String = violations
+        .iter()
+        .map(|violation| format!("\n  {violation}"))
+        .collect();
+    bail!(
+        "the approval does not satisfy gate `{}`'s approval_schema:{listed}\n\nnothing was \
+         recorded and the run is still parked at that gate. A conforming approval satisfies:\n{}",
+        gate.id,
+        render::pretty_json(&gate.approval_schema)
+    )
 }
 
 /// A [`ToolResolver`] over the provided agents' own tools: a graph `tool` node
@@ -1180,7 +1286,7 @@ pub(crate) async fn build_agents(paths: &[PathBuf]) -> Result<(Vec<Agent>, Vec<M
     let mut servers: Vec<McpServer> = Vec::new();
     for path in paths {
         let config = AgentConfig::load(path)?;
-        let (agent, agent_servers) = agent_config::build_agent(&config, path).await?;
+        let (agent, agent_servers) = agent_config::build_agent(&config, path, false).await?;
         agents.push(agent);
         servers.extend(agent_servers);
     }
@@ -1454,7 +1560,7 @@ async fn build_from_definition(definition: AgentDefinition) -> Result<BuiltAgent
     // working directory; the pseudo path's parent is that directory.
     let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let pseudo_path = base.join("agent-definition");
-    let (agent, servers) = agent_config::build_agent(&config, &pseudo_path)
+    let (agent, servers) = agent_config::build_agent(&config, &pseudo_path, false)
         .await
         .map_err(|error| format!("{error:#}"))?;
     Ok(BuiltAgent { agent, servers })

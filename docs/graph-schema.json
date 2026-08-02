@@ -34,7 +34,7 @@
     },
     "BranchCase": {
       "additionalProperties": false,
-      "description": "One case of a [`BranchNode`]: a name and the condition that selects it.\n\nThe realized routing (which downstream node a fired case flows to) is\ncarried by an [`Edge`] whose `label` matches the case `name`, so topology\nstays entirely in the edge list and a branch has real outbound edges.",
+      "description": "One case of a `BranchNode`: a name and the condition that selects it.\n\nThe realized routing (which downstream node a fired case flows to) is\ncarried by an `Edge` whose `label` matches the case `name`, so topology\nstays entirely in the edge list and a branch has real outbound edges.",
       "properties": {
         "name": {
           "description": "The case name. An edge labeled with this name realizes the route.",
@@ -52,7 +52,7 @@
       "type": "object"
     },
     "BranchCondition": {
-      "description": "How a [`BranchCase`] is selected. Modeled as data; not evaluated in this\ncrate.\n\nAdjacently tagged (`{\"kind\": \"...\", \"value\": ...}`) so it stays additive:\na future condition kind is a new variant, which does not change how an\nexisting document encodes.",
+      "description": "How a `BranchCase` is selected. Modeled as data; not evaluated in this\ncrate.\n\nAdjacently tagged (`{\"kind\": \"...\", \"value\": ...}`) so it stays additive:\na future condition kind is a new variant, which does not change how an\nexisting document encodes.",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -93,14 +93,14 @@
       "description": "A `branch` node: routes on a typed output.",
       "properties": {
         "agent_hash": {
-          "description": "Content hash of the agent that decides a [`BranchCondition::ModelDecision`]\ncase, in `sha256:<64 lowercase hex>` form. Present only on a branch that\ncarries a model-decision case: the engine drives this agent with the\nrouted value and maps its reply to a case name. Additive: absent on the\nwire when unset, so a purely expression-driven branch (and every document\nwritten before this field existed) serializes byte for byte as before.\n[`crate::validate`] reports a model-decision case with no agent here as a\nnode-precise error.",
+          "description": "Content hash of the agent that decides a `BranchCondition::ModelDecision`\ncase, in `sha256:<64 lowercase hex>` form. Present only on a branch that\ncarries a model-decision case: the engine drives this agent with the\nrouted value and maps its reply to a case name. Additive: absent on the\nwire when unset, so a purely expression-driven branch (and every document\nwritten before this field existed) serializes byte for byte as before.\n`crate::validate` reports a model-decision case with no agent here as a\nnode-precise error.",
           "type": [
             "string",
             "null"
           ]
         },
         "cases": {
-          "description": "The cases, each a named condition. An expression condition is evaluated\nagainst the routed value; a model-decision condition is resolved by the\nnode's [`agent_hash`](Self::agent_hash) agent. The first matching case in\nauthor order wins, and the engine records the choice as a\n[`crate::document`]-external `BranchTaken` event.",
+          "description": "The cases, each a named condition. An expression condition is evaluated\nagainst the routed value; a model-decision condition is resolved by the\nnode's `agent_hash` agent. The first matching case in\nauthor order wins, and the engine records the choice as a\n`crate::document`-external `BranchTaken` event.",
           "items": {
             "$ref": "#/$defs/BranchCase"
           },
@@ -140,7 +140,7 @@
           "type": "string"
         },
         "label": {
-          "description": "Optional label. When the source is a [`BranchNode`], this names the\n[`BranchCase`] this edge realizes. Data only.",
+          "description": "Optional label. When the source is a `BranchNode`, this names the\n`BranchCase` this edge realizes. Data only.",
           "type": [
             "string",
             "null"
@@ -158,7 +158,7 @@
       "type": "object"
     },
     "FoldBody": {
-      "description": "The body a [`FoldNode`] runs each pass. Adjacently tagged, mirroring\n[`MapBody`], so adding a third form later stays additive. A `node` body names\nan existing node by id (checked for existence during validation); a\n`subgraph` body embeds a whole [`Graph`] and is deferred exactly as the map's\nsubgraph body is.",
+      "description": "The body a `FoldNode` runs each pass. Adjacently tagged, mirroring\n`MapBody`, so adding a third form later stays additive. A `node` body names\nan existing node by id (checked for existence during validation); a\n`subgraph` body embeds a whole `Graph` and is deferred exactly as the map's\nsubgraph body is.",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -199,11 +199,11 @@
       ]
     },
     "FoldJoin": {
-      "description": "How a [`FoldNode`] folds its passes into the single value it produces.\n\nAdjacently tagged (`{\"kind\": \"...\", \"value\": ...}` for the variant that\ncarries data, `{\"kind\": \"...\"}` for the unit variants) so a future join rule\nis a new variant that does not change how an existing document encodes,\nexactly like [`BranchCondition`].\n\nThe variants are grounded in what the AARG loop actually needs. `best_by` is\nthe argmax winner the loop's \"best draft wins, never the last pass\" rule\nrequires; `last` and `all` are the two obvious simpler folds a different\nconsumer might want.",
+      "description": "How a `FoldNode` folds its passes into the single value it produces.\n\nAdjacently tagged (`{\"kind\": \"...\", \"value\": ...}` for the variant that\ncarries data, `{\"kind\": \"...\"}` for the unit variants) so a future join rule\nis a new variant that does not change how an existing document encodes,\nexactly like `BranchCondition`.\n\nThe variants are grounded in what the AARG loop actually needs. `best_by` is\nthe argmax winner the loop's \"best draft wins, never the last pass\" rule\nrequires; `last` and `all` are the two obvious simpler folds a different\nconsumer might want.",
       "oneOf": [
         {
           "additionalProperties": false,
-          "description": "Produce the pass whose value MAXIMIZES the given reference (a path into\nthe accumulated value, `score` or `review.overall_score`). This is the\nargmax the AARG loop needs: the best draft wins, never the last. The\nreference is parsed at submit like a [`crate::expr`] path, so a malformed\none is a node-precise error.",
+          "description": "Produce the pass whose value MAXIMIZES the given reference (a path into\nthe accumulated value, `score` or `review.overall_score`). This is the\nargmax the AARG loop needs: the best draft wins, never the last. The\nreference is parsed at submit like a `crate::expr` path, so a malformed\none is a node-precise error.",
           "properties": {
             "kind": {
               "const": "best_by",
@@ -251,14 +251,14 @@
     },
     "FoldNode": {
       "additionalProperties": false,
-      "description": "A `fold` node: bounded iteration that accumulates across passes.\n\nModels an adversarial refine loop as one node: a `body` is run up to\n`max_iterations` times, each pass folding into an accumulated value, and the\nloop stops when `stop_when` holds over that value (or the bound is reached).\nThe `join` rule then selects the value the node produces. Every field is\nauthor-time data; this crate never runs the loop.\n\nGrounded in the AARG tailor loop the graph wiring models: bounded revisions\n(`max_iterations`), a stop predicate over the accumulated score\n(`stop_when`, an expression in the same language a branch case uses), and an\nargmax winner (`join` = [`FoldJoin::BestBy`] over the score). See the\ncrate-level docs and the graph wiring plan.",
+      "description": "A `fold` node: bounded iteration that accumulates across passes.\n\nModels an adversarial refine loop as one node: a `body` is run up to\n`max_iterations` times, each pass folding into an accumulated value, and the\nloop stops when `stop_when` holds over that value (or the bound is reached).\nThe `join` rule then selects the value the node produces. Every field is\nauthor-time data; this crate never runs the loop.\n\nGrounded in the AARG tailor loop the graph wiring models: bounded revisions\n(`max_iterations`), a stop predicate over the accumulated score\n(`stop_when`, an expression in the same language a branch case uses), and an\nargmax winner (`join` = `FoldJoin::BestBy` over the score). See the\ncrate-level docs and the graph wiring plan.",
       "properties": {
         "accumulator_schema": {
-          "description": "Optional JSON Schema for the accumulated value the loop carries and\nproduces. Data only, like an [`AgentNode`]'s `output_schema`: recorded\nfor authoring and tooling, never wired into the edge type-compatibility\ncheck (a fold's produced-value semantics are not implemented with\nits execution). Additive: absent on the wire when unset."
+          "description": "Optional JSON Schema for the accumulated value the loop carries and\nproduces. Data only, like an `AgentNode`'s `output_schema`: recorded\nfor authoring and tooling, never wired into the edge type-compatibility\ncheck (a fold's produced-value semantics are not implemented with\nits execution). Additive: absent on the wire when unset."
         },
         "body": {
           "$ref": "#/$defs/FoldBody",
-          "description": "What each pass runs: a node already in this document, or an embedded\nsub-graph. Not implemented exactly as [`MapBody`]'s subgraph form is not:\nthe shape is legal, but no engine runs it yet."
+          "description": "What each pass runs: a node already in this document, or an embedded\nsub-graph. Not implemented exactly as `MapBody`'s subgraph form is not:\nthe shape is legal, but no engine runs it yet."
         },
         "id": {
           "description": "The node's stable id, unique within the document.",
@@ -269,7 +269,7 @@
           "description": "How the passes are folded into the value the node produces."
         },
         "max_iterations": {
-          "description": "The iteration bound: the most passes the loop may run. Must be at least\n1; [`crate::validate`] reports a zero bound by node id.",
+          "description": "The iteration bound: the most passes the loop may run. Must be at least\n1; `crate::validate` reports a zero bound by node id.",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
@@ -282,7 +282,7 @@
           ]
         },
         "stop_when": {
-          "description": "A boolean expression over the accumulated value that stops the loop when\nit holds. Written in the [`crate::expr`] condition language, the same one\na [`BranchCondition::Expression`] uses, and validated at submit so a\nmalformed predicate is a node-precise error, never a run-time failure.",
+          "description": "A boolean expression over the accumulated value that stops the loop when\nit holds. Written in the `crate::expr` condition language, the same one\na `BranchCondition::Expression` uses, and validated at submit so a\nmalformed predicate is a node-precise error, never a run-time failure.",
           "type": "string"
         }
       },
@@ -328,7 +328,7 @@
       "type": "object"
     },
     "MapBody": {
-      "description": "The body a [`MapNode`] maps each element through.\n\nAdjacently tagged, so adding a third form later is additive. A `node` body\nnames an existing node by id (checked for existence during validation); a\n`subgraph` body embeds a whole [`Graph`].",
+      "description": "The body a `MapNode` maps each element through.\n\nAdjacently tagged, so adding a third form later is additive. A `node` body\nnames an existing node by id (checked for existence during validation); a\n`subgraph` body embeds a whole `Graph`.",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -377,7 +377,7 @@
           "description": "What each element is mapped through: a node already in this document, or\nan embedded sub-graph."
         },
         "concurrency": {
-          "description": "The maximum number of sub-runs in flight at once. Must be at least 1;\n[`crate::validate`] reports a non-positive cap by node id.",
+          "description": "The maximum number of sub-runs in flight at once. Must be at least 1;\n`crate::validate` reports a non-positive cap by node id.",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
@@ -410,7 +410,7 @@
       "type": "object"
     },
     "Node": {
-      "description": "One node in a graph: exactly one of the six kinds the runtime knows how to\nexecute.\n\nAdjacently tagged like the event enum: each node serializes as `{\"kind\":\n\"...\", \"payload\": {...}}`. The tag (`kind`) and content (`payload`) live in\nseparate keys, which never collides with a payload field and does not force\npayloads to be JSON objects. `deny_unknown_fields` on the enum rejects any\nkey other than `kind` and `payload`.\n\nThe stable node id lives inside each payload (every payload struct carries\nan `id`), reachable generically through [`Node::id`]. Keeping the id in the\npayload is what lets the outer shape stay exactly the two-key adjacent\ntagging the event log uses, with no third common field to special-case.",
+      "description": "One node in a graph: exactly one of the six kinds the runtime knows how to\nexecute.\n\nAdjacently tagged like the event enum: each node serializes as `{\"kind\":\n\"...\", \"payload\": {...}}`. The tag (`kind`) and content (`payload`) live in\nseparate keys, which never collides with a payload field and does not force\npayloads to be JSON objects. `deny_unknown_fields` on the enum rejects any\nkey other than `kind` and `payload`.\n\nThe stable node id lives inside each payload (every payload struct carries\nan `id`), reachable generically through `Node::id`. Keeping the id in the\npayload is what lets the outer shape stay exactly the two-key adjacent\ntagging the event log uses, with no third common field to special-case.",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -582,7 +582,7 @@
       "type": "array"
     },
     "schema_version": {
-      "description": "The document schema version. Always [`SCHEMA_VERSION`] for documents\nthis build writes; an older value may appear when reading a recorded\ndocument.",
+      "description": "The document schema version. Always `SCHEMA_VERSION` for documents\nthis build writes; an older value may appear when reading a recorded\ndocument.",
       "format": "uint32",
       "minimum": 0,
       "type": "integer"

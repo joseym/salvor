@@ -338,6 +338,7 @@ mod tests {
                 Event::ToolCallCompleted {
                     seq: SequenceNumber::new(4),
                     output: json!({"ok": true}),
+                    deduplicated_from: None,
                 },
             ),
             envelope(

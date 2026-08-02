@@ -67,8 +67,9 @@ use thiserror::Error;
 use time::OffsetDateTime;
 
 use crate::effect::Effect;
-use crate::event::{Budget, Event, EventEnvelope, ForkOrigin, TokenUsage};
+use crate::event::{Budget, DedupOrigin, Event, EventEnvelope, ForkOrigin, TokenUsage};
 use crate::id::{RunId, SequenceNumber};
+use crate::state::PendingCall;
 
 /// How the cursor answered a request: from recorded history, or with a
 /// permission to execute live.
@@ -1007,7 +1008,7 @@ impl ReplayCursor {
             };
             return match self.log.get(self.pos + 1) {
                 Some(next) => {
-                    if let Event::ToolCallCompleted { seq, output } = &next.event
+                    if let Event::ToolCallCompleted { seq, output, .. } = &next.event
                         && *seq == correlation
                     {
                         let output = output.clone();
@@ -1063,6 +1064,124 @@ impl ReplayCursor {
             idempotency_key: key,
             cursor: self,
         }))
+    }
+
+    /// The recorded call intent sitting at the cursor's position with nothing
+    /// after it: the gap a crash left, seen from where replay currently stands.
+    ///
+    /// Read-only, and the reason it exists is the borrow discipline of the
+    /// layer above rather than replay itself. A caller that must consult the
+    /// outside world about a dangling intent needs to *know* it is looking at
+    /// one before it commits to a step, because
+    /// [`tool_call`](Self::tool_call) either advances the cursor or fails, with
+    /// nothing in between. This is the look before the leap.
+    ///
+    /// `None` unless the cursor is at the last recorded event and that event is
+    /// a call intent. Answered from this run's log alone, like everything else
+    /// here.
+    #[must_use]
+    pub fn dangling_intent(&self) -> Option<PendingCall> {
+        if self.pos + 1 != self.log.len() {
+            return None;
+        }
+        match &self.log[self.pos].event {
+            Event::ModelCallRequested {
+                seq, request_hash, ..
+            } => Some(PendingCall::Model {
+                seq: *seq,
+                request_hash: request_hash.clone(),
+            }),
+            Event::ToolCallRequested {
+                seq,
+                tool,
+                input,
+                effect,
+                idempotency_key,
+                ..
+            } => Some(PendingCall::Tool {
+                seq: *seq,
+                tool: tool.clone(),
+                input: input.clone(),
+                effect: *effect,
+                idempotency_key: idempotency_key.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    /// Takes the live permit for a recorded tool intent that the caller has
+    /// proven, outside this cursor, did not execute.
+    ///
+    /// This is the narrow escape from [`ReplayError::NeedsReconciliation`], and
+    /// it exists for exactly one situation: a call that resolved as a duplicate
+    /// of work another run had already committed, and whose process died
+    /// between recording the intent and recording the copied completion. Such a
+    /// call executed nothing, so parking it for a human would be asking a human
+    /// to reconcile an effect that provably never happened. Every other
+    /// dangling [`Effect::Write`] intent still parks; see
+    /// [`tool_call`](Self::tool_call).
+    ///
+    /// **The cursor does not check the claim and cannot.** Whether an intent
+    /// executed is a fact about the store and the world, not about this run's
+    /// log, and this crate reads neither. The caller carries the burden of
+    /// proof; `salvor-runtime` discharges it by showing that the store's
+    /// commitment for this call's `(tool, idempotency_key)` is held by a
+    /// *different* run, which means this run never held the right to execute.
+    ///
+    /// On success the recorded intent is consumed and the returned permit
+    /// carries no intent to persist (it is already in the log), so the caller
+    /// redeems it with
+    /// [`record_deduplicated`](ToolCallPermit::record_deduplicated).
+    ///
+    /// # Errors
+    ///
+    /// [`ReplayError::Divergence`] when the log position does not hold a
+    /// matching intent for this call, or when that intent is not the last event
+    /// in the log (an intent with a completion after it is not dangling and
+    /// must be replayed through [`tool_call`](Self::tool_call) instead).
+    pub fn resume_unexecuted_tool_call(
+        &mut self,
+        tool: &str,
+        input: &Value,
+        effect: Effect,
+        idempotency_key: &str,
+    ) -> Result<ToolCallPermit<'_>, ReplayError> {
+        let requested = RequestedStep::ToolCall {
+            tool: tool.to_owned(),
+            input: input.clone(),
+            effect,
+            idempotency_key: Some(idempotency_key.to_owned()),
+        };
+        // Dangling means the intent is the final recorded event. Anything else
+        // is a different situation and must not take this path.
+        if self.pos + 1 != self.log.len() {
+            return Err(self.mismatch(requested));
+        }
+        let correlation = match &self.log[self.pos].event {
+            Event::ToolCallRequested {
+                seq,
+                tool: recorded_tool,
+                input: recorded_input,
+                effect: recorded_effect,
+                idempotency_key: recorded_key,
+                ..
+            } if recorded_tool == tool
+                && recorded_input == input
+                && *recorded_effect == effect
+                && recorded_key.as_deref() == Some(idempotency_key) =>
+            {
+                *seq
+            }
+            _ => return Err(self.mismatch(requested)),
+        };
+        self.pos += 1;
+        Ok(ToolCallPermit {
+            correlation,
+            intent: None,
+            effect,
+            idempotency_key: Some(idempotency_key.to_owned()),
+            cursor: self,
+        })
     }
 
     /// Requests suspension of the run.
@@ -1454,6 +1573,29 @@ impl ToolCallPermit<'_> {
         self.cursor.emit(Event::ToolCallCompleted {
             seq: self.correlation,
             output,
+            deduplicated_from: None,
+        })
+    }
+
+    /// Records a completion that copied its output from an equal call already
+    /// committed elsewhere, naming that call as the origin.
+    ///
+    /// The caller redeems the permit this way instead of [`record`](Self::record)
+    /// when it decided, live and before executing, that this call is a
+    /// duplicate: nothing ran, and `output` is the origin's recorded output.
+    /// The recorded [`DedupOrigin`] is what keeps the log honest about which
+    /// of two equal completions witnessed the effect.
+    ///
+    /// This cursor makes no such decision and cannot: it sees one run's log and
+    /// deduplication is a fact about the whole store. The decision belongs to
+    /// the IO edge (`salvor-runtime`), and the origin arrives here already
+    /// determined. Replay of the resulting log never consults the origin.
+    #[must_use]
+    pub fn record_deduplicated(self, output: Value, origin: DedupOrigin) -> Emitted {
+        self.cursor.emit(Event::ToolCallCompleted {
+            seq: self.correlation,
+            output,
+            deduplicated_from: Some(origin),
         })
     }
 }

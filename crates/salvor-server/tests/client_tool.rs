@@ -290,7 +290,7 @@ async fn a_client_performed_call_is_recorded_end_to_end() {
         "the log says who performed it"
     );
     assert!(
-        matches!(&log[2].event, Event::ToolCallCompleted { seq, output }
+        matches!(&log[2].event, Event::ToolCallCompleted { seq, output, .. }
             if seq.get() == 1 && output == &json!({ "charge_id": "ch_9" })),
         "the completion correlates to the intent, got {:?}",
         log[2].event
@@ -876,7 +876,7 @@ async fn a_require_equal_mismatch_is_refused_and_the_honest_report_is_accepted()
     let log = read_log(&client, &server.base, &run).await;
     assert_eq!(log.len(), 3, "RunStarted, intent, completion");
     assert!(
-        matches!(&log[2].event, Event::ToolCallCompleted { seq, output }
+        matches!(&log[2].event, Event::ToolCallCompleted { seq, output, .. }
             if seq.get() == 1 && output["amount_cents"] == json!(5000)),
         "the honest completion is recorded, got {:?}",
         log[2].event

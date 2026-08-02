@@ -11,8 +11,9 @@
 use std::collections::BTreeMap;
 
 use salvor_replay::{
-    Effect, Emitted, Event, EventEnvelope, LoggedStep, ModelReply, Outcome, ReplayCursor,
-    ReplayError, RequestedStep, RunId, RunStatus, SequenceNumber, TokenUsage, derive_state,
+    DedupOrigin, Effect, Emitted, Event, EventEnvelope, LoggedStep, ModelReply, Outcome,
+    PendingCall, ReplayCursor, ReplayError, RequestedStep, RunId, RunStatus, SequenceNumber,
+    TokenUsage, derive_state,
 };
 use serde_json::{Value, json};
 use time::macros::datetime;
@@ -547,6 +548,7 @@ fn dangling_idempotent_intent_retries_under_recorded_key() {
         Event::ToolCallCompleted {
             seq: SequenceNumber::new(1),
             output: json!({"stored": true}),
+            deduplicated_from: None,
         }
     );
 }
@@ -709,4 +711,170 @@ fn labels_recorded_live_survive_a_replayed_log() {
     else {
         panic!("begin should replay from a recorded log");
     };
+}
+
+/// The cursor can be asked whether it is standing in front of a dangling
+/// intent, without taking a step. That look-before-you-leap is what lets the
+/// IO edge consult the outside world before committing to `tool_call`, which
+/// either advances or fails with nothing in between.
+#[test]
+fn dangling_intent_reports_the_gap_without_advancing() {
+    let base = datetime!(2026-07-09 12:00:00 UTC);
+    let payout = json!({"claim_id": "wreck-9931"});
+    let intent = |seq: u64| {
+        EventEnvelope::new(
+            run_id(),
+            SequenceNumber::new(seq),
+            base,
+            Event::ToolCallRequested {
+                seq: SequenceNumber::new(seq),
+                tool: "pay_claim".into(),
+                input: payout.clone(),
+                effect: Effect::Write,
+                idempotency_key: Some("pay_claim:wreck-9931".into()),
+                performed_by: None,
+            },
+        )
+    };
+    let started = EventEnvelope::new(
+        run_id(),
+        SequenceNumber::new(0),
+        base,
+        Event::RunStarted {
+            agent_def_hash: AGENT_HASH.into(),
+            input: json!({}),
+            labels: None,
+        },
+    );
+
+    let mut cursor = ReplayCursor::new(vec![started.clone(), intent(1)]).expect("log is valid");
+    assert_eq!(cursor.dangling_intent(), None, "not there yet");
+    cursor.begin(AGENT_HASH, None).expect("begin replays");
+    let Some(PendingCall::Tool {
+        seq,
+        tool,
+        idempotency_key,
+        ..
+    }) = cursor.dangling_intent()
+    else {
+        panic!("expected a dangling tool intent");
+    };
+    assert_eq!(seq, SequenceNumber::new(1));
+    assert_eq!(tool, "pay_claim");
+    assert_eq!(idempotency_key.as_deref(), Some("pay_claim:wreck-9931"));
+    // Looking must not have moved the cursor: the same look answers the same.
+    assert!(cursor.dangling_intent().is_some());
+
+    // An intent with a completion behind it is not dangling.
+    let completed = EventEnvelope::new(
+        run_id(),
+        SequenceNumber::new(2),
+        base,
+        Event::ToolCallCompleted {
+            seq: SequenceNumber::new(1),
+            output: json!({"charge_id": "po_1"}),
+            deduplicated_from: None,
+        },
+    );
+    let mut cursor = ReplayCursor::new(vec![started, intent(1), completed]).expect("log is valid");
+    cursor.begin(AGENT_HASH, None).expect("begin replays");
+    assert_eq!(cursor.dangling_intent(), None);
+}
+
+/// A dangling write intent the caller has proven did not execute is finished as
+/// the copy it was: the permit reports the intent as already recorded, and the
+/// completion carries the origin it copied.
+///
+/// The cursor never checks the proof, because it cannot: whether an intent
+/// executed is a fact about the store and the world. What it does enforce is
+/// that the position really holds this call's dangling intent, so the escape
+/// cannot be pointed at anything else.
+#[test]
+fn a_proven_unexecuted_intent_records_a_deduplicated_completion() {
+    let base = datetime!(2026-07-09 12:00:00 UTC);
+    let payout = json!({"claim_id": "wreck-9931"});
+    let log = vec![
+        EventEnvelope::new(
+            run_id(),
+            SequenceNumber::new(0),
+            base,
+            Event::RunStarted {
+                agent_def_hash: AGENT_HASH.into(),
+                input: json!({}),
+                labels: None,
+            },
+        ),
+        EventEnvelope::new(
+            run_id(),
+            SequenceNumber::new(1),
+            base,
+            Event::ToolCallRequested {
+                seq: SequenceNumber::new(1),
+                tool: "pay_claim".into(),
+                input: payout.clone(),
+                effect: Effect::Write,
+                idempotency_key: Some("pay_claim:wreck-9931".into()),
+                performed_by: None,
+            },
+        ),
+    ];
+
+    // The ordinary path still refuses it, which is the behavior every other
+    // dangling write keeps.
+    let mut cursor = ReplayCursor::new(log.clone()).expect("log is valid");
+    cursor.begin(AGENT_HASH, None).expect("begin replays");
+    assert!(matches!(
+        cursor.tool_call(
+            "pay_claim",
+            &payout,
+            Effect::Write,
+            Some("pay_claim:wreck-9931")
+        ),
+        Err(ReplayError::NeedsReconciliation { .. })
+    ));
+
+    let mut cursor = ReplayCursor::new(log).expect("log is valid");
+    cursor.begin(AGENT_HASH, None).expect("begin replays");
+    // A different call cannot borrow the escape.
+    assert!(
+        cursor
+            .resume_unexecuted_tool_call(
+                "pay_claim",
+                &json!({"claim_id": "someone-else"}),
+                Effect::Write,
+                "pay_claim:wreck-9931"
+            )
+            .is_err(),
+        "the escape must be pinned to the recorded intent"
+    );
+
+    let origin = DedupOrigin {
+        run_id: RunId::from_uuid(
+            Uuid::parse_str("00000000-0000-4000-8000-0000000000aa").expect("uuid"),
+        ),
+        seq: SequenceNumber::new(4),
+    };
+    let permit = cursor
+        .resume_unexecuted_tool_call("pay_claim", &payout, Effect::Write, "pay_claim:wreck-9931")
+        .expect("the proven-unexecuted intent goes live");
+    assert!(permit.intent().is_none(), "the intent is already recorded");
+    assert_eq!(permit.seq(), SequenceNumber::new(1));
+
+    let emitted = permit.record_deduplicated(json!({"charge_id": "po_1"}), origin);
+    assert_eq!(emitted.seq, SequenceNumber::new(2));
+    let Event::ToolCallCompleted {
+        seq,
+        output,
+        deduplicated_from,
+    } = emitted.event
+    else {
+        panic!("expected a tool completion");
+    };
+    assert_eq!(seq, SequenceNumber::new(1), "it correlates to the intent");
+    assert_eq!(output, json!({"charge_id": "po_1"}));
+    assert_eq!(
+        deduplicated_from,
+        Some(origin),
+        "the completion must name what it copied"
+    );
 }
