@@ -49,6 +49,7 @@ fn a_valid_file_reports_the_model_and_a_hash_and_exits_zero() {
         stdout.contains("agent ok: model claude-test-model, 0 tool(s) from 0 mcp server(s)"),
         "{stdout}"
     );
+    assert!(stdout.contains("keys:    (none)"), "{stdout}");
     assert!(stdout.contains("hash:    sha256:"), "{stdout}");
     // One file: no path prefix, since there is nothing to disambiguate.
     assert!(!stdout.contains("research.toml:"), "{stdout}");
@@ -74,6 +75,65 @@ fn a_declared_prompt_and_budget_are_reported() {
     assert!(stdout.contains("prompt:  set ("), "{stdout}");
     assert!(
         stdout.contains("budgets: steps 10, tokens 5000"),
+        "{stdout}"
+    );
+}
+
+/// A declared `idempotency_keys` map is echoed in the report, and it shows up
+/// under `--no-connect` too: the declaration comes straight out of the parsed
+/// config, so there is nothing a connection would add to it. The server's own
+/// command does not exist on this machine, which would fail an ordinary build;
+/// `--no-connect` never spawns it, so the file still validates.
+#[test]
+fn a_declared_idempotency_key_is_reported_without_connecting() {
+    let dir = tempdir().expect("tempdir");
+    let agent = write(
+        dir.path(),
+        "payout.toml",
+        "model = \"claude-test-model\"\n\n\
+         [[mcp_servers]]\n\
+         command = \"this-command-does-not-exist-anywhere-on-path\"\n\
+         idempotency_keys = { pay_claim = \"claim_id\" }\n",
+    );
+
+    let output = salvor()
+        .args(["agent", "validate", "--no-connect"])
+        .arg(&agent)
+        .output()
+        .expect("runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        stdout.contains("keys:    pay_claim key from claim_id"),
+        "{stdout}"
+    );
+}
+
+/// Several declared keys, across servers, are joined on one line in tool-name
+/// order, the same way `budgets:` joins its dimensions.
+#[test]
+fn several_declared_keys_are_all_reported() {
+    let dir = tempdir().expect("tempdir");
+    let agent = write(
+        dir.path(),
+        "multi.toml",
+        "model = \"claude-test-model\"\n\n\
+         [[mcp_servers]]\n\
+         command = \"this-command-does-not-exist-anywhere-on-path\"\n\
+         idempotency_keys = { pay_claim = \"claim_id\", refund = \"payment.charge_id\" }\n",
+    );
+
+    let output = salvor()
+        .args(["agent", "validate", "--no-connect"])
+        .arg(&agent)
+        .output()
+        .expect("runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        stdout.contains("keys:    pay_claim key from claim_id, refund key from payment.charge_id"),
         "{stdout}"
     );
 }

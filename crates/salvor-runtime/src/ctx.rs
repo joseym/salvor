@@ -752,6 +752,15 @@ impl RunCtx {
     /// the runtime derives on a tool's behalf is not, and the difference is not
     /// a technicality.
     ///
+    /// A hand-written tool makes that declaration in Rust. An MCP or wasm tool
+    /// has no code here to make it in, so its operator does, by naming the
+    /// input field that identifies a call in the agent file
+    /// (`idempotency_keys`); the tool derives the key from that field on every
+    /// call and answers through the same trait method. Nothing below this
+    /// distinguishes the two, because there is no distinction to make: both are
+    /// a statement about what the call does in the world, from someone in a
+    /// position to know.
+    ///
     /// A declared key is a statement about the world: `"pay_claim:wreck-9931"`
     /// means *this is the payout for claim 9931*, and two calls carrying it are
     /// the same payment no matter which run asked for them. A derived key says

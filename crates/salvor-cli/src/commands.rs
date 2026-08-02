@@ -982,10 +982,15 @@ pub async fn agent_validate(args: AgentValidateArgs) -> Result<u8> {
             let config = AgentConfig::load(path)?;
             let (agent, servers) =
                 agent_config::build_agent(&config, path, args.no_connect).await?;
+            let idempotency_keys = config.declared_idempotency_keys();
             let report = if args.no_connect {
-                render::agent_summary_no_connect(&agent, config.mcp_servers.len())
+                render::agent_summary_no_connect(
+                    &agent,
+                    config.mcp_servers.len(),
+                    &idempotency_keys,
+                )
             } else {
-                render::agent_summary(&agent, servers.len())
+                render::agent_summary(&agent, servers.len(), &idempotency_keys)
             };
             close_servers(servers).await;
             Ok(report)

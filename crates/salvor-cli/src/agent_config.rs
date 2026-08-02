@@ -892,6 +892,31 @@ impl AgentConfig {
         resolve_record_prompts(self.record_prompts, env_record_prompts_default())
     }
 
+    /// Every declared idempotency key across `mcp_servers` and `wasm_tools`,
+    /// merged into one map from tool name to the raw field-path string as the
+    /// file wrote it (not the parsed [`IdempotencyPath`]; this is for display,
+    /// not dispatch).
+    ///
+    /// This reads only the parsed config, so it is available in `--no-connect`
+    /// mode too, where nothing was spawned or dialed to ask a server what it
+    /// advertises. `salvor agent validate` uses it to echo what a file
+    /// declares back to the person checking it.
+    #[must_use]
+    pub fn declared_idempotency_keys(&self) -> BTreeMap<String, String> {
+        let mut keys = BTreeMap::new();
+        for server in &self.mcp_servers {
+            for (tool, path) in &server.idempotency_keys {
+                keys.insert(tool.clone(), path.clone());
+            }
+        }
+        for tool in &self.wasm_tools {
+            if let Some(path) = &tool.idempotency_key {
+                keys.insert(tool.name.clone(), path.clone());
+            }
+        }
+        keys
+    }
+
     /// The system prompt text, reading the file when `system_prompt_path` is
     /// set (relative to `agent_dir`).
     fn system_prompt(&self, agent_dir: &Path) -> Result<Option<String>> {
