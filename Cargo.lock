@@ -2653,6 +2653,7 @@ dependencies = [
  "salvor-store",
  "salvor-tools",
  "salvor-wasm",
+ "serde_json",
  "tempfile",
  "tokio",
 ]
