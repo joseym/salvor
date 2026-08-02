@@ -1,5 +1,5 @@
 {
-  "salvor_version": "0.9.0",
+  "salvor_version": "0.9.1",
   "root": {
     "name": "salvor",
     "about": "Salvor CLI: run, resume, list, history, and replay for durable agent runs",

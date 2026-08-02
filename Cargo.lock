@@ -2642,7 +2642,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "salvor"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "salvor-core",
  "salvor-engine",
@@ -2660,7 +2660,7 @@ dependencies = [
 
 [[package]]
 name = "salvor-cli"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anstream",
  "anstyle",
@@ -2701,7 +2701,7 @@ dependencies = [
 
 [[package]]
 name = "salvor-cli-core"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anstyle",
  "clap",
@@ -2715,7 +2715,7 @@ dependencies = [
 
 [[package]]
 name = "salvor-cli-wasm"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anstream",
  "clap",
@@ -2730,14 +2730,14 @@ dependencies = [
 
 [[package]]
 name = "salvor-core"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "salvor-replay",
 ]
 
 [[package]]
 name = "salvor-engine"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "async-trait",
  "jsonschema",
@@ -2759,7 +2759,7 @@ dependencies = [
 
 [[package]]
 name = "salvor-graph"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "proptest",
  "schemars",
@@ -2770,7 +2770,7 @@ dependencies = [
 
 [[package]]
 name = "salvor-llm"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
@@ -2783,7 +2783,7 @@ dependencies = [
 
 [[package]]
 name = "salvor-replay"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2794,7 +2794,7 @@ dependencies = [
 
 [[package]]
 name = "salvor-replay-wasm"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "salvor-replay",
  "serde",
@@ -2806,7 +2806,7 @@ dependencies = [
 
 [[package]]
 name = "salvor-runtime"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "async-trait",
  "salvor-core",
@@ -2827,7 +2827,7 @@ dependencies = [
 
 [[package]]
 name = "salvor-server"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -2859,7 +2859,7 @@ dependencies = [
 
 [[package]]
 name = "salvor-store"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "async-trait",
  "rusqlite",
@@ -2877,7 +2877,7 @@ dependencies = [
 
 [[package]]
 name = "salvor-store-conformance"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "async-trait",
  "salvor-core",
@@ -2889,7 +2889,7 @@ dependencies = [
 
 [[package]]
 name = "salvor-tools"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -2905,7 +2905,7 @@ dependencies = [
 
 [[package]]
 name = "salvor-tools-macros"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2916,7 +2916,7 @@ dependencies = [
 
 [[package]]
 name = "salvor-wasm"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "async-trait",
  "salvor-core",

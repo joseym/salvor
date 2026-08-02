@@ -2,6 +2,18 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.9.1 - 2026-08-02
+#### Features
+- (**salvor**) the umbrella crate compiles the front-page sample - (4397ece) - Josey Morton
+#### Bug Fixes
+- (**server**) a client-run 401 names the server-side key variable - (94c8173) - Josey Morton
+#### Documentation
+- count v0.9.0 among the shipped releases - (6a70725) - Josey Morton
+#### Continuous Integration
+- wait as long for the release as the release actually takes - (4746f31) - Josey Morton
+
+- - -
+
 ## v0.9.0 - 2026-08-02
 #### Features
 - (**engine**) refuse a gate approval its schema rejects - (fa53cfe) - Josey Morton
