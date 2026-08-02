@@ -28,9 +28,10 @@ facts, which no script can derive.
 
 ### Versions
 
-8 versions have shipped, and `v0.9.1` is current.
+9 versions have shipped, and `v0.9.1` is current.
 
-`v0.5.0`, `v0.5.1`, `v0.5.2`, `v0.5.3`, `v0.6.0`, `v0.7.0`, `v0.8.0`, `v0.9.0`.
+`v0.5.0`, `v0.5.1`, `v0.5.2`, `v0.5.3`, `v0.6.0`, `v0.7.0`, `v0.8.0`, `v0.9.0`,
+`v0.9.1`.
 
 ### Workflows a version tag starts
 
