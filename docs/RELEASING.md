@@ -28,18 +28,19 @@ facts, which no script can derive.
 
 ### Versions
 
-7 versions have shipped, and `v0.8.0` is current.
+7 versions have shipped, and `v0.9.0` is current.
 
 `v0.5.0`, `v0.5.1`, `v0.5.2`, `v0.5.3`, `v0.6.0`, `v0.7.0`, `v0.8.0`.
 
 ### Workflows a version tag starts
 
-5 of the 6 workflows in `.github/workflows` match the tag `v0.8.0`.
+6 of the 7 workflows in `.github/workflows` match the tag `v0.9.0`.
 
 | Workflow | Tag patterns | First version that ran it |
 | --- | --- | --- |
 | `.github/workflows/crates.yml` | `v[0-9]+.[0-9]+.[0-9]+*` | `v0.5.2` |
 | `.github/workflows/docker.yml` | `v*` | `v0.6.0` |
+| `.github/workflows/npm-cli.yml` | `v[0-9]+.[0-9]+.[0-9]+*` | not yet tagged |
 | `.github/workflows/npm-client.yml` | `v[0-9]+.[0-9]+.[0-9]+*` | `v0.5.2` |
 | `.github/workflows/pypi.yml` | `v[0-9]+.[0-9]+.[0-9]+*` | `v0.5.2` |
 | `.github/workflows/release.yml` | `**[0-9]+.[0-9]+.[0-9]+*` | `v0.5.0` |
@@ -64,7 +65,6 @@ decides what is pushed anywhere beyond the GitHub Release.
 | Channel | What a tag does with it |
 | --- | --- |
 | `homebrew` | built and attached to the release only; absent from `publish-jobs`, so nothing pushes it to its registry |
-| `npm` | built, attached to the release, and published to its registry |
 | `powershell` | built and attached to the release, which is its only distribution point |
 | `shell` | built and attached to the release, which is its only distribution point |
 

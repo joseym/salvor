@@ -15,7 +15,7 @@ license.workspace = true
 # false` can turn off the host-only `rng` feature: that is what keeps this
 # crate free of a randomness backend and buildable for
 # wasm32-unknown-unknown. The types are the same ones salvor-core re-exports.
-salvor-replay = { path = "../salvor-replay", version = "0.8.0", default-features = false }
+salvor-replay = { path = "../salvor-replay", version = "0.9.0", default-features = false }
 # The graph document summary `graph validate` prints. A pure, IO-free leaf.
 salvor-graph.workspace = true
 clap.workspace = true

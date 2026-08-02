@@ -2,6 +2,24 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.9.0 - 2026-08-02
+#### Features
+- (**engine**) refuse a gate approval its schema rejects - (fa53cfe) - Josey Morton
+- (**runtime**) let a declared idempotency key hold across runs - (dc396ac) - Josey Morton
+- (**store**) make the event log tamper-evident, for real - (745b3a3) - Josey Morton
+- (**tools**) declare an idempotency key in the agent file - (e006c12) - Josey Morton
+#### Bug Fixes
+- (**cli**) the seven paper cuts a field-test round surfaced - (16f6c59) - Josey Morton
+- (**npm**) install a killable binary, not a Node wrapper - (b4ec79d) - Josey Morton
+#### Documentation
+- make the idempotency key findable from where it is promised - (e9ba9a7) - Josey Morton
+- say how the key, the npm binary, and the cross-run guarantee work - (509bbcd) - Josey Morton
+- point the readme at salvor.run - (d2bdd9f) - Josey Morton
+#### Build system
+- regenerate release facts at bump time, accept the one-ahead state - (0d68cd0) - Josey Morton
+
+- - -
+
 ## v0.8.0 - 2026-08-01
 #### Features
 - (**bridge**) draw the body reference a map only implies - (df30546) - Josey Morton
