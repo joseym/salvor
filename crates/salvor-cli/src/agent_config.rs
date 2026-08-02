@@ -69,6 +69,10 @@
 //! # trust decision, since MCP effect annotations are hints a server
 //! # may misstate, so an operator who knows a tool's true side-effect class pins
 //! # it here and the runtime honors it over the wire hints.
+//! #
+//! # `idempotency_keys` is the operator's other per-tool declaration, valid with
+//! # either transport: which input field's value identifies the operation a call
+//! # performs. See "Idempotency keys" below.
 //!
 //! # A local stdio server:
 //! [[mcp_servers]]
@@ -76,6 +80,7 @@
 //! args = ["-m", "my_server"]
 //! env = { API_TOKEN = "..." }
 //! effect_overrides = { delete = "write", fetch = "read" }
+//! idempotency_keys = { pay_claim = "claim_id" }
 //!
 //! # A remote HTTP server. `bearer_token_env` NAMES an env var holding a bearer
 //! # token (never the token itself); when set and non-empty it is sent as
@@ -84,6 +89,7 @@
 //! url = "https://mcp.example.com/mcp"
 //! bearer_token_env = "MY_MCP_TOKEN"
 //! effect_overrides = { delete = "write" }
+//! idempotency_keys = { refund = "payment.charge_id" }
 //!
 //! # Optional, repeatable. Each entry is one sandboxed WebAssembly tool: an
 //! # untrusted component (the `salvor:tool@0.1.0` world) run under wasmtime
@@ -104,6 +110,10 @@
 //! # Exactly one of `input_schema` (inline JSON) or `input_schema_path`
 //! # (a JSON file, resolved relative to this file).
 //! input_schema = '{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}'
+//! # Optional. The input field identifying the operation a call performs, the
+//! # singular of an MCP server's `idempotency_keys` (this table is one tool, and
+//! # already names it). See "Idempotency keys" below.
+//! # idempotency_key = "claim_id"
 //!
 //! [wasm_tools.limits]                 # optional; these are the defaults
 //! wall_time_ms = 5000                 # per-call wall/CPU cap (epoch deadline)
@@ -122,6 +132,66 @@
 //! # accept that.
 //! record_prompts = false
 //! ```
+//!
+//! # Idempotency keys (`idempotency_keys`, `idempotency_key`)
+//!
+//! Within one run, nothing happens twice because a recorded completion replays
+//! instead of executing. Across two separate `salvor run` invocations there is
+//! no shared log to replay, and what holds the line instead is an idempotency
+//! key: a statement that a call *is* a particular operation in the world, so
+//! the store can let exactly one run perform it.
+//!
+//! A hand-written Rust tool makes that statement in code. A tool that arrives
+//! at runtime cannot: an MCP server is not this program and may not be this
+//! machine, and a wasm component is untrusted by construction. What is
+//! available is the call's input and the operator's knowledge of which field
+//! of it names the thing being done. That is what these settings declare.
+//!
+//! On an `[[mcp_servers]]` entry, a map from tool name to field path:
+//!
+//! ```toml
+//! idempotency_keys = { pay_claim = "claim_id", refund = "payment.charge_id" }
+//! ```
+//!
+//! On a `[[wasm_tools]]` entry, the same thing in the singular, since the table
+//! is already one named tool:
+//!
+//! ```toml
+//! idempotency_key = "claim_id"
+//! ```
+//!
+//! The path is a field name, or several joined by `.` to read a nested field.
+//! There is no array indexing and no escaping, so a field name containing a dot
+//! cannot be addressed. An empty path, or one with a leading, trailing, or
+//! doubled dot, is a parse error on the file.
+//!
+//! **The key.** The runtime derives `<tool>:<field value>` at dispatch, so
+//! `pay_claim` called with `{"claim_id": "wreck-9931", ...}` is the identity
+//! `pay_claim:wreck-9931`. The format is fixed and worth relying on: it is
+//! stable across processes and machines (nothing but the input feeds it), and
+//! it stays legible where the key is printed on its own, in `salvor history`,
+//! in a refusal naming the run that holds it, or in a grep of the store. The
+//! tool prefix is redundant against the store's own `(tool, key)` index and
+//! deliberately kept anyway, so the string a human reads says what was done as
+//! well as to what.
+//!
+//! **A missing field is refused, never demoted.** The value must be a non-empty
+//! string or a number. If the field is absent, if the path runs through a
+//! non-object, or if the value is a boolean, a null, an empty string, an array,
+//! or an object, the call fails before the tool is reached, with an error
+//! naming the tool, the path, and the keys the input did carry. The tool does
+//! not run keyless: an operator who declared an identity asked for exactly one
+//! execution, and a call that quietly lost its key is how a claim gets paid
+//! twice.
+//!
+//! **A name that binds to nothing fails the build.** Declaring a key for a tool
+//! the server does not advertise is refused when the agent is built, listing
+//! what the server does advertise. This is stricter than `effect_overrides`,
+//! which ignores an unknown name; an unbound effect override leaves a tool at
+//! the safe default, while an unbound key declaration leaves a tool the
+//! operator meant to protect completely unprotected.
+//!
+//! Tools with no declaration are untouched by all of this.
 //!
 //! # Recording the prompt body (`record_prompts`)
 //!
@@ -163,7 +233,8 @@ use anyhow::{Context, Result, bail};
 use salvor_core::Effect;
 use salvor_llm::{AuthKind, Config};
 use salvor_runtime::{Agent, AgentBuildError, Budgets, Pricing};
-use salvor_tools::mcp::{EffectOverrides, McpServer};
+use salvor_tools::mcp::{EffectOverrides, IdempotencyKeys, McpServer};
+use salvor_tools::{DynTool, IdempotencyPath};
 use salvor_wasm::{DirGrant, WasmEngine, WasmTool, WasmToolSpec};
 use serde::Deserialize;
 
@@ -380,6 +451,18 @@ pub struct McpServerConfig {
     /// over the server's annotations. Valid with either transport.
     #[serde(default)]
     pub effect_overrides: BTreeMap<String, Effect>,
+    /// Per-tool idempotency key declarations: tool name to the input field
+    /// whose value identifies the operation the call performs, as
+    /// `{ pay_claim = "claim_id" }`. A dotted path (`"payment.claim_id"`) reads
+    /// a nested field. Valid with either transport.
+    ///
+    /// A tool named here declares an identity, and the store then lets exactly
+    /// one run execute a given identity, across separate `salvor run`
+    /// invocations. A tool left out is keyless and behaves as it always has.
+    /// See the module docs for the derived key's format and what a call missing
+    /// the field gets.
+    #[serde(default)]
+    pub idempotency_keys: BTreeMap<String, String>,
 }
 
 impl McpServerConfig {
@@ -414,7 +497,26 @@ impl McpServerConfig {
                 }
             }
         }
+        self.parsed_idempotency_keys()?;
         Ok(())
+    }
+
+    /// The declared key paths, parsed. Run at load (through
+    /// [`validate`](Self::validate)) so a malformed path fails when the file is
+    /// read rather than when a payout is dispatched, and again at build to make
+    /// the set the connection is handed.
+    ///
+    /// # Errors
+    ///
+    /// Fails on an empty path or one with an empty segment, naming the tool.
+    fn parsed_idempotency_keys(&self) -> Result<IdempotencyKeys> {
+        let mut keys = IdempotencyKeys::new();
+        for (tool, path) in &self.idempotency_keys {
+            let parsed = IdempotencyPath::parse(path)
+                .with_context(|| format!("`idempotency_keys` entry for tool `{tool}`"))?;
+            keys.insert(tool.clone(), parsed);
+        }
+        Ok(keys)
     }
 }
 
@@ -459,6 +561,17 @@ pub struct WasmToolConfig {
     /// directory. Exactly one of this and `input_schema` must be set.
     #[serde(default)]
     pub input_schema_path: Option<String>,
+    /// The input field whose value identifies the operation this tool's calls
+    /// perform, as `idempotency_key = "claim_id"`. A dotted path
+    /// (`"payment.claim_id"`) reads a nested field. Absent means the tool's
+    /// calls have no business identity, which is the default.
+    ///
+    /// This is the singular of an MCP server's `idempotency_keys` map, because
+    /// a `[[wasm_tools]]` entry *is* one tool: it already carries the `name`,
+    /// so a map keyed by that same name would only be a second place for it to
+    /// be wrong.
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
     /// Per-call resource caps; defaults apply to any left unset.
     #[serde(default)]
     pub limits: WasmLimitsConfig,
@@ -581,7 +694,25 @@ impl WasmToolConfig {
                 )
             })?;
         }
+        self.parsed_idempotency_key()?;
         Ok(())
+    }
+
+    /// The declared key path, parsed. Run at load through
+    /// [`validate`](Self::validate), so a malformed path fails on the file
+    /// rather than on a call.
+    ///
+    /// # Errors
+    ///
+    /// Fails on an empty path or one with an empty segment, naming the tool.
+    fn parsed_idempotency_key(&self) -> Result<Option<IdempotencyPath>> {
+        self.idempotency_key
+            .as_deref()
+            .map(|path| {
+                IdempotencyPath::parse(path)
+                    .with_context(|| format!("wasm tool `{}`: `idempotency_key`", self.name))
+            })
+            .transpose()
     }
 
     /// The input schema as a JSON value, reading the schema file when
@@ -848,6 +979,10 @@ pub async fn build_agent(
             for (name, effect) in &server_config.effect_overrides {
                 overrides.insert(name.clone(), *effect);
             }
+            // Parsed again here rather than carried from load, because
+            // `build_agent` is reachable from a caller that built the config by
+            // hand; the paths are a handful of strings and parsing is free.
+            let keys = server_config.parsed_idempotency_keys()?;
 
             // `validate` (run at load) guarantees exactly one transport is set, so
             // the `url`-first branch is exhaustive: a config that reaches here with
@@ -861,7 +996,7 @@ pub async fn build_agent(
                     .as_deref()
                     .and_then(|name| std::env::var(name).ok())
                     .filter(|t| !t.is_empty());
-                McpServer::connect_http(url, token.as_deref(), &overrides)
+                McpServer::connect_http(url, token.as_deref(), &overrides, &keys)
                     .await
                     .with_context(|| format!("connecting to MCP server at `{url}`"))?
             } else {
@@ -874,10 +1009,12 @@ pub async fn build_agent(
                 for (key, value) in &server_config.env {
                     command.env(key, value);
                 }
-                McpServer::connect(command, &overrides)
+                McpServer::connect(command, &overrides, &keys)
                     .await
                     .with_context(|| format!("connecting to MCP server `{command_name}`"))?
             };
+
+            check_declared_keys_exist(&keys, &server)?;
 
             for tool in server.take_tools() {
                 builder = builder.tool_dyn(Box::new(tool));
@@ -902,6 +1039,7 @@ pub async fn build_agent(
                     .effect
                     .expect("validate (run at load) guarantees an effect"),
                 input_schema: tool_config.resolved_input_schema(agent_dir)?,
+                idempotency_key: tool_config.parsed_idempotency_key()?,
                 limits: tool_config.limits.tool_limits(),
                 grants: tool_config
                     .grants
@@ -933,6 +1071,47 @@ pub async fn build_agent(
 
     let agent = builder.build().map_err(build_error_context)?;
     Ok((agent, servers))
+}
+
+/// Fails the build when `idempotency_keys` names a tool the connected server
+/// does not advertise.
+///
+/// `effect_overrides` ignores a name it does not find, and that is defensible:
+/// an override that binds to nothing leaves the tool with the effect the
+/// mapping already gave it, which is the safe class. An idempotency key that
+/// binds to nothing is the opposite. The operator declared that a call has an
+/// identity, and silence would leave the tool keyless, which is precisely the
+/// state that lets a second run pay a claim twice. A misspelled tool name in
+/// this table is a payments bug, so it stops the build.
+///
+/// The message lists what the server does advertise, since the usual cause is a
+/// typo or a server whose tool was renamed.
+///
+/// # Errors
+///
+/// Fails naming the tool, the server's advertised tools, and what the entry was
+/// asking for.
+fn check_declared_keys_exist(keys: &IdempotencyKeys, server: &McpServer) -> Result<()> {
+    if keys.is_empty() {
+        return Ok(());
+    }
+    let advertised: Vec<&str> = server.tools().iter().map(DynTool::name).collect();
+    for declared in keys.names() {
+        if !advertised.contains(&declared) {
+            let list = if advertised.is_empty() {
+                "this server advertises no tools at all".to_owned()
+            } else {
+                format!("this server advertises: {}", advertised.join(", "))
+            };
+            bail!(
+                "`idempotency_keys` declares a key for tool `{declared}`, but {list}. A key that \
+                 binds to no tool would leave the tool it was meant for keyless, which is the \
+                 state cross-run deduplication exists to prevent, so this is refused rather than \
+                 ignored. Check the spelling, or drop the entry"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Turns an [`AgentBuildError`] into an actionable message. The cost-budget

@@ -104,7 +104,7 @@ async fn resume_reports_then_resolve_records_the_completion() {
         .success()
         .stdout(
             predicate::str::contains("resolved").and(predicate::str::contains(format!(
-                "salvor resume {uuid} --agent agents/writer.toml --input <json>"
+                "salvor resume {uuid} --agent agents/writer.toml\n"
             ))),
         );
 

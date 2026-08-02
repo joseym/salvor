@@ -268,7 +268,11 @@ pub fn resolved_report(
             command.push_str(&format!(" --agent {}", agent.display()));
         }
     }
-    command.push_str(" --input <json>");
+    // No `--input`: a resolved run is a crashed run whose missing completion
+    // was just recorded by hand, so `resume` recovers it rather than resuming a
+    // parked one, and `recover` ignores `--input` (it warns and drops it). The
+    // command printed here is meant to be copied as it stands, so it carries
+    // only flags that do something.
     out.push_str(&format!("\n  {command}\n"));
     out
 }
@@ -854,8 +858,9 @@ mod tests {
 
         let report = resolved_report(UUID, &[PathBuf::from("agents/writer.toml")], None, 40);
         assert!(
-            report.lines().any(|line| line
-                == format!("  salvor resume {UUID} --agent agents/writer.toml --input <json>")),
+            report
+                .lines()
+                .any(|line| line == format!("  salvor resume {UUID} --agent agents/writer.toml")),
             "the resume command must survive on one line:\n{report}"
         );
 
@@ -866,7 +871,7 @@ mod tests {
         assert!(
             unfilled
                 .lines()
-                .any(|line| line == format!("  salvor resume {UUID} --agent <FILE> --input <json>")),
+                .any(|line| line == format!("  salvor resume {UUID} --agent <FILE>")),
             "the fallback resume command must survive on one line:\n{unfilled}"
         );
 
@@ -893,6 +898,12 @@ mod tests {
     /// command line the same `clap` parse tree accepts, exactly as the resume
     /// hint a graph run's own parked report prints already is. Feeding it back
     /// through `Cli::try_parse_from` is the proof.
+    ///
+    /// It also carries no flag the command it names would ignore. `resolve`
+    /// applies only to a run parked at a dangling write, which resumes through
+    /// the recover path, and recovery ignores `--input`. A copy-pasteable
+    /// command that quietly drops one of its own arguments teaches the wrong
+    /// thing about what resume does with input.
     #[test]
     fn resolved_report_resume_hint_parses() {
         use clap::Parser;
@@ -911,6 +922,10 @@ mod tests {
         crate::cli::Cli::try_parse_from(&tokens).unwrap_or_else(|error| {
             panic!("printed resume hint does not parse: {error}\nline: {line}")
         });
+        assert!(
+            !line.contains("--input"),
+            "a resolved run recovers, and recovery ignores --input: {line}"
+        );
     }
 
     /// The recorded-intent block keeps its label column aligned and its

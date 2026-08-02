@@ -108,6 +108,13 @@ pub trait DynTool: Send + Sync {
     /// specific as the effect is. `"pay_claim"` alone would collapse every
     /// payout the system ever makes into one; the claim id is what makes the
     /// key mean one payment.
+    ///
+    /// A tool whose code is not here (an MCP server's, a wasm component's)
+    /// still gets to make this statement: its operator names the identifying
+    /// input field in the agent file and the tool derives the key from it. See
+    /// [`IdempotencyPath`](crate::IdempotencyPath) for the format and for what
+    /// a call missing that field gets, which is a refusal rather than a
+    /// quietly unkeyed call.
     fn idempotency_key(&self, input: &Value) -> Option<String> {
         let _ = input;
         None

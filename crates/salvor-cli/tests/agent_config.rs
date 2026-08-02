@@ -474,6 +474,91 @@ preopen = [{ host = "./data", guest = "/data", perms = "read" }]
     assert_eq!(preopen.perms, PreopenPermsConfig::Read);
 }
 
+/// An MCP server's `idempotency_keys` parses as a per-tool map of field paths,
+/// dotted paths included, alongside the effect overrides it sits next to.
+#[test]
+fn mcp_idempotency_keys_parse() {
+    let toml = r#"
+model = "m"
+
+[[mcp_servers]]
+command = "payouts"
+effect_overrides = { pay_claim = "write" }
+idempotency_keys = { pay_claim = "claim_id", refund = "payment.charge_id" }
+"#;
+    let (config, _file) = load_from_str(toml);
+    let server = &config.mcp_servers[0];
+    assert_eq!(
+        server.idempotency_keys.get("pay_claim").map(String::as_str),
+        Some("claim_id")
+    );
+    assert_eq!(
+        server.idempotency_keys.get("refund").map(String::as_str),
+        Some("payment.charge_id")
+    );
+}
+
+/// A malformed path fails when the file is read, not when a payout is
+/// dispatched, and the error names the tool it was declared for.
+#[test]
+fn a_malformed_mcp_idempotency_key_path_is_rejected_at_load() {
+    for path in ["", "claim_id.", ".claim_id", "a..b"] {
+        let toml = format!(
+            "model = \"m\"\n\n[[mcp_servers]]\ncommand = \"payouts\"\nidempotency_keys = {{ pay_claim = \"{path}\" }}\n"
+        );
+        let mut file = NamedTempFile::new().expect("temp file");
+        file.write_all(toml.as_bytes()).expect("write");
+        let error = AgentConfig::load(file.path())
+            .expect_err(&format!("`{path}` must be rejected at load"));
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("pay_claim"),
+            "names the tool declared for: {message}"
+        );
+        assert!(
+            message.contains("empty"),
+            "says what is wrong with the path: {message}"
+        );
+    }
+}
+
+/// A `[[wasm_tools]]` entry declares its key in the singular, because the
+/// table is already one named tool.
+#[test]
+fn wasm_tool_idempotency_key_parses() {
+    let toml = r#"
+model = "m"
+
+[[wasm_tools]]
+path = "tools/pay.wasm"
+name = "pay_claim"
+description = "Pays a claim"
+effect = "write"
+input_schema = '{"type":"object"}'
+idempotency_key = "payment.claim_id"
+"#;
+    let (config, _file) = load_from_str(toml);
+    assert_eq!(
+        config.wasm_tools[0].idempotency_key.as_deref(),
+        Some("payment.claim_id")
+    );
+}
+
+/// The same parse-time refusal on the wasm surface, naming the tool.
+#[test]
+fn a_malformed_wasm_idempotency_key_path_is_rejected_at_load() {
+    let toml = "model = \"m\"\n\n[[wasm_tools]]\npath = \"t.wasm\"\nname = \"pay_claim\"\ndescription = \"d\"\neffect = \"write\"\ninput_schema = '{}'\nidempotency_key = \"\"\n";
+    let mut file = NamedTempFile::new().expect("temp file");
+    file.write_all(toml.as_bytes()).expect("write");
+    let error = AgentConfig::load(file.path()).expect_err("an empty path must be rejected");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("wasm tool `pay_claim`"),
+        "names the tool: {message}"
+    );
+    assert!(message.contains("empty"), "says what is wrong: {message}");
+}
+
 /// `effect` has no default for a sandboxed binary. Omitting it is refused
 /// loudly, the error names the offending tool, and the message says why
 /// there is nothing to fall back on.

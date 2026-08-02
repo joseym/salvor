@@ -11,7 +11,7 @@
 #![cfg(feature = "mcp")]
 
 use async_trait::async_trait;
-use salvor_tools::mcp::{EffectOverrides, McpServer};
+use salvor_tools::mcp::{EffectOverrides, IdempotencyKeys, McpServer};
 use salvor_tools::{
     DynTool, Effect, HandlerError, Tool, ToolCtx, ToolError, ToolHandler, ToolOutcome, ToolSet,
 };
@@ -28,9 +28,13 @@ fn fixture_command() -> Command {
 
 /// Connects to the fixture with no effect overrides.
 async fn connect() -> McpServer {
-    McpServer::connect(fixture_command(), &EffectOverrides::new())
-        .await
-        .expect("the fixture server connects, initializes, and lists tools")
+    McpServer::connect(
+        fixture_command(),
+        &EffectOverrides::new(),
+        &IdempotencyKeys::new(),
+    )
+    .await
+    .expect("the fixture server connects, initializes, and lists tools")
 }
 
 /// Finds a tool by name in a slice, panicking with a clear message if absent.
@@ -134,7 +138,7 @@ async fn annotations_map_to_effects() {
 async fn an_override_beats_the_annotation() {
     // read_note is annotated read-only, but the operator declares it a Write.
     let overrides = EffectOverrides::new().with("read_note", Effect::Write);
-    let server = McpServer::connect(fixture_command(), &overrides)
+    let server = McpServer::connect(fixture_command(), &overrides, &IdempotencyKeys::new())
         .await
         .expect("connect with overrides");
 

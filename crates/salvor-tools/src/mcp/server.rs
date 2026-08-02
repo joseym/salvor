@@ -10,7 +10,7 @@ use rmcp::transport::streamable_http_client::{
 use serde_json::Value;
 use tokio::process::Command;
 
-use super::{EffectOverrides, McpTool, effect_for};
+use super::{EffectOverrides, IdempotencyKeys, McpTool, effect_for};
 
 /// A live connection to one MCP server.
 ///
@@ -78,8 +78,18 @@ impl McpServer {
     /// hints, unless `overrides` pins the tool's name, in which case the
     /// operator's override wins.
     ///
+    /// `keys` carries the other operator declaration a server cannot make for
+    /// itself: which input field identifies a call, per tool. A tool named
+    /// there declares an idempotency key and can be deduplicated across runs; a
+    /// tool absent from it is keyless, exactly as every MCP tool was before.
+    /// See [`IdempotencyKeys`].
+    ///
     /// [`Effect`]: salvor_core::Effect
-    pub async fn connect(command: Command, overrides: &EffectOverrides) -> Result<Self, McpError> {
+    pub async fn connect(
+        command: Command,
+        overrides: &EffectOverrides,
+        keys: &IdempotencyKeys,
+    ) -> Result<Self, McpError> {
         // `TokioChildProcess` spawns the child with stdin/stdout piped (the
         // JSON-RPC stream) and stderr inherited.
         let transport = TokioChildProcess::new(command).map_err(McpError::Spawn)?;
@@ -89,7 +99,7 @@ impl McpServer {
         // initialize handshake and returns once the session is live.
         let service = ().serve(transport).await.map_err(|e| McpError::Initialize(Box::new(e)))?;
 
-        Self::from_service(service, overrides).await
+        Self::from_service(service, overrides, keys).await
     }
 
     /// Connects to a *remote* MCP server at `url` over the streamable-HTTP
@@ -119,6 +129,7 @@ impl McpServer {
         url: &str,
         bearer_token: Option<&str>,
         overrides: &EffectOverrides,
+        keys: &IdempotencyKeys,
     ) -> Result<Self, McpError> {
         let config = StreamableHttpClientTransportConfig::with_uri(url.to_owned());
         let config = match bearer_token {
@@ -136,7 +147,7 @@ impl McpServer {
         // on.
         let service = ().serve(transport).await.map_err(|e| McpError::Initialize(Box::new(e)))?;
 
-        Self::from_service(service, overrides).await
+        Self::from_service(service, overrides, keys).await
     }
 
     /// Lists a live session's tools and wraps each as an [`McpTool`], the step
@@ -145,6 +156,7 @@ impl McpServer {
     async fn from_service(
         service: RunningService<RoleClient, ()>,
         overrides: &EffectOverrides,
+        keys: &IdempotencyKeys,
     ) -> Result<Self, McpError> {
         // `list_all_tools` pages through the server's tool list until the
         // cursor is exhausted, so a server that paginates is handled.
@@ -169,6 +181,10 @@ impl McpServer {
                     .output_schema
                     .map(|schema| Value::Object((*schema).clone()));
                 let effect = effect_for(&name, tool.annotations.as_ref(), overrides);
+                // The operator's key declaration for this tool, if there is
+                // one. Cloned per tool so each `McpTool` owns what it needs and
+                // the caller's declaration set stays borrowed only here.
+                let idempotency_key = keys.get(&name).cloned();
                 McpTool::new(
                     peer.clone(),
                     name,
@@ -176,6 +192,7 @@ impl McpServer {
                     input_schema,
                     output_schema,
                     effect,
+                    idempotency_key,
                 )
             })
             .collect();

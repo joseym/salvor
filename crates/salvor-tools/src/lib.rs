@@ -23,6 +23,11 @@
 //! - **The registry.** [`ToolSet`] registers tools by name, looks them up, and
 //!   enumerates them as [`ToolDescriptor`]s for a model. Duplicate names are a
 //!   [`RegistryError`].
+//! - **Declared idempotency keys.** [`IdempotencyPath`] derives the key a
+//!   runtime-defined tool (MCP or wasm) declares, from the input field the
+//!   operator named in the agent file. A hand-written tool overrides
+//!   [`ToolHandler::idempotency_key`] instead; both end up at the same place,
+//!   [`DynTool::idempotency_key`], which is what the runtime deduplicates on.
 //! - **Retry policy.** [`RetryPolicy`] encodes the per-effect rule for
 //!   retrying a failed *live* execution. It classifies; the runtime loop enforces.
 //! - **MCP tools.** Behind the `mcp` cargo feature (on by default), the
@@ -45,6 +50,7 @@ mod context;
 mod erased;
 mod error;
 mod handler;
+mod idempotency;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 mod outcome;
@@ -65,6 +71,7 @@ pub use context::ToolCtx;
 pub use erased::{DynTool, ToolDescriptor, TypedTool};
 pub use error::{HandlerError, ToolError};
 pub use handler::{ToolHandler, ToolMeta};
+pub use idempotency::{IdempotencyPath, IdempotencyPathError};
 pub use outcome::{Suspension, ToolOutcome};
 pub use registry::{RegistryError, ToolSet};
 pub use retry::RetryPolicy;
