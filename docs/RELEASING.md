@@ -28,9 +28,9 @@ facts, which no script can derive.
 
 ### Versions
 
-7 versions have shipped, and `v0.9.0` is current.
+8 versions have shipped, and `v0.9.0` is current.
 
-`v0.5.0`, `v0.5.1`, `v0.5.2`, `v0.5.3`, `v0.6.0`, `v0.7.0`, `v0.8.0`.
+`v0.5.0`, `v0.5.1`, `v0.5.2`, `v0.5.3`, `v0.6.0`, `v0.7.0`, `v0.8.0`, `v0.9.0`.
 
 ### Workflows a version tag starts
 
@@ -40,7 +40,7 @@ facts, which no script can derive.
 | --- | --- | --- |
 | `.github/workflows/crates.yml` | `v[0-9]+.[0-9]+.[0-9]+*` | `v0.5.2` |
 | `.github/workflows/docker.yml` | `v*` | `v0.6.0` |
-| `.github/workflows/npm-cli.yml` | `v[0-9]+.[0-9]+.[0-9]+*` | not yet tagged |
+| `.github/workflows/npm-cli.yml` | `v[0-9]+.[0-9]+.[0-9]+*` | `v0.9.0` |
 | `.github/workflows/npm-client.yml` | `v[0-9]+.[0-9]+.[0-9]+*` | `v0.5.2` |
 | `.github/workflows/pypi.yml` | `v[0-9]+.[0-9]+.[0-9]+*` | `v0.5.2` |
 | `.github/workflows/release.yml` | `**[0-9]+.[0-9]+.[0-9]+*` | `v0.5.0` |
