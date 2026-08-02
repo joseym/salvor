@@ -11,8 +11,14 @@
 //! # What the default features give you
 //!
 //! The agent loop ([`runtime`]), the tool contract ([`tools`]), the SQLite event store ([`store`]),
-//! and the event model and replay engine ([`core`]). That is the set needed to define an agent, run
-//! it, kill it, and resume it.
+//! the Messages API client ([`llm`]), and the event model and replay engine ([`core`]). That is the
+//! set needed to define an agent, point it at a model, run it, kill it, and resume it.
+//!
+//! `llm` rides along with `runtime` rather than sitting behind its own opt-in: `runtime` already
+//! depends on `salvor-llm` unconditionally, since the agent loop has no code path that skips
+//! calling a model, so the dependency (`reqwest` and the rest of that tree) is compiled into every
+//! default build regardless of whether this feature is named. Turning `llm` on by default costs
+//! nothing further; leaving it off by default would have cost a working `Config` import.
 //!
 //! # What is optional
 //!
@@ -22,7 +28,6 @@
 //! - `graph`: the declarative graph document format and its validator.
 //! - `engine`: the walker that executes a graph document. Implies `graph`.
 //! - `server`: the HTTP and server-sent-events control plane.
-//! - `llm`: the Messages API client, for talking to a model directly.
 //! - `wasm`: sandboxed WebAssembly component tools. Heavy, since it builds wasmtime.
 //! - `mcp`: Model Context Protocol tools, forwarded to `salvor-tools`.
 //!
@@ -93,7 +98,7 @@ pub mod server {
 
 /// The Messages API client, for hosted and local model endpoints.
 ///
-/// Re-export of `salvor-llm`. Requires the `llm` feature.
+/// Re-export of `salvor-llm`. Requires the `llm` feature, on by default.
 #[cfg(feature = "llm")]
 pub mod llm {
     pub use salvor_llm::*;
@@ -107,14 +112,24 @@ pub mod wasm {
     pub use salvor_wasm::*;
 }
 
+/// The run input a caller hands to `Runtime::start`, as unstructured JSON.
+///
+/// Re-export of `serde_json::json`. Every run input and completed output crosses the log as a
+/// `serde_json::Value`, so this stays available without an extra `serde_json` dependency line in
+/// a caller's own `Cargo.toml`.
+pub use serde_json::json;
+
 /// The handful of names most programs want, in one import.
 ///
-/// Deliberately small: enough to define an agent, give it tools, run it against a store, and read
-/// the outcome. Anything more specific is one module path away.
+/// Deliberately small: enough to define an agent, point it at a model, give it tools, run it
+/// against a store, and read the outcome. Anything more specific is one module path away.
 pub mod prelude {
     // Each group follows its own feature: a narrow build gets a smaller prelude rather than a
     // compile error, so `default-features = false` stays usable instead of merely legal.
     pub use crate::core::{Event, EventEnvelope, RunId, RunState, RunStatus, derive_state};
+    pub use crate::json;
+    #[cfg(feature = "llm")]
+    pub use crate::llm::Config;
     #[cfg(feature = "runtime")]
     pub use crate::runtime::{Agent, ParkReason, RunOutcome, Runtime, RuntimeError};
     #[cfg(feature = "store")]

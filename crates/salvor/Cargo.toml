@@ -18,7 +18,13 @@ path = "src/lib.rs"
 [features]
 # Enough to define an agent, run it, kill it, and resume it. Anything that drags in a network
 # server, a wasm engine, or a graph walker is opt-in.
-default = ["runtime", "tools", "store"]
+#
+# `llm` sits in this list even though it is a whole Messages API client: `runtime` already
+# depends on `salvor-llm` unconditionally (the agent loop calls a model, so it has no optional
+# path around that dependency), so every default build compiles reqwest and the rest of that
+# tree regardless of this feature. Adding `llm` here costs zero new crates; what it buys is the
+# re-export, so `Config` resolves without an extra opt-in the dependency graph already paid for.
+default = ["runtime", "tools", "store", "llm"]
 
 runtime = ["dep:salvor-runtime"]
 tools = ["dep:salvor-tools"]
@@ -44,6 +50,10 @@ salvor-engine = { path = "../salvor-engine", version = "=0.9.0", optional = true
 salvor-server = { path = "../salvor-server", version = "=0.9.0", optional = true }
 salvor-llm = { path = "../salvor-llm", version = "=0.9.0", optional = true }
 salvor-wasm = { path = "../salvor-wasm", version = "=0.9.0", optional = true }
+# Not optional: every sibling that takes a run's input takes it as a `serde_json::Value`, so
+# the umbrella re-exports `json!` unconditionally rather than gating it behind a feature that
+# would make the macro vanish under some builds and not others.
+serde_json.workspace = true
 
 [package.metadata.docs.rs]
 # Document the whole surface, including the opt-in modules, so the crate page shows what is

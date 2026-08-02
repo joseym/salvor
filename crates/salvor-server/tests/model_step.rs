@@ -655,3 +655,47 @@ async fn missing_executor_is_503() {
     let log = read_log(&client, &server.base, &run).await;
     assert_eq!(log.len(), 1, "only the RunStarted the client appended");
 }
+
+/// A model step whose upstream rejects the key with a 401 must not leak a bare
+/// `x-api-key header is required`; the message has to name the environment
+/// variable this server's client-driven model step reads it from, and say to
+/// set it where the server runs, not the client driving the run over HTTP.
+#[tokio::test]
+async fn model_step_401_names_the_server_side_api_key_env() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "type": "error",
+            "error": {
+                "type": "authentication_error",
+                "message": "x-api-key header is required"
+            }
+        })))
+        .mount(&mock)
+        .await;
+    let server = model_server(&mock).await;
+    let client = reqwest::Client::new();
+    let (run, token) = open_run(&client, &server.base, false).await;
+    append(
+        &client,
+        &server.base,
+        &run,
+        &token,
+        vec![run_started_env(&run)],
+    )
+    .await;
+
+    let (status, body) = model_step(&client, &server.base, &run, &token, 1, &request()).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "401 upstream: {body}");
+    assert_eq!(body["error"]["code"], "model_execution");
+    let message = body["error"]["message"].as_str().expect("message string");
+    assert!(
+        message.contains("ANTHROPIC_API_KEY"),
+        "message should name the env var this server reads: {message}"
+    );
+    assert!(
+        message.contains("server"),
+        "message should say to set the key where the server runs: {message}"
+    );
+}
