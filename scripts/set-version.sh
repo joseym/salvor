@@ -4,11 +4,16 @@
 #
 # Salvor declares its version exactly once: the [workspace.package] version in
 # the root Cargo.toml, which every crate inherits via `version.workspace = true`.
-# The in-workspace path dependencies carry no version requirement, so this
-# script rewrites only that single `version = "..."` line (the sole one at
-# column zero; every dependency version sits inside an inline table or after a
-# `name = ` key). Third-party dependency versions (serde, tokio, ...) are left
-# untouched. Finally it runs `cargo update --workspace` so Cargo.lock matches.
+# The in-workspace path dependencies DO carry a version requirement (a caret
+# range, e.g. `version = "0.9.0"`), because crates.io refuses to publish a path
+# dependency without one: once a crate is published, its `path = "../..."` is
+# stripped and only that version requirement resolves the sibling. So this
+# script rewrites the single top-level `version = "..."` line (the sole one at
+# column zero), then makes a second pass over every crates/*/Cargo.toml
+# rewriting the version on any line that also carries `path = "../salvor` -
+# an internal sibling dependency, never a third-party one (serde, tokio, ...),
+# which are left untouched. Finally it runs `cargo update --workspace` so
+# Cargo.lock matches.
 #
 # Idempotent: stamping the current version rewrites the same bytes and leaves no
 # diff. Called by cocogitto's pre_bump_hooks (see cog.toml).
@@ -89,21 +94,23 @@ if [ -f "$FACADE" ]; then
   echo "stamped the facade's sibling pins"
 fi
 
-# A few crates depend on an in-workspace sibling directly (not via
-# `workspace = true`) so they can turn off its default features, which Cargo
-# forbids overriding on a workspace-inherited dependency. Each of those direct
-# dependencies still carries the same caret version requirement and the same
-# publish-time consequences, so it needs the same floor rewrite as the table
-# above.
-for member_manifest in \
-  "$ROOT/crates/salvor-cli/Cargo.toml" \
-  "$ROOT/crates/salvor-cli-core/Cargo.toml" \
-  "$ROOT/crates/salvor-wasm/Cargo.toml" \
-  "$ROOT/crates/salvor-replay-wasm/Cargo.toml" \
-  "$ROOT/crates/salvor-cli-wasm/Cargo.toml"; do
+# Several crates depend on an in-workspace sibling directly (not via
+# `workspace = true`), most often so they can turn off its default features,
+# which Cargo forbids overriding on a workspace-inherited dependency. Each of
+# those direct dependencies still carries the same caret version requirement
+# and the same publish-time consequences as the workspace.dependencies table
+# above, so every crates/*/Cargo.toml gets the same rewrite here. The pattern
+# is anchored on the `path = "../salvor` substring, which never appears in a
+# third-party dependency's line, so a serde/tokio version is never touched.
+# Stamped to the exact new version (not the floor): unlike the shared
+# workspace.dependencies table, these are hand-listed per crate, so leaving
+# them at a stale floor across patch releases is how the eight of them went
+# stale in the first place.
+for member_manifest in "$ROOT"/crates/*/Cargo.toml; do
   [ -f "$member_manifest" ] || continue
   mtmp="$member_manifest.tmp.$$"
-  sed -E "s/^(salvor-[A-Za-z0-9_-]+ = \{ path = \"[^\"]*\", version = \")[0-9][^\"]*(\")/\1$FLOOR\2/" "$member_manifest" >"$mtmp"
+  trap 'rm -f "$tmp" "$ftmp" "$mtmp"' EXIT
+  sed -E "s#(path = \"\.\./salvor[^\"]*\", version = \")[0-9][^\"]*(\")#\1$VERSION\2#" "$member_manifest" >"$mtmp"
   mv "$mtmp" "$member_manifest"
 done
 echo "stamped the direct sibling dependency requirements"
