@@ -26,4 +26,4 @@ rng = ["salvor-replay/rng"]
 # false` here plus the `rng` forward above is what makes this crate's own gate
 # meaningful rather than decorative; the default build turns `rng` straight
 # back on, so nothing native changes.
-salvor-replay = { path = "../salvor-replay", version = "0.9.1", default-features = false }
+salvor-replay = { path = "../salvor-replay", version = "0.9.2", default-features = false }

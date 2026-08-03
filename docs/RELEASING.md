@@ -28,14 +28,14 @@ facts, which no script can derive.
 
 ### Versions
 
-9 versions have shipped, and `v0.9.1` is current.
+9 versions have shipped, and `v0.9.2` is current.
 
 `v0.5.0`, `v0.5.1`, `v0.5.2`, `v0.5.3`, `v0.6.0`, `v0.7.0`, `v0.8.0`, `v0.9.0`,
 `v0.9.1`.
 
 ### Workflows a version tag starts
 
-6 of the 7 workflows in `.github/workflows` match the tag `v0.9.1`.
+6 of the 7 workflows in `.github/workflows` match the tag `v0.9.2`.
 
 | Workflow | Tag patterns | First version that ran it |
 | --- | --- | --- |

@@ -2,6 +2,20 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.9.2 - 2026-08-03
+#### Features
+- (**wasm**) export the real history renderer, agent parse, and budget check - (8f47306) - Josey Morton
+#### Bug Fixes
+- (**tools**) an MCP server dies with the connection that spawned it - (49f3827) - Josey Morton
+#### Documentation
+- count v0.9.1 among the shipped releases - (0aaa2c9) - Josey Morton
+#### Tests
+- commit the budget fold fixtures the suite reads - (3332eee) - Josey Morton
+#### Build system
+- stamp every internal version requirement the bump was missing - (3bc3741) - Josey Morton
+
+- - -
+
 ## v0.9.1 - 2026-08-02
 #### Features
 - (**salvor**) the umbrella crate compiles the front-page sample - (4397ece) - Josey Morton
