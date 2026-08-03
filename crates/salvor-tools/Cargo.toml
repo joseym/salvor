@@ -8,11 +8,12 @@ edition.workspace = true
 repository.workspace = true
 license.workspace = true
 
-# salvor-tools declares one binary, `salvor-mcp-fixture`, which is a test
-# fixture gated behind `required-features = ["mcp"]`. It is not product surface,
-# so it must never ship in a release. dist auto-distributes any workspace
-# package that has a binary; this opts salvor-tools out entirely, leaving
-# salvor-cli's `salvor` as the only released binary.
+# salvor-tools declares two binaries, `salvor-mcp-fixture` and
+# `salvor-mcp-parent`, both test fixtures gated behind
+# `required-features = ["mcp"]`. Neither is product surface, so neither must
+# ever ship in a release. dist auto-distributes any workspace package that has a
+# binary; this opts salvor-tools out entirely, leaving salvor-cli's `salvor` as
+# the only released binary.
 [package.metadata.dist]
 dist = false
 
@@ -32,10 +33,18 @@ dist = false
 # up), which the tests drive. Keeping one feature avoids a second, non-default
 # feature that `cargo test` defaults would then miss.
 default = ["mcp"]
-mcp = ["dep:rmcp", "dep:tokio"]
+mcp = ["dep:rmcp", "dep:tokio", "dep:process-wrap", "dep:libc"]
 
 [dependencies]
-salvor-core.workspace = true
+# Only for `Effect`, which this crate re-exports. `default-features = false`
+# turns off salvor-core's `rng` forward: nothing here mints a run id, so the
+# randomness backend it would drag in is dead weight on a native build and a
+# compile error on wasm32-unknown-unknown. That matters because the CLI's pure
+# half (salvor-cli-core) parses agent files, and an agent file declares
+# idempotency paths, so it reaches `IdempotencyPath` in this crate from a
+# wasm32 build. Native builds are unaffected: Cargo unions features, and every
+# native consumer that wants `RunId::new` still asks for it.
+salvor-core = { path = "../salvor-core", version = "0.9.0", default-features = false }
 salvor-tools-macros.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -58,6 +67,16 @@ rmcp = { workspace = true, optional = true, features = [
     "schemars",
 ] }
 tokio = { workspace = true, optional = true }
+# The command wrapper rmcp's own child-process transport is built on. Naming it
+# here is what lets `McpServer::connect` hand rmcp a command already carrying a
+# process group and kill-on-drop, so an MCP server and anything it spawned die
+# as one unit. See the workspace pin for why the version must match rmcp's.
+process-wrap = { workspace = true, optional = true }
+# Unix only in effect (every call site is behind `cfg`), but declared plainly
+# rather than under a target table so the `mcp` feature can enable it the same
+# way on every platform. Used for the Linux parent-death signal an MCP child
+# arms for itself between fork and exec.
+libc = { workspace = true, optional = true }
 
 [dev-dependencies]
 # `net` is added over the base test features so the HTTP integration test can
@@ -65,6 +84,10 @@ tokio = { workspace = true, optional = true }
 # that rmcp's `StreamableHttpService` plugs into. Both are test-only.
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net"] }
 axum.workspace = true
+# The child-lifecycle tests hand the fixture server a scratch directory to write
+# its pid files into, so a test learns which process to watch without the
+# public API growing a pid accessor it has no product use for.
+tempfile.workspace = true
 
 # The hermetic MCP test fixture. It is a real server binary spawned over stdio
 # by the integration tests, not an in-process mock, because the product path is
@@ -76,4 +99,14 @@ axum.workspace = true
 [[bin]]
 name = "salvor-mcp-fixture"
 path = "src/bin/salvor-mcp-fixture.rs"
+required-features = ["mcp"]
+
+# The second half of the child-lifecycle proof, and a test fixture on the same
+# terms as the one above. It is a stand-in parent: it connects to the fixture
+# server through the real `McpServer::connect` and then does nothing, so a test
+# can kill *it* and observe what became of the server. A test cannot prove that
+# about itself without killing the process doing the asserting.
+[[bin]]
+name = "salvor-mcp-parent"
+path = "src/bin/salvor-mcp-parent.rs"
 required-features = ["mcp"]
