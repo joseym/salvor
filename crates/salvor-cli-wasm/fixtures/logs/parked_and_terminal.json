@@ -1,0 +1,102 @@
+[
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 0,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:00:00Z",
+    "event": {
+      "kind": "RunStarted",
+      "payload": {
+        "agent_def_hash": "sha256:aabbcc",
+        "input": {
+          "claim": "wreck-9931"
+        }
+      }
+    }
+  },
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 1,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:01:00Z",
+    "event": {
+      "kind": "BudgetExceeded",
+      "payload": {
+        "budget": {
+          "kind": "cost_usd",
+          "limit": 2.5
+        },
+        "observed": 2.500001
+      }
+    }
+  },
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 2,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:02:00Z",
+    "event": {
+      "kind": "Resumed",
+      "payload": {
+        "input": {
+          "extend": {
+            "cost_usd": 1.0
+          }
+        }
+      }
+    }
+  },
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 3,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:03:00Z",
+    "event": {
+      "kind": "Suspended",
+      "payload": {
+        "reason": "a human must approve the payout",
+        "input_schema": {
+          "type": "object"
+        }
+      }
+    }
+  },
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 4,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:04:00Z",
+    "event": {
+      "kind": "Resumed",
+      "payload": {
+        "input": {
+          "approved": true
+        }
+      }
+    }
+  },
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 5,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:05:00Z",
+    "event": {
+      "kind": "RandomObserved",
+      "payload": {
+        "value": 17014118346046923173
+      }
+    }
+  },
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 6,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:06:00Z",
+    "event": {
+      "kind": "RunFailed",
+      "payload": {
+        "error": "the ledger refused the write"
+      }
+    }
+  }
+]

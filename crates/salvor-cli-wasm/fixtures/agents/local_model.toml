@@ -1,0 +1,53 @@
+# A plain assistant agent that talks to a LOCAL model instead of the public
+# Anthropic endpoint: no API key, no network spend, no account. Salvor's
+# model client speaks one wire protocol (the Anthropic Messages API) and
+# both Ollama (0.14+) and LM Studio (0.4.1+) answer to it, so pointing at a
+# local model is a `base_url` change, not a different code path. See
+# crates/salvor-llm/src/lib.rs for that claim and crates/salvor-cli/src/
+# agent_config.rs for the `[llm]` schema this file uses.
+#
+# This example runs with NO tools and NO MCP servers, on purpose: the only
+# prerequisite is a local model server, so a reader can try Salvor for free
+# with nothing else installed. See README.md for setup (Ollama by default,
+# LM Studio as a one-line swap) and the run command.
+#
+# Run from the repository root: this file has no relative paths in it, so
+# where you run it from does not matter, but the run command in README.md
+# assumes the repository root.
+
+model = "llama3.2"
+
+system_prompt = """
+You are a plain assistant with no tools. Your input is a JSON object with one
+field, `question`. Read it, answer it directly in a few sentences, and stop.
+Do not ask follow-up questions and do not invent tool calls; you have none.
+"""
+
+[llm]
+# Ollama's default local endpoint. The client appends `/v1/messages` itself,
+# so this is just the host and port, with no path.
+#
+# To use LM Studio instead, change this one line (and see README.md for the
+# port and the model-name field LM Studio expects):
+# base_url = "http://localhost:1234"
+base_url = "http://localhost:11434"
+
+# Deliberately a name nothing sets. `client_config()` in agent_config.rs
+# falls back to reading `ANTHROPIC_API_KEY` when `api_key_env` is absent, and
+# plenty of shells have that exported for other work; naming an env var that
+# is never set guarantees this run sends no `x-api-key` header at all, which
+# is what a local endpoint expects. If the variable were set, Salvor would
+# still work (local servers generally ignore an unexpected auth header), but
+# leaving it unset is the honest zero-key path this example is showing.
+api_key_env = "SALVOR_LOCAL_MODEL_API_KEY"
+
+[budgets]
+# A single question is one model call. These rails exist so the pattern
+# matches every other example (a runaway loop parks for a human rather than
+# spending on); there is no `cost_usd` budget here because a local model has
+# no per-token price to enforce against. Durability, replay, and the step
+# and token budgets below all work identically to a run against the real
+# Anthropic endpoint.
+steps = 5
+tokens = 20000
+wall_time_seconds = 120

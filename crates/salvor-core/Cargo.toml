@@ -8,9 +8,22 @@ edition.workspace = true
 repository.workspace = true
 license.workspace = true
 
+[features]
+# Forwards salvor-replay's randomness gate. On by default, so every native
+# consumer keeps `RunId::new` and behaves exactly as before. It exists so a
+# crate that needs only the vocabulary this one re-exports (salvor-tools needs
+# `Effect` and nothing else) can take it with `default-features = false` and
+# stay buildable for wasm32-unknown-unknown, where a randomness backend does
+# not compile. Without this forward, `default-features = false` on salvor-core
+# would be a silent no-op: the dependency below would still turn `rng` on.
+default = ["rng"]
+rng = ["salvor-replay/rng"]
+
 [dependencies]
-# The event model, replay cursor, and state fold live in salvor-replay (a pure,
-# wasm32-buildable crate); this crate re-exports them so every existing
-# `salvor_core::` path keeps resolving. Default features keep `rng` on, so
-# `RunId::new` stays available to native consumers exactly as before.
-salvor-replay.workspace = true
+# The event model, replay cursor, state fold, and budget check live in
+# salvor-replay (a pure, wasm32-buildable crate); this crate re-exports them so
+# every existing `salvor_core::` path keeps resolving. `default-features =
+# false` here plus the `rng` forward above is what makes this crate's own gate
+# meaningful rather than decorative; the default build turns `rng` straight
+# back on, so nothing native changes.
+salvor-replay = { path = "../salvor-replay", version = "0.9.0", default-features = false }

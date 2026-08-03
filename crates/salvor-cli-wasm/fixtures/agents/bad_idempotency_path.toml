@@ -1,0 +1,5 @@
+model = "m"
+
+[[mcp_servers]]
+command = "x"
+idempotency_keys = { pay_claim = "a..b" }

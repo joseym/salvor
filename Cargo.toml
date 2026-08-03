@@ -133,10 +133,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Unix, matching the three platforms the dist pipeline ships.
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 # `salvor serve --dev`'s process-group signal (tearing down `ng serve` and
-# anything it spawned as one unit; see salvor-cli's dev_server module). Only
-# `libc::kill` is used, on Unix. Already in the tree at 0.2 transitively
-# through sysinfo and tokio's own signal handling, so this promotes it to a
-# direct dependency rather than adding a new one.
+# anything it spawned as one unit; see salvor-cli's dev_server module), and, in
+# salvor-tools, the Linux `prctl(PR_SET_PDEATHSIG)` an MCP child arms for itself
+# between fork and exec. Only `kill`, `prctl`, `getppid`, and `_exit` are used,
+# all on Unix. Already in the tree at 0.2 transitively through sysinfo and
+# tokio's own signal handling, so this promotes it to a direct dependency rather
+# than adding a new one.
 libc = "0.2"
 # Dev-only CLI test tooling: drive the real binary and assert on its output.
 assert_cmd = "2"
@@ -176,6 +178,16 @@ trybuild = "1"
 # is the one crate that touches it. Bump this pin deliberately, re-reading the
 # API each time, never automatically.
 rmcp = { version = "=2.2.0", default-features = false }
+# process-wrap: the command/child wrapper rmcp's child-process transport is
+# itself built on (`TokioChildProcess::new` takes an `impl Into<CommandWrap>`).
+# salvor-tools names it directly so it can hand rmcp a command already wrapped
+# in a process group and kill-on-drop, which is what makes an MCP server's own
+# subprocesses die with it. Hard-pinned with `=` to rmcp's exact resolved
+# version, and for a sharper reason than rmcp's own pin: `CommandWrap` crosses
+# the boundary between the two crates, so two different process-wrap versions in
+# one tree would be two unrelated types and the call would stop compiling.
+# Bump this in lockstep with the rmcp pin above, never on its own.
+process-wrap = { version = "=9.1.0", features = ["tokio1"] }
 # wasmtime: the sandbox behind salvor-wasm's untrusted-tool execution.
 # Verified against crates.io on 2026-07-10; 46.0.1 was the latest release
 # (published 2026-06-24), with wasmtime-wasi versioned in lockstep. Hard-pinned

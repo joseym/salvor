@@ -6,6 +6,10 @@
 //!   string, and the two [`clap::builder::TypedValueParser`] implementations
 //!   behind `salvor list --status` and `--group`.
 //! - [`render`] turns runtime and store values into the text the CLI prints.
+//! - [`agent_config`] is the agent file's schema and the parse that validates
+//!   it: the TOML (or JSON) vocabulary, unknown-field rejection, and every
+//!   cross-field rule, with the file read and the live build left to the IO
+//!   edge.
 //! - [`graph_editor`] is a line-oriented editor for a graph document, built as
 //!   an event fold so its state is a pure function of the commands typed at
 //!   it.
@@ -31,6 +35,7 @@
 
 #![warn(missing_docs)]
 
+pub mod agent_config;
 pub mod cli;
 pub mod graph_editor;
 pub mod render;

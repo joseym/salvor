@@ -14,7 +14,9 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use salvor_cli::agent_config::{AgentConfig, ApiKeyKind, PreopenPermsConfig, build_agent};
+use salvor_cli::agent_config::{
+    AgentConfig, AgentConfigExt, ApiKeyKind, PreopenPermsConfig, build_agent,
+};
 use salvor_core::Effect;
 use salvor_llm::AuthKind;
 use tempfile::NamedTempFile;

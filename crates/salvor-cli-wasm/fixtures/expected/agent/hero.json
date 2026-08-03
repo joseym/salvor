@@ -1,0 +1,40 @@
+{
+  "config": {
+    "budgets": {
+      "cost_usd": null,
+      "steps": 24,
+      "tokens": 400000,
+      "wall_time_seconds": null
+    },
+    "llm": {
+      "api_key_env": null,
+      "api_key_kind": "api_key",
+      "base_url": null,
+      "base_url_env": "SALVOR_HERO_BASE_URL",
+      "max_retries": null,
+      "timeout_seconds": null
+    },
+    "max_response_tokens": null,
+    "mcp_servers": [
+      {
+        "args": [],
+        "bearer_token_env": null,
+        "command": "target/debug/salvor-hero-tools",
+        "effect_overrides": {
+          "save_claim": "write"
+        },
+        "env": {},
+        "idempotency_keys": {},
+        "url": null
+      }
+    ],
+    "model": "claude-opus-4-8",
+    "name": "salvage-claim",
+    "pricing": null,
+    "record_prompts": null,
+    "system_prompt": "You are recording salvage claims against a wreck manifest.\n\nCall save_claim exactly once, with the item named in the input, then reply\nwith one short sentence confirming what you recorded. Never call save_claim\ntwice for the same item.\n",
+    "system_prompt_path": null,
+    "wasm_tools": []
+  },
+  "ok": true
+}

@@ -43,7 +43,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use salvor_cli::agent_config::{self, AgentConfig};
+use salvor_cli::agent_config::{self, AgentConfig, AgentConfigExt};
 use salvor_core::{Event, EventEnvelope, RunId, event_kind};
 use salvor_engine::{GraphOutcome, ToolResolver, graph_hash, run_graph};
 use salvor_graph::{Graph, Node};

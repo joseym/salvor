@@ -46,13 +46,13 @@ use salvor_llm::{ContentBlock, Message, MessageRequest, Tool};
 use serde_json::Value;
 
 use crate::agent::Agent;
-use crate::budgets::{BudgetExtensions, BudgetObservations};
 use crate::compact::FailureTracker;
 use crate::ctx::{Resumption, RunCtx, ToolCallResult};
 use crate::error::RuntimeError;
 use crate::runtime::ParkReason;
 use crate::wire::content_string;
 use salvor_core::Effect;
+use salvor_core::{BudgetExtensions, BudgetObservations};
 use time::OffsetDateTime;
 
 /// How one drive of the loop ended: it produced a final output, or it parked

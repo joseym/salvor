@@ -1,0 +1,4 @@
+{
+  "error": "`idempotency_keys` entry for tool `pay_claim`: idempotency key path `a..b` has an empty segment; write dotted paths as `payment.claim_id`, with no leading, trailing, or doubled dots",
+  "ok": false
+}

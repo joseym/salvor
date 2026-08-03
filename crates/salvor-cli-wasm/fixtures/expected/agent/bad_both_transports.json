@@ -1,0 +1,4 @@
+{
+  "error": "an [[mcp_servers]] entry sets both `command` and `url`; use exactly one",
+  "ok": false
+}

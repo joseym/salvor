@@ -1,0 +1,50 @@
+{
+  "config": {
+    "budgets": {
+      "cost_usd": 0.25,
+      "steps": 10,
+      "tokens": 100000,
+      "wall_time_seconds": 120.0
+    },
+    "llm": {
+      "api_key_env": "DEMO_ANTHROPIC_API_KEY",
+      "api_key_kind": "api_key",
+      "base_url": null,
+      "base_url_env": null,
+      "max_retries": null,
+      "timeout_seconds": null
+    },
+    "max_response_tokens": null,
+    "mcp_servers": [],
+    "model": "claude-opus-4-8",
+    "name": null,
+    "pricing": {
+      "input_per_mtok": 5.0,
+      "output_per_mtok": 25.0
+    },
+    "record_prompts": null,
+    "system_prompt": "You are a text-analysis assistant with one tool: `wordcount`, which takes a\nstring field `text` and returns its statistics (words, chars, lines, longest\nword).\n\nYour input is a JSON object with one field, `texts`: a map of labels to text\nsnippets. Work in this order:\n\n1. Call `wordcount` exactly once per snippet.\n2. Reply with a short plain-text comparison: per snippet, its word count,\n   character count, and longest word; then one sentence naming which snippet\n   is longer and by how many words. Then stop. Do not call any tool after the\n   comparison.\n",
+    "system_prompt_path": null,
+    "wasm_tools": [
+      {
+        "description": "Counts words, characters, and lines in a text and finds its longest word.",
+        "effect": "read",
+        "grants": {
+          "preopen": []
+        },
+        "idempotency_key": null,
+        "input_schema": "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\",\"description\":\"The text to analyze\"}},\"required\":[\"text\"]}",
+        "input_schema_path": null,
+        "limits": {
+          "fuel": null,
+          "memory_bytes": 67108864,
+          "wall_time_ms": 2000
+        },
+        "name": "wordcount",
+        "path": "../../target/wasm-guests/wasm32-wasip2/release/wordcount_guest.wasm",
+        "sha256": null
+      }
+    ]
+  },
+  "ok": true
+}

@@ -1,0 +1,41 @@
+{
+  "config": {
+    "budgets": {
+      "cost_usd": null,
+      "steps": null,
+      "tokens": null,
+      "wall_time_seconds": null
+    },
+    "llm": {
+      "api_key_env": null,
+      "api_key_kind": "api_key",
+      "base_url": null,
+      "base_url_env": null,
+      "max_retries": null,
+      "timeout_seconds": null
+    },
+    "max_response_tokens": null,
+    "mcp_servers": [
+      {
+        "args": [],
+        "bearer_token_env": null,
+        "command": "payouts",
+        "effect_overrides": {},
+        "env": {},
+        "idempotency_keys": {
+          "pay_claim": "claim_id",
+          "refund": "payment.charge_id"
+        },
+        "url": null
+      }
+    ],
+    "model": "m",
+    "name": null,
+    "pricing": null,
+    "record_prompts": null,
+    "system_prompt": null,
+    "system_prompt_path": null,
+    "wasm_tools": []
+  },
+  "ok": true
+}

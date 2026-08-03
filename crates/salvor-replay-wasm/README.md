@@ -12,8 +12,8 @@ the crate split: one fold implementation, no TypeScript port, no drift.
 
 ## API surface
 
-Two exported functions (see `types/index.d.ts` for the full type surface,
-including the JSON shape the state string parses into):
+Three exported functions (see `types/index.d.ts` for the full type surface,
+including the JSON shapes the returned strings parse into):
 
 ```ts
 // Fold the first `prefixLen` events of a wire-JSON event log into the derived
@@ -24,10 +24,30 @@ function deriveState(logJson: string, prefixLen: number): string;
 
 // Count the events in a log, so a caller can enumerate scrub positions.
 function eventCount(logJson: string): number;
+
+// Evaluate declared budgets against a recorded log. `budgetsJson` is the
+// declaration in the agent file's own vocabulary ({"steps":24,"tokens":400000},
+// optionally with a `pricing` object), which is exactly the object
+// salvor-cli-wasm's `parseAgentToml` hands back. Returns the verdict as JSON:
+// whether a limit was crossed, which one, and the folded observations and
+// extensions it was decided from.
+function checkBudgets(logJson: string, budgetsJson: string): string;
 ```
 
 `deriveState(logJson, n)` is the scrubber's one operation: `n` in `0..=len`,
 where `0` is the empty (not-started) prefix and `len` is the head.
+
+`checkBudgets` estimates nothing. The observed steps, tokens, and elapsed time
+are folded out of the log by `salvor_replay::budget_observations`, any
+extension a recorded resume granted comes from
+`salvor_replay::budget_extensions`, and the comparison is
+`Budgets::first_crossing`, the function the runtime's loop calls before every
+model call, in the same fixed order (steps, tokens, cost, wall time), firing on
+`observed >= limit`. Pass a log prefix to ask what the check saw at that point:
+the loop checks before each model call, so the verdict behind a recorded
+`BudgetExceeded` at position `n` is `checkBudgets` over the first `n` events.
+That is the equality `salvor-runtime`'s own budget tests assert against a real
+recorded run.
 
 ## Boundary choice (measured, not assumed)
 
@@ -58,11 +78,22 @@ wasm module, asserting byte-identical canonical JSON. The chain has two links:
    expected, byte for byte.
 
 Together: **native == committed == wasm**, all three checked live. Latest run:
-**13 logs, 1044 prefixes** verified on each side.
+**14 logs, 1055 prefixes, and 126 budget verdicts** verified on each side.
+
+The budget check rides the same chain, one file over: `fixtures/expected-budgets/`
+holds one verdict per log per declaration, `tests/same_fold.rs` asserts those
+equal the live native check, and `js/same-fold.mjs` asserts the wasm
+`checkBudgets` equals them too. The declarations walk every dimension and both
+answers: a limit no log reaches, one every started log has already crossed, the
+cost path with and without the pricing it needs, and a wall clock measured
+between recorded observations.
 
 The reference logs deliberately touch every event kind and every derived status,
 including the `f64` budget paths and the `u64` random/sequence paths, so the
-cross-target number-formatting that is the real miscompilation risk.
+cross-target number-formatting that is the real miscompilation risk. One of them
+(`budget_extended`) exists for the budget corpus specifically: it carries two
+clock observations a wall-time check can measure between, and a recorded
+`extend` a check has to absorb from the log rather than be handed.
 
 ## Building
 

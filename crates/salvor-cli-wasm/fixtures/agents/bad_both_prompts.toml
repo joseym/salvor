@@ -1,0 +1,3 @@
+model = "m"
+system_prompt = "inline"
+system_prompt_path = "prompt.txt"

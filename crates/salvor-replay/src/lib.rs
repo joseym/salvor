@@ -32,6 +32,12 @@
 //!   returns) are plain values over the vocabulary above. They live here so a
 //!   consumer that only reads or renders runs can name them without linking the
 //!   IO edge that produced them.
+//! - **Budget evaluation.** [`Budgets`] declares the limits an agent runs
+//!   under and [`Budgets::first_crossing`] answers which one a run has
+//!   crossed. Every input is replayed data, so the check is arithmetic over
+//!   recorded numbers; [`budget_observations`] folds a log into exactly those
+//!   numbers. The runtime enforces the result at its IO edge and re-exports
+//!   these names unchanged.
 //! - **Event rendering.** [`event_kind`] and [`event_detail`] turn one event
 //!   into the kind label and the one-line detail every surface prints: the live
 //!   progress stream, the `history` command, and a browser inspector. One pure
@@ -79,6 +85,7 @@
 //! and the rest keep working for every existing consumer. New code may depend on
 //! either crate; they name the same types.
 
+mod budgets;
 mod effect;
 mod event;
 mod graph_state;
@@ -90,6 +97,10 @@ mod state;
 mod summary;
 mod validate;
 
+pub use budgets::{
+    BudgetExtensions, BudgetObservations, Budgets, Pricing, budget_extensions, budget_observations,
+    validate_extension_input,
+};
 pub use effect::Effect;
 pub use event::{
     Budget, BudgetKind, DedupOrigin, Event, EventEnvelope, ForkOrigin, Performer, SCHEMA_VERSION,

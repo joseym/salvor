@@ -52,8 +52,8 @@ use salvor_tools::{DynTool, ToolHandler, ToolSet};
 use serde_json::{Value, json};
 use thiserror::Error;
 
-use crate::budgets::{Budgets, Pricing};
 use crate::hash::hash_value;
+use salvor_core::{Budgets, Pricing};
 
 /// The default `max_tokens` sent with each model request when the builder
 /// is not told otherwise.

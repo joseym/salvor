@@ -20,7 +20,10 @@ import { fileURLToPath } from "node:url";
 import {
   helpText,
   helpTextAnsi,
+  parseAgentToml,
   parseArgv,
+  renderHistory,
+  renderHistoryPlain,
   renderList,
   renderListPlain,
 } from "../pkg-node/salvor_cli_wasm.js";
@@ -112,6 +115,34 @@ for (const name of names("argv", ".json")) {
     `parse ${name}`,
     JSON.stringify(canonical(JSON.parse(parseArgv(argv)))),
     JSON.stringify(canonical(JSON.parse(read("expected/parse", `${name}.json`)))),
+  );
+}
+
+// The history listing, for every committed log. Both forms, because the plain
+// one is a promise about what the caller gets, not an alias.
+for (const name of names("logs", ".json")) {
+  const log = read("logs", `${name}.json`);
+  same(
+    `history ${name} (ansi)`,
+    renderHistory(log),
+    read("expected/history", `${name}.ansi.txt`),
+  );
+  same(
+    `history ${name} (plain)`,
+    renderHistoryPlain(log),
+    read("expected/history", `${name}.plain.txt`),
+  );
+}
+
+// The agent-definition envelope for every committed file: the repository's own
+// agent files, and the ones written to be refused. Compared as canonical JSON,
+// for the same reason the parse envelopes are.
+for (const name of names("agents", ".toml")) {
+  const text = read("agents", `${name}.toml`);
+  same(
+    `agent ${name}`,
+    JSON.stringify(canonical(JSON.parse(parseAgentToml(text)))),
+    JSON.stringify(canonical(JSON.parse(read("expected/agent", `${name}.json`)))),
   );
 }
 

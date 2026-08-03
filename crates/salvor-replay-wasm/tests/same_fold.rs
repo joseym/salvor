@@ -27,7 +27,7 @@ use std::path::PathBuf;
 use salvor_replay::{
     Budget, BudgetKind, Effect, Event, EventEnvelope, RunId, SequenceNumber, TokenUsage,
 };
-use salvor_replay_wasm::fold_prefix_to_json;
+use salvor_replay_wasm::{check_budgets_to_json, fold_prefix_to_json};
 use serde_json::json;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -177,6 +177,63 @@ fn reference_logs() -> Vec<(&'static str, Vec<EventEnvelope>)> {
         ]),
     ));
 
+    // A crossing, the resume that answered it, and the run continuing under the
+    // raised limit. This is the log the budget corpus needs and no other one
+    // here provides: two clock observations a wall-time check can measure
+    // between, and a recorded `extend` a check has to absorb from the log
+    // rather than be handed.
+    logs.push((
+        "budget_extended",
+        log(vec![
+            started(),
+            Event::NowObserved {
+                now: OffsetDateTime::from_unix_timestamp(1_752_566_400).unwrap(),
+            },
+            Event::ModelCallRequested {
+                seq: SequenceNumber::new(2),
+                request_hash: "sha256:req-1".into(),
+                request_body: None,
+            },
+            Event::ModelCallCompleted {
+                seq: SequenceNumber::new(2),
+                response: json!({"text": "one"}),
+                usage: TokenUsage {
+                    input_tokens: 30,
+                    output_tokens: 3,
+                },
+            },
+            Event::NowObserved {
+                now: OffsetDateTime::from_unix_timestamp(1_752_566_409).unwrap(),
+            },
+            Event::BudgetExceeded {
+                budget: Budget {
+                    kind: BudgetKind::Steps,
+                    limit: 1.0,
+                },
+                observed: 1.0,
+            },
+            Event::Resumed {
+                input: json!({"extend": {"steps": 2, "wall_time_seconds": 1.0}}),
+            },
+            Event::ModelCallRequested {
+                seq: SequenceNumber::new(7),
+                request_hash: "sha256:req-2".into(),
+                request_body: None,
+            },
+            Event::ModelCallCompleted {
+                seq: SequenceNumber::new(7),
+                response: json!({"text": "two"}),
+                usage: TokenUsage {
+                    input_tokens: 40,
+                    output_tokens: 4,
+                },
+            },
+            Event::RunCompleted {
+                output: json!("done under extension"),
+            },
+        ]),
+    ));
+
     logs.push((
         "context_and_usage",
         log(vec![
@@ -297,8 +354,10 @@ fn regenerate() {
     );
     let logs_dir = fixtures_dir().join("logs");
     let expected_dir = fixtures_dir().join("expected");
+    let budgets_dir = fixtures_dir().join("expected-budgets");
     fs::create_dir_all(&logs_dir).unwrap();
     fs::create_dir_all(&expected_dir).unwrap();
+    fs::create_dir_all(&budgets_dir).unwrap();
 
     for (name, events) in reference_logs() {
         let log_json = serde_json::to_string_pretty(&events).unwrap();
@@ -311,8 +370,51 @@ fn regenerate() {
             expected.join("\n") + "\n",
         )
         .unwrap();
+        // One budget verdict per line, one per declaration in
+        // `reference_budgets()`, in that order.
+        fs::write(
+            budgets_dir.join(format!("{name}.jsonl")),
+            native_budget_verdicts(&events).join("\n") + "\n",
+        )
+        .unwrap();
         eprintln!("wrote fixture {name} ({} events)", events.len());
     }
+}
+
+/// The budget declarations every reference log is checked against.
+///
+/// Written in the agent file's own vocabulary, because that is the argument
+/// `checkBudgets` takes: the object `parseAgentToml` hands back under
+/// `budgets`, with `pricing` folded in. The set walks every dimension and both
+/// answers: a limit no log reaches, a limit every started log has already
+/// crossed, the cost path with and without the pricing it needs, and a wall
+/// clock measured against recorded observations.
+const REFERENCE_BUDGETS: &[(&str, &str)] = &[
+    ("none_declared", "{}"),
+    ("steps_generous", r#"{"steps":1000}"#),
+    ("steps_zero", r#"{"steps":0}"#),
+    ("steps_one", r#"{"steps":1}"#),
+    ("tokens_tight", r#"{"tokens":10}"#),
+    (
+        "cost_with_pricing",
+        r#"{"cost_usd":0.0001,"pricing":{"input_per_mtok":3.0,"output_per_mtok":15.0}}"#,
+    ),
+    ("cost_without_pricing", r#"{"cost_usd":0.0001}"#),
+    ("wall_time", r#"{"wall_time_seconds":0.5}"#),
+    (
+        "every_dimension",
+        r#"{"steps":2,"tokens":50,"cost_usd":1.0,"wall_time_seconds":3600.0,"pricing":{"input_per_mtok":3.0,"output_per_mtok":15.0}}"#,
+    ),
+];
+
+/// One verdict per declaration, in declaration order, exactly as each crosses
+/// the wasm boundary.
+fn native_budget_verdicts(events: &[EventEnvelope]) -> Vec<String> {
+    let log_json = serde_json::to_string(events).unwrap();
+    REFERENCE_BUDGETS
+        .iter()
+        .map(|(_, declaration)| check_budgets_to_json(&log_json, declaration).unwrap())
+        .collect()
 }
 
 /// The real proof's native anchor: the committed fixtures still equal what the
@@ -364,4 +466,62 @@ fn committed_fixtures_match_native_fold() {
 
     eprintln!("same-fold native anchor: {total_logs} logs, {total_prefixes} prefixes verified");
     assert!(total_logs >= 12, "expected the full reference-log set");
+}
+
+/// The committed budget verdicts equal the live check, for every reference log
+/// against every reference declaration.
+///
+/// The same two guards the fold gets. The divergence guard is implicit in the
+/// call: `check_budgets_to_json` is what the wasm binding runs, and it reaches
+/// `salvor_replay::Budgets::first_crossing`, the function the runtime's loop
+/// calls before every model call. The drift guard is the committed file: widen
+/// what counts as a step, absorb an extension the loop would not, and these
+/// lines move.
+///
+/// The verdicts are the anchor `js/same-fold.mjs` measures the WASM
+/// `checkBudgets` against, completing native == committed == wasm for the
+/// budget rule the way it already does for the fold.
+#[test]
+fn committed_budget_verdicts_match_the_native_check() {
+    let budgets_dir = fixtures_dir().join("expected-budgets");
+
+    let mut crossings = 0usize;
+    let mut clears = 0usize;
+    for (name, events) in reference_logs() {
+        let committed_raw = fs::read_to_string(budgets_dir.join(format!("{name}.jsonl")))
+            .unwrap_or_else(|_| {
+                panic!("missing committed budget fixture {name}; run the regenerator")
+            });
+        let committed: Vec<&str> = committed_raw.lines().collect();
+        let live = native_budget_verdicts(&events);
+
+        assert_eq!(
+            committed.len(),
+            REFERENCE_BUDGETS.len(),
+            "budget fixture {name} must carry one verdict per declaration"
+        );
+        for ((declaration, _), (committed, fresh)) in REFERENCE_BUDGETS
+            .iter()
+            .zip(committed.iter().zip(live.iter()))
+        {
+            assert_eq!(
+                *committed, fresh,
+                "committed budget verdict {name}/{declaration} drifted from the native check; \
+                 regenerate"
+            );
+            if fresh.contains("\"crossed\":true") {
+                crossings += 1;
+            } else {
+                clears += 1;
+            }
+        }
+    }
+
+    // Both answers have to be represented, or the corpus would be proving one
+    // branch and asserting nothing about the other.
+    assert!(
+        crossings >= 10,
+        "the corpus reaches crossings on every dimension"
+    );
+    assert!(clears >= 10, "and clears the ones it does not reach");
 }
