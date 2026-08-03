@@ -18,7 +18,10 @@
 //!   and speaks stdio, [`connect_http`](McpServer::connect_http) reaches a
 //!   remote server by URL over streamable HTTP. Either way it initializes the
 //!   MCP session, lists the tools, and shuts the session down cleanly on close
-//!   or drop.
+//!   or drop. A stdio server is a real child process of this one, and how it is
+//!   held (its own process group, kill on drop, and a parent-death signal where
+//!   the platform has one) is stated in that submodule's docs, along with the
+//!   one case that can still outlive an operator's `kill -9`.
 //! - [`McpTool`] (in the `tool` submodule) is one MCP tool, implementing
 //!   [`DynTool`](crate::DynTool) directly. Its name, description, and JSON
 //!   schema are the server's own; its [`Effect`] is decided by the mapping

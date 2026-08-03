@@ -1,0 +1,4 @@
+{
+  "error": "parsing agent definition as TOML: TOML parse error at line 3, column 1\n  |\n3 | step = 3\n  | ^^^^\nunknown field `step`, expected one of `steps`, `tokens`, `cost_usd`, `wall_time_seconds`\n",
+  "ok": false
+}

@@ -1,0 +1,11 @@
+{"status":{"kind":"NotStarted"},"next_seq":0,"usage":{"input_tokens":0,"output_tokens":0}}
+{"status":{"kind":"Running"},"next_seq":1,"usage":{"input_tokens":0,"output_tokens":0}}
+{"status":{"kind":"Running"},"next_seq":2,"usage":{"input_tokens":0,"output_tokens":0}}
+{"status":{"kind":"AwaitingModel"},"next_seq":3,"usage":{"input_tokens":0,"output_tokens":0},"pending_call":{"kind":"Model","seq":2,"request_hash":"sha256:req-1"}}
+{"status":{"kind":"Running"},"next_seq":4,"usage":{"input_tokens":30,"output_tokens":3}}
+{"status":{"kind":"Running"},"next_seq":5,"usage":{"input_tokens":30,"output_tokens":3}}
+{"status":{"kind":"BudgetExceeded","budget":{"kind":"steps","limit":1.0},"observed":1.0},"next_seq":6,"usage":{"input_tokens":30,"output_tokens":3}}
+{"status":{"kind":"Running"},"next_seq":7,"usage":{"input_tokens":30,"output_tokens":3}}
+{"status":{"kind":"AwaitingModel"},"next_seq":8,"usage":{"input_tokens":30,"output_tokens":3},"pending_call":{"kind":"Model","seq":7,"request_hash":"sha256:req-2"}}
+{"status":{"kind":"Running"},"next_seq":9,"usage":{"input_tokens":70,"output_tokens":7}}
+{"status":{"kind":"Completed","output":"done under extension"},"next_seq":10,"usage":{"input_tokens":70,"output_tokens":7}}

@@ -1,0 +1,4 @@
+{
+  "error": "set only one of `system_prompt` or `system_prompt_path`, not both",
+  "ok": false
+}

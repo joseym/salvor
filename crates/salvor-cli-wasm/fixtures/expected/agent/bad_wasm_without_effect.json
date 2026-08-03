@@ -1,0 +1,4 @@
+{
+  "error": "wasm tool `t`: `effect` is required (\"read\", \"idempotent\", or \"write\") and has no default. The sandboxed binary gets no say in its own side-effect class, so a missing effect is a missing operator decision, not something to guess",
+  "ok": false
+}

@@ -1,0 +1,154 @@
+[
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 0,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:00:00Z",
+    "event": {
+      "kind": "RunStarted",
+      "payload": {
+        "agent_def_hash": "sha256:1f0c6d2a9b3e5477c8d1e0a2b4f60918d3c5e7a9b1d3f50729c4e6a8b0d2f416",
+        "input": {
+          "item": "ss-waratah"
+        }
+      }
+    }
+  },
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 1,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:01:00Z",
+    "event": {
+      "kind": "NowObserved",
+      "payload": {
+        "now": "2025-07-15T08:00:00Z"
+      }
+    }
+  },
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 2,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:02:00Z",
+    "event": {
+      "kind": "ModelCallRequested",
+      "payload": {
+        "seq": 1,
+        "request_hash": "sha256:2b4d6f8a0c2e40628a4c6e80a2c4e6081b3d5f79a1c3e50729b4d6f8a0c2e406"
+      }
+    }
+  },
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 3,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:03:00Z",
+    "event": {
+      "kind": "ModelCallCompleted",
+      "payload": {
+        "seq": 2,
+        "response": {
+          "text": "recording the claim"
+        },
+        "usage": {
+          "input_tokens": 24,
+          "output_tokens": 41
+        }
+      }
+    }
+  },
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 4,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:04:00Z",
+    "event": {
+      "kind": "ToolCallRequested",
+      "payload": {
+        "seq": 4,
+        "tool": "save_claim",
+        "input": {
+          "item": "ss-waratah"
+        },
+        "effect": "write",
+        "idempotency_key": "save_claim:ss-waratah"
+      }
+    }
+  },
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 5,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:05:00Z",
+    "event": {
+      "kind": "ToolCallCompleted",
+      "payload": {
+        "seq": 4,
+        "output": {
+          "content": [
+            {
+              "text": "claim recorded: ss-waratah"
+            }
+          ]
+        }
+      }
+    }
+  },
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 6,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:06:00Z",
+    "event": {
+      "kind": "NowObserved",
+      "payload": {
+        "now": "2025-07-15T08:01:00Z"
+      }
+    }
+  },
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 7,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:07:00Z",
+    "event": {
+      "kind": "ModelCallRequested",
+      "payload": {
+        "seq": 7,
+        "request_hash": "sha256:3c5e7a9b1d3f50729c4e6a8b0d2f4160a2c4e6081b3d5f79a1c3e50729b4d6f8"
+      }
+    }
+  },
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 8,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:08:00Z",
+    "event": {
+      "kind": "ModelCallCompleted",
+      "payload": {
+        "seq": 8,
+        "response": {
+          "text": "Recorded the salvage claim for ss-waratah."
+        },
+        "usage": {
+          "input_tokens": 118,
+          "output_tokens": 17
+        }
+      }
+    }
+  },
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 9,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:09:00Z",
+    "event": {
+      "kind": "RunCompleted",
+      "payload": {
+        "output": "Recorded the salvage claim for ss-waratah."
+      }
+    }
+  }
+]

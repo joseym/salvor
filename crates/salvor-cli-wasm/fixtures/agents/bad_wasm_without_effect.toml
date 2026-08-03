@@ -1,0 +1,7 @@
+model = "m"
+
+[[wasm_tools]]
+path = "t.wasm"
+name = "t"
+description = "d"
+input_schema = "{}"

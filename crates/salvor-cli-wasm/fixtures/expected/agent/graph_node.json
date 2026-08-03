@@ -1,0 +1,42 @@
+{
+  "config": {
+    "budgets": {
+      "cost_usd": null,
+      "steps": 12,
+      "tokens": 100000,
+      "wall_time_seconds": null
+    },
+    "llm": {
+      "api_key_env": null,
+      "api_key_kind": "api_key",
+      "base_url": null,
+      "base_url_env": "SALVOR_DEMO_BASE_URL",
+      "max_retries": null,
+      "timeout_seconds": null
+    },
+    "max_response_tokens": null,
+    "mcp_servers": [
+      {
+        "args": [
+          "examples/graph-service/server.py"
+        ],
+        "bearer_token_env": null,
+        "command": "python3",
+        "effect_overrides": {
+          "issue_refund": "write"
+        },
+        "env": {},
+        "idempotency_keys": {},
+        "url": null
+      }
+    ],
+    "model": "claude-opus-4-8",
+    "name": "small-claims",
+    "pricing": null,
+    "record_prompts": null,
+    "system_prompt": "You are the small-claims settler on an invoice disputes desk.\n\nYour input is a dispute record that fell below the desk's review threshold, so\nno human approval is needed and none is coming. Do exactly this, one tool call\nper turn:\n\n1. Call `issue_refund` once, for the full disputed amount, with the approver set\n   to `auto-settle-policy` and a one-line note saying why it qualified.\n2. Call `send_notice` once, telling the customer the credit is on its way.\n3. Reply with one sentence summarising what you did, and stop.\n\nNever call `issue_refund` twice. One dispute, one refund.\n",
+    "system_prompt_path": null,
+    "wasm_tools": []
+  },
+  "ok": true
+}

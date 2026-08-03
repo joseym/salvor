@@ -2,9 +2,24 @@
 //! cost budget needs ([`Pricing`]), the extensions a human grants at resume
 //! time ([`BudgetExtensions`]), and the crossing check itself.
 //!
-//! Named `Budgets` (plural) deliberately: `salvor_core::Budget` is the *event
-//! payload* naming which single limit was crossed; this type is the
-//! *declaration* of every limit an agent runs under.
+//! Named `Budgets` (plural) deliberately: [`Budget`] is the *event payload*
+//! naming which single limit was crossed; this type is the *declaration* of
+//! every limit an agent runs under.
+//!
+//! # Why this lives in the pure crate
+//!
+//! Every input to a check is replayed data (see the determinism section
+//! below), so the check itself never touches a clock, a store, or a network:
+//! it is arithmetic over recorded numbers. It sits here rather than in
+//! `salvor-runtime` for the same reason [`derive_state`](crate::derive_state)
+//! does: the runtime enforces budgets at the IO edge and a browser wants to
+//! evaluate the identical rule client-side, and one implementation serving
+//! both is the only way the two cannot disagree. `salvor-runtime` re-exports
+//! every name here, so `salvor_runtime::Budgets` and the rest keep resolving.
+//!
+//! [`budget_observations`] closes the loop: it folds a recorded log into the
+//! [`BudgetObservations`] the loop would have built at that point, so a caller
+//! holding only the log can run the real check rather than approximate it.
 //!
 //! # Determinism
 //!
@@ -52,8 +67,9 @@
 
 use std::time::Duration;
 
-use salvor_core::{Budget, BudgetKind};
 use serde_json::Value;
+
+use crate::{Budget, BudgetKind, Event, EventEnvelope};
 
 /// The limits an agent declares. Every dimension is optional; an absent
 /// dimension is never checked.
@@ -189,6 +205,67 @@ pub struct BudgetObservations {
     pub elapsed_seconds: f64,
 }
 
+/// Folds a recorded log into the observations a budget check consumes.
+///
+/// The runtime's loop accumulates these as it drives, but every quantity it
+/// accumulates is itself recorded, so the same numbers can be read back out
+/// of the log afterwards. That is what makes a check reproducible off the
+/// event stream alone, which is what a browser has:
+///
+/// - **steps** is the count of `ModelCallCompleted` events, the loop's
+///   "completed model calls".
+/// - **tokens** are the recorded `usage` totals on those same events.
+/// - **elapsed** is the span between the first and the last `NowObserved`,
+///   the loop's baseline and its latest reading. Fewer than two observations
+///   means no span has elapsed, which is zero.
+///
+/// Pass the prefix the check would have seen. The loop checks *before* each
+/// model call, so the observations behind a recorded
+/// [`Event::BudgetExceeded`] at position `n` are the fold of `log[..n]`.
+///
+/// # Scope
+///
+/// This is the accounting of one agent run's log: what `salvor run` and
+/// `salvor resume` record, and what the loop counts. It is the whole log
+/// because the loop replays: on resume the driver re-enters at iteration
+/// zero and every recorded call is replayed through it, so its counters
+/// arrive at the live edge holding the run's full recorded history.
+///
+/// A graph run is deliberately not that shape. Its engine drives each node
+/// through its own loop with its own counters, so folding a graph log whole
+/// would sum quantities no single check ever saw. Fold one node's span, or
+/// do not use this on a graph log.
+#[must_use]
+pub fn budget_observations(log: &[EventEnvelope]) -> BudgetObservations {
+    let mut observations = BudgetObservations::default();
+    let mut first_now = None;
+    let mut last_now = None;
+
+    for envelope in log {
+        match &envelope.event {
+            Event::ModelCallCompleted { usage, .. } => {
+                observations.steps = observations.steps.saturating_add(1);
+                observations.input_tokens = observations
+                    .input_tokens
+                    .saturating_add(u64::from(usage.input_tokens));
+                observations.output_tokens = observations
+                    .output_tokens
+                    .saturating_add(u64::from(usage.output_tokens));
+            }
+            Event::NowObserved { now } => {
+                first_now.get_or_insert(*now);
+                last_now = Some(*now);
+            }
+            _ => {}
+        }
+    }
+
+    if let (Some(first), Some(last)) = (first_now, last_now) {
+        observations.elapsed_seconds = (last - first).as_seconds_f64();
+    }
+    observations
+}
+
 /// The accumulated budget extensions granted by recorded resume inputs.
 /// See the module docs for the JSON shape they are parsed from.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -225,6 +302,33 @@ impl BudgetExtensions {
             self.wall_time_seconds += seconds;
         }
     }
+}
+
+/// Folds a recorded log into the extensions a budget check has been granted.
+///
+/// The loop absorbs an extension exactly when a resume answers a budget
+/// crossing, so this absorbs the input of a [`Event::Resumed`] whose
+/// immediately preceding event is a [`Event::BudgetExceeded`], and no other.
+/// That adjacency is not a heuristic: `ctx.budget_exceeded` records the
+/// crossing and the `await_resume` that follows it records the answer, with
+/// nothing in between. A resume answering a *suspension* is a different
+/// conversation and is deliberately not absorbed here, even if its input
+/// happens to carry a key spelled `extend`.
+///
+/// Like [`budget_observations`], this is the whole log because the loop
+/// replays: on resume the driver re-absorbs every recorded extension in
+/// order before it reaches the live edge.
+#[must_use]
+pub fn budget_extensions(log: &[EventEnvelope]) -> BudgetExtensions {
+    let mut extensions = BudgetExtensions::default();
+    for pair in log.windows(2) {
+        if let (Event::BudgetExceeded { .. }, Event::Resumed { input }) =
+            (&pair[0].event, &pair[1].event)
+        {
+            extensions.absorb(input);
+        }
+    }
+    extensions
 }
 
 /// Validates a resume input against the budget-extension shape documented

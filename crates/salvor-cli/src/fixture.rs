@@ -16,7 +16,7 @@
 //!
 //! # How the model gets pointed at the fixture
 //!
-//! [`AgentConfig::client_config`](crate::agent_config::AgentConfig::client_config)
+//! [`AgentConfigExt::client_config`](crate::agent_config::AgentConfigExt::client_config)
 //! resolves the endpoint from the agent file's `[llm] base_url_env`: when that
 //! variable is set and non-empty its value wins, otherwise the file's own
 //! `base_url` (or the public Anthropic endpoint) does. So one agent file

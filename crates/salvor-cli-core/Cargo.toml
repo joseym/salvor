@@ -15,15 +15,37 @@ license.workspace = true
 # false` can turn off the host-only `rng` feature: that is what keeps this
 # crate free of a randomness backend and buildable for
 # wasm32-unknown-unknown. The types are the same ones salvor-core re-exports.
-salvor-replay = { path = "../salvor-replay", version = "0.9.0", default-features = false }
+salvor-replay = { path = "../salvor-replay", version = "0.9.1", default-features = false }
 # The graph document summary `graph validate` prints. A pure, IO-free leaf.
 salvor-graph.workspace = true
+# Only for `IdempotencyPath`, the dotted-path syntax an agent file declares an
+# idempotency key in. The agent-file parse validates a declared path by parsing
+# it with the same type the runtime dispatches through, so a file cannot
+# declare a path a call could never be keyed on. `default-features = false`
+# turns off the `mcp` feature, which is where rmcp and Tokio live: the contract
+# layer that remains is pure Rust and builds for wasm32-unknown-unknown, and CI
+# already builds salvor-tools that way. It also turns off salvor-core's `rng`
+# forward, which is what keeps the randomness backend out of this crate.
+salvor-tools = { path = "../salvor-tools", version = "0.9.1", default-features = false }
+# The agent file's own format. A pure parser (serde plus a hand-rolled lexer),
+# no IO of its own: the bytes arrive as a string from whoever read them.
+toml.workspace = true
+# The error type the agent-file parse reports in. Used here rather than a
+# bespoke enum because the messages ARE the contract: `salvor agent validate`
+# prints them, the control plane returns them, and a browser has to show the
+# same text. anyhow's context chain is what carries "parsing agent file X" in
+# front of toml's own complaint, and reimplementing that would be
+# reimplementing the errors this export exists to share.
+anyhow.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
 # The style vocabulary for the status column. anstyle only describes a style;
 # the stream that decides whether to emit or strip the codes lives with the
 # caller that owns stdout.
 anstyle.workspace = true
+# The derive behind the agent file's schema. The vocabulary and its
+# unknown-field rejection are serde attributes, so the derive is the schema.
+serde.workspace = true
 serde_json.workspace = true
 # The graph editor's parse error, which names the command and the token that
 # broke it. A proc macro plus a Display impl, so nothing here reaches the host.

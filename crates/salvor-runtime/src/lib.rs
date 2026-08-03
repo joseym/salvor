@@ -65,7 +65,6 @@
 #![warn(missing_docs)]
 
 mod agent;
-mod budgets;
 mod compact;
 mod ctx;
 mod driver;
@@ -79,9 +78,11 @@ mod validate;
 mod wire;
 
 pub use agent::{Agent, AgentBuildError, AgentBuilder, DEFAULT_MAX_RESPONSE_TOKENS};
-pub use budgets::{
-    BudgetExtensions, BudgetObservations, Budgets, Pricing, validate_extension_input,
-};
+// The budget declaration and its crossing check. Every input to a check is
+// replayed data, so the rule is pure arithmetic and lives in `salvor-replay`
+// with the rest of the pure half: one implementation the runtime enforces at
+// its IO edge and a browser evaluates client-side. Re-exported unchanged, so
+// `salvor_runtime::Budgets` and the rest keep resolving where they always did.
 pub use compact::{
     COMPACT_HEAD_CHARS, COMPACT_MESSAGE_CAP, COMPACT_TAIL_CHARS, FailureTracker,
     compact_error_message,
@@ -96,6 +97,10 @@ pub use labels::{MAX_LABEL_KEY_LEN, MAX_LABEL_VALUE_LEN, MAX_LABELS, validate_la
 pub use model::{clamp_tokens, response_value, usage_of};
 pub use progress::{event_detail, event_kind};
 pub use runtime::{ParkReason, RunOutcome, Runtime};
+pub use salvor_core::{
+    BudgetExtensions, BudgetObservations, Budgets, Pricing, budget_extensions, budget_observations,
+    validate_extension_input,
+};
 pub use validate::validate_against_schema;
 pub use wire::{
     ERROR_SENTINEL_KEY, SUSPEND_SENTINEL_KEY, ToolFailure, ToolFailureKind, content_string,

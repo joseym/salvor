@@ -52,7 +52,7 @@ use serde_json::Value;
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
-use crate::agent_config::{self, AgentConfig};
+use crate::agent_config::{self, AgentConfig, AgentConfigExt};
 use crate::checkout;
 use crate::cli::{
     AbandonArgs, AgentHashArgs, AgentValidateArgs, BuildArgs, CompletionsArgs, ForkArgs,

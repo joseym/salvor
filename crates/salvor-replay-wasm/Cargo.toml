@@ -22,7 +22,7 @@ crate-type = ["cdylib", "rlib"]
 # randomness and stays pure, exactly as the dashboard crate consumes it. A
 # browser inspector reads run ids already recorded in the log; it never mints
 # one.
-salvor-replay = { path = "../salvor-replay", version = "0.9.0", default-features = false }
+salvor-replay = { path = "../salvor-replay", version = "0.9.1", default-features = false }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # The wasm boundary. wasm-bindgen compiles on native targets too (the generated

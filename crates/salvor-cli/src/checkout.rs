@@ -62,11 +62,27 @@ pub async fn ensure_node_modules(bridge: &Path) -> Result<()> {
 /// (plain `bash -c`, or spawning `node`/`npm` directly, does not source the
 /// profile that sets that up, and an interactive-shell nvm hook under zsh in
 /// particular is not reliable when driven non-interactively).
+///
+/// Two deliberate differences from the other two places this CLI starts a child
+/// process (`dev_server`, and MCP servers through `salvor_tools::mcp`), both
+/// following from what this one is: a build step the operator is watching.
+///
+/// It is killed on drop, like the others: if the future awaiting it is
+/// cancelled or unwound past, `npm ci` must not keep running unattended with
+/// nobody left to read its output.
+///
+/// It is *not* moved into a process group of its own, unlike the others. A
+/// fresh group would take the compiler out of the terminal's foreground group,
+/// and Ctrl-C during a long build would stop reaching it, which is precisely
+/// the behavior an operator is entitled to here. The others make the opposite
+/// trade because their shutdown is always explicit and nobody is watching them
+/// run.
 pub async fn run_shell(dir: &Path, line: &str) -> Result<()> {
     let status = tokio::process::Command::new("bash")
         .arg("-lc")
         .arg(line)
         .current_dir(dir)
+        .kill_on_drop(true)
         .status()
         .await
         .with_context(|| format!("spawning `{line}`"))?;

@@ -1,0 +1,4 @@
+model = "m"
+
+[[mcp_servers]]
+args = ["x"]

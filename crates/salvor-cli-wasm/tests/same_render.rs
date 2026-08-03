@@ -33,13 +33,15 @@ use std::fs;
 use std::path::PathBuf;
 
 use clap::{CommandFactory, Parser};
+use salvor_cli_core::agent_config::AgentConfig;
 use salvor_cli_core::cli::Cli;
 use salvor_cli_core::render;
 use salvor_cli_wasm::{
-    parse_argv_to_json, render_help_to_ansi_string, render_help_to_string,
+    parse_agent_toml_to_json, parse_argv_to_json, render_help_to_ansi_string,
+    render_help_to_string, render_history_to_plain_string, render_history_to_string,
     render_list_to_plain_string, render_list_to_string,
 };
-use salvor_replay::{RunId, RunSummary};
+use salvor_replay::{Effect, Event, EventEnvelope, RunId, RunSummary, SequenceNumber, TokenUsage};
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -438,10 +440,24 @@ fn regenerate() {
 
     let rows_dir = fixtures_dir().join("rows");
     let argv_dir = fixtures_dir().join("argv");
+    let logs_dir = fixtures_dir().join("logs");
+    let agents_dir = fixtures_dir().join("agents");
     let list_dir = fixtures_dir().join("expected/list");
     let help_dir = fixtures_dir().join("expected/help");
     let parse_dir = fixtures_dir().join("expected/parse");
-    for dir in [&rows_dir, &argv_dir, &list_dir, &help_dir, &parse_dir] {
+    let history_dir = fixtures_dir().join("expected/history");
+    let agent_dir = fixtures_dir().join("expected/agent");
+    for dir in [
+        &rows_dir,
+        &argv_dir,
+        &logs_dir,
+        &agents_dir,
+        &list_dir,
+        &help_dir,
+        &parse_dir,
+        &history_dir,
+        &agent_dir,
+    ] {
         fs::create_dir_all(dir).unwrap();
     }
 
@@ -483,6 +499,58 @@ fn regenerate() {
         )
         .unwrap();
     }
+
+    for (name, events) in reference_logs() {
+        let input = log_json(&events);
+        fs::write(logs_dir.join(format!("{name}.json")), &input).unwrap();
+        fs::write(
+            history_dir.join(format!("{name}.plain.txt")),
+            render_history_to_plain_string(&input).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            history_dir.join(format!("{name}.ansi.txt")),
+            render_history_to_string(&input).unwrap(),
+        )
+        .unwrap();
+    }
+
+    // The real agent files are COPIED in rather than read through at check
+    // time, so the committed corpus holds its own inputs the way the rows and
+    // argv corpora do. The copy is then checked against the repository file it
+    // came from, which is what keeps a fixture from quietly outliving the file
+    // it was supposed to be about.
+    for (name, relative) in PINNED_AGENT_FILES {
+        let text = fs::read_to_string(repo_root().join(relative)).unwrap();
+        fs::write(agents_dir.join(format!("{name}.toml")), &text).unwrap();
+    }
+    for (name, text) in reference_agent_texts() {
+        fs::write(agents_dir.join(format!("{name}.toml")), text).unwrap();
+    }
+    for name in agent_fixture_names() {
+        let text = fs::read_to_string(agents_dir.join(format!("{name}.toml"))).unwrap();
+        let envelope: Value =
+            serde_json::from_str(&parse_agent_toml_to_json(&text).unwrap()).unwrap();
+        fs::write(
+            agent_dir.join(format!("{name}.json")),
+            serde_json::to_string_pretty(&envelope).unwrap() + "\n",
+        )
+        .unwrap();
+    }
+}
+
+/// Every name in the agent corpus: the pinned real files first, then the
+/// synthetic ones.
+fn agent_fixture_names() -> Vec<String> {
+    PINNED_AGENT_FILES
+        .iter()
+        .map(|(name, _)| (*name).to_owned())
+        .chain(
+            reference_agent_texts()
+                .into_iter()
+                .map(|(name, _)| name.to_owned()),
+        )
+        .collect()
 }
 
 /// The list table, through the boundary, is the table `salvor-cli-core` draws,
@@ -702,4 +770,494 @@ fn the_version_line_matches_the_core_parser() {
         Value::String(err.to_string()),
         "the version line crossed the boundary changed"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The history listing
+// ---------------------------------------------------------------------------
+
+/// One envelope of a reference log. Fixed run id and a timestamp that advances
+/// with the sequence, so the fixtures are byte-stable and the recorded-time
+/// column still varies between lines.
+fn envelope(seq: u64, event: Event) -> EventEnvelope {
+    EventEnvelope::new(
+        run_id(0xaa),
+        SequenceNumber::new(seq),
+        ts(seq as i64),
+        event,
+    )
+}
+
+fn log(events: Vec<Event>) -> Vec<EventEnvelope> {
+    events
+        .into_iter()
+        .enumerate()
+        .map(|(i, event)| envelope(i as u64, event))
+        .collect()
+}
+
+/// The named reference logs. Each becomes one `logs/<name>.json` input and a
+/// plain and an ANSI `expected/history/<name>.*.txt` pair.
+fn reference_logs() -> Vec<(&'static str, Vec<EventEnvelope>)> {
+    let mut logs: Vec<(&'static str, Vec<EventEnvelope>)> = Vec::new();
+
+    // No events is no lines, which the real command reaches only for a run id
+    // it refuses first. It is here because an empty listing must be an empty
+    // string rather than a stray newline.
+    logs.push(("empty", Vec::new()));
+
+    // The hero fixture's own shape, event for event: the ten-event run behind
+    // the terminal on salvor.run (`salvor run --fixture examples/hero`). One
+    // model call decides to record a claim, one tool call records it, one more
+    // model call closes the run out, with a clock observation per loop
+    // iteration. This is the log the landing page prints, so it is the log the
+    // proof is anchored on.
+    logs.push((
+        "hero",
+        log(vec![
+            Event::RunStarted {
+                agent_def_hash:
+                    "sha256:1f0c6d2a9b3e5477c8d1e0a2b4f60918d3c5e7a9b1d3f50729c4e6a8b0d2f416"
+                        .to_owned(),
+                input: json!({"item": "ss-waratah"}),
+                labels: None,
+            },
+            Event::NowObserved { now: ts(0) },
+            Event::ModelCallRequested {
+                seq: SequenceNumber::new(1),
+                request_hash:
+                    "sha256:2b4d6f8a0c2e40628a4c6e80a2c4e6081b3d5f79a1c3e50729b4d6f8a0c2e406"
+                        .to_owned(),
+                request_body: None,
+            },
+            Event::ModelCallCompleted {
+                seq: SequenceNumber::new(2),
+                response: json!({"text": "recording the claim"}),
+                usage: TokenUsage {
+                    input_tokens: 24,
+                    output_tokens: 41,
+                },
+            },
+            Event::ToolCallRequested {
+                seq: SequenceNumber::new(4),
+                tool: "save_claim".to_owned(),
+                input: json!({"item": "ss-waratah"}),
+                effect: Effect::Write,
+                idempotency_key: Some("save_claim:ss-waratah".to_owned()),
+                performed_by: None,
+            },
+            Event::ToolCallCompleted {
+                seq: SequenceNumber::new(4),
+                output: json!({"content": [{"text": "claim recorded: ss-waratah"}]}),
+                deduplicated_from: None,
+            },
+            Event::NowObserved { now: ts(1) },
+            Event::ModelCallRequested {
+                seq: SequenceNumber::new(7),
+                request_hash:
+                    "sha256:3c5e7a9b1d3f50729c4e6a8b0d2f4160a2c4e6081b3d5f79a1c3e50729b4d6f8"
+                        .to_owned(),
+                request_body: None,
+            },
+            Event::ModelCallCompleted {
+                seq: SequenceNumber::new(8),
+                response: json!({"text": "Recorded the salvage claim for ss-waratah."}),
+                usage: TokenUsage {
+                    input_tokens: 118,
+                    output_tokens: 17,
+                },
+            },
+            Event::RunCompleted {
+                output: json!("Recorded the salvage claim for ss-waratah."),
+            },
+        ]),
+    ));
+
+    // The ways a run can stop short, which the hero run never reaches: a
+    // budget crossing (the f64 detail path), a suspension and its resume, an
+    // abandonment with a reason, and a failure. Each takes a different arm of
+    // `event_detail`, so this walks the branches the hero log leaves cold.
+    logs.push((
+        "parked_and_terminal",
+        log(vec![
+            Event::RunStarted {
+                agent_def_hash: "sha256:aabbcc".to_owned(),
+                input: json!({"claim": "wreck-9931"}),
+                labels: None,
+            },
+            Event::BudgetExceeded {
+                budget: salvor_replay::Budget {
+                    kind: salvor_replay::BudgetKind::CostUsd,
+                    limit: 2.5,
+                },
+                observed: 2.500_001,
+            },
+            Event::Resumed {
+                input: json!({"extend": {"cost_usd": 1.0}}),
+            },
+            Event::Suspended {
+                reason: "a human must approve the payout".to_owned(),
+                input_schema: json!({"type": "object"}),
+            },
+            Event::Resumed {
+                input: json!({"approved": true}),
+            },
+            Event::RandomObserved {
+                value: 17_014_118_346_046_923_173,
+            },
+            Event::RunFailed {
+                error: "the ledger refused the write".to_owned(),
+            },
+        ]),
+    ));
+
+    logs
+}
+
+/// A reference log as the JSON a caller hands across the boundary: the exact
+/// wire form the store writes, which is also what `salvor-replay-wasm`'s fold
+/// takes.
+fn log_json(events: &[EventEnvelope]) -> String {
+    serde_json::to_string_pretty(events).unwrap() + "\n"
+}
+
+/// The history listing built by calling `salvor-cli-core` directly. This is the
+/// reference the wasm-facing function is measured against, so it repeats the
+/// command handler's own loop (one `render::history_line` per envelope, each on
+/// its own line) rather than calling the crate under test.
+fn core_history(events: &[EventEnvelope]) -> String {
+    let mut out = String::new();
+    for envelope in events {
+        out.push_str(&render::history_line(envelope));
+        out.push('\n');
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// The agent-definition parse
+// ---------------------------------------------------------------------------
+
+/// The repository root, from this crate's manifest directory.
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap()
+}
+
+/// Every agent file this repository ships, by path from the root.
+///
+/// These are the real thing: the files `salvor run --agent` is pointed at in
+/// the READMEs, the examples, and the SDK walkthroughs. A parse that cannot
+/// read them is not the CLI's parse, whatever else it can read.
+const REPO_AGENT_FILES: &[&str] = &[
+    "demo/agent.toml",
+    "examples/hero/agent.toml",
+    "examples/local-model/agent.toml",
+    "examples/payroll/agents/notify-summary.toml",
+    "examples/polyglot-service/agent.toml",
+    "examples/python-tools/agent.toml",
+    "examples/reconciliation/agent.toml",
+    "examples/support-ops/agent.toml",
+    "examples/typescript-tools/agent.toml",
+    "examples/wasm-tools/agent.toml",
+    "examples/web-research/agent.toml",
+    "examples/graph-clients/agents/settle-and-notify.toml",
+    "examples/graph-clients/agents/small-claims.toml",
+    "examples/graph-service/agents/customer-notice.toml",
+    "examples/graph-service/agents/small-claims.toml",
+    "sdks/python/example/agent.toml",
+    "sdks/typescript/example/agent.toml",
+];
+
+/// The real agent files the committed corpus pins, and the fixture name each
+/// is copied to. A subset of [`REPO_AGENT_FILES`], chosen for breadth rather
+/// than count: the hero's MCP server and budgets, a wasm tool with limits and
+/// grants, a graph node's agent, and a file with an `[llm]` section.
+const PINNED_AGENT_FILES: &[(&str, &str)] = &[
+    ("hero", "examples/hero/agent.toml"),
+    ("wasm_tools", "examples/wasm-tools/agent.toml"),
+    ("local_model", "examples/local-model/agent.toml"),
+    (
+        "graph_node",
+        "examples/graph-clients/agents/small-claims.toml",
+    ),
+];
+
+/// The definitions the parse must REFUSE, and the rule each one breaks. The
+/// committed expectation for these is the CLI's own message, so a reworded
+/// refusal is a visible diff rather than a silent change to what a page shows
+/// somebody who mistyped their file.
+///
+/// One synthetic acceptance rides along (`keys`): no agent file in this
+/// repository declares an idempotency key, so without it the path parse the
+/// schema reaches into `salvor-tools` for would be uncovered.
+fn reference_agent_texts() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "keys",
+            "model = \"m\"\n\n\
+             [[mcp_servers]]\n\
+             command = \"payouts\"\n\
+             idempotency_keys = { pay_claim = \"claim_id\", refund = \"payment.charge_id\" }\n",
+        ),
+        (
+            "bad_unknown_field",
+            "model = \"claude-opus-4-8\"\n\
+             [budgets]\n\
+             step = 3\n",
+        ),
+        (
+            "bad_both_prompts",
+            "model = \"m\"\n\
+             system_prompt = \"inline\"\n\
+             system_prompt_path = \"prompt.txt\"\n",
+        ),
+        (
+            "bad_no_transport",
+            "model = \"m\"\n\n[[mcp_servers]]\nargs = [\"x\"]\n",
+        ),
+        (
+            "bad_both_transports",
+            "model = \"m\"\n\n\
+             [[mcp_servers]]\n\
+             command = \"x\"\n\
+             url = \"https://example.com/mcp\"\n",
+        ),
+        (
+            "bad_wasm_without_effect",
+            "model = \"m\"\n\n\
+             [[wasm_tools]]\n\
+             path = \"t.wasm\"\n\
+             name = \"t\"\n\
+             description = \"d\"\n\
+             input_schema = \"{}\"\n",
+        ),
+        (
+            "bad_idempotency_path",
+            "model = \"m\"\n\n\
+             [[mcp_servers]]\n\
+             command = \"x\"\n\
+             idempotency_keys = { pay_claim = \"a..b\" }\n",
+        ),
+        ("bad_not_toml", "model = \"m\"\nthis is not toml at all\n"),
+    ]
+}
+
+/// The agent envelope built by calling `salvor-cli-core` directly, so the
+/// wasm-facing function is measured against the parse rather than against
+/// itself.
+fn core_agent_envelope(text: &str) -> Value {
+    match AgentConfig::from_toml_str(text) {
+        Ok(config) => json!({"ok": true, "config": serde_json::to_value(&config).unwrap()}),
+        Err(error) => json!({"ok": false, "error": format!("{error:#}")}),
+    }
+}
+
+/// The history listing, through the boundary, is the listing
+/// `salvor-cli-core` writes, and it is still the listing that was committed.
+///
+/// The hero log is the one the landing page prints, so this is the assertion
+/// that a page showing `salvor history` is showing the CLI's own lines: the
+/// sequence column's width, the timestamp's spelling, the kind label, and the
+/// per-event detail all come from `render::history_line` and the two renderers
+/// in `salvor-replay` it delegates to.
+#[test]
+fn the_history_listing_matches_the_core_renderer() {
+    assert_clean_env();
+    let logs_dir = fixtures_dir().join("logs");
+    let history_dir = fixtures_dir().join("expected/history");
+
+    let mut checked = 0usize;
+    for (name, events) in reference_logs() {
+        // The committed input equals the reference corpus: an input that
+        // drifted would let the expected side agree with the wrong log.
+        let input = log_json(&events);
+        let committed_input = fs::read_to_string(logs_dir.join(format!("{name}.json")))
+            .unwrap_or_else(|_| panic!("missing committed log fixture {name}; run the generator"));
+        assert_eq!(
+            committed_input, input,
+            "committed log fixture {name} drifted from the reference corpus; regenerate"
+        );
+
+        // The divergence guard: the wasm-facing function against a direct call
+        // into salvor-cli-core, byte for byte.
+        let core = core_history(&events);
+        let wasm = render_history_to_string(&input).unwrap();
+        assert_eq!(
+            wasm, core,
+            "the history listing for {name} crossed the boundary changed"
+        );
+
+        // The history renderer emits no styling today, so the two forms are
+        // equal. Asserted rather than assumed: this is what would notice if it
+        // ever grew a styled column, and the plain form stopped being plain.
+        let plain = render_history_to_plain_string(&input).unwrap();
+        assert_eq!(
+            plain, wasm,
+            "the history renderer is unstyled, so its two forms agree"
+        );
+        assert!(
+            !wasm.contains('\u{1b}'),
+            "the history listing for {name} carries no escape codes"
+        );
+
+        // The drift guard: the renderer itself still writes what was committed.
+        assert_eq!(
+            fs::read_to_string(history_dir.join(format!("{name}.ansi.txt"))).unwrap(),
+            wasm,
+            "the history listing for {name} no longer matches the committed fixture; the \
+             renderer changed. Regenerate only if the change was intended."
+        );
+        assert_eq!(
+            fs::read_to_string(history_dir.join(format!("{name}.plain.txt"))).unwrap(),
+            plain,
+            "the plain history listing for {name} no longer matches the committed fixture; the \
+             renderer changed. Regenerate only if the change was intended."
+        );
+        checked += 1;
+    }
+
+    assert!(checked >= 3, "expected the full reference-log set");
+}
+
+/// Each line of the hero listing is a whole event, not a truncation of one.
+///
+/// The listing test above compares two implementations, which would agree even
+/// if both were wrong. This says what the right answer looks like: ten lines
+/// for ten events, in log order, each opening with its own sequence number in
+/// the four-column gutter, and the write's effect class visible on the line
+/// that records it.
+#[test]
+fn the_hero_listing_reads_like_the_command_prints_it() {
+    assert_clean_env();
+    let (_, events) = reference_logs()
+        .into_iter()
+        .find(|(name, _)| *name == "hero")
+        .expect("the hero log is in the corpus");
+    let listing = render_history_to_string(&log_json(&events)).unwrap();
+
+    let lines: Vec<&str> = listing.lines().collect();
+    assert_eq!(lines.len(), 10, "ten events, ten lines: {listing}");
+    for (seq, line) in lines.iter().enumerate() {
+        assert!(
+            line.starts_with(&format!("{seq:>4}  ")),
+            "line {seq} opens with its sequence number: {line}"
+        );
+    }
+    assert!(lines[0].contains("RunStarted"), "{}", lines[0]);
+    assert!(
+        lines[4].contains("save_claim") && lines[4].contains("Write"),
+        "the write names its tool and its effect class: {}",
+        lines[4]
+    );
+    assert!(lines[9].contains("RunCompleted"), "{}", lines[9]);
+}
+
+/// Parsing an agent definition, through the boundary, accepts and refuses
+/// exactly what `salvor-cli-core` does, gives back the CLI's own message for a
+/// refusal, and still produces the committed envelope.
+#[test]
+fn the_agent_parse_matches_the_core_parser() {
+    assert_clean_env();
+    let agents_dir = fixtures_dir().join("agents");
+    let agent_dir = fixtures_dir().join("expected/agent");
+
+    let mut accepted = 0usize;
+    let mut refused = 0usize;
+    for name in agent_fixture_names() {
+        let text =
+            fs::read_to_string(agents_dir.join(format!("{name}.toml"))).unwrap_or_else(|_| {
+                panic!("missing committed agent fixture {name}; run the generator")
+            });
+
+        // The divergence guard: the wasm-facing function against a direct call
+        // into salvor-cli-core.
+        let envelope: Value =
+            serde_json::from_str(&parse_agent_toml_to_json(&text).unwrap()).unwrap();
+        assert_eq!(
+            envelope,
+            core_agent_envelope(&text),
+            "the agent envelope for {name} crossed the boundary changed"
+        );
+
+        if envelope["ok"] == Value::Bool(true) {
+            accepted += 1;
+        } else {
+            refused += 1;
+            // The refusal text is the CLI's own, not a paraphrase: the same
+            // string `salvor agent validate` prints, context chain included.
+            let error = AgentConfig::from_toml_str(&text).unwrap_err();
+            assert_eq!(
+                envelope["error"],
+                Value::String(format!("{error:#}")),
+                "the refusal for {name} crossed the boundary changed"
+            );
+        }
+
+        // The drift guard: the parse still produces what was committed.
+        let committed: Value = serde_json::from_str(
+            &fs::read_to_string(agent_dir.join(format!("{name}.json"))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            committed, envelope,
+            "the agent envelope for {name} no longer matches the committed fixture; the schema \
+             changed. Regenerate only if the change was intended."
+        );
+    }
+
+    assert!(
+        accepted >= 5,
+        "expected the pinned real files plus the keys case"
+    );
+    assert!(refused >= 6, "expected the full reference-refusal set");
+}
+
+/// The pinned fixtures are still copies of the repository's own agent files.
+///
+/// Without this the corpus could pass forever against a file that no longer
+/// exists in the form anyone ships, which would make the accept side of the
+/// proof about nothing.
+#[test]
+fn the_pinned_agent_fixtures_are_the_repository_files() {
+    let agents_dir = fixtures_dir().join("agents");
+    for (name, relative) in PINNED_AGENT_FILES {
+        let committed =
+            fs::read_to_string(agents_dir.join(format!("{name}.toml"))).unwrap_or_else(|_| {
+                panic!("missing committed agent fixture {name}; run the generator")
+            });
+        let real = fs::read_to_string(repo_root().join(relative))
+            .unwrap_or_else(|_| panic!("{relative} is gone; the fixture points at nothing"));
+        assert_eq!(
+            committed, real,
+            "the committed copy of {relative} drifted from the file itself; regenerate"
+        );
+    }
+}
+
+/// Every agent file this repository ships parses.
+///
+/// The pinned corpus proves the parse is byte-identical across the boundary;
+/// this proves it is the CLI's parse in the sense that matters to somebody
+/// reading the docs, which is that the files those docs tell them to run are
+/// files it accepts. Checked live against the repository rather than against a
+/// fixture, so a new example that the parse would refuse fails here.
+#[test]
+fn every_agent_file_in_the_repository_parses() {
+    let root = repo_root();
+    for relative in REPO_AGENT_FILES {
+        let path = root.join(relative);
+        let text = fs::read_to_string(&path)
+            .unwrap_or_else(|_| panic!("{relative} is listed here but not in the repository"));
+        let parsed = parse_agent_toml_to_json(&text).unwrap();
+        let envelope: Value = serde_json::from_str(&parsed).unwrap();
+        assert_eq!(
+            envelope["ok"],
+            Value::Bool(true),
+            "{relative} must parse: {}",
+            envelope["error"]
+        );
+    }
 }

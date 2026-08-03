@@ -7,6 +7,13 @@
 //! same clap tree and the same renderer the `salvor` binary uses, so what the
 //! page parses, refuses, and prints cannot drift from what the terminal does.
 //!
+//! It exposes one thing more, on the same terms: the agent-file parse
+//! ([`parse_agent_toml_to_json`], calling
+//! `salvor_cli_core::agent_config::AgentConfig::from_toml_str`). A page that
+//! shows an `agent.toml` and says whether it is valid is making the binary's
+//! acceptance decision, and that decision is a parse over text with no process
+//! behind it, so it belongs here rather than in a second implementation.
+//!
 //! # No stdout
 //!
 //! There is no standard output in wasm, so nothing here writes to a stream:
@@ -51,8 +58,9 @@
 //! # Native and wasm from one source
 //!
 //! The parse and render cores ([`parse_argv_to_json`], [`render_help_to_string`],
-//! [`render_list_to_string`], and their variants) are ordinary Rust that builds
-//! for any target. `cargo build/test --workspace` compiles and tests them
+//! [`render_list_to_string`], [`render_history_to_string`],
+//! [`parse_agent_toml_to_json`], and their variants) are ordinary Rust that
+//! builds for any target. `cargo build/test --workspace` compiles and tests them
 //! natively with no wasm toolchain; wasm-pack compiles the very same code to
 //! `wasm32-unknown-unknown` behind the bindings below. The same-render proof in
 //! `tests/same_render.rs` exists to show that what crosses the wasm boundary is
@@ -60,14 +68,16 @@
 
 #![warn(missing_docs)]
 
+use salvor_cli_core::agent_config;
 use salvor_cli_core::cli::{
     AbandonArgs, AgentCommand, AgentHashArgs, AgentValidateArgs, BuildArgs, Cli, Command,
     CompletionsArgs, ForkArgs, GraphCommand, GraphEditArgs, GraphRunArgs, GraphValidateArgs,
     HistoryArgs, ListArgs, ReplayArgs, ResolveArgs, ResumeArgs, RunArgs, ServeArgs,
 };
 use salvor_cli_core::render;
-use salvor_replay::RunSummary;
+use salvor_replay::{EventEnvelope, RunSummary};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use wasm_bindgen::prelude::*;
 
 /// The error a call into this crate can return: bad input from the caller,
@@ -82,6 +92,8 @@ pub enum CliError {
     Argv(serde_json::Error),
     /// `rows_json` was not a JSON array of list rows.
     Rows(serde_json::Error),
+    /// `log_json` was not a JSON array of event envelopes.
+    Events(serde_json::Error),
     /// The help path named a subcommand this build does not have. `path` is the
     /// full path as given, `unknown` the segment that did not resolve.
     UnknownSubcommand {
@@ -100,6 +112,9 @@ impl core::fmt::Display for CliError {
         match self {
             CliError::Argv(e) => write!(f, "argv is not a JSON array of strings: {e}"),
             CliError::Rows(e) => write!(f, "rows are not a JSON array of list rows: {e}"),
+            CliError::Events(e) => {
+                write!(f, "log is not a JSON array of event envelopes: {e}")
+            }
             CliError::UnknownSubcommand { path, unknown } => {
                 write!(f, "no subcommand `{unknown}` in the path `{path}`")
             }
@@ -582,6 +597,116 @@ pub fn render_list_to_plain_string(rows_json: &str) -> Result<String, CliError> 
     Ok(anstream::adapter::strip_str(&styled).to_string())
 }
 
+/// Renders the `salvor history` listing from a JSON array of event envelopes.
+///
+/// This is the history render core, callable from any target, and it is what
+/// `salvor history` itself writes: one
+/// [`salvor_cli_core::render::history_line`] per envelope, in log order, each
+/// terminated by a newline, which is the `println!` the command handler makes
+/// per event. The per-event kind and detail inside each line come from
+/// `salvor-replay`'s own [`event_kind`](salvor_replay::event_kind) and
+/// [`event_detail`](salvor_replay::event_detail), the same pair that formats
+/// the live progress stream, so a step reads identically whether it is watched
+/// or inspected.
+///
+/// `log_json` is the exact wire form the store writes: a JSON array of
+/// `salvor_replay::EventEnvelope`, the same input `salvor-replay-wasm`'s fold
+/// takes, so a page holding one log can fold it and print it without reshaping
+/// it in between.
+///
+/// # Errors
+///
+/// Returns [`CliError::Events`] if `log_json` is not a JSON array of event
+/// envelopes.
+pub fn render_history_to_string(log_json: &str) -> Result<String, CliError> {
+    let log: Vec<EventEnvelope> = serde_json::from_str(log_json).map_err(CliError::Events)?;
+    let mut out = String::new();
+    for envelope in &log {
+        out.push_str(&render::history_line(envelope));
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+/// Renders the `salvor history` listing with any ANSI styling stripped.
+///
+/// The stripping is `anstream::adapter::strip_str`, the same pass the plain
+/// list table takes. It is a no-op today, and deliberately so rather than
+/// omitted: `render::history_line` emits no escape codes, so the two forms are
+/// equal, and the test that says so is the thing that would notice if the
+/// history renderer ever grew a styled column. Keeping the pair means the
+/// caller's choice ("give me the plain one") stays true when it does.
+///
+/// # Errors
+///
+/// Returns [`CliError::Events`] if `log_json` is not a JSON array of event
+/// envelopes.
+pub fn render_history_to_plain_string(log_json: &str) -> Result<String, CliError> {
+    let styled = render_history_to_string(log_json)?;
+    Ok(anstream::adapter::strip_str(&styled).to_string())
+}
+
+/// What parsing an agent definition produced: either the validated config, or
+/// the CLI's own refusal.
+///
+/// Exactly one of `config` and `error` is present, and `ok` says which, the
+/// same envelope discipline the command-line parse uses. A file the CLI
+/// refuses is an answer here, not an error: the refusal IS the product, and it
+/// has to be the binary's own words.
+#[derive(Serialize)]
+struct AgentEnvelope {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    config: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// Parses an agent definition from TOML text and returns the validated config,
+/// or the CLI's refusal, as JSON.
+///
+/// This is the agent-file parse core, callable from any target, and it is the
+/// binary's own: [`salvor_cli_core::agent_config::AgentConfig::from_toml_str`],
+/// the same function `salvor run --agent` reaches through after reading the
+/// file, and the same one the control plane calls on a submitted definition.
+/// The field vocabulary, the unknown-field rejection, and every cross-field
+/// rule therefore cannot differ from what the binary accepts.
+///
+/// On success the envelope is `{"ok":true,"config":{...}}`, where `config` is
+/// the parsed definition re-serialized: the same key names the file used, an
+/// unset optional as `null`, and `budgets`/`pricing` in exactly the shape
+/// `salvor-replay-wasm`'s `checkBudgets` takes, so a page can hand one
+/// straight to the other.
+///
+/// On a refusal it is `{"ok":false,"error":"..."}`, and the string is the
+/// error the CLI prints, context chain included: `anyhow`'s alternate
+/// formatting (`{:#}`), which is what `salvor agent validate` shows a person
+/// checking a file. A refusal is not a throw.
+///
+/// # Errors
+///
+/// Returns [`CliError::Serialize`] only if the validated config fails to
+/// re-serialize, which the schema's own types make unreachable. A malformed
+/// file is a refusal, not an error.
+pub fn parse_agent_toml_to_json(text: &str) -> Result<String, CliError> {
+    let envelope = match agent_config::AgentConfig::from_toml_str(text) {
+        Ok(config) => AgentEnvelope {
+            ok: true,
+            config: Some(serde_json::to_value(&config).map_err(CliError::Serialize)?),
+            error: None,
+        },
+        Err(error) => AgentEnvelope {
+            ok: false,
+            config: None,
+            // `{:#}` is anyhow's whole context chain on one line, which is the
+            // text the CLI's own error reporting prints. A bare `{}` would show
+            // only the outermost note and drop the reason.
+            error: Some(format!("{error:#}")),
+        },
+    };
+    serde_json::to_string(&envelope).map_err(CliError::Serialize)
+}
+
 /// Parses a `salvor` command line and returns what it means, as JSON.
 ///
 /// `argvJson` is the full argv as a JSON array of strings, program name
@@ -638,6 +763,45 @@ pub fn render_list_js(rows_json: &str) -> Result<String, JsError> {
 #[wasm_bindgen(js_name = renderListPlain)]
 pub fn render_list_plain_js(rows_json: &str) -> Result<String, JsError> {
     render_list_to_plain_string(rows_json).map_err(|e| JsError::new(&e.to_string()))
+}
+
+/// Renders the `salvor history` listing from a run's event log, exactly as the
+/// command prints it: one line per event, in log order, each newline
+/// terminated.
+///
+/// `logJson` is the run's log as the wire JSON the store writes (a JSON array
+/// of event envelopes), which is the same input `salvor-replay-wasm`'s
+/// `deriveState` takes. Throws if it is not that.
+#[wasm_bindgen(js_name = renderHistory)]
+pub fn render_history_js(log_json: &str) -> Result<String, JsError> {
+    render_history_to_string(log_json).map_err(|e| JsError::new(&e.to_string()))
+}
+
+/// Renders the `salvor history` listing with any ANSI styling stripped, the way
+/// a piped `salvor history` reads.
+///
+/// Throws if `logJson` is not a JSON array of event envelopes.
+#[wasm_bindgen(js_name = renderHistoryPlain)]
+pub fn render_history_plain_js(log_json: &str) -> Result<String, JsError> {
+    render_history_to_plain_string(log_json).map_err(|e| JsError::new(&e.to_string()))
+}
+
+/// Parses an agent definition from TOML text with the CLI's own parser and
+/// returns the validated config, or the CLI's own refusal, as JSON.
+///
+/// `text` is the contents of an `agent.toml`. Returns
+/// `{"ok":true,"config":{...}}` when it parses and validates, where `config`
+/// is the definition re-serialized under the same key names the file used.
+/// When the CLI would refuse the file, returns `{"ok":false,"error":"..."}`
+/// carrying the message `salvor agent validate` prints, context chain
+/// included.
+///
+/// A refused file is a message, not a throw. Nothing here reads a file, an
+/// environment variable, or a network: the caller supplies the text, and what
+/// comes back is the acceptance decision alone.
+#[wasm_bindgen(js_name = parseAgentToml)]
+pub fn parse_agent_toml_js(text: &str) -> Result<String, JsError> {
+    parse_agent_toml_to_json(text).map_err(|e| JsError::new(&e.to_string()))
 }
 
 #[cfg(test)]

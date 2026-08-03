@@ -1,0 +1,52 @@
+# The agent behind the hero demo on salvor.run.
+#
+# It is deliberately the smallest agent that still tells the whole durability
+# story: one model call decides to record a claim, one tool call records it,
+# one more model call closes the run out. Ten events, exactly one write.
+#
+# Ten, not nine: the driver records one clock observation per loop iteration,
+# so a two-turn run carries two NowObserved events. A replay has to see the
+# same now() the first run saw, so the reading is part of the log.
+#
+# Two modes, one file, switched by an environment variable:
+#
+# - Fixture (offline): `salvor run --fixture examples/hero` starts the
+#   scripted model in `model.json`, points SALVOR_HERO_BASE_URL at it, and
+#   needs no key and no network.
+# - Real model: export ANTHROPIC_API_KEY, leave SALVOR_HERO_BASE_URL unset,
+#   and run it with `--agent`/`--input` like any other agent.
+
+model = "claude-opus-4-8"
+name = "salvage-claim"
+
+system_prompt = """
+You are recording salvage claims against a wreck manifest.
+
+Call save_claim exactly once, with the item named in the input, then reply
+with one short sentence confirming what you recorded. Never call save_claim
+twice for the same item.
+"""
+
+[llm]
+# When exported and non-empty this overrides the endpoint; unset means the
+# public Anthropic endpoint. `--fixture` sets it for you.
+base_url_env = "SALVOR_HERO_BASE_URL"
+
+[budgets]
+# The scripted run takes two model calls. 24 leaves headroom for a chattier
+# real model while still stopping a runaway loop; crossing it parks the run
+# for a human rather than killing it.
+steps = 24
+tokens = 400000
+
+[[mcp_servers]]
+# Built by a plain `cargo build` (the salvor-cli `fixture` feature is on by
+# default). Path is relative to the directory salvor is invoked from.
+command = "target/debug/salvor-hero-tools"
+
+# save_claim writes to a ledger outside this process, so it is pinned to
+# `write`. The server's own annotations already imply Write, but the pin
+# records the operator's decision independent of what the server claims:
+# a write is never replayed blind, and a crash between recording the intent
+# and recording the result parks the run for a human.
+effect_overrides = { save_claim = "write" }

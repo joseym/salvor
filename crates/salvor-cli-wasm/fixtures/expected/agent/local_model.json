@@ -1,0 +1,28 @@
+{
+  "config": {
+    "budgets": {
+      "cost_usd": null,
+      "steps": 5,
+      "tokens": 20000,
+      "wall_time_seconds": 120.0
+    },
+    "llm": {
+      "api_key_env": "SALVOR_LOCAL_MODEL_API_KEY",
+      "api_key_kind": "api_key",
+      "base_url": "http://localhost:11434",
+      "base_url_env": null,
+      "max_retries": null,
+      "timeout_seconds": null
+    },
+    "max_response_tokens": null,
+    "mcp_servers": [],
+    "model": "llama3.2",
+    "name": null,
+    "pricing": null,
+    "record_prompts": null,
+    "system_prompt": "You are a plain assistant with no tools. Your input is a JSON object with one\nfield, `question`. Read it, answer it directly in a few sentences, and stop.\nDo not ask follow-up questions and do not invent tool calls; you have none.\n",
+    "system_prompt_path": null,
+    "wasm_tools": []
+  },
+  "ok": true
+}

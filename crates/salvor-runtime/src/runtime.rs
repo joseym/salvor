@@ -11,7 +11,7 @@
 //!   log ends at a `Suspended` or `BudgetExceeded` event). The input is
 //!   validated first: against the recorded suspension `input_schema` (see
 //!   [`crate::validate`] for what validation means in v0.1), or against the
-//!   budget-extension shape (see [`crate::budgets`]). Only then is it handed
+//!   budget-extension shape (see [`validate_extension_input`](crate::validate_extension_input)). Only then is it handed
 //!   to the loop, which records it as the `Resumed` event at the parked
 //!   position, through the cursor like every other event.
 //! - [`resolve`](Runtime::resolve) is the one human-driven override: it
@@ -43,11 +43,11 @@ use serde_json::Value;
 pub use salvor_core::ParkReason;
 
 use crate::agent::Agent;
-use crate::budgets::validate_extension_input;
 use crate::ctx::{ClockFn, RandomFn, RunCtx};
 use crate::driver::{self, LoopOutcome};
 use crate::error::RuntimeError;
 use crate::validate::validate_against_schema;
+use salvor_core::validate_extension_input;
 
 /// How a drive of a run ended.
 #[derive(Debug, Clone)]

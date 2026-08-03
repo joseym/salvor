@@ -1,0 +1,154 @@
+[
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 0,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:00:00Z",
+    "event": {
+      "kind": "RunStarted",
+      "payload": {
+        "agent_def_hash": "sha256:agent-def",
+        "input": {
+          "nested": {
+            "a": 2,
+            "z": 1
+          },
+          "topic": "otters"
+        }
+      }
+    }
+  },
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 1,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:00:00Z",
+    "event": {
+      "kind": "NowObserved",
+      "payload": {
+        "now": "2025-07-15T08:00:00Z"
+      }
+    }
+  },
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 2,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:00:00Z",
+    "event": {
+      "kind": "ModelCallRequested",
+      "payload": {
+        "seq": 2,
+        "request_hash": "sha256:req-1"
+      }
+    }
+  },
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 3,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:00:00Z",
+    "event": {
+      "kind": "ModelCallCompleted",
+      "payload": {
+        "seq": 2,
+        "response": {
+          "text": "one"
+        },
+        "usage": {
+          "input_tokens": 30,
+          "output_tokens": 3
+        }
+      }
+    }
+  },
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 4,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:00:00Z",
+    "event": {
+      "kind": "NowObserved",
+      "payload": {
+        "now": "2025-07-15T08:00:09Z"
+      }
+    }
+  },
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 5,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:00:00Z",
+    "event": {
+      "kind": "BudgetExceeded",
+      "payload": {
+        "budget": {
+          "kind": "steps",
+          "limit": 1.0
+        },
+        "observed": 1.0
+      }
+    }
+  },
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 6,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:00:00Z",
+    "event": {
+      "kind": "Resumed",
+      "payload": {
+        "input": {
+          "extend": {
+            "steps": 2,
+            "wall_time_seconds": 1.0
+          }
+        }
+      }
+    }
+  },
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 7,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:00:00Z",
+    "event": {
+      "kind": "ModelCallRequested",
+      "payload": {
+        "seq": 7,
+        "request_hash": "sha256:req-2"
+      }
+    }
+  },
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 8,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:00:00Z",
+    "event": {
+      "kind": "ModelCallCompleted",
+      "payload": {
+        "seq": 7,
+        "response": {
+          "text": "two"
+        },
+        "usage": {
+          "input_tokens": 40,
+          "output_tokens": 4
+        }
+      }
+    }
+  },
+  {
+    "run_id": "00000000-0000-4000-8000-0000000000aa",
+    "seq": 9,
+    "schema_version": 1,
+    "recorded_at": "2025-07-15T08:00:00Z",
+    "event": {
+      "kind": "RunCompleted",
+      "payload": {
+        "output": "done under extension"
+      }
+    }
+  }
+]

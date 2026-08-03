@@ -2704,13 +2704,17 @@ name = "salvor-cli-core"
 version = "0.9.1"
 dependencies = [
  "anstyle",
+ "anyhow",
  "clap",
  "clap_complete",
  "salvor-graph",
  "salvor-replay",
+ "salvor-tools",
+ "serde",
  "serde_json",
  "thiserror",
  "time",
+ "toml 0.8.23",
 ]
 
 [[package]]
@@ -2893,12 +2897,15 @@ version = "0.9.1"
 dependencies = [
  "async-trait",
  "axum",
+ "libc",
+ "process-wrap",
  "rmcp",
  "salvor-core",
  "salvor-tools-macros",
  "schemars",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
 ]

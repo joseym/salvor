@@ -16,10 +16,58 @@
 //   await init();
 //   const state: RunStateJson = JSON.parse(deriveState(logJson, n));
 
-/** The two functions the wasm module exports. Mirrors the wasm-pack-generated
+/** The three functions the wasm module exports. Mirrors the wasm-pack-generated
  *  signatures; kept here so `types/index.d.ts` is the one place a consumer reads. */
 export function deriveState(logJson: string, prefixLen: number): string;
 export function eventCount(logJson: string): number;
+export function checkBudgets(logJson: string, budgetsJson: string): string;
+
+/** The declaration `checkBudgets` takes as its second argument, stringified.
+ *  Every dimension is optional and an absent one is never checked. These are
+ *  the agent file's own key names, so the object `parseAgentToml` returns under
+ *  `budgets` (with `pricing` folded in) can be passed straight through.
+ *  An unknown key is refused rather than ignored. */
+export interface BudgetsDeclaration {
+  steps?: number | null;
+  tokens?: number | null;
+  cost_usd?: number | null;
+  wall_time_seconds?: number | null;
+  /** Required by the cost dimension, ignored by every other one. Without it a
+   *  declared `cost_usd` is simply not checked, the same silence the runtime
+   *  keeps (the agent builder is what refuses the combination). */
+  pricing?: { input_per_mtok: number; output_per_mtok: number } | null;
+}
+
+/** What `checkBudgets` returns, parsed. `budget` and `observed` are present
+ *  only when `crossed` is true, and are the pair the runtime would have
+ *  recorded in its `BudgetExceeded` event. The two folded inputs come back
+ *  alongside the verdict so a caller can show the arithmetic. */
+export interface BudgetCheckJson {
+  crossed: boolean;
+  budget?: Budget;
+  observed?: number;
+  observations: BudgetObservations;
+  extensions: BudgetExtensions;
+}
+
+/** The replay-derived quantities the check consumed: completed model calls,
+ *  their recorded usage, and the span between the first and last recorded
+ *  clock observation. */
+export interface BudgetObservations {
+  steps: number;
+  input_tokens: number;
+  output_tokens: number;
+  elapsed_seconds: number;
+}
+
+/** What the resumes that answered earlier crossings granted, folded out of the
+ *  log. A resume answering a suspension is not one of these. */
+export interface BudgetExtensions {
+  steps: number;
+  tokens: number;
+  cost_usd: number;
+  wall_time_seconds: number;
+}
 
 /** Effect class of a tool call. Matches `salvor_replay::Effect`'s wire form. */
 export type Effect = "read" | "idempotent" | "write";

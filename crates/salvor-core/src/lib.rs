@@ -13,8 +13,10 @@
 //! ([`Event`], [`EventEnvelope`], [`RunId`], [`SequenceNumber`],
 //! [`SCHEMA_VERSION`]), the replay cursor ([`ReplayCursor`] and its typed
 //! [`Outcome`] permits), the state fold ([`derive_state`] into [`RunState`]),
-//! the values read back out of a log ([`ParkReason`], [`RunSummary`]), and the
-//! event renderers ([`event_kind`], [`event_detail`]).
+//! the values read back out of a log ([`ParkReason`], [`RunSummary`]), the
+//! budget declaration and its crossing check ([`Budgets`], [`Pricing`],
+//! [`BudgetObservations`], [`budget_observations`]), and the event renderers
+//! ([`event_kind`], [`event_detail`]).
 //!
 //! `salvor-core` re-exports that surface unchanged. Every `salvor_core::` path
 //! that existed before the extraction keeps resolving, so the store, the
@@ -25,10 +27,11 @@
 //! pure path.
 
 pub use salvor_replay::{
-    BeginPermit, Budget, BudgetKind, DedupOrigin, Effect, Emitted, Event, EventEnvelope,
-    ForkOrigin, GraphBeginPermit, LogValidator, LoggedStep, ModelCallPermit, ModelReply, NowPermit,
-    Outcome, ParkReason, Parked, PendingCall, Performer, RandomPermit, ReplayCursor, ReplayError,
-    RequestedStep, RunId, RunState, RunStatus, RunSummary, SCHEMA_VERSION, SequenceNumber,
-    TokenTotals, TokenUsage, ToolCallPermit, UnresolvedWrite, ValidationError, derive_state,
-    event_detail, event_kind, validate_next,
+    BeginPermit, Budget, BudgetExtensions, BudgetKind, BudgetObservations, Budgets, DedupOrigin,
+    Effect, Emitted, Event, EventEnvelope, ForkOrigin, GraphBeginPermit, LogValidator, LoggedStep,
+    ModelCallPermit, ModelReply, NowPermit, Outcome, ParkReason, Parked, PendingCall, Performer,
+    Pricing, RandomPermit, ReplayCursor, ReplayError, RequestedStep, RunId, RunState, RunStatus,
+    RunSummary, SCHEMA_VERSION, SequenceNumber, TokenTotals, TokenUsage, ToolCallPermit,
+    UnresolvedWrite, ValidationError, budget_extensions, budget_observations, derive_state,
+    event_detail, event_kind, validate_extension_input, validate_next,
 };

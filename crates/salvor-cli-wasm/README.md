@@ -2,10 +2,11 @@
 
 A thin `wasm-bindgen` wrapper over the pure
 [`salvor-cli-core`](../salvor-cli-core) crate. It compiles the CLI's own clap
-parse tree and its own value-to-text renderer to WebAssembly, so a terminal
-drawn in a browser can parse a typed command line, answer `--help`, and draw a
-run listing with the REAL parser and renderer rather than a hand-written copy
-that drifts the moment either side changes.
+parse tree, its own value-to-text renderer, and its own agent-file parse to
+WebAssembly, so a terminal drawn in a browser can parse a typed command line,
+answer `--help`, draw a run listing, print a run's history, and say whether an
+`agent.toml` is valid with the REAL parsers and renderers rather than
+hand-written copies that drift the moment either side changes.
 
 `salvor-cli-core` stays pure and IO-free; all the wasm plumbing lives here. It
 is the same split, and the same payoff, as
@@ -31,7 +32,23 @@ function helpTextAnsi(path: string): string;  // with ANSI escape codes
 // carrying an added `status` key (the label folded from that run's log).
 function renderList(rowsJson: string): string;       // as `salvor list` writes it
 function renderListPlain(rowsJson: string): string;  // as `salvor list | cat` reads
+
+// The `salvor history` listing, from a run's event log as the wire JSON the
+// store writes (the same input salvor-replay-wasm's `deriveState` takes): one
+// line per event, in log order, each newline terminated.
+function renderHistory(logJson: string): string;       // as `salvor history` writes it
+function renderHistoryPlain(logJson: string): string;  // as `salvor history | cat` reads
+
+// An agent definition, parsed and validated with the CLI's own parser.
+// Returns {"ok":true,"config":{...}} for a file it accepts, or
+// {"ok":false,"error":"..."} carrying the message `salvor agent validate`
+// prints. A refused file is a message, not a throw.
+function parseAgentToml(text: string): string;
 ```
+
+The JSON shapes these carry are documented in
+[`types/index.d.ts`](types/index.d.ts), which is the one place a TypeScript
+consumer reads.
 
 ## Plain and styled
 
@@ -49,6 +66,12 @@ column unconditionally (stripping is the writer's job in the real CLI, which
 prints through an `anstream` stream), so `renderList` is the styled form and
 `renderListPlain` strips it with `anstream::adapter::strip_str`, the same pass
 `anstream` makes when the CLI's stdout is a pipe.
+
+The history listing takes the same pair for a different reason:
+`render::history_line` emits no escape codes today, so the two forms are equal.
+The pair is kept, and the equality asserted rather than assumed, because
+"give me the plain one" has to stay true if the listing ever grows a styled
+column.
 
 ## No standard output
 
@@ -73,12 +96,12 @@ compared byte for byte. The chain has two links:
    which is the half that notices a change to `salvor-cli-core` itself, since
    a renderer change moves both sides together.
 2. `js/same-render.mjs` (Node, runs the wasm build) feeds the same committed
-   inputs through `renderList`, `helpText`, and `parseArgv` and asserts the
-   results equal that same committed expected.
+   inputs through `renderList`, `helpText`, `parseArgv`, `renderHistory`, and
+   `parseAgentToml` and asserts the results equal that same committed expected.
 
 Together: **native == committed == wasm**, all three checked live. The
 comparison count is the committed corpus: two per row set, two per help page,
-one per argv, **60** as it stands.
+one per argv, two per event log, one per agent file.
 
 The corpus is deliberately wide. The list tables cover every status label the
 STATUS column can print (each takes a different colour branch), an unrecognised
@@ -87,6 +110,23 @@ verbs, both nested groups, and a nested verb under each. The parse cases cover
 every refusal shape the CLI has, including the two custom `did you mean` tips
 that a plain `value_parser` would have replaced with clap's string-similarity
 guess (which for `--group awaiting-model` names the WRONG group).
+
+The event logs cover the hero fixture's own ten events (the run behind the
+terminal on salvor.run, so the page's listing is measured against the listing
+that run really produces) plus the ways a run stops short: a budget crossing,
+a suspension and its resume, a random observation, and a failure. Each takes a
+different arm of the event renderer.
+
+The agent files are the real thing. `fixtures/agents/` holds copies of files
+this repository ships (`examples/hero/agent.toml` and three others), checked
+against their originals on every run so a fixture cannot outlive the file it
+was about, and a separate test parses **every** agent file in the repository
+live. Alongside them sit definitions written to be refused, one per rule:
+an unknown field, both prompt settings, an MCP server with no transport and one
+with two, a wasm tool with no `effect`, a malformed idempotency path, and text
+that is not TOML. Their committed expectation is the CLI's own message, so a
+reworded refusal is a visible diff rather than a silent change to what a page
+shows somebody who mistyped their file.
 
 ## Building
 
@@ -99,7 +139,16 @@ wasm-pack build --target nodejs --out-dir pkg-node --out-name salvor_cli_wasm
 ```
 
 `pkg/` and `pkg-node/` are wasm-pack outputs (each self-gitignored) and are not
-committed. Latest `.wasm` size: **471 KB** optimized, **185 KB** gzipped.
+committed. Latest `.wasm` size: **1.19 MB** optimized, **412 KB** gzipped.
+
+It grew from 471 KB when the agent-file parse landed, and the growth is the
+parse: a TOML reader, and the contract layer of `salvor-tools` for the one type
+that decides what an idempotency path may say. Reaching for the real
+`IdempotencyPath::parse` rather than restating the rule here is the whole point
+of the export, so the bytes are the price of the guarantee. The MCP client and
+its Tokio runtime are NOT in there: `salvor-cli-core` takes `salvor-tools` with
+`default-features = false`, which is what leaves them out, and the
+wasm32-unknown-unknown build in CI is what proves it stayed that way.
 
 ## Running the proof
 
