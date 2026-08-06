@@ -17,7 +17,7 @@ That engine backs `salvor graph run`, `POST /v1/graphs`, and
 | `gate` | optional `prompt`, `approval_schema` | Human approval that suspends the run. The `approval_schema` is enforced against the resume input before the approval is recorded: a non-conforming approval is refused, nothing is appended, and the run stays parked at the gate. A schema that names `required` or `properties` without a `type` is read as asking for an object, so a bare `null`, number, or string is refused too. |
 | `branch` | optional `on`, `cases` (each a `name` + a `when` condition) | Routes on a typed output. Conditions are recorded as DATA and evaluated by the engine at run time, never by this crate. |
 | `map` | `over`, `concurrency` cap, `body` (a node id or an embedded sub-graph), optional `output_schema` | Fan-out a sub-run per element of a list. The engine runs iterations inline and sequentially; the `concurrency` cap is accepted and validated but not enforced, a deliberate choice for v0.4. A `subgraph` body, or any body node that is not an `agent` or `tool`, is refused with a typed `UnsupportedMapBody` error rather than driven. |
-| `fold` | `body` (a node id or an embedded sub-graph), `max_iterations`, `stop_when` condition, `join` strategy, optional `accumulator_schema` | A bounded iteration loop. The engine drives a `node` body: passes run inline and sequentially, each folding over the previous pass's output, until `stop_when` holds or the bound is reached, and then the `join` rule (`best_by` argmax, `last`, or `all`) picks the value the node produces. A `subgraph` body, or any body node that is not an `agent` or `tool`, is refused with a typed `UnsupportedFoldBody` error rather than driven. |
+| `fold` | `body` (a node id or an embedded sub-graph), `max_iterations`, `stop_when` condition, `join` strategy, optional `on_bound`, optional `accumulator_schema` | A bounded iteration loop. The engine drives a `node` body: passes run inline and sequentially, each folding over the previous pass's output, until `stop_when` holds or the bound is reached, and then the `join` rule (`best_by` argmax, `last`, or `all`) picks the value the node produces. A `subgraph` body, or any body node that is not an `agent` or `tool`, is refused with a typed `UnsupportedFoldBody` error rather than driven. `on_bound` says what reaching the bound with `stop_when` still unsatisfied MEANS: `"join"` joins the passes anyway (today's behavior, and what an absent field means, so a document written before the field existed keeps its bytes and its meaning) or `"fail"`, for a stop predicate that is a requirement rather than an early exit. Recorded as data here; the engine reads it in a later release, so a `"fail"` fold currently runs exactly as a `"join"` one does. |
 
 Edges are the topology: `{ "from": "<node id>", "to": "<node id>" }`, with an
 optional `label` (used to name the branch case an edge realizes). Every node
@@ -223,6 +223,21 @@ All checks run and every failure is reported (never just the first):
   This is deliberately conservative: it does NOT implement JSON Schema
   subtyping, so a compatible-but-not-identical pair is reported as a mismatch.
   Relaxing it to true schema compatibility is a later change to that one check.
+- **A fold's references against the shape its body declares.** A fold's
+  accumulated value is what its body produced, so where the body is named by id
+  and that node declares an `output_schema`, the paths in `stop_when` and in a
+  `best_by` join are read against it directly, with no envelope in front of
+  them: `fold-refine.json`'s `score >= 0.85` is checked against `tailor`'s
+  declared `score`. A path is reported ONLY when the walk positively fails, that
+  is when a segment is absent from a `properties` map that exists and does not
+  admit extra keys. Everything else stays silent, and deliberately: a body with
+  no `output_schema`, a `subgraph` body, a schema with no `properties`, a schema
+  whose declared `type` is not what the path steps into, one that admits extra
+  keys (`additionalProperties` set to anything but `false`, or any
+  `patternProperties`), and one that names its shape elsewhere (`$ref`, `anyOf`,
+  `oneOf`, `allOf`, `not`) are all left unjudged. So the check catches the typo
+  that would keep a loop from ever stopping, and never refuses a document it
+  cannot actually read.
 
 What `validate` does NOT do: check an expression branch case's `when` string
 against the grammar below. That string is stored as opaque data by this crate,

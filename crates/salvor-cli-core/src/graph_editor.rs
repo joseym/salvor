@@ -51,7 +51,7 @@
 //! add gate   <ID> --approval-schema <JSON>
 //! add branch <ID> [--on REF] [--hash <sha256:HASH> | --file <PATH>]
 //! add map    <ID> --over REF --concurrency N --body <ID>
-//! add fold   <ID> --body <ID> --max-iterations N --stop-when EXPR --join J
+//! add fold   <ID> --body <ID> --max-iterations N --stop-when EXPR --join J [--on-bound join|fail]
 //! edge <FROM> <TO> [--label NAME]
 //! case <BRANCH-ID> <CASE-NAME> --when EXPR | --model
 //! rm node <ID> | rm edge <FROM> <TO> | rm case <BRANCH-ID> <CASE-NAME>
@@ -124,7 +124,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use salvor_graph::{
     AgentNode, BranchCase, BranchCondition, BranchNode, Edge, FoldBody, FoldJoin, FoldNode,
-    GateNode, Graph, MapBody, MapNode, Node, SCHEMA_VERSION, ToolNode,
+    GateNode, Graph, MapBody, MapNode, Node, OnBound, SCHEMA_VERSION, ToolNode,
 };
 use serde_json::Value;
 
@@ -991,6 +991,9 @@ fn node_digest(node: &Node) -> String {
             facts.push(format!("max_iterations {}", fold.max_iterations));
             facts.push(format!("stop_when {}", quote(&fold.stop_when)));
             facts.push(join_word(&fold.join));
+            if let Some(on_bound) = fold.on_bound {
+                facts.push(format!("on_bound {}", on_bound_word(on_bound)));
+            }
             if let Some(schema) = &fold.accumulator_schema {
                 facts.push(format!("accumulator_schema {}", schema_word(schema)));
             }
@@ -1056,6 +1059,9 @@ fn node_detail(node: &Node) -> String {
             field("max_iterations:", &fold.max_iterations.to_string());
             field("stop_when:", &fold.stop_when);
             field("join:", &join_word(&fold.join));
+            if let Some(on_bound) = fold.on_bound {
+                field("on_bound:", on_bound_word(on_bound));
+            }
         }
     }
 
@@ -1129,6 +1135,16 @@ fn join_word(join: &FoldJoin) -> String {
         FoldJoin::BestBy(reference) => format!("join best-by:{reference}"),
         FoldJoin::Last => "join last".to_owned(),
         FoldJoin::All => "join all".to_owned(),
+    }
+}
+
+/// What a reached bound means, named for a reader. The same two words
+/// `--on-bound` takes and the document itself holds, so a line, the JSON, and
+/// what `show` prints all say it the same way.
+fn on_bound_word(on_bound: OnBound) -> &'static str {
+    match on_bound {
+        OnBound::Join => "join",
+        OnBound::Fail => "fail",
     }
 }
 
@@ -1251,6 +1267,9 @@ fn add_line(node: &Node) -> String {
                 word(&fold.stop_when),
                 join_option(&fold.join),
             ));
+            if let Some(on_bound) = fold.on_bound {
+                out.push_str(&format!(" --on-bound {}", on_bound_word(on_bound)));
+            }
             if let Some(schema) = &fold.accumulator_schema {
                 out.push_str(&format!(" --accumulator-schema {}", compact(schema)));
             }
@@ -1453,6 +1472,13 @@ pub enum ParseError {
     #[error("add fold: --join needs last, all, or best-by:<REF>, found `{found}`")]
     MalformedJoin {
         /// The value that was not a join rule.
+        found: String,
+    },
+
+    /// An `--on-bound` value is neither of the two words the field takes.
+    #[error("add fold: --on-bound needs join or fail, found `{found}`")]
+    MalformedOnBound {
+        /// The value that was not one of the two words.
         found: String,
     },
 
@@ -1951,6 +1977,7 @@ fn parse_add_fold(tokens: &[String]) -> Result<Command, ParseError> {
     let mut max_iterations = None;
     let mut stop_when = None;
     let mut join = None;
+    let mut on_bound = None;
     let mut accumulator_schema = None;
 
     while let Some(token) = scan.take() {
@@ -1968,6 +1995,10 @@ fn parse_add_fold(tokens: &[String]) -> Result<Command, ParseError> {
                 let raw = scan.value("--join")?;
                 join = Some(parse_join(&raw)?);
             }
+            "--on-bound" => {
+                let raw = scan.value("--on-bound")?;
+                on_bound = Some(parse_on_bound(&raw)?);
+            }
             "--accumulator-schema" => {
                 accumulator_schema = Some(scan.json("--accumulator-schema")?);
             }
@@ -1982,6 +2013,7 @@ fn parse_add_fold(tokens: &[String]) -> Result<Command, ParseError> {
         max_iterations: max_iterations.ok_or_else(|| scan.missing("--max-iterations"))?,
         stop_when: stop_when.ok_or_else(|| scan.missing("--stop-when"))?,
         join: join.ok_or_else(|| scan.missing("--join"))?,
+        on_bound,
         accumulator_schema,
     }))))
 }
@@ -1998,6 +2030,18 @@ fn parse_join(raw: &str) -> Result<FoldJoin, ParseError> {
                 found: raw.to_owned(),
             }),
         },
+    }
+}
+
+/// An `--on-bound` value: the two words the document's own field takes, so what
+/// a line types is what the JSON holds.
+fn parse_on_bound(raw: &str) -> Result<OnBound, ParseError> {
+    match raw {
+        "join" => Ok(OnBound::Join),
+        "fail" => Ok(OnBound::Fail),
+        _ => Err(ParseError::MalformedOnBound {
+            found: raw.to_owned(),
+        }),
     }
 }
 
@@ -2184,7 +2228,7 @@ const TOPICS: &[Topic] = &[
             "add gate   <ID> --approval-schema JSON [--prompt TEXT] [--name TEXT]",
             "add branch <ID> [--on REF] [--hash <sha256:HASH> | --file <PATH>] [--name TEXT]",
             "add map    <ID> --over REF --concurrency N (--body ID | --body-subgraph JSON) [--output-schema JSON] [--name TEXT]",
-            "add fold   <ID> (--body ID | --body-subgraph JSON) --max-iterations N --stop-when EXPR --join (last | all | best-by:REF) [--accumulator-schema JSON] [--name TEXT]",
+            "add fold   <ID> (--body ID | --body-subgraph JSON) --max-iterations N --stop-when EXPR --join (last | all | best-by:REF) [--on-bound (join | fail)] [--accumulator-schema JSON] [--name TEXT]",
         ],
         detail: "An agent node names its definition by content hash, never by path, because a \
                  run records only the hash. `--hash` takes one you already have; `--file` asks \
@@ -2481,22 +2525,52 @@ fn option_group(chunk: &'static str) -> Option<Vec<FormOption>> {
     }
     let repeats = chunk.ends_with("...");
     Some(
-        inner
-            .split('|')
+        alternatives(inner)
+            .into_iter()
             .filter_map(|alternative| {
-                let mut words = alternative.split_whitespace();
-                let name = words.next()?;
+                let alternative = alternative.trim();
+                let name = alternative.split_whitespace().next()?;
                 if !name.starts_with("--") {
                     return None;
                 }
+                // Everything after the option's own word is its value,
+                // whitespace and all, so a value set written inside the group
+                // arrives whole rather than cut at its first space.
+                let value = alternative[name.len()..].trim();
                 Some(FormOption {
                     name,
-                    value: words.next(),
+                    value: (!value.is_empty()).then_some(value),
                     repeats,
                 })
             })
             .collect(),
     )
+}
+
+/// A group's alternatives, split at its TOP-LEVEL `|` only.
+///
+/// A `|` inside parentheses belongs to a value set, not to the group:
+/// `[--on-bound (join | fail)]` offers one option whose value happens to be a
+/// fixed set, where `[--when EXPR | --model]` offers two options. Reading depth
+/// is what tells those apart, and it is the same rule a reader applies to the
+/// printed form.
+fn alternatives(inner: &'static str) -> Vec<&'static str> {
+    let mut found = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+    for (at, character) in inner.char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            '|' if depth == 0 => {
+                found.push(&inner[start..at]);
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    found.push(&inner[start..]);
+    found
 }
 
 /// Whether a form word is a literal to be typed as it stands, as opposed to a
@@ -3091,6 +3165,67 @@ mod tests {
         assert_eq!(fold.max_iterations, 3);
         assert_eq!(fold.stop_when, "score >= 0.85");
         assert_eq!(fold.join, FoldJoin::BestBy("score".to_owned()));
+        assert_eq!(fold.on_bound, None, "an unsaid --on-bound stays unsaid");
+    }
+
+    /// `--on-bound` lands on the node, prints in the outline and the detail
+    /// block, and dumps back to the line that produced it. Left off, it stays
+    /// off all three, exactly as `--accumulator-schema` does.
+    #[test]
+    fn a_fold_says_what_a_reached_bound_means() {
+        for (word, expected) in [("join", OnBound::Join), ("fail", OnBound::Fail)] {
+            let editor = run(&format!(
+                "add agent tailor --hash {HASH_A}\n\
+                 add fold refine --body tailor --max-iterations 3 --stop-when \"score >= 0.85\" \
+                 --join best-by:score --on-bound {word}\n"
+            ));
+            let Node::Fold(fold) = &editor.document().nodes[1] else {
+                panic!("the second node is a fold");
+            };
+            assert_eq!(fold.on_bound, Some(expected));
+
+            let outline = editor.script();
+            assert!(
+                outline.contains(&format!("--on-bound {word}")),
+                "the dumped line reproduces the option:\n{outline}"
+            );
+            let replayed = run(&outline);
+            assert_eq!(
+                replayed.document(),
+                editor.document(),
+                "the dumped line replays into the same document"
+            );
+
+            let (editor, shown) = step(editor, "show refine");
+            assert!(
+                shown.text.contains("on_bound:") && shown.text.contains(word),
+                "the detail block names it: {}",
+                shown.text
+            );
+            let (_, outline) = step(editor, "show");
+            assert!(
+                outline.text.contains(&format!("on_bound {word}")),
+                "the outline names it: {}",
+                outline.text
+            );
+        }
+
+        let quiet = run(&format!(
+            "add agent tailor --hash {HASH_A}\n\
+             add fold refine --body tailor --max-iterations 3 --stop-when \"score >= 0.85\" \
+             --join best-by:score\n"
+        ));
+        assert!(
+            !quiet.script().contains("--on-bound"),
+            "an unset on_bound is absent from the script:\n{}",
+            quiet.script()
+        );
+        let (_, shown) = step(quiet, "show");
+        assert!(
+            !shown.text.contains("on_bound"),
+            "an unset on_bound is absent from the outline: {}",
+            shown.text
+        );
     }
 
     /// A `case` command mutates an existing branch node, and the cases arrive
@@ -3431,7 +3566,7 @@ mod tests {
              case route ask --model\n\
              add map fanout --over route.items --concurrency 4 --body research\n\
              add fold polish --body research --max-iterations 5 --stop-when \"score >= 0.9\" \
-             --join best-by:review.overall_score\n\
+             --join best-by:review.overall_score --on-bound fail\n\
              edge research route\n\
              edge route publish --label high\n\
              edge research approve\n\
@@ -3560,6 +3695,13 @@ mod tests {
                 "add fold refine --body x --max-iterations 3 --stop-when s --join worst",
                 ParseError::MalformedJoin {
                     found: "worst".to_owned(),
+                },
+            ),
+            (
+                "add fold refine --body x --max-iterations 3 --stop-when s --join last \
+                 --on-bound retry",
+                ParseError::MalformedOnBound {
+                    found: "retry".to_owned(),
                 },
             ),
             (
@@ -4225,6 +4367,16 @@ mod tests {
         // to be what it accepts.
         for offered in ["last", "all", "best-by:score"] {
             assert!(parse_join(offered).is_ok(), "{offered}");
+        }
+
+        // A value set written inside an optional group is still a value set:
+        // the `|` between its words belongs to the values, not to the options.
+        assert_eq!(
+            words(&editor, "add fold refine --body research --on-bound "),
+            ["join", "fail"]
+        );
+        for offered in ["join", "fail"] {
+            assert!(parse_on_bound(offered).is_ok(), "{offered}");
         }
     }
 

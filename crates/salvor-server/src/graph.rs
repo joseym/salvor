@@ -893,6 +893,18 @@ fn graph_error_json(error: &GraphError) -> Value {
             "code": "invalid_fold_join_reference", "message": message,
             "node": node, "reference": reference, "error": error,
         }),
+        GraphError::FoldStopPathNotInBodySchema { node, path, body } => json!({
+            "code": "fold_stop_path_not_in_body_schema", "message": message,
+            "node": node, "path": path, "body": body,
+        }),
+        GraphError::FoldJoinReferenceNotInBodySchema {
+            node,
+            reference,
+            body,
+        } => json!({
+            "code": "fold_join_reference_not_in_body_schema", "message": message,
+            "node": node, "reference": reference, "body": body,
+        }),
         GraphError::NodeNameTooLong { id, len, max } => json!({
             "code": "node_name_too_long", "message": message, "node": id, "len": len, "max": max,
         }),

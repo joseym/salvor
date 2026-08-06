@@ -142,6 +142,15 @@ export type FoldJoin =
   | { kind: "last" }
   | { kind: "all" };
 
+/**
+ * What a fold reaching its `max_iterations` bound means, when `stop_when` never
+ * held. A bare word on the wire. Absent is `"join"`, today's behavior, so a
+ * document written before the field existed means the same thing it always did;
+ * `"fail"` is for a stop predicate that is a requirement rather than an early
+ * exit.
+ */
+export type OnBound = "join" | "fail";
+
 /** The `fold` node payload: bounded iteration that accumulates across passes. */
 export interface FoldPayload {
   id: string;
@@ -151,6 +160,7 @@ export interface FoldPayload {
   max_iterations: number;
   stop_when: string;
   join: FoldJoin;
+  on_bound?: OnBound;
   accumulator_schema?: JsonValue;
 }
 
@@ -220,6 +230,7 @@ export interface MapOptions {
 /** The optional fields a fold node may declare. */
 export interface FoldOptions {
   name?: string;
+  onBound?: OnBound;
   accumulatorSchema?: JsonValue;
 }
 
@@ -350,6 +361,7 @@ export class GraphBuilder {
       join,
     };
     if (options.name !== undefined) payload.name = options.name;
+    if (options.onBound !== undefined) payload.on_bound = options.onBound;
     if (options.accumulatorSchema !== undefined)
       payload.accumulator_schema = options.accumulatorSchema;
     this.nodes.push({ kind: "fold", payload });

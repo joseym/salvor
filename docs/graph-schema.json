@@ -281,6 +281,17 @@
             "null"
           ]
         },
+        "on_bound": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OnBound"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What a reached `max_iterations` bound means, when `stop_when` never\nheld. Absent is `OnBound::Join`: the bound joins the best pass, which is\nwhat every fold written before this field existed does, so an absent\nfield is both the default and byte-identical to those documents on the\nwire. Additive: absent on the wire when unset."
+        },
         "stop_when": {
           "description": "A boolean expression over the accumulated value that stops the loop when\nit holds. Written in the `crate::expr` condition language, the same one\na `BranchCondition::Expression` uses, and validated at submit so a\nmalformed predicate is a node-precise error, never a run-time failure.",
           "type": "string"
@@ -519,6 +530,21 @@
             "payload"
           ],
           "type": "object"
+        }
+      ]
+    },
+    "OnBound": {
+      "description": "What a `FoldNode` reaching its iteration bound means, when `stop_when` never\nheld.\n\nA bare lowercase string on the wire (`\"join\"`, `\"fail\"`), not the adjacently\ntagged shape `FoldJoin` uses: the two variants carry no data and none is\nforeseen, so a tag object would be ceremony around a word. Adding a third\nvariant later stays additive all the same, because an older document simply\nomits the field.\n\nAbsent means [`OnBound::Join`], which is what every fold written before this\nfield existed does, so the default is the behavior already shipped rather\nthan a new one chosen now. Authors reach for [`OnBound::Fail`] when the stop\npredicate is a REQUIREMENT rather than an early exit: a loop that must reach\na score before its value is worth anything is better off saying so than\nhanding a caller the best of several passes that all fell short. Data only;\nthis crate never runs the loop, and the engine reads this field in a later\nslice.",
+      "oneOf": [
+        {
+          "const": "join",
+          "description": "Reaching the bound joins the passes exactly as `stop_when` holding\nwould: the `join` rule picks the value the node produces. Today's\nbehavior, and what an absent field means.",
+          "type": "string"
+        },
+        {
+          "const": "fail",
+          "description": "Reaching the bound without `stop_when` holding is an error: the loop\nconverged on nothing, and the node produces no value.",
+          "type": "string"
         }
       ]
     },

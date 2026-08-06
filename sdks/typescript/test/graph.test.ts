@@ -115,6 +115,36 @@ function buildBranchModelDecisionFlow() {
     .build();
 }
 
+test("fold declares what a reached bound means, present only when set", () => {
+  for (const onBound of ["join", "fail"] as const) {
+    const graph = new GraphBuilder()
+      .agent("tailor", `sha256:${"3".repeat(64)}`, { outputSchema: scoreSchema })
+      .fold(
+        "refine",
+        { kind: "node", value: "tailor" },
+        3,
+        "score >= 0.85",
+        { kind: "best_by", value: "score" },
+        { onBound },
+      )
+      .build();
+    deepStrictEqual(graph.nodes[1].payload.on_bound, onBound);
+  }
+
+  // Unset stays entirely off the wire, so a fold's bytes are what they were
+  // before the field existed.
+  const quiet = buildFoldFlow();
+  deepStrictEqual(Object.keys(quiet.nodes[1].payload), [
+    "id",
+    "body",
+    "max_iterations",
+    "stop_when",
+    "join",
+    "name",
+    "accumulator_schema",
+  ]);
+});
+
 test("builder emits the canonical branch model-decision document", () => {
   const built = JSON.parse(JSON.stringify(buildBranchModelDecisionFlow()));
   const fixturePath = resolve(
