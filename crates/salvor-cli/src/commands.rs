@@ -430,15 +430,22 @@ pub async fn fork(store_path: &Path, args: ForkArgs) -> Result<u8> {
 /// completion they observed, so a later `resume` replays it and never re-runs
 /// the write. It builds no agent and drives nothing; `--agent`/`--graph`, if
 /// given, are used only to compose the real resume command the success report
-/// prints, matching what a graph run's own parked report already does.
+/// prints, matching what a graph run's own parked report already does. The
+/// log itself, not the presence of `--graph`, decides whether that command
+/// hints at a graph run: see [`render::resolved_report`].
 pub async fn resolve(store_path: &Path, args: ResolveArgs) -> Result<u8> {
     let run_id = parse_run_id(&args.run_id)?;
     let uuid = run_id.as_uuid().to_string();
     let output = parse_input(&args.output)?;
     let store = open_store(store_path)?;
-    if store.read_log(run_id).await?.is_empty() {
+    let log = store.read_log(run_id).await?;
+    if log.is_empty() {
         bail!("no run {uuid} in this store");
     }
+    // Read off the log itself, not off whether `--graph` happened to be
+    // passed: an operator can resolve a graph run without supplying it, and
+    // the printed command still needs to hint at `--graph <FILE>` then.
+    let graph_run = is_graph_run(&log);
 
     let runtime = Runtime::new(store);
     match runtime.resolve(run_id, output).await {
@@ -449,6 +456,7 @@ pub async fn resolve(store_path: &Path, args: ResolveArgs) -> Result<u8> {
                     &uuid,
                     &args.agents,
                     args.graph.as_deref(),
+                    graph_run,
                     render::DEFAULT_REPORT_WIDTH
                 )
             );

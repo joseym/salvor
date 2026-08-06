@@ -37,6 +37,20 @@ ignored.
 | [`invalid-dangling-edge.json`](invalid-dangling-edge.json) | An edge whose target `aprove` is a typo of the node `approve`. Produces a precise dangling-edge error with a nearest-name suggestion. |
 | [`invalid-cycle.json`](invalid-cycle.json) | Two agents pointing at each other. Produces a precise cycle error naming the path. |
 
+A `map` or `fold` body-by-id node, such as `fold-refine.json`'s `tailor`, has
+no edges of its own, so `salvor graph validate`'s summary reports it as both
+an entry and a terminal node.
+
+`fold-refine.json`'s `agent_hash` (`sha256:` followed by sixty-four `3`s) is a
+placeholder; no real agent file hashes to it, so the document only validates,
+it does not run, until you splice in a real one: `jq --arg h "$(salvor agent
+hash agents/tailor.toml)" '.nodes[0].payload.agent_hash = $h'
+examples/graphs/fold-refine.json > fold-refine.local.json`. `--agent` supplies
+the TOOL inventory too, not just an agent node's hash: a `tool` node's tools
+come from the tools the supplied `--agent` files' MCP servers carry (see the
+comment in `examples/payroll/agents/notify-summary.toml`), so even a graph
+with no `agent` nodes at all still needs `--agent` when it has `tool` nodes.
+
 ## Learning an agent's hash first
 
 An `agent` node names its agent by content hash and never by path, so writing
@@ -157,7 +171,10 @@ $ salvor graph run examples/graphs/research-review-publish.json \
 ```
 
 A `gate` node parks the run the same way a tool suspension does; continue it
-with `salvor resume <RUN_ID> --graph examples/graphs/research-review-publish.json --input '{"approved": true}'`.
+with `salvor resume <RUN_ID> --graph examples/graphs/research-review-publish.json --agent agents/research.toml --agent agents/review.toml --input '{"approved": true}'`.
+The same `--agent` files `graph run` needed above are needed again here: a
+`tool` node's tools come from the agents' MCP servers, so a resume that omits
+one names a tool none of the supplied agents carry.
 `salvor fork <RUN_ID> --from-node <NODE> --graph <FILE>` re-walks a run from a
 node boundary into a new run.
 
@@ -188,8 +205,9 @@ replays into the identical document.
 
 All checks run and every failure is reported (never just the first):
 
-- **Referential integrity.** Every edge endpoint, and every `map` body that
-  names a node, must be a real node id. A near miss gets a suggestion.
+- **Referential integrity.** Every edge endpoint, and every `map` or `fold`
+  body that names a node, must be a real node id. A near miss gets a
+  suggestion.
 - **Per-node required fields.** An `agent` hash is a well-formed
   `sha256:<64 hex>` string; a `map` concurrency cap is at least 1; a `gate`
   approval schema is a JSON object.

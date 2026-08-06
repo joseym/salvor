@@ -9,7 +9,7 @@ Try it in your browser at **[salvor.run](https://salvor.run)**. The demo termina
 ![Salvor kills a research agent mid-run and resumes it to completion with no duplicate side effects](docs/demo.gif)
 
 - **Crash-exact resume.** Every event is written before the runtime acts on it, so a resume replays what already happened and re-executes none of it.
-- **No duplicate side effects.** Tools declare an effect (read, write, or idempotent) and a write is never replayed blind. A write left dangling by a crash blocks the resume until a human reconciles it. Within one run this holds always; across separate runs it holds for a call whose tool declares an idempotency key, which the store then lets exactly one run execute. Declare it as `idempotency_keys` on an `[[mcp_servers]]` entry, a map from tool name to the input field that names the operation: `idempotency_keys = { pay_claim = "claim_id" }`.
+- **No duplicate side effects.** Tools declare an effect (read, write, or idempotent) and a write is never replayed blind. A write left dangling by a crash blocks the resume until a human reconciles it. Within one run this holds always; across separate runs it holds for a call whose tool declares an idempotency key, which the store then lets exactly one run execute. Declare it as `idempotency_keys` on an `[[mcp_servers]]` entry, a map from tool name to the input field that names the operation: `idempotency_keys = { pay_claim = "claim_id" }`. That guarantee does not cover a model call: one still in flight at the moment of a kill is re-issued live on resume, and the provider may have billed the interrupted attempt, while a completed call replays from the log and is never re-paid.
 - **The log is the run.** State is a pure fold over events: the same code in the runtime, in `salvor replay`, and in the browser via wasm.
 - **Hard budgets.** Ceilings on steps, tokens, dollars, and wall time, enforced by the runtime rather than suggested to the model. Wall time is measured between recorded clock observations, never against the ambient clock.
 - **One static binary.** The event store and the web UI ship inside it.
@@ -303,7 +303,7 @@ The kill demo is one crash at one boundary. The release gate is the property sui
 | `salvor-wasm` | Sandboxed WebAssembly component tools (wasmtime, WASI p2, deny-all) |
 | `salvor-runtime` | The IO edge: `RunCtx`, the `Agent` builder, the built-in loop |
 | `salvor-graph` | Graph document model, validation, JSON Schema emission |
-| `salvor-engine` | Executes graph documents: linear chains, gates, branches, maps, forks |
+| `salvor-engine` | Executes graph documents: linear chains, gates, branches, maps, folds, forks |
 | `salvor-server` | The control plane: HTTP + SSE, server-driven and client-driven |
 | `salvor-cli` | The `salvor` binary |
 | `salvor` | Facade over the family: `cargo add salvor` for the library, with `graph`, `engine`, `server`, `llm` and `wasm` as opt-in features |
