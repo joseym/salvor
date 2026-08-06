@@ -301,6 +301,13 @@ never a silent wrong answer.
   exactly-once because it keys on the employee and checks under a lock, not because
   the word "idempotent" was applied to it. A Write with no such key, killed
   mid-batch, is the reconciliation story, not this one.
+- **The inline names here are a demo convenience, not a template.** The roster
+  carries each employee's `name` straight through tool arguments and results, and
+  it is synthetic data made up for this example. A deployment paying real people
+  who can invoke erasure should pass a reference instead and resolve it against a
+  system that can actually delete, the pattern
+  [SECURITY.md](../../SECURITY.md#what-the-event-log-records) sets out for
+  erasure-bound data.
 
 ## Files
 

@@ -125,6 +125,14 @@ curl -s -o /dev/null -w '%{http_code}\n' https://salvor.example.com/v1/runs
 # 401: auth is on. 200: it is not, whatever the flags say.
 ```
 
+Without a proxy in front, run the same check against the address
+`--bind` actually opened:
+
+```sh
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/v1/runs
+# 401: auth is on. 200: it is not, whatever the flags say.
+```
+
 ## Backup and restore
 
 Everything durable is in the store: `--store` names it, else
@@ -165,7 +173,11 @@ sqlite3 /var/lib/salvor/salvor.db \
   ".backup '/backups/salvor-$(date -u +%Y%m%dT%H%M%SZ).db'"
 ```
 
-The output is a single file with no side files of its own. Prefer this
+The output is a single file with no side files of its own, but only at
+the instant `.backup` finishes. The backup inherits the source's
+`journal_mode=WAL`, so the next read against it, even a plain `sqlite3
+SELECT`, recreates a `-wal` and `-shm` beside it; that is ordinary WAL
+behavior on a clean file, not the backup coming apart. Prefer this
 over `cp` on anything running: a plain copy of a live WAL database can
 catch the main file and the log at different instants, and the result
 may be torn or refuse to open.
@@ -191,7 +203,10 @@ in-memory registry, so a restart drops them and a restore does not
 return them. Runs and their event logs survive; the document a run
 referenced does not. The recovery path belongs to the client: whatever
 submitted the graph resubmits it before a run or a fork references it
-again.
+again. Get the order right: a `POST /v1/runs/{id}/resume` for a graph
+run whose document is not back in the registry yet fails `404
+unknown_graph`; the identical call succeeds once the document has been
+resubmitted, so resubmit before you resume, not after.
 
 ### Verifying a restored store
 
@@ -205,7 +220,10 @@ salvor list --store /var/lib/salvor/salvor.db
 `list` folds every run's log to derive its status, and every log read
 goes through `read_log`, which recomputes the run's whole hash chain
 before returning a single event. A listing that completes is therefore
-an integrity pass over every run it walked.
+an integrity pass over every run it walked, and only over every run it
+walked: `no runs in <path>` is a pass over zero chains, not evidence
+the restore worked. A verification worth trusting needs a store that
+holds at least one run.
 `salvor history <run-id> --store <path>` does the same for one run in
 detail.
 
@@ -270,9 +288,11 @@ store, so rotating strands in-flight runs in the old file, and they can
 only be resumed against that file. Cross-run idempotency is per store
 too: the table that lets exactly one run execute a keyed call lives in
 the database, so a call that would have been deduplicated against a run
-in the archived file executes again in the fresh one. Rotate at a quiet
-point, and do not rotate away a run holding a keyed call that must
-never repeat.
+in the archived file executes again in the fresh one. A quiet point is
+one where `salvor list --store <path> --group waiting` and `salvor
+list --store <path> --group progress` both print no runs, meaning
+nothing is parked on a person or moving on its own. Rotate there, and
+do not rotate away a run holding a keyed call that must never repeat.
 
 Because there is no event-level deletion, the decision about what the
 log holds has to be made before the run, not after it. What gets
