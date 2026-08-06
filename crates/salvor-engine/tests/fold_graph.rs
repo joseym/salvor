@@ -21,7 +21,11 @@
 //! - the accumulated value is the `structuredContent` a tool result carries and
 //!   the whole output when there is none, per pass: the next pass's input, the
 //!   predicate, the argmax, and the join all read bare paths, while the log
-//!   still records the whole envelope, and an unwrapped run replays free;
+//!   still records the whole envelope, and an unwrapped run replays free. The
+//!   value ENTERING the fold over an edge is unwrapped the same way, so one body
+//!   tool sees one shape across a whole run, and the envelope test is the PAIR
+//!   of keys (a `content` array beside the payload), so an author's own
+//!   `structuredContent` field is data and survives whole;
 //! - `on_bound` decides what a reached bound MEANS: `fail` refuses with a typed
 //!   `FoldBoundExceeded` where the convergence would have been, and the driver
 //!   records the terminal `RunFailed` a permanent refusal earns, while `join`
@@ -76,6 +80,26 @@ fn fold_only_graph(max_iterations: u32, stop_when: &str, join: FoldJoin) -> Grap
             join,
         ))
         .tool(ToolSpec::new("worker", "refine_tool"))
+        .build()
+}
+
+/// A fold FED BY an ordinary node: `seed` runs first and an edge carries its
+/// output into `refine`, whose body is `worker`. Both tool nodes name the SAME
+/// registered tool, so the value a pass is handed and the value the feeding node
+/// produced are answered by one body, and any disagreement in their shapes is
+/// that body's problem to read.
+fn fed_fold_graph(max_iterations: u32, stop_when: &str, join: FoldJoin) -> Graph {
+    GraphBuilder::new()
+        .tool(ToolSpec::new("seed", "refine_tool"))
+        .fold(FoldSpec::new(
+            "refine",
+            FoldBody::Node("worker".into()),
+            max_iterations,
+            stop_when,
+            join,
+        ))
+        .tool(ToolSpec::new("worker", "refine_tool"))
+        .edge("seed", "refine")
         .build()
 }
 
@@ -533,7 +557,7 @@ async fn stop_when_fires_early_and_records_the_predicate_reason() {
     assert_eq!(event_kinds(&log), expected_kinds(2));
     let (winner_index, reason) = convergence(&log);
     assert_eq!(winner_index, 1);
-    assert_eq!(reason, "stop_when `score >= 5` held after pass 1");
+    assert_eq!(reason, "stop_when held after pass 1: `score >= 5`");
 }
 
 /// A predicate that never holds runs the loop to its bound, and the recorded
@@ -548,7 +572,7 @@ async fn the_bound_stops_the_loop_and_records_the_bound_reason() {
     let (_, reason) = convergence(&log);
     assert_eq!(
         reason,
-        "reached the max_iterations bound of 3 without stop_when `score >= 99` holding"
+        "joined at the max_iterations bound of 3; stop_when never held: `score >= 99`"
     );
 }
 
@@ -866,7 +890,7 @@ async fn a_fold_folds_the_structured_content_a_tool_result_carries() {
     assert_eq!(event_kinds(&log), expected_kinds(2));
     let (winner_index, reason) = convergence(&log);
     assert_eq!(winner_index, 1);
-    assert_eq!(reason, "stop_when `score >= 5` held after pass 1");
+    assert_eq!(reason, "stop_when held after pass 1: `score >= 5`");
 
     // (a) Pass 0 folded the graph input; pass 1 folded pass 0's PAYLOAD.
     assert_eq!(
@@ -938,6 +962,110 @@ async fn a_pass_answering_bare_is_folded_verbatim_beside_one_that_wraps() {
         json!({"pass": 2, "score": 5}),
         "a bare pass output is the accumulated value verbatim"
     );
+}
+
+/// THE ENTRY VALUE, the shape a fold meets when something upstream feeds it.
+/// `seed` is an ordinary `tool` node answering the way an MCP tool does, and an
+/// edge carries its output into `refine`. Pass 0 must fold the PAYLOAD, exactly
+/// as pass 1 does:
+///
+///   (a) pass 0's recorded `ToolCallRequested.input` is the bare payload `seed`
+///       produced, never the envelope around it;
+///   (b) so the ONE body tool sees ONE shape across the whole loop: every
+///       recorded input is a bare payload with no transport keys on it.
+///
+/// Both tool nodes resolve the same registered tool, which is what makes (b) a
+/// claim about a real body rather than about two lookalikes: if the entry value
+/// were threaded verbatim, this single tool would be handed an envelope at pass
+/// 0 and a bare payload afterwards, read no `pass` at all out of the envelope,
+/// and silently fall back to zero.
+#[tokio::test]
+async fn a_fold_fed_over_an_edge_folds_the_payload_from_pass_zero() {
+    let graph = fed_fold_graph(2, "score >= 99", FoldJoin::Last);
+    let (log, calls) = drive_enveloped(
+        &graph,
+        vec![json!(1), json!(5), json!(2)],
+        vec![true, true, true],
+        fixed_run_id(67),
+    )
+    .await;
+
+    // One call for the feeding node, then one per pass of a two-pass bound.
+    assert_eq!(calls, 3, "the feeding node plus both passes ran");
+
+    let inputs = tool_inputs(&log);
+    assert_eq!(
+        inputs,
+        vec![
+            // The graph input, into the feeding node.
+            json!({"pass": 0}),
+            // (a) Pass 0 folded `seed`'s PAYLOAD, not the envelope it arrived in.
+            json!({"pass": 1, "score": 1}),
+            // Pass 1 folded pass 0's payload, as it always did.
+            json!({"pass": 2, "score": 5}),
+        ],
+        "the value entering the fold is unwrapped exactly like one a pass produced"
+    );
+    // (b) One shape, every call: no input carries the transport keys.
+    for input in &inputs {
+        assert!(
+            input.get("content").is_none() && input.get("structuredContent").is_none(),
+            "the body tool sees one shape all run: {input}"
+        );
+    }
+
+    // And the fold still produced a bare payload, so the edge in front of it
+    // changed nothing downstream.
+    assert_eq!(final_output(&log), json!({"pass": 3, "score": 2}));
+}
+
+/// The envelope test is the PAIR of keys, not the payload key alone. A fold's
+/// value is arbitrary author-shaped JSON, so a field that happens to be called
+/// `structuredContent` is data, and an MCP result with nothing structured in it
+/// is not a wrapper around anything. Both pass through whole:
+///
+///   (a) an object with a `structuredContent` key and NO `content` array is
+///       folded verbatim, so pass 0 reads the fields the author put there;
+///   (b) an object with a `content` array and no `structuredContent` key is
+///       folded verbatim too, because there is no payload to take.
+///
+/// (a) is also the fold-as-entry-node guarantee: the graph input reaches pass 0
+/// as submitted.
+#[tokio::test]
+async fn a_coincidental_structured_content_field_is_folded_verbatim() {
+    for (index, input) in [
+        json!({"pass": 0, "structuredContent": {"pass": 41}}),
+        json!({"pass": 0, "content": [{"type": "text", "text": "no payload"}]}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let graph = fold_only_graph(1, "score >= 99", FoldJoin::Last);
+        let store = Arc::new(SqliteStore::in_memory().expect("store opens"));
+        let (tools, calls) = worker_tools(vec![json!(1)]);
+        let run_id = fixed_run_id(68 + index as u8);
+        let mut ctx =
+            RunCtx::with_hooks(store.clone(), run_id, vec![], fixed_clock(), fixed_random())
+                .expect("ctx builds");
+        run_graph(&mut ctx, &graph, &input, &no_agents(), &tools)
+            .await
+            .expect("graph drives");
+
+        let log = store.read_log(run_id).await.expect("log reads");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "one pass under a bound of 1"
+        );
+        assert_eq!(
+            tool_inputs(&log),
+            vec![input.clone()],
+            "a value that is not an MCP result envelope reaches pass 0 whole"
+        );
+        // Read at the bare path, so pass 0 really did see `pass: 0` rather than
+        // the 41 a wrongly-stripped payload would have handed it.
+        assert_eq!(final_output(&log), json!({"pass": 1, "score": 1}));
+    }
 }
 
 /// An unwrapped run replays with ZERO live calls and a byte-identical log. The
@@ -1133,7 +1261,7 @@ async fn an_explicit_join_reaches_the_bound_exactly_as_an_absent_on_bound_does()
     assert_eq!(convergence(&without), convergence(&with));
     assert_eq!(
         convergence(&with).1,
-        "reached the max_iterations bound of 3 without stop_when `score >= 99` holding"
+        "joined at the max_iterations bound of 3; stop_when never held: `score >= 99`"
     );
     assert_eq!(final_output(&without), final_output(&with));
 }

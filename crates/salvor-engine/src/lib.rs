@@ -67,17 +67,25 @@
 //!   sequentially in the same log. Pass 0's input is the fold's routed value;
 //!   every later pass's input is the previous pass's output, which IS the
 //!   accumulated value: there is no separate accumulator state and no merge rule,
-//!   because the document has no vocabulary for one. A pass output that is an
-//!   object carrying a `structuredContent` key contributes that PAYLOAD as the
-//!   accumulated value, not the object around it: an MCP tool answers with a
+//!   because the document has no vocabulary for one. A value that is an MCP
+//!   result envelope (an object with a `content` ARRAY and a
+//!   `structuredContent` key) contributes that PAYLOAD as the accumulated
+//!   value, not the object around it: an MCP tool answers with a
 //!   `{content, structuredContent}` envelope, and the payload is the value the
 //!   loop is folding, so the next pass's input, the `stop_when` predicate, a
 //!   `best_by` reference, and the join's own output all read the bare payload
-//!   and a fold expression never reaches through a transport detail. Any other
-//!   output (an agent body's structured object, a native tool's flat struct,
-//!   a string, a list) is carried verbatim. The unwrap is DERIVATION, not
+//!   and a fold expression never reaches through a transport detail. This holds
+//!   for the value ENTERING the fold as much as for one a pass produced, so a
+//!   fold fed by a `tool` node over an edge folds the same shape at pass 0 that
+//!   it folds at pass 3. Any other value (an agent body's structured object, a
+//!   native tool's flat struct, an object that merely carries a field called
+//!   `structuredContent` as data, a string, a list) is carried verbatim. The
+//!   unwrap is DERIVATION, not
 //!   recording: `ToolCallCompleted` still holds the whole envelope, and the
-//!   payload is a pure function of it (see [`unwrap_pass_output`]). The engine
+//!   payload is a pure function of it (see [`unwrap_pass_output`]). Nothing
+//!   outside a fold is touched: an ordinary edge routes a node's recorded output
+//!   verbatim, so a branch expression reading `structuredContent.` still reads
+//!   what it always read. The engine
 //!   records `NodeEntered`, then per pass `FoldIterationStarted`, the body's
 //!   work inline,
 //!   and `FoldIterationJoined`, and stops when the `stop_when` predicate holds
@@ -912,8 +920,10 @@ enum FoldOutcome {
 /// body's work inline, and `FoldIterationJoined`. Pass 0's input is the fold's
 /// routed value; every later pass's input is the previous pass's output, which
 /// IS the accumulated value (the document has no vocabulary for a separate
-/// accumulator or a merge rule), unwrapped out of a `structuredContent`
-/// envelope when it carries one (see [`unwrap_pass_output`]). The loop stops
+/// accumulator or a merge rule). Both go through the same unwrap out of an MCP
+/// result envelope (see [`unwrap_pass_output`]), so the body sees ONE shape
+/// across the whole loop whether the fold was fed over an edge or by itself.
+/// The loop stops
 /// when `stop_when` holds over the
 /// pass just joined, or when `max_iterations` passes have run. A bound reached
 /// by a fold declaring `on_bound: fail` is a typed
@@ -987,6 +997,19 @@ async fn drive_fold(
     // author-supplied and may be enormous, and each pass does real work, so
     // growing costs nothing next to reserving for passes that may never run.
     let mut passes: Vec<Value> = Vec::new();
+    // THE ENTRY VALUE. The fold's routed value goes through the SAME unwrap its
+    // pass outputs do. A fold reached over an inbound edge from a `tool` node is
+    // handed that node's recorded output, which for a tool reached over MCP is
+    // the whole result envelope; without this, pass 0 would fold the envelope
+    // while every later pass folds a bare payload, so one body tool would see two
+    // shapes in a single run and pass 0 would read every field at a path that is
+    // not there. Derived once, here, because this is the single point pass 0's
+    // input is chosen, and a fold that IS the entry node folds its graph input
+    // exactly as before (a plain object is not an envelope and passes through
+    // verbatim). Nothing outside a fold changes: an ordinary edge still routes a
+    // node's recorded output verbatim, which is what branch expressions reading
+    // `structuredContent.` depend on.
+    let entry = unwrap_pass_output(routed.clone());
     let mut stopped_by_predicate = false;
     for position in 0..fold.max_iterations {
         let index = u64::from(position);
@@ -997,17 +1020,19 @@ async fn drive_fold(
             node_id,
             index,
         };
-        // Pass 0 folds over the routed value; every later pass folds over the
-        // pass before it. Bound to its own statement so the borrow of `passes`
-        // ends before the outcome is pushed onto it.
+        // Pass 0 folds over the unwrapped entry value; every later pass folds
+        // over the pass before it, which was unwrapped as it was pushed. Bound to
+        // its own statement so the borrow of `passes` ends before the outcome is
+        // pushed onto it.
         let outcome = {
-            let input = passes.last().unwrap_or(routed);
+            let input = passes.last().unwrap_or(&entry);
             run_body(ctx, body, input, agents, tools, call).await?
         };
         match outcome {
-            // THE UNWRAP POINT, and the only one. The accumulated value the
-            // fold carries is the pass output's `structuredContent` payload
-            // when the output is an object carrying that key, and the output
+            // THE UNWRAP POINT for a pass output; the entry value above is the
+            // only other one, and it calls the same function. The accumulated
+            // value the fold carries is the pass output's `structuredContent`
+            // payload when the output is an MCP result envelope, and the output
             // verbatim otherwise (see `unwrap_pass_output`). Applying it here,
             // where the output is pushed onto `passes`, is what makes every
             // consumer agree: the next pass's input, the `stop_when` predicate,
@@ -1095,9 +1120,11 @@ async fn drive_fold(
     Ok(FoldOutcome::Converged(output))
 }
 
-/// The accumulated value one fold pass contributes: the `structuredContent`
-/// payload when the pass output is an object carrying that key, and the pass
-/// output verbatim otherwise.
+/// The value a fold actually folds, given a recorded one: the
+/// `structuredContent` payload when the value is an MCP result envelope, and the
+/// value verbatim otherwise. Applied to a pass's output and to the fold's own
+/// entry value, so a fold folds bare payloads whether they entered over an edge
+/// or were produced by a pass.
 ///
 /// A fold pass whose body is a `tool` node produces the RECORDED TOOL RESULT.
 /// For a tool reached over MCP that result is an envelope,
@@ -1109,11 +1136,28 @@ async fn drive_fold(
 /// native tool, which returns its flat struct with no envelope at all. Unwrap
 /// once, here, and the document says the same thing whichever tool answers.
 ///
-/// A bare object with no `structuredContent` key is returned untouched, which
-/// is what makes this safe for every other body: an `agent` body with an
-/// `output_schema` already produces a bare object, a native tool produces a
-/// flat struct, and both pass straight through. A non-object output (a string,
-/// a number, a list) is returned untouched for the same reason.
+/// # What counts as an envelope
+///
+/// An object with BOTH a `content` array and a `structuredContent` key, which
+/// is the recorded shape and the whole recorded shape. `salvor-tools` hands the
+/// runtime `serde_json::to_value(&rmcp::model::CallToolResult)`, and that type
+/// serializes `content: Vec<ContentBlock>` unconditionally (no
+/// `skip_serializing_if`, so an empty result still writes `"content": []`)
+/// while `structuredContent`, `isError`, and `_meta` are each written only when
+/// present. So every MCP result carries a `content` ARRAY, and only a
+/// structured one carries the payload key beside it.
+///
+/// Keying on the payload key ALONE would be wrong, and that is the point of the
+/// pair: a bare tool or agent output is arbitrary author-shaped JSON, and an
+/// object that happens to carry a field called `structuredContent` as data is a
+/// legitimate accumulated value, not a transport wrapper. Such a value has no
+/// `content` array beside it and passes through whole.
+///
+/// Everything else is returned untouched, which is what makes this safe for
+/// every other body: an `agent` body with an `output_schema` produces a bare
+/// object, a native tool produces a flat struct, a graph input is whatever the
+/// operator submitted, and a non-object value (a string, a number, a list) has
+/// no keys at all.
 ///
 /// This is a pure, total function of a recorded value, which is what lets it
 /// sit outside the recording entirely: `ToolCallCompleted` still holds the full
@@ -1122,11 +1166,15 @@ async fn drive_fold(
 /// what it checks at submit is what the engine folds at run time.
 fn unwrap_pass_output(output: Value) -> Value {
     match output {
-        Value::Object(mut fields) => match fields.remove("structuredContent") {
-            Some(payload) => payload,
-            // `remove` took nothing, so the object is intact.
-            None => Value::Object(fields),
-        },
+        // The guard is the envelope test; the `remove` below cannot then miss.
+        Value::Object(mut fields)
+            if fields.get("content").is_some_and(Value::is_array)
+                && fields.contains_key("structuredContent") =>
+        {
+            fields
+                .remove("structuredContent")
+                .expect("the guard proved the key is present")
+        }
         other => other,
     }
 }
@@ -1169,16 +1217,31 @@ fn best_by_index(passes: &[Value], reference: &Reference) -> Option<usize> {
 /// reached. A pure function of the document and the pass count, so it reproduces
 /// byte for byte on replay (the cursor matches the recorded reason). There is no
 /// third cause: no "failed to improve" rule stops a fold.
+///
+/// # Why both read verdict first, expression last
+///
+/// This string is rendered after a display prefix that is not this function's to
+/// change (`fold <node> converged on [<i>]: `), and readers truncate. So the
+/// VERDICT leads and the author's `stop_when` expression trails: truncation can
+/// then only ever eat the expression, never the word that says which way the
+/// loop went. The bound reason in particular has to survive standing beside the
+/// word "converged", so it says plainly that the join was taken at the bound and
+/// that the predicate never held, rather than opening with the bound and hiding
+/// the negation past the cut.
+///
+/// The `on_bound: fail` case never reaches here at all: it returns
+/// [`EngineError::FoldBoundExceeded`] from where `FoldConverged` would have been
+/// recorded, and that error text is verdict-first already.
 fn stop_reason(fold: &FoldNode, stopped_by_predicate: bool, passes: usize) -> String {
     if stopped_by_predicate {
         format!(
-            "stop_when `{}` held after pass {}",
-            fold.stop_when,
-            passes - 1
+            "stop_when held after pass {}: `{}`",
+            passes - 1,
+            fold.stop_when
         )
     } else {
         format!(
-            "reached the max_iterations bound of {} without stop_when `{}` holding",
+            "joined at the max_iterations bound of {}; stop_when never held: `{}`",
             fold.max_iterations, fold.stop_when
         )
     }

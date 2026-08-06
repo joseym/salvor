@@ -79,7 +79,7 @@ first draft 0.55 and its second 0.85. The loop stops after pass 1, and the log
 says which pass won and why it stopped, in one line:
 
 ```
-FoldConverged   fold refine converged on [1]: stop_when `score >= 0.8` held after pass 1
+FoldConverged   fold refine converged on [1]: stop_when held after pass 1: `score >= 0.8`
 ```
 
 `winner_index` is the argmax the `best_by: score` join computed over every pass
@@ -143,13 +143,20 @@ bash examples/refine/run.sh
 
 It validates the document, refuses the typoed copy, runs the graph clean, runs it
 again into a `kill -9`, resumes, checks every proof above, and then runs the
-bound arm. It exits 0 only if all of them hold.
+bound arm. It exits 0 only if all of them hold, and every check that does not
+hold prints a `FAILED: expected ...` line naming what it wanted and what it
+found, so a run that stops early can never be mistaken for one that passed.
+
+`cargo build --release` works just as well: the script takes `target/debug`
+when it is there and `target/release` otherwise, so there is no need to build the
+same code twice.
 
 Ports and paths are overridable, so it runs on a busy machine and in CI:
 `SALVOR_EXAMPLE_MODEL_PORT` (default 18951), `SALVOR_EXAMPLE_MODEL_DELAY_MS`
 (default 2000, wide enough to aim a kill at), `SALVOR_EXAMPLE_SCRATCH`, and the
-three store paths. `SALVOR_BIN` and `SALVOR_DEMO_MODEL_BIN` point at an installed
-CLI instead of a checkout's build.
+three store paths. `SALVOR_BIN` and `SALVOR_DEMO_MODEL_BIN` override the binary
+paths outright, which is how an already-installed CLI drives this instead of a
+checkout's build.
 
 ## How the offline model answers a loop
 

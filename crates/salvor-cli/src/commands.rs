@@ -418,7 +418,8 @@ pub async fn fork(store_path: &Path, args: ForkArgs) -> Result<u8> {
     let child_log = store.read_log(child_id).await?;
     let mut ctx = RunCtx::new(store, child_id, child_log)?;
     let outcome = run_graph(&mut ctx, &graph, &Value::Null, &agents, &tools).await;
-    let outcome = settle_graph_drive(&mut ctx, &child_uuid, outcome).await;
+    let outcome =
+        settle_graph_drive(&mut ctx, &child_uuid, &args.graph, &args.agents, outcome).await;
     close_servers(servers).await;
     report_graph_outcome(outcome?, &child_uuid, &args.graph, &args.agents)
 }
@@ -1106,7 +1107,8 @@ pub fn graph_schema() -> Result<u8> {
 /// key it by its computed definition hash, and drive the engine over a fresh
 /// `RunCtx`. The run id is printed first so a `kill -9` mid-run still leaves an
 /// id to resume. On a park (a gate, a budget crossing) it prints how to continue
-/// with `salvor resume ... --graph`.
+/// with `salvor resume ... --graph`, and so does a TRANSIENT failure, which
+/// leaves the same live, resumable run behind (see [`settle_graph_drive`]).
 ///
 /// # Resolution, and how it matches the server
 ///
@@ -1143,7 +1145,7 @@ pub async fn graph_run(store_path: &Path, args: GraphRunArgs) -> Result<u8> {
         ctx = ctx.with_labels(labels);
     }
     let outcome = run_graph(&mut ctx, &graph, &input, &agents, &tools).await;
-    let outcome = settle_graph_drive(&mut ctx, &uuid, outcome).await;
+    let outcome = settle_graph_drive(&mut ctx, &uuid, &args.graph, &args.agents, outcome).await;
     close_servers(servers).await;
     report_graph_outcome(outcome?, &uuid, &args.graph, &args.agents)
 }
@@ -1218,7 +1220,7 @@ async fn resume_graph(
     }
     // The recorded input wins on replay, so a bare null is fine here.
     let outcome = run_graph(&mut ctx, &graph, &Value::Null, &agents, &tools).await;
-    let outcome = settle_graph_drive(&mut ctx, uuid, outcome).await;
+    let outcome = settle_graph_drive(&mut ctx, uuid, graph_path, &args.agents, outcome).await;
     close_servers(servers).await;
     report_graph_outcome(outcome?, uuid, graph_path, &args.agents)
 }
@@ -1542,20 +1544,42 @@ fn seq_list(seqs: &[u64]) -> String {
 /// the refusal is the real news, and a missing terminal only means the run
 /// reads as recoverable when it is not. It is logged at `warn` and the drive's
 /// own error is returned.
+///
+/// # The transient counterpart
+///
+/// A permanent refusal tells the operator the run is dead and where to read
+/// that. A TRANSIENT one (a model transport failure, a tool call that failed, a
+/// store hiccup) leaves a run that is alive, on disk, and resumable, and saying
+/// only what went wrong strands it: the id scrolled past with the run's first
+/// line, and nothing on screen says the work so far survived. So the same
+/// triage is printed for it, in its own direction: the id, that the run is
+/// recorded and resumable, and the exact `salvor resume` command. Only when a
+/// run head exists (`next_seq` past zero), because a refusal raised before
+/// `GraphRunStarted` has no run to point at.
 async fn settle_graph_drive(
     ctx: &mut RunCtx,
     uuid: &str,
+    graph_path: &Path,
+    agents: &[PathBuf],
     outcome: Result<GraphOutcome, EngineError>,
 ) -> Result<GraphOutcome> {
     let error = match outcome {
         Ok(outcome) => return Ok(outcome),
         Err(error) => error,
     };
+    // Read before the append below, so a permanent refusal's own terminal never
+    // counts as the head this asks about.
+    let has_head = ctx.next_seq().get() > 0;
     match salvor_engine::record_permanent_refusal(ctx, &error).await {
         Ok(true) => Err(anyhow::anyhow!(
             "{error}\n\nthis refusal is a pure function of the graph document and the recorded \
              log, so re-driving reproduces it exactly; run {uuid} is recorded as failed, and \
              `salvor list` shows it as failed."
+        )),
+        Ok(false) if has_head => Err(anyhow::anyhow!(
+            "{error}\n\nrun {uuid} is recorded and resumable: every step it completed is durable, \
+             and nothing was recorded past this failure. Re-drive it with:\n  {}",
+            graph_resume_command(uuid, graph_path, agents)
         )),
         Ok(false) => Err(error.into()),
         Err(recording) => {
@@ -1567,6 +1591,22 @@ async fn settle_graph_drive(
             Err(error.into())
         }
     }
+}
+
+/// The `salvor resume` command line that re-drives one graph run: the id, the
+/// document, and every `--agent` file the caller supplied, in the order they
+/// were given. One place, so the parked report and the transient-failure triage
+/// can never drift into telling an operator two different commands for the same
+/// run.
+fn graph_resume_command(uuid: &str, graph_path: &Path, agents: &[PathBuf]) -> String {
+    let agent_flags: String = agents
+        .iter()
+        .map(|path| format!(" --agent {}", path.display()))
+        .collect();
+    format!(
+        "salvor resume {uuid} --graph {}{agent_flags}",
+        graph_path.display()
+    )
 }
 
 /// Prints the result of a graph drive: the final output on completion, or a
@@ -1591,13 +1631,9 @@ fn report_graph_outcome(
                     println!("  budget crossed: {budget:?} (observed {observed})");
                 }
             }
-            let agent_flags: String = agents
-                .iter()
-                .map(|path| format!(" --agent {}", path.display()))
-                .collect();
             println!(
-                "resume it with:\n  salvor resume {uuid} --graph {}{agent_flags} --input <json>",
-                graph_path.display()
+                "resume it with:\n  {} --input <json>",
+                graph_resume_command(uuid, graph_path, agents)
             );
             Ok(0)
         }

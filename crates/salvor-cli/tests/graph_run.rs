@@ -8,9 +8,11 @@
 //! must match the one the run recorded. The rest pins the refusals: an invalid
 //! document, a hash mismatch on resume, and an unresolvable tool or agent.
 //!
-//! The last pair pins the permanent/transient split as an operator meets it: a
+//! The last group pins the permanent/transient split as an operator meets it: a
 //! PERMANENT engine refusal names the triage in the CLI's own voice and leaves
-//! the run reading `failed` in `salvor list`, while a refused approval (which a
+//! the run reading `failed` in `salvor list`; a TRANSIENT one names the same
+//! triage pointed the other way, saying the run is recorded, resumable, and
+//! giving the command that continues it; and a refused approval (which a
 //! conforming one can still fix) records no terminal and the very same run
 //! resumes and completes.
 
@@ -364,6 +366,97 @@ fn a_permanent_graph_refusal_records_the_run_as_failed() {
     assert!(
         listing.contains(&run) && listing.contains("failed"),
         "salvor list shows the run as failed: {listing}"
+    );
+}
+
+/// An agent file whose model endpoint is a port nothing can be listening on
+/// (binding port 1 needs privileges no test process has), with retries off so
+/// the transport failure is immediate. No API key and no network: the connection
+/// is refused before a request is ever formed.
+const DEAD_MODEL_AGENT: &str = "model = \"test-model\"\n\
+                                system_prompt = \"You are a test agent.\"\n\
+                                \n\
+                                [llm]\n\
+                                base_url = \"http://127.0.0.1:1\"\n\
+                                max_retries = 0\n";
+
+/// A single-`agent` graph, with the agent hash filled in from the file on disk.
+fn dead_model_graph(agent_hash: &str) -> String {
+    format!(
+        r#"{{
+  "schema_version": 1,
+  "nodes": [ {{ "kind": "agent", "payload": {{ "id": "work", "agent_hash": "{agent_hash}" }} }} ],
+  "edges": []
+}}"#
+    )
+}
+
+/// A TRANSIENT refusal gets the triage line too, pointed the other way. The
+/// mirror of `a_permanent_graph_refusal_records_the_run_as_failed`: that one
+/// says the run is dead and where to read it, this one says the run is ALIVE and
+/// how to continue it.
+///
+/// The failure is a model transport failure, which is what an operator actually
+/// meets: an endpoint that is down, a proxy that dropped the connection. Nothing
+/// about the graph or the log caused it, so re-driving can succeed, and the run
+/// is sitting on disk with its completed steps durable. Printing only the error
+/// strands that run: its id scrolled past on the first line, and nothing on
+/// screen says the work survived or what command picks it back up.
+#[test]
+fn a_transient_graph_failure_names_the_run_as_resumable() {
+    let dir = tempdir().expect("tempdir");
+    let store = dir.path().join("salvor.db");
+    let agent = write(dir.path(), "agent.toml", DEAD_MODEL_AGENT);
+
+    // The document must name the agent by the hash of the file beside it, so the
+    // CLI computes it exactly as an operator would.
+    let output = salvor(&store)
+        .args(["agent", "hash"])
+        .arg(&agent)
+        .output()
+        .expect("runs");
+    assert!(output.status.success(), "agent hash: {output:?}");
+    let hash = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let graph = write(dir.path(), "dead-model.json", &dead_model_graph(&hash));
+
+    let output = salvor(&store)
+        .args(["graph", "run"])
+        .arg(&graph)
+        .args(["--input", r#"{"topic":"otters"}"#])
+        .arg("--agent")
+        .arg(&agent)
+        .output()
+        .expect("runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "an unreachable model fails the drive: {output:?}"
+    );
+    let run = run_id_from(&stdout);
+
+    assert!(
+        stderr.contains(&run) && stderr.contains("recorded and resumable"),
+        "the failure names the run and says it survives: {stderr}"
+    );
+    // The literal command, so it can be pasted rather than reconstructed.
+    let expected = format!(
+        "salvor resume {run} --graph {} --agent {}",
+        graph.display(),
+        agent.display()
+    );
+    assert!(
+        stderr.contains(&expected),
+        "the failure prints the resume command verbatim ({expected}): {stderr}"
+    );
+
+    // And the run really is alive: no terminal was recorded for it.
+    let output = salvor(&store).arg("list").output().expect("runs");
+    let listing = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "list runs: {output:?}");
+    assert!(
+        listing.contains(&run) && !listing.contains("failed"),
+        "a transient failure never kills the run: {listing}"
     );
 }
 
