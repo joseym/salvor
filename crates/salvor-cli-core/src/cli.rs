@@ -693,10 +693,11 @@ pub struct ServeArgs {
     #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:8080")]
     pub bind: String,
     /// The NAME of an environment variable holding a shared-secret bearer
-    /// token. When set (and the variable is non-empty), every request must
-    /// carry `Authorization: Bearer <that value>`. When omitted, the server
-    /// runs without auth, trusting a reverse proxy to guard it. Never the
-    /// token itself, matching how agent files name key variables.
+    /// token. The variable must be set and non-empty: every request must then
+    /// carry `Authorization: Bearer <that value>`, and the server refuses to
+    /// start if the named variable is unset or empty. Omit this flag
+    /// entirely to run without auth, trusting a reverse proxy to guard it.
+    /// Never the token itself, matching how agent files name key variables.
     #[arg(long, value_name = "ENV_VAR")]
     pub auth_token: Option<String>,
     /// Kill the running `salvor serve` instead of serving. With no value,

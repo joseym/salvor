@@ -788,8 +788,9 @@ pub async fn serve(store_path: &Path, args: ServeArgs) -> Result<u8> {
                 state = state.with_auth_token(token);
                 tracing::info!("bearer auth required (token read from ${env_name})");
             }
-            _ => tracing::warn!(
-                "--auth-token names ${env_name}, but it is unset or empty; serving without auth"
+            _ => bail!(
+                "--auth-token names ${env_name}, but it is unset or empty; export ${env_name} \
+                 with the bearer token before serving, or drop --auth-token to serve without auth"
             ),
         }
     }

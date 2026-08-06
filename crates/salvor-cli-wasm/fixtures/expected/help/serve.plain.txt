@@ -17,7 +17,7 @@ Options:
           [default: ./salvor.db]
 
       --auth-token <ENV_VAR>
-          The NAME of an environment variable holding a shared-secret bearer token. When set (and the variable is non-empty), every request must carry `Authorization: Bearer <that value>`. When omitted, the server runs without auth, trusting a reverse proxy to guard it. Never the token itself, matching how agent files name key variables
+          The NAME of an environment variable holding a shared-secret bearer token. The variable must be set and non-empty: every request must then carry `Authorization: Bearer <that value>`, and the server refuses to start if the named variable is unset or empty. Omit this flag entirely to run without auth, trusting a reverse proxy to guard it. Never the token itself, matching how agent files name key variables
 
       --kill [<PID|PORT>]
           Kill the running `salvor serve` instead of serving. With no value, discovers every running `salvor serve` (by inspecting the process table, since there are no pid files): zero found is reported and this exits; exactly one is killed; multiple print a numbered table and prompt for a choice. Given a value (a pid or a listening port), kills that one directly with no prompt. When present at all, this short-circuits before `--bind` or `--store` are acted on: the process never binds a port
