@@ -1,0 +1,5 @@
+model = "m"
+output_schema_path = "answer.json"
+
+[output_schema]
+type = "object"

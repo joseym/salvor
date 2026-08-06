@@ -78,6 +78,8 @@ That prints a run id and the model's answer. `salvor history <run-id>` prints wh
 
 Five events, each written before the run moved past it. Even the clock reading is recorded, because a replay has to see the same `now()` the first run saw.
 
+An agent answers in prose unless it says otherwise. Give the file an `[output_schema]` table and it answers in that shape instead: the runtime offers the model a `salvor_answer` tool carrying the schema, requires the call, and validates the answer before recording it, so the run's output is an object a caller reads a field from rather than a sentence it has to parse. `output_schema_path = "answer.json"` keeps a growing schema in its own file. A graph's `agent` node can declare a schema too, and for that node it wins; the agent file's is what every other run of that agent uses. The declaration is part of what the agent produces, so it is hashed into the agent's identity: adding it to an existing file mints a new `salvor agent hash`, and any graph pinning the old one needs repinning.
+
 ### Now kill it
 
 ```sh

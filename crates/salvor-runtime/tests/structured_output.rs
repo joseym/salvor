@@ -20,7 +20,10 @@
 //!   boundary recovers to a byte-identical log, because everything fed back is
 //!   a pure function of recorded data;
 //! - an agent that already offers a real `salvor_answer` tool is a typed
-//!   refusal recorded nowhere, raised before the first model call.
+//!   refusal recorded nowhere, raised before the first model call;
+//! - the declaration can live on the agent instead of the call site, and then
+//!   `Runtime::start` reaches the structured loop on its own, while an agent
+//!   that declares nothing stays on the plain one.
 //!
 //! [`FailureTracker`]: salvor_runtime::FailureTracker
 
@@ -35,10 +38,10 @@ use common::{
     fixed_clock, fixed_random, fixed_run_id, text_response, tool_result_contents, tool_use_block,
     tool_use_response,
 };
-use salvor_core::{Effect, EventEnvelope, RunId};
+use salvor_core::{Effect, Event, EventEnvelope, RunId};
 use salvor_runtime::{
-    ANSWER_TOOL, Agent, Budgets, LoopOutcome, ParkReason, RunCtx, RuntimeError,
-    drive_loop_structured,
+    ANSWER_TOOL, Agent, Budgets, LoopOutcome, ParkReason, RunCtx, RunOutcome, Runtime,
+    RuntimeError, drive_loop_structured,
 };
 use salvor_store::{EventStore, RunSummary, SqliteStore, StoreError};
 use serde_json::{Value, json};
@@ -619,4 +622,89 @@ async fn a_structured_run_recovers_identically_from_every_kill_boundary() {
             "the read tool ran {executions} times for a kill after {allow} appends"
         );
     }
+}
+
+/// The declaration can live on the agent itself, and then nobody has to ask
+/// for the structured loop by name: `Runtime::start` drives it, because
+/// `driver::drive` reads `agent.output_schema()`. This is the path a
+/// `salvor run` over an `agent.toml` with an `[output_schema]` table takes,
+/// end to end, with the scripted model answering through the answer tool.
+#[tokio::test]
+async fn an_agent_that_declares_a_schema_drives_the_structured_loop_through_the_runtime() {
+    let server = ScriptedModel::mount(vec![(
+        1,
+        answer_response("tu_runtime", json!({"score": 0.42, "note": "thin"}), 2),
+    )])
+    .await;
+    let agent = agent_builder(&server.uri())
+        .output_schema(schema())
+        .build()
+        .expect("agent builds");
+    let store = Arc::new(SqliteStore::in_memory().expect("store opens"));
+    let runtime = Runtime::with_hooks(store.clone(), fixed_clock(), fixed_random());
+    let run_id = fixed_run_id(72);
+
+    let outcome = runtime
+        .start_with_id(&agent, run_id, json!("rate this"))
+        .await
+        .expect("the run completes");
+    let RunOutcome::Completed { output, .. } = outcome else {
+        panic!("expected completion, got {outcome:?}");
+    };
+    // The object, not a sentence about it: the whole point of declaring it.
+    assert_eq!(output, json!({"score": 0.42, "note": "thin"}));
+
+    // And the run's terminal carries the same object, so a caller reading the
+    // log sees the structured answer too.
+    let log = store.read_log(run_id).await.expect("log reads");
+    assert_eq!(
+        event_kinds(&log),
+        [
+            "RunStarted",
+            "NowObserved",
+            "ModelCallRequested",
+            "ModelCallCompleted",
+            "RunCompleted",
+        ]
+    );
+    let Event::RunCompleted { output } = &log.last().expect("a terminal").event else {
+        panic!("the last event is the terminal");
+    };
+    assert_eq!(*output, json!({"score": 0.42, "note": "thin"}));
+
+    // The request the agent's own declaration produced is the same one an
+    // explicit `drive_loop_structured` produces: the declared schema on the
+    // answer tool, and a forced call.
+    let requests = server.received_requests().await.expect("requests recorded");
+    let (tools, tool_choice) = offered_tools(&requests[0].body);
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0]["name"], json!(ANSWER_TOOL));
+    assert_eq!(tools[0]["input_schema"], schema());
+    assert_eq!(tool_choice, Some(json!({"type": "any"})));
+}
+
+/// The mirror of the test above: the same agent with no declaration is left
+/// exactly where it was, on the plain loop, answering in text. The default is
+/// untouched, which is what makes the key safe to add to the format.
+#[tokio::test]
+async fn an_agent_without_a_schema_still_drives_the_plain_loop_through_the_runtime() {
+    let server = ScriptedModel::mount(vec![(1, text_response("about 0.42", 10, 2))]).await;
+    let agent = agent_builder(&server.uri()).build().expect("agent builds");
+    let store = Arc::new(SqliteStore::in_memory().expect("store opens"));
+    let runtime = Runtime::with_hooks(store.clone(), fixed_clock(), fixed_random());
+    let run_id = fixed_run_id(73);
+
+    let outcome = runtime
+        .start_with_id(&agent, run_id, json!("rate this"))
+        .await
+        .expect("the run completes");
+    let RunOutcome::Completed { output, .. } = outcome else {
+        panic!("expected completion, got {outcome:?}");
+    };
+    assert_eq!(output, json!("about 0.42"));
+
+    let requests = server.received_requests().await.expect("requests recorded");
+    let body: Value = serde_json::from_slice(&requests[0].body).expect("request body is JSON");
+    assert!(body.get("tools").is_none(), "{body}");
+    assert!(body.get("tool_choice").is_none(), "{body}");
 }

@@ -9,6 +9,10 @@
 //!
 //! Both halves are here side by side, over the same shape of graph, because
 //! the difference between them is the whole feature.
+//!
+//! The resolved agent can declare a schema too, so the last two tests pin the
+//! precedence: the node's declaration wins where there is one, and the agent's
+//! is what a node that declares nothing runs under.
 
 mod common;
 
@@ -188,4 +192,139 @@ async fn a_node_without_an_output_schema_still_answers_in_text() {
     let body: Value = serde_json::from_slice(&requests[0].body).expect("request body is JSON");
     assert!(body.get("tools").is_none(), "{body}");
     assert!(body.get("tool_choice").is_none(), "{body}");
+}
+
+/// The schema an agent declares for itself, differing from the node's so the
+/// two are never confused for one another.
+fn agent_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["headline"],
+        "properties": {"headline": {"type": "string"}}
+    })
+}
+
+#[tokio::test]
+async fn a_node_schema_overrides_the_agents_own() {
+    // The model answers in the NODE's shape. If the agent's schema had been
+    // the one offered, this answer would have failed validation and the loop
+    // would have asked again instead of completing on the first turn.
+    let server = ScriptedModel::mount(vec![(
+        1,
+        tool_use_response(
+            "tu_answer",
+            ANSWER_TOOL,
+            json!({"score": 0.91, "verdict": "ship it"}),
+            5,
+            3,
+        ),
+    )])
+    .await;
+    let mut agents: HashMap<String, Agent> = HashMap::new();
+    agents.insert(
+        RATE_HASH.to_owned(),
+        agent_builder(&server.uri())
+            .output_schema(agent_schema())
+            .build()
+            .expect("agent builds"),
+    );
+    let (publish, publish_calls) = EchoTool::new("http_post", Effect::Write);
+    let mut tools: HashMap<String, Box<dyn DynTool>> = HashMap::new();
+    tools.insert("http_post".to_owned(), Box::new(publish));
+
+    let run_id = fixed_run_id(82);
+    let store = Arc::new(SqliteStore::in_memory().expect("store opens"));
+    let mut ctx = RunCtx::with_hooks(store.clone(), run_id, vec![], fixed_clock(), fixed_random())
+        .expect("ctx builds");
+    let outcome = run_graph(
+        &mut ctx,
+        &rating_graph(Some(declared_schema())),
+        &json!({"draft": "otters"}),
+        &agents,
+        &tools,
+    )
+    .await
+    .expect("the graph drives");
+    let GraphOutcome::Completed { output } = outcome else {
+        panic!("expected completion, got {outcome:?}");
+    };
+    assert_eq!(
+        output,
+        json!({"published": {"score": 0.91, "verdict": "ship it"}})
+    );
+    assert_eq!(publish_calls.load(Ordering::SeqCst), 1);
+
+    // The proof is in the request: the node's schema went to the model, not
+    // the agent's.
+    let requests = server.received_requests().await.expect("requests recorded");
+    let body: Value = serde_json::from_slice(&requests[0].body).expect("request body is JSON");
+    let offered = body["tools"].as_array().expect("the request offers tools");
+    assert_eq!(offered[0]["input_schema"], declared_schema());
+    assert_ne!(offered[0]["input_schema"], agent_schema());
+}
+
+#[tokio::test]
+async fn a_node_without_a_schema_uses_the_agents_own() {
+    // The node declares nothing, so the agent's declaration is what the run
+    // is held to, and the answer arrives in the agent's shape.
+    let server = ScriptedModel::mount(vec![(
+        1,
+        tool_use_response(
+            "tu_answer",
+            ANSWER_TOOL,
+            json!({"headline": "otters, briefly"}),
+            5,
+            3,
+        ),
+    )])
+    .await;
+    let mut agents: HashMap<String, Agent> = HashMap::new();
+    agents.insert(
+        RATE_HASH.to_owned(),
+        agent_builder(&server.uri())
+            .output_schema(agent_schema())
+            .build()
+            .expect("agent builds"),
+    );
+    let (publish, publish_calls) = EchoTool::new("http_post", Effect::Write);
+    let mut tools: HashMap<String, Box<dyn DynTool>> = HashMap::new();
+    tools.insert("http_post".to_owned(), Box::new(publish));
+
+    // No branch here: the graph is `rate -> publish`, because the point is
+    // the schema the node inherited, not the routing.
+    let graph = GraphBuilder::new()
+        .agent(AgentSpec::new("rate", RATE_HASH))
+        .tool(ToolSpec::new("publish", "http_post"))
+        .edge("rate", "publish")
+        .build();
+
+    let run_id = fixed_run_id(83);
+    let store = Arc::new(SqliteStore::in_memory().expect("store opens"));
+    let mut ctx = RunCtx::with_hooks(store.clone(), run_id, vec![], fixed_clock(), fixed_random())
+        .expect("ctx builds");
+    let outcome = run_graph(
+        &mut ctx,
+        &graph,
+        &json!({"draft": "otters"}),
+        &agents,
+        &tools,
+    )
+    .await
+    .expect("the graph drives");
+    let GraphOutcome::Completed { output } = outcome else {
+        panic!("expected completion, got {outcome:?}");
+    };
+    assert_eq!(
+        output,
+        json!({"published": {"headline": "otters, briefly"}})
+    );
+    assert_eq!(publish_calls.load(Ordering::SeqCst), 1);
+
+    let requests = server.received_requests().await.expect("requests recorded");
+    let body: Value = serde_json::from_slice(&requests[0].body).expect("request body is JSON");
+    let offered = body["tools"].as_array().expect("the request offers tools");
+    assert_eq!(offered.len(), 1);
+    assert_eq!(offered[0]["name"], json!(ANSWER_TOOL));
+    assert_eq!(offered[0]["input_schema"], agent_schema());
+    assert_eq!(body["tool_choice"], json!({"type": "any"}));
 }

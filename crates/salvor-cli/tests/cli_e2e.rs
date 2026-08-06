@@ -158,3 +158,83 @@ async fn run_emits_progress_on_stderr() {
     assert!(stdout.contains("run "));
     assert!(stdout.contains("done"));
 }
+
+/// An agent file that declares an `[output_schema]` runs structured end to
+/// end: nothing on the command line asks for it, the model answers through
+/// the forced `salvor_answer` call, and what `salvor run` prints is the
+/// object, not a sentence. This is the whole agent-level feature seen from
+/// outside the process.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_declared_output_schema_makes_run_print_an_object() {
+    let dir = tempdir().expect("tempdir");
+    let store = dir.path().join("salvor.db");
+    let count_file = dir.path().join("count.txt");
+
+    // One turn (1 message): the answer call itself.
+    let model = GateModel::mount(vec![(
+        1,
+        tool_use_response(
+            "tu_answer",
+            "salvor_answer",
+            json!({"score": 0.87, "verdict": "ship it"}),
+            100,
+            20,
+        ),
+    )])
+    .await;
+    let agent = write_agent(
+        dir.path(),
+        &model.uri(),
+        &count_file,
+        "\n[output_schema]\n\
+         type = \"object\"\n\
+         required = [\"score\"]\n\n\
+         [output_schema.properties.score]\n\
+         type = \"number\"\n",
+    );
+
+    let output = run_salvor(
+        &store,
+        &[
+            "run",
+            "--agent",
+            agent.to_str().unwrap(),
+            "--input",
+            "\"rate this\"",
+        ],
+    )
+    .await;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "run exits 0: {output:?}");
+
+    // The printed output parses as the answer object, verbatim.
+    let printed: Value = serde_json::from_str(
+        stdout
+            .split_once('\n')
+            .expect("the id line comes first")
+            .1
+            .trim(),
+    )
+    .expect("the run printed JSON");
+    assert_eq!(printed, json!({"score": 0.87, "verdict": "ship it"}));
+
+    // The request the binary sent offered the declared schema on the answer
+    // tool beside the agent's real one, and required a call.
+    let requests = model.received_requests().await.expect("requests recorded");
+    let body: Value = serde_json::from_slice(&requests[0].body).expect("request body is JSON");
+    let offered = body["tools"].as_array().expect("tools offered");
+    let answer = offered
+        .iter()
+        .find(|tool| tool["name"] == json!("salvor_answer"))
+        .expect("the answer tool is offered");
+    assert_eq!(
+        answer["input_schema"],
+        json!({
+            "type": "object",
+            "required": ["score"],
+            "properties": {"score": {"type": "number"}}
+        })
+    );
+    assert_eq!(body["tool_choice"], json!({"type": "any"}));
+    assert_eq!(count_lines(&count_file), 0, "no tool needed to run");
+}

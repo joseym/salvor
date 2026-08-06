@@ -1,0 +1,8 @@
+model = "m"
+
+[output_schema]
+type = "object"
+required = ["score"]
+
+[output_schema.properties.score]
+type = "number"

@@ -1,0 +1,4 @@
+{
+  "error": "set only one of `output_schema` or `output_schema_path`, not both",
+  "ok": false
+}

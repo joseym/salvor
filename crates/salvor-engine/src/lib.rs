@@ -23,7 +23,10 @@
 //!   the structured form of that loop
 //!   ([`drive_loop_structured`](salvor_runtime::drive_loop_structured)) instead,
 //!   so the node's output is the validated object the schema describes rather
-//!   than the reply text, and downstream expressions can read its fields;
+//!   than the reply text, and downstream expressions can read its fields. The
+//!   resolved agent may declare a schema of its own, in which case the node's
+//!   declaration wins and the agent's is the fallback (see
+//!   [`Agent::output_schema`](salvor_runtime::Agent::output_schema));
 //! - a **tool** node records one tool call through the same write-ahead
 //!   intent/completion machinery the built-in loop uses, honoring the tool's
 //!   effect class;
@@ -694,18 +697,32 @@ impl BodyCall<'_> {
 /// Drives one `agent` node's loop, wherever it sits: walked as a node of its
 /// own, or run inline as a map's or fold's per-item worker.
 ///
-/// The node's `output_schema` is the effective structured-output schema, and it
-/// is the whole difference between the two loops. With one, the runtime offers
-/// the model its answer tool and validates the answer against the schema, so
-/// this node's output is that object and a downstream expression can read a
-/// field of it; without one, the output is the reply text as before.
+/// A declared `output_schema` is the whole difference between the two loops.
+/// With one, the runtime offers the model its answer tool and validates the
+/// answer against the schema, so this node's output is that object and a
+/// downstream expression can read a field of it; without one, the output is the
+/// reply text as before.
+///
+/// Two places can declare it, and the rule is **node wins, else the agent's
+/// own**. The node's `output_schema` is the graph author's statement about what
+/// this position in this document needs, made with the whole document in view;
+/// the agent's is the agent author's statement about what the agent always
+/// produces, made without knowing which graph would call it. The more specific
+/// declaration is the more informed one, so it takes the node's when there is
+/// one and falls back to the agent's when there is not. A node that declares
+/// nothing and an agent that declares nothing stay on the plain text loop, as
+/// every graph did before either declaration existed.
 async fn drive_agent_node(
     ctx: &mut RunCtx,
     node: &AgentNode,
     agent: &Agent,
     input: &Value,
 ) -> Result<LoopOutcome, EngineError> {
-    let outcome = match node.output_schema.as_ref() {
+    let schema = node
+        .output_schema
+        .as_ref()
+        .or_else(|| agent.output_schema());
+    let outcome = match schema {
         Some(schema) => drive_loop_structured(ctx, agent, input, schema).await?,
         None => drive_loop(ctx, agent, input).await?,
     };

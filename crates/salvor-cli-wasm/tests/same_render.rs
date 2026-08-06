@@ -1003,6 +1003,22 @@ fn reference_agent_texts() -> Vec<(&'static str, &'static str)> {
              idempotency_keys = { pay_claim = \"claim_id\", refund = \"payment.charge_id\" }\n",
         ),
         (
+            "output_schema",
+            "model = \"m\"\n\n\
+             [output_schema]\n\
+             type = \"object\"\n\
+             required = [\"score\"]\n\n\
+             [output_schema.properties.score]\n\
+             type = \"number\"\n",
+        ),
+        (
+            "bad_both_output_schemas",
+            "model = \"m\"\n\
+             output_schema_path = \"answer.json\"\n\n\
+             [output_schema]\n\
+             type = \"object\"\n",
+        ),
+        (
             "bad_unknown_field",
             "model = \"claude-opus-4-8\"\n\
              [budgets]\n\

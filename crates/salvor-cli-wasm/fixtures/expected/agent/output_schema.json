@@ -15,23 +15,20 @@
       "timeout_seconds": null
     },
     "max_response_tokens": null,
-    "mcp_servers": [
-      {
-        "args": [],
-        "bearer_token_env": null,
-        "command": "payouts",
-        "effect_overrides": {},
-        "env": {},
-        "idempotency_keys": {
-          "pay_claim": "claim_id",
-          "refund": "payment.charge_id"
-        },
-        "url": null
-      }
-    ],
+    "mcp_servers": [],
     "model": "m",
     "name": null,
-    "output_schema": null,
+    "output_schema": {
+      "properties": {
+        "score": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "score"
+      ],
+      "type": "object"
+    },
     "output_schema_path": null,
     "pricing": null,
     "record_prompts": null,

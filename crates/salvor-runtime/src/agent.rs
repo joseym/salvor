@@ -2,7 +2,8 @@
 //! definition.
 //!
 //! An agent is model + system prompt + tools + budgets (+ pricing when a
-//! cost budget is declared). Under the single built-in loop, that makes an
+//! cost budget is declared, + an output schema when the agent declares the
+//! shape of what it produces). Under the single built-in loop, that makes an
 //! agent definition pure data, and pure data can be content-hashed:
 //!
 //! # The definition hash
@@ -30,12 +31,20 @@
 //! entirely rather than carrying it as `null`, so every tool without one
 //! hashes exactly as it did before `output_schema` existed on the contract.
 //!
+//! An agent that declares an [`output_schema`](Agent::output_schema) of its
+//! own carries it as a top-level `"output_schema"` key beside `"model"` and
+//! `"tools"`, under the same absent-not-null discipline: an agent that
+//! declares none omits the key entirely, so its hash is byte-identical to
+//! the one it had before agents could declare a shape at all. That matters
+//! more here than anywhere: an agent hash is pinned in checked-in graph
+//! documents, and adding a field must not orphan a single one of them.
+//!
 //! Tools appear sorted by name (the `ToolSet` enumerates them that way), so
 //! registration order never changes the hash; any change to the model id,
-//! prompt, a tool contract, a budget, or pricing does. The client
-//! configuration (base URL, API key, retries) is deliberately *not* hashed:
-//! it is transport, not definition, and pointing the same agent at a local
-//! endpoint must not orphan its recorded runs. MCP-backed tools participate
+//! prompt, a tool contract, a budget, pricing, or the declared output shape
+//! does. The client configuration (base URL, API key, retries) is
+//! deliberately *not* hashed: it is transport, not definition, and pointing
+//! the same agent at a local endpoint must not orphan its recorded runs. MCP-backed tools participate
 //! exactly like native ones, through their `DynTool` descriptors.
 //!
 //! # Build-time checks
@@ -69,6 +78,7 @@ pub struct Agent {
     budgets: Budgets,
     pricing: Option<Pricing>,
     max_response_tokens: u32,
+    output_schema: Option<Value>,
     def_hash: String,
     record_prompts: bool,
     labels: Option<BTreeMap<String, String>>,
@@ -129,6 +139,26 @@ impl Agent {
     #[must_use]
     pub fn max_response_tokens(&self) -> u32 {
         self.max_response_tokens
+    }
+
+    /// The shape this agent's final answer must take, when it declares one
+    /// with [`AgentBuilder::output_schema`]. `Some` puts every run of this
+    /// agent on the structured path: the built-in loop offers the model the
+    /// `salvor_answer` tool carrying this schema, forces a tool call, and
+    /// ends only on an answer the schema accepts, so the run's output is that
+    /// object rather than a paragraph of prose.
+    ///
+    /// Unlike [`record_prompts`](Self::record_prompts), [`labels`](Self::labels),
+    /// and [`name`](Self::name), this IS part of
+    /// [`def_hash`](Self::def_hash). Those three are posture and paperwork
+    /// around an agent; this changes what the agent produces, so two agents
+    /// that differ only here are two different agents and must not share one
+    /// recorded identity. Declaring a schema on an existing agent file
+    /// therefore mints a new hash, and any graph document pinning the old one
+    /// needs repinning.
+    #[must_use]
+    pub fn output_schema(&self) -> Option<&Value> {
+        self.output_schema.as_ref()
     }
 
     /// Whether runs of this agent record the full model request body into the
@@ -193,6 +223,7 @@ pub struct AgentBuilder {
     budgets: Budgets,
     pricing: Option<Pricing>,
     max_response_tokens: Option<u32>,
+    output_schema: Option<Value>,
     record_prompts: bool,
     labels: Option<BTreeMap<String, String>>,
     name: Option<String>,
@@ -271,6 +302,30 @@ impl AgentBuilder {
         self
     }
 
+    /// Declares the shape of this agent's final answer (unset by default),
+    /// putting every run of it on the structured path: the built-in loop
+    /// offers the model the `salvor_answer` tool carrying this schema and
+    /// ends only on an answer the schema accepts. See
+    /// [`Agent::output_schema`], and
+    /// [`drive_loop_structured`](crate::drive_loop_structured) for the loop
+    /// itself.
+    ///
+    /// This one IS hashed into [`Agent::def_hash`], unlike
+    /// [`record_prompts`](Self::record_prompts), [`labels`](Self::labels),
+    /// and [`name`](Self::name): it changes what the agent produces, not how
+    /// it is deployed or described. An agent that declares no schema hashes
+    /// exactly as it did before this setter existed.
+    ///
+    /// A graph's `agent` node may declare a schema too, and a node's
+    /// declaration wins over this one for that node (see the graph engine's
+    /// `drive_agent_node`). This is the agent's own default, used wherever it
+    /// runs without a node speaking for it.
+    #[must_use]
+    pub fn output_schema(mut self, schema: Value) -> Self {
+        self.output_schema = Some(schema);
+        self
+    }
+
     /// Turns on recording of the full model request body for runs of this
     /// agent (default off). This is the resolved effective setting; the CLI
     /// and server compute it from the per-agent `record_prompts` config and the
@@ -346,6 +401,7 @@ impl AgentBuilder {
             &tools,
             &self.budgets,
             self.pricing.as_ref(),
+            self.output_schema.as_ref(),
         );
 
         Ok(Agent {
@@ -358,6 +414,7 @@ impl AgentBuilder {
             max_response_tokens: self
                 .max_response_tokens
                 .unwrap_or(DEFAULT_MAX_RESPONSE_TOKENS),
+            output_schema: self.output_schema,
             def_hash,
             record_prompts: self.record_prompts,
             labels: self.labels,
@@ -397,6 +454,7 @@ fn compute_def_hash(
     tools: &ToolSet,
     budgets: &Budgets,
     pricing: Option<&Pricing>,
+    output_schema: Option<&Value>,
 ) -> String {
     let tool_values: Vec<Value> = tools
         .descriptors()
@@ -427,7 +485,7 @@ fn compute_def_hash(
             value
         })
         .collect();
-    let value = json!({
+    let mut value = json!({
         "budgets": {
             "max_cost_usd": budgets.max_cost_usd,
             "max_steps": budgets.max_steps,
@@ -441,6 +499,20 @@ fn compute_def_hash(
         "system_prompt": system_prompt,
         "tools": tool_values,
     });
+    // The agent's own output schema, on exactly the terms a tool's is: the
+    // key appears only when one is declared, never as an explicit `null`.
+    // Absent-not-null is what keeps a schema-less agent hashing the way it
+    // always has, and an agent hash is the thing checked-in graph documents
+    // pin, so the alternative would silently invalidate every one of them the
+    // day this field was added. `pricing` above is the older, looser style
+    // (`null` when unset) and stays that way for the same reason in reverse:
+    // it was there from the start, so its null is already in every hash.
+    if let Some(output_schema) = output_schema {
+        value
+            .as_object_mut()
+            .expect("the json! object literal above always builds a Value::Object")
+            .insert("output_schema".to_owned(), output_schema.clone());
+    }
     hash_value(&value)
 }
 
@@ -713,5 +785,47 @@ mod tests {
             .build()
             .unwrap();
         assert_ne!(without.def_hash(), with.def_hash());
+    }
+
+    /// The agent's OWN output schema changes the hash, and the same absent-key
+    /// discipline protects an agent that declares none: the literal pinned in
+    /// `a_tool_without_output_schema_hashes_unchanged` is the same agent,
+    /// still hashing to the same value after this field was added, which is
+    /// the proof that no existing agent file's identity moved.
+    #[test]
+    fn an_agent_output_schema_changes_the_hash() {
+        let without = base_builder().build().unwrap();
+        let with = base_builder()
+            .output_schema(json!({"type": "object", "required": ["score"]}))
+            .build()
+            .unwrap();
+        let differently = base_builder()
+            .output_schema(json!({"type": "object", "required": ["verdict"]}))
+            .build()
+            .unwrap();
+
+        assert_ne!(without.def_hash(), with.def_hash());
+        assert_ne!(with.def_hash(), differently.def_hash());
+        assert_eq!(without.output_schema(), None);
+        assert_eq!(
+            with.output_schema(),
+            Some(&json!({"type": "object", "required": ["score"]}))
+        );
+    }
+
+    /// An agent's schema and a tool's are separate keys in separate places:
+    /// the same schema declared on the agent and on its tool are two different
+    /// definitions, so they must not collide into one hash.
+    #[test]
+    fn an_agent_schema_and_a_tool_schema_are_not_the_same_declaration() {
+        let schema = json!({"type": "object", "properties": {"receipt_id": {"type": "string"}}});
+        let on_the_agent = base_builder().output_schema(schema).build().unwrap();
+        let on_the_tool = Agent::builder()
+            .model(Config::new(), "test-model")
+            .system_prompt("prompt")
+            .tool_dyn(Box::new(StubToolWithOutputSchema))
+            .build()
+            .unwrap();
+        assert_ne!(on_the_agent.def_hash(), on_the_tool.def_hash());
     }
 }

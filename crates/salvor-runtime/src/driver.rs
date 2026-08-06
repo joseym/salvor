@@ -41,6 +41,13 @@
 //! a re-ask. There is no retry counter: the steps budget is the bound, and a
 //! crossing mid-re-ask parks like any other.
 //!
+//! Nothing has to ask for that path by name. An [`Agent`] that declares an
+//! [`output_schema`](Agent::output_schema) drives it automatically through
+//! [`drive`], so a schema written into an `agent.toml` reaches every
+//! server-side loop that runs the agent; [`drive_loop_structured`] is the
+//! same thing for a caller driving a schema of its own, which is how a
+//! graph's `agent` node overrides its agent's default.
+//!
 //! # Determinism inventory
 //!
 //! Everything the loop feeds forward is a pure function of recorded data:
@@ -131,18 +138,28 @@ pub enum LoopOutcome {
 /// Drives one run (fresh, recovering, or resuming; the `ctx` knows which)
 /// to a final output or a park.
 ///
-/// This is exactly [`begin`] followed by [`drive_loop`], with the terminal
+/// This is exactly [`begin`] followed by the loop, with the terminal
 /// `RunCompleted` recorded here on completion. Splitting those two halves out
 /// is what lets the graph engine run [`drive_loop`] against a `RunCtx` whose
 /// log it already opened with `GraphRunStarted`: the agent node contributes its
 /// model and tool events without a second run head and without closing the run.
+///
+/// Which loop runs is the agent's own decision: an agent that declares an
+/// [`output_schema`](Agent::output_schema) drives the structured path, and one
+/// that declares none drives the plain one. So the declaration in an
+/// `agent.toml` reaches `salvor run`, `Runtime::start`, `recover`, and
+/// `resume` without any of them being told about it a second time. (A
+/// structured drive whose agent already owns a real `salvor_answer` tool still
+/// fails with [`RuntimeError::AnswerToolNameTaken`], but here the head is
+/// already recorded when it does, exactly as for any other failure on the
+/// first step.)
 pub(crate) async fn drive(
     ctx: &mut RunCtx,
     agent: &Agent,
     initial_input: &Value,
 ) -> Result<LoopOutcome, RuntimeError> {
     let input = begin(ctx, agent, initial_input).await?;
-    let outcome = drive_loop(ctx, agent, &input).await?;
+    let outcome = drive_loop_inner(ctx, agent, &input, agent.output_schema()).await?;
     // The built-in path records the terminal itself, in the same position and
     // with the same output the loop used to record inline. Moving the call here
     // changes no bytes: `begin`, the loop's events, then `RunCompleted`, in that
