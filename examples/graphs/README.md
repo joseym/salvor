@@ -12,7 +12,7 @@ That engine backs `salvor graph run`, `POST /v1/graphs`, and
 
 | Kind | Payload it carries | Meaning |
 |---|---|---|
-| `agent` | `agent_hash` (a `sha256:<64 hex>` string), optional `input_schema` / `output_schema` | A full agent loop, referenced BY CONTENT HASH, never an embedded definition. |
+| `agent` | `agent_hash` (a `sha256:<64 hex>` string), optional `input_schema` / `output_schema` | A full agent loop, referenced BY CONTENT HASH, never an embedded definition. An `output_schema` here has a RUNTIME meaning as well as a documentary one: the engine runs that node's loop in structured mode. The model is offered a synthetic `salvor_answer` tool whose input schema IS the declared schema, and the request requires it to call some tool, so the reply is delivered through that call and the node's output is the call's validated input rather than the reply text. The check is this repo's own structural validator, which honors `type`, `required`, `properties`, `items`, and `enum`, and never rejects a value over a keyword outside that set (`pattern`, numeric ranges, `oneOf`, and the rest are read but not enforced). An answer that fails the check goes back to the model with the violation named, and the loop asks again until the steps budget stops it. The same field is separately used at load time, on the document, for the edge type-compatibility check below; the two uses do not interact. |
 | `tool` | `tool` name, `input` mapping (data), optional schemas | One direct tool invocation, no model in the loop. |
 | `gate` | optional `prompt`, `approval_schema` | Human approval that suspends the run. The `approval_schema` is enforced against the resume input before the approval is recorded: a non-conforming approval is refused, nothing is appended, and the run stays parked at the gate. A schema that names `required` or `properties` without a `type` is read as asking for an object, so a bare `null`, number, or string is refused too. |
 | `branch` | optional `on`, `cases` (each a `name` + a `when` condition) | Routes on a typed output. Conditions are recorded as DATA and evaluated by the engine at run time, never by this crate. |
@@ -33,7 +33,7 @@ ignored.
 | [`linear-research-publish.json`](linear-research-publish.json) | A simpler linear flow with no gate: a research `agent` drafts, a review `agent` checks, a `tool` publishes. |
 | [`branch-review.json`](branch-review.json) | An `agent` drafts, a `tool` scores it, a `branch` routes on the score: the high case reaches a `gate` then publishes, the low case reaches a rejection `tool` directly. |
 | [`branch-model-decision.json`](branch-model-decision.json) | An `agent` drafts, a `tool` scores it, a `branch` carries BOTH an expression case and a `model_decision` case with a well-formed `agent_hash`: the high case reaches a `gate` then publishes, the review case reaches an escalation `tool` directly. The shared fixture the Rust, TypeScript, and Python builders all reduce to for a branch's `agent_hash`. |
-| [`fold-refine.json`](fold-refine.json) | A single `fold` node whose body is an `agent`, bounded to 3 iterations with a `stop_when` condition and a `best_by` join. Validates clean, and the engine drives the loop: `tailor` runs once per pass as the fold's per-pass worker, never as a node of its own. Its `best_by` join then needs a `score` inside each pass's value, and an `agent` node's output is the model's reply text, so with a plain text reply the join has nothing to order and refuses (`FoldNoComparableCandidate`) rather than guessing a winner. A `tool` body, whose output is arbitrary JSON, is what carries a scored accumulator today. |
+| [`fold-refine.json`](fold-refine.json) | A single `fold` node whose body is an `agent`, bounded to 3 iterations with a `stop_when` condition and a `best_by` join. Validates clean, and the engine drives the loop to convergence: `tailor` runs once per pass as the fold's per-pass worker, never as a node of its own, and because that node declares an `output_schema` requiring a numeric `score`, each pass answers through the forced `salvor_answer` call and hands the fold a scored object. So `stop_when` (`score >= 0.85`) reads a real number, the `best_by` argmax orders real candidates, and the node's output is the winning pass's object. A `tool` body, whose output is arbitrary JSON, carries a scored accumulator the same way. |
 | [`invalid-dangling-edge.json`](invalid-dangling-edge.json) | An edge whose target `aprove` is a typo of the node `approve`. Produces a precise dangling-edge error with a nearest-name suggestion. |
 | [`invalid-cycle.json`](invalid-cycle.json) | Two agents pointing at each other. Produces a precise cycle error naming the path. |
 
@@ -217,6 +217,9 @@ All checks run and every failure is reported (never just the first):
 - **Edge type-compatibility.** Where BOTH endpoints of an edge declare a
   schema, the source's `output_schema` and the target's `input_schema` must be
   structurally identical. Where either is absent, the edge passes unchecked.
+  This is a document-level check, done at load time by comparing two declared
+  schemas; it is a separate use of the same field from the runtime enforcement
+  an `agent` node's `output_schema` carries (see the node-kind table above).
   This is deliberately conservative: it does NOT implement JSON Schema
   subtyping, so a compatible-but-not-identical pair is reported as a mismatch.
   Relaxing it to true schema compatibility is a later change to that one check.

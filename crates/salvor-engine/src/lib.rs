@@ -19,7 +19,11 @@
 //!
 //! - an **agent** node runs the built-in agent loop
 //!   ([`drive_loop`](salvor_runtime::drive_loop)) inside the same log, framed by
-//!   `NodeEntered` / `NodeExited`;
+//!   `NodeEntered` / `NodeExited`. A node that declares an `output_schema` runs
+//!   the structured form of that loop
+//!   ([`drive_loop_structured`](salvor_runtime::drive_loop_structured)) instead,
+//!   so the node's output is the validated object the schema describes rather
+//!   than the reply text, and downstream expressions can read its fields;
 //! - a **tool** node records one tool call through the same write-ahead
 //!   intent/completion machinery the built-in loop uses, honoring the tool's
 //!   effect class;
@@ -133,11 +137,12 @@ use std::collections::{HashMap, HashSet};
 use salvor_core::{Effect, RunId};
 use salvor_graph::expr::{Expr, Reference};
 use salvor_graph::{
-    BranchCondition, BranchNode, Edge, FoldBody, FoldJoin, FoldNode, GateNode, Graph, MapBody,
-    MapNode, Node,
+    AgentNode, BranchCondition, BranchNode, Edge, FoldBody, FoldJoin, FoldNode, GateNode, Graph,
+    MapBody, MapNode, Node,
 };
 use salvor_runtime::{
-    Agent, LoopOutcome, ParkReason, Resumption, RunCtx, ToolCallResult, drive_loop, hash_value,
+    Agent, LoopOutcome, ParkReason, Resumption, RunCtx, ToolCallResult, drive_loop,
+    drive_loop_structured, hash_value,
 };
 use salvor_tools::DynTool;
 use serde_json::{Value, json};
@@ -335,7 +340,7 @@ pub async fn run_graph(
                 // The agent loop runs inside this same log via the runtime's
                 // begin/drive_loop split: no second run head, and it returns the
                 // output without recording a terminal (the engine owns that).
-                match drive_loop(ctx, agent, &node_input).await? {
+                match drive_agent_node(ctx, agent_node, agent, &node_input).await? {
                     LoopOutcome::Completed(output) => {
                         ctx.node_exited(id).await?;
                         last_output = output.clone();
@@ -686,6 +691,27 @@ impl BodyCall<'_> {
     }
 }
 
+/// Drives one `agent` node's loop, wherever it sits: walked as a node of its
+/// own, or run inline as a map's or fold's per-item worker.
+///
+/// The node's `output_schema` is the effective structured-output schema, and it
+/// is the whole difference between the two loops. With one, the runtime offers
+/// the model its answer tool and validates the answer against the schema, so
+/// this node's output is that object and a downstream expression can read a
+/// field of it; without one, the output is the reply text as before.
+async fn drive_agent_node(
+    ctx: &mut RunCtx,
+    node: &AgentNode,
+    agent: &Agent,
+    input: &Value,
+) -> Result<LoopOutcome, EngineError> {
+    let outcome = match node.output_schema.as_ref() {
+        Some(schema) => drive_loop_structured(ctx, agent, input, schema).await?,
+        None => drive_loop(ctx, agent, input).await?,
+    };
+    Ok(outcome)
+}
+
 /// Runs one map iteration's or fold pass's body work inline: the referenced
 /// `agent` or `tool` node's work with `item` as its input, recorded in the parent
 /// log WITHOUT a `NodeEntered` frame of its own (the owner's markers bracket it
@@ -707,7 +733,7 @@ async fn run_body(
                     node: agent_node.id.clone(),
                     agent_hash: agent_node.agent_hash.clone(),
                 })?;
-            match drive_loop(ctx, agent, item).await? {
+            match drive_agent_node(ctx, agent_node, agent, item).await? {
                 LoopOutcome::Completed(output) => Ok(IterationOutcome::Output(output)),
                 LoopOutcome::Parked(reason) => Ok(IterationOutcome::Parked(reason)),
             }

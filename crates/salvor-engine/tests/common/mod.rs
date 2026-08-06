@@ -147,6 +147,52 @@ impl Respond for ScriptedModel {
     }
 }
 
+/// A scripted model that picks its response by a NEEDLE found in the raw
+/// request body, for the conversations [`ScriptedModel`]'s message count
+/// cannot tell apart.
+///
+/// A fold's passes are exactly that case: every pass drives a fresh agent loop
+/// whose conversation is one message long, so the count is 1 every time and
+/// only the pass's own input distinguishes them. Matching on request content
+/// keeps the script correct across replays and resumes the same way the count
+/// does: it reads the request, never a call counter, so a replayed call that
+/// never reaches the server changes nothing. Needles are tried in script
+/// order; the first one the body contains wins.
+pub struct ContentScriptedModel {
+    script: Vec<(String, Value)>,
+}
+
+impl ContentScriptedModel {
+    /// Mounts the script on a fresh mock server and returns it.
+    pub async fn mount(script: Vec<(&str, Value)>) -> MockServer {
+        let server = MockServer::start().await;
+        let script = script
+            .into_iter()
+            .map(|(needle, response)| (needle.to_owned(), response))
+            .collect();
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(Self { script })
+            .mount(&server)
+            .await;
+        server
+    }
+}
+
+impl Respond for ContentScriptedModel {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let body = String::from_utf8_lossy(&request.body);
+        for (needle, response) in &self.script {
+            if body.contains(needle.as_str()) {
+                return ResponseTemplate::new(200).set_body_json(response.clone());
+            }
+        }
+        ResponseTemplate::new(500).set_body_json(json!({
+            "error": {"type": "test_script", "message": "no scripted response matched the request"}
+        }))
+    }
+}
+
 /// A tool that echoes its input, counting each execution so a replay's
 /// zero-execution claim can be checked.
 pub struct EchoTool {

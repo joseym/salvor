@@ -23,7 +23,9 @@
 //!   typed `UnsupportedFoldBody` refused before the fold's `NodeEntered`;
 //! - the committed `fold-refine.json` fixture drives under the engine with its
 //!   `tailor` agent as the per-pass worker, walked once per pass and never as a
-//!   node of its own.
+//!   node of its own, and CONVERGES: the node's declared `output_schema` runs,
+//!   so each pass hands the fold a scored object, the predicate fires on it, and
+//!   the `best_by` join picks a winner.
 
 mod common;
 
@@ -32,8 +34,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use common::{
-    PassTool, ScriptedModel, SuspendingTool, agent_builder, event_kinds, fixed_clock, fixed_random,
-    fixed_run_id, text_response,
+    ContentScriptedModel, PassTool, SuspendingTool, agent_builder, event_kinds, fixed_clock,
+    fixed_random, fixed_run_id, tool_use_response,
 };
 use salvor_core::{Effect, Event, EventEnvelope, RunId};
 use salvor_engine::{EngineError, ForkError, GraphOutcome, plan_fork, run_graph};
@@ -41,7 +43,7 @@ use salvor_graph::{
     FoldBody, FoldJoin, FoldSpec, GateSpec, Graph, GraphBuilder, ToolSpec, validate,
 };
 use salvor_replay::{NodeState, derive_graph_projection};
-use salvor_runtime::{Agent, ParkReason, RunCtx};
+use salvor_runtime::{ANSWER_TOOL, Agent, ParkReason, RunCtx};
 use salvor_store::{EventStore, SqliteStore};
 use salvor_tools::DynTool;
 use serde_json::{Value, json};
@@ -752,19 +754,26 @@ async fn forking_into_a_fold_pass_is_refused_but_the_fold_node_is_a_boundary() {
 // ---------------------------------------------------------------------------
 
 /// The committed `fold-refine.json` fixture, the cross-language pin, validates
-/// and now DRIVES under the engine: its `tailor` agent runs once per pass as the
-/// fold's per-pass worker and is never walked as a node of its own (no
-/// `NodeEntered` names it, and the model is called exactly once per pass rather
-/// than four times).
+/// and CONVERGES under the engine: its `tailor` agent runs once per pass as the
+/// fold's per-pass worker, never walked as a node of its own (no `NodeEntered`
+/// names it, and the model is called exactly once per pass rather than four
+/// times), and the `best_by` join picks a winner.
 ///
-/// The fixture's `best_by` join then refuses, and that is the honest reading of
-/// what it asks for: a built-in `agent` node's output is the model's reply TEXT,
-/// so no pass value carries the `score` the join names, and an argmax with no
-/// comparable candidate has no answer. The loop itself is what this pins; the
-/// refusal at the join is the documented boundary of what an agent body can
-/// currently produce.
+/// The join is what this test exists to pin. It used to refuse: an agent node's
+/// output was the model's reply TEXT, so no pass value carried the `score` the
+/// join names and the argmax had nothing to order. The fixture's `tailor` node
+/// declares an `output_schema`, and that declaration now RUNS: the loop offers
+/// the model its answer tool carrying that schema, validates the call, and hands
+/// the fold a scored object per pass. So the predicate reads a real score, the
+/// argmax orders real candidates, and the document means at runtime exactly what
+/// it says on the page.
+///
+/// The scripted passes score 0.6, then 0.9, then 0.7. `stop_when`
+/// (`score >= 0.85`) fires on the middle one, so the third is never asked for
+/// and the run stops one short of its `max_iterations` bound; `best_by` then
+/// picks that middle pass, index 1, out of the two that ran.
 #[tokio::test]
-async fn the_fold_refine_fixture_drives_without_double_running_its_body() {
+async fn the_fold_refine_fixture_converges_on_its_best_scoring_pass() {
     let path = format!(
         "{}/../../examples/graphs/fold-refine.json",
         env!("CARGO_MANIFEST_DIR")
@@ -775,8 +784,44 @@ async fn the_fold_refine_fixture_drives_without_double_running_its_body() {
         validate(&graph).is_ok(),
         "the committed fixture validates clean"
     );
+    let document: Value = serde_json::from_str(&text).expect("the fixture parses as JSON");
+    let declared_schema = document["nodes"][0]["payload"]["output_schema"].clone();
 
-    let server = ScriptedModel::mount(vec![(1, text_response("a tailored draft", 5, 3))]).await;
+    // Each pass folds over the pass before it, so the pass input is what tells
+    // the turns apart: the graph input first, then each answer in turn.
+    let server = ContentScriptedModel::mount(vec![
+        (
+            "otters",
+            tool_use_response(
+                "tu_pass_0",
+                ANSWER_TOOL,
+                json!({"draft": "first pass", "score": 0.6}),
+                5,
+                3,
+            ),
+        ),
+        (
+            "0.6",
+            tool_use_response(
+                "tu_pass_1",
+                ANSWER_TOOL,
+                json!({"draft": "second pass", "score": 0.9}),
+                5,
+                3,
+            ),
+        ),
+        (
+            "0.9",
+            tool_use_response(
+                "tu_pass_2",
+                ANSWER_TOOL,
+                json!({"draft": "third pass", "score": 0.7}),
+                5,
+                3,
+            ),
+        ),
+    ])
+    .await;
     let mut agents: HashMap<String, Agent> = HashMap::new();
     agents.insert(
         TAILOR_HASH.to_owned(),
@@ -788,7 +833,7 @@ async fn the_fold_refine_fixture_drives_without_double_running_its_body() {
     let store = Arc::new(SqliteStore::in_memory().expect("store opens"));
     let mut ctx = RunCtx::with_hooks(store.clone(), run_id, vec![], fixed_clock(), fixed_random())
         .expect("ctx builds");
-    let error = run_graph(
+    let outcome = run_graph(
         &mut ctx,
         &graph,
         &json!({"topic": "otters"}),
@@ -796,16 +841,21 @@ async fn the_fold_refine_fixture_drives_without_double_running_its_body() {
         &tools,
     )
     .await
-    .expect_err("a text reply carries no `score` for the best_by join to order");
-    assert!(
-        matches!(error, EngineError::FoldNoComparableCandidate { .. }),
-        "expected the argmax refusal, got {error:?}"
+    .expect("the fixture converges");
+    let GraphOutcome::Completed { output } = outcome else {
+        panic!("expected completion, got {outcome:?}");
+    };
+    assert_eq!(
+        output,
+        json!({"draft": "second pass", "score": 0.9}),
+        "the run's output is the winning pass's structured answer, verbatim"
     );
 
     let log = store.read_log(run_id).await.expect("log reads");
-    // Three passes, each one agent loop inline between the fold's markers.
+    // Two passes, each one agent loop inline between the fold's markers, then
+    // the convergence and the terminal.
     let mut kinds = vec!["GraphRunStarted", "NodeEntered"];
-    for _ in 0..3 {
+    for _ in 0..2 {
         kinds.extend([
             "FoldIterationStarted",
             "NowObserved",
@@ -814,7 +864,16 @@ async fn the_fold_refine_fixture_drives_without_double_running_its_body() {
             "FoldIterationJoined",
         ]);
     }
+    kinds.extend(["FoldConverged", "NodeExited", "RunCompleted"]);
     assert_eq!(event_kinds(&log), kinds);
+
+    let (winner_index, reason) = convergence(&log);
+    assert_eq!(winner_index, 1, "the 0.9 pass wins the argmax");
+    assert!(
+        reason.contains("stop_when") && reason.contains("after pass 1"),
+        "the recorded reason names the predicate and the pass: {reason}"
+    );
+
     assert!(
         !log.iter().any(|env| matches!(
             &env.event,
@@ -822,11 +881,23 @@ async fn the_fold_refine_fixture_drives_without_double_running_its_body() {
         )),
         "the body agent is fold-owned: it is never entered as a node of its own"
     );
+    let requests = server.received_requests().await.expect("requests recorded");
     assert_eq!(
-        log.iter()
-            .filter(|env| matches!(env.event, Event::ModelCallRequested { .. }))
-            .count(),
-        3,
-        "one model call per pass: the body did not also run as a walked node"
+        requests.len(),
+        2,
+        "one model call per pass, and the third pass never ran"
     );
+
+    // The declared `output_schema` is what the model was actually offered: the
+    // answer tool carries it verbatim, and some tool call is required.
+    let body: Value = serde_json::from_slice(&requests[0].body).expect("request body is JSON");
+    let offered = body["tools"].as_array().expect("the request offers tools");
+    assert_eq!(
+        offered.len(),
+        1,
+        "the fixture's agent has no tools of its own"
+    );
+    assert_eq!(offered[0]["name"], json!(ANSWER_TOOL));
+    assert_eq!(offered[0]["input_schema"], declared_schema);
+    assert_eq!(body["tool_choice"], json!({"type": "any"}));
 }
