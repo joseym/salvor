@@ -3,19 +3,24 @@
 //! Two families sit here. The first is the engine's own refusals, each naming
 //! the offending node: a `map` node whose `over` reference does not resolve to a
 //! list ([`EngineError::MapOverNotAList`]) or whose body form is not
-//! executable ([`EngineError::UnsupportedMapBody`]), an agent or tool the resolver
+//! executable ([`EngineError::UnsupportedMapBody`]), a `fold` node whose body
+//! form is not executable ([`EngineError::UnsupportedFoldBody`]) or whose
+//! `best_by` join finds no comparable candidate
+//! ([`EngineError::FoldNoComparableCandidate`]), an agent or tool the resolver
 //! could not supply, a graph whose topology is not a well-formed DAG, a branch
 //! that no case matched or whose model decision named no case, a tool that
-//! failed, a gate resumed with an approval that does not satisfy its
-//! `approval_schema` ([`EngineError::ApprovalSchemaViolation`]),
-//! or a node whose kind is not executable
-//! ([`EngineError::UnsupportedNode`], today a `fold`). Most are returned
-//! **before** recording anything for the node they
+//! failed, or a gate resumed with an approval that does not satisfy its
+//! `approval_schema` ([`EngineError::ApprovalSchemaViolation`]). Most are
+//! returned **before** recording anything for the node they
 //! name, so the log never carries events past the refusal; the two branch-decision
 //! errors that require running a model first are the documented exception (their
 //! `NodeEntered` and the model's events are already recorded when the mapping
-//! fails). The second family is [`EngineError::Runtime`], the plain pass-through
-//! of a [`RuntimeError`] from the `RunCtx` operations the engine drives.
+//! fails), as is the fold's join refusal, which can only be reached once the
+//! passes it chooses among have run. There is no longer a whole-kind refusal:
+//! every node kind the document defines is executed, so the variant that named
+//! one is gone. The second family is [`EngineError::Runtime`], the plain
+//! pass-through of a [`RuntimeError`] from the `RunCtx` operations the engine
+//! drives.
 
 use crate::approval::ApprovalViolation;
 use salvor_runtime::RuntimeError;
@@ -84,20 +89,40 @@ pub enum EngineError {
         cases: Vec<String>,
     },
 
-    /// A node whose kind the engine does not execute was reached on the
-    /// walk. Today the sole such kind is `fold`: its execution semantics are
-    /// not implemented, so the engine refuses it with this typed error rather
-    /// than guessing a loop. Returned **before** the node's `NodeEntered`
-    /// is recorded, so nothing lands in the log past the refusal, and it
-    /// reproduces on replay (the same document re-walks to the same refusal). The
-    /// document layer still validates a fold as a legal graph; only the engine
-    /// declines to run it.
-    #[error("node `{node}`: the engine does not execute `{kind}` nodes yet")]
-    UnsupportedNode {
-        /// The id of the node whose kind is not executable here.
+    /// A `fold` node's body is a form that is not executable: an embedded
+    /// `subgraph` (per-pass sub-walks need their own log per pass to keep node
+    /// ids unambiguous, which is not implemented yet, exactly as for a map), or
+    /// a `node` body that names a node whose kind cannot be a per-pass worker
+    /// (only `agent` and `tool` bodies run). Returned **before** the fold's
+    /// `NodeEntered` is recorded, so nothing lands in the log past the refusal.
+    /// The document layer still validates these as legal graphs; only the engine
+    /// declines to run them.
+    #[error("fold node `{node}`: {detail}")]
+    UnsupportedFoldBody {
+        /// The id of the fold node.
         node: String,
-        /// The node's kind name (`"fold"`).
-        kind: &'static str,
+        /// What about the body is not supported.
+        detail: String,
+    },
+
+    /// A `fold` node's `best_by` join found no pass it could choose between:
+    /// the reference resolved on no pass, or resolved only to values the
+    /// expression language does not order (anything but a number or a string).
+    /// An argmax with no candidate has no answer, so the engine refuses rather
+    /// than falling back to a pass no rule chose. Unlike the body refusal this
+    /// arrives **after** the fold's `NodeEntered` and its passes are recorded
+    /// (the passes had to run to be chosen among), but **before**
+    /// `FoldConverged`: no winner and no reason land in the log for a
+    /// convergence that did not happen. It reproduces on replay, because the
+    /// argmax reads the recorded pass outputs.
+    #[error(
+        "fold node `{node}`: the `best_by` join reference `{reference}` named no comparable value in any pass"
+    )]
+    FoldNoComparableCandidate {
+        /// The id of the fold node.
+        node: String,
+        /// The `best_by` reference that named nothing comparable.
+        reference: String,
     },
 
     /// An `agent` node referenced an agent hash the resolver could not supply.

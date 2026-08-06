@@ -16,14 +16,15 @@
 //! The engine's crate docs claim that everything it feeds forward is a pure
 //! function of the document or of recorded values: the walk order, each node's
 //! input, the branch route, a map's resolved item list, its per-iteration child
-//! ids, and an idempotent tool's key. That claim is what makes "a second drive
+//! ids, a fold's stop decision and the winner it converges on, and an idempotent
+//! tool's key. That claim is what makes "a second drive
 //! over the recorded log replays with no live calls and produces a
 //! byte-identical log" true. Prose cannot check it. This sweep does, at every
 //! prefix of every shape in the corpus.
 //!
 //! # The corpus
 //!
-//! Four shapes, each swept independently so each carries its own boundary
+//! Five shapes, each swept independently so each carries its own boundary
 //! count rather than hiding behind an aggregate:
 //!
 //! - `gate`: `research` (agent) -> `approve` (gate) -> `publish` (Write tool).
@@ -40,6 +41,13 @@
 //!   (Idempotent tool). The fan-out has the most events and the most chances to
 //!   double-execute, and its body being a Write is what puts three
 //!   reconciliation refusals inside one fan-out.
+//! - `fold`: `refine` (a bounded loop of three passes, body a Write tool) ->
+//!   `record` (Idempotent tool). Where the map fans out over a list the document
+//!   supplies, the fold's passes are a CHAIN: each pass folds over the previous
+//!   pass's recorded output, so a cut inside the loop must reproduce not just the
+//!   pass count but the value threaded through it, and the winner the `best_by`
+//!   argmax lands on. Its body is a Write for the same reason the map's is: it
+//!   puts one reconciliation refusal inside each pass.
 //! - `flagship`: all three at once, plus an agent node that crosses a
 //!   `max_steps` budget mid-node and resumes with a recorded extension, plus an
 //!   Idempotent tool whose key is derived from its position in the graph. The
@@ -47,28 +55,25 @@
 //!   the item list is a pure function of a recorded resume input rather than of
 //!   the graph document alone.
 //!
-//! # `fold` is deliberately absent
+//! # What `map` and `fold` running inline bound the claim to
 //!
-//! The engine refuses a `fold` node with `EngineError::UnsupportedNode` before
-//! recording its `NodeEntered`, so a fold graph has no run to sweep: there is
-//! no reference log, and every boundary would be the same one-event log. Its
-//! absence from the corpus is therefore a property of the engine, not an
-//! omission, and it is machine-checked rather than asserted in prose: see
-//! [`a_fold_node_has_no_run_to_sweep`] below, and `fold_graph.rs` for the
-//! refusal's own coverage.
-//!
-//! # What `map` running inline bounds the claim to
-//!
-//! A map's iterations run inline and sequentially in the parent's own log
-//! today: the `concurrency` cap is accepted and not honored. So this gate
+//! A map's iterations and a fold's passes both run inline and sequentially in
+//! the parent's own log today: the map's `concurrency` cap is accepted and not
+//! honored, and a fold has no concurrency to accept. So this gate
 //! proves exactly what a single-log replay can prove, which for the shipped
-//! engine is everything: iterations are recorded in index order, each body call
-//! executes exactly once across a kill and its resume, and the fan-out replays
-//! byte for byte. What it does not prove, because the engine does not do it, is
-//! anything about concurrent child runs: no interleaving exists to be killed
-//! between, and no per-iteration log exists to be truncated independently. When
-//! iterations do get their own runs, this suite's claim will need extending to
-//! cuts inside a child log; today there is no such cut.
+//! engine is everything: iterations and passes are recorded in index order, each
+//! body call executes exactly once across a kill and its resume, and both loops
+//! replay byte for byte. What it does not prove, because the engine does not do
+//! it, is anything about concurrent child runs: no interleaving exists to be
+//! killed between, and no per-iteration log exists to be truncated independently.
+//! When iterations do get their own runs, this suite's claim will need extending
+//! to cuts inside a child log; today there is no such cut.
+//!
+//! What the `fold` shape does add over the `map` shape is a loop whose length is
+//! not known from the document: the number of passes depends on the recorded
+//! pass values, through the `stop_when` predicate. A cut that lands mid-loop must
+//! therefore re-derive how many passes remain, which is why the fold belongs in
+//! this corpus rather than resting on the map's sweep.
 //!
 //! # How a kill is modeled, and why the document is re-supplied
 //!
@@ -127,8 +132,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use common::{
-    ConstTool, EchoTool, ScriptedModel, agent_builder, event_kinds, fixed_clock, fixed_random,
-    fixed_run_id, text_response, tool_use_response,
+    ConstTool, EchoTool, PassTool, ScriptedModel, agent_builder, event_kinds, fixed_clock,
+    fixed_random, fixed_run_id, text_response, tool_use_response,
 };
 use salvor_core::{Effect, Event, EventEnvelope, ReplayError, RunId, RunStatus, derive_state};
 use salvor_engine::{EngineError, GraphOutcome, run_graph};
@@ -831,7 +836,75 @@ fn map_shape() -> Shape {
     }
 }
 
-/// Shape four: everything at once. An agent node that crosses a `max_steps`
+/// Shape four: a bounded fold of three passes whose body is a Write tool,
+/// followed by an Idempotent tool.
+///
+/// The predicate never holds over the scripted scores, so the loop runs to its
+/// bound and the `best_by` argmax lands on the middle pass: a winner neither the
+/// first nor the last pass would give, so a continuation that mis-derived it
+/// would record a different `FoldConverged` and fail the byte-identical check.
+fn fold_shape() -> Shape {
+    let graph = GraphBuilder::new()
+        .fold(FoldSpec::new(
+            "refine",
+            FoldBody::Node("worker".into()),
+            3,
+            "score >= 99",
+            FoldJoin::BestBy("score".into()),
+        ))
+        .tool(ToolSpec::new("worker", "publish_worker"))
+        .tool(ToolSpec::new("record", "record_tool"))
+        .edge("refine", "record")
+        .build();
+    let mut expected_kinds = vec!["GraphRunStarted", "NodeEntered"];
+    for _ in 0..3 {
+        expected_kinds.extend([
+            "FoldIterationStarted",
+            "ToolCallRequested",
+            "ToolCallCompleted",
+            "FoldIterationJoined",
+        ]);
+    }
+    expected_kinds.extend([
+        "FoldConverged",
+        "NodeExited",  // refine
+        "NodeEntered", // record
+        "ToolCallRequested",
+        "ToolCallCompleted",
+        "NodeExited", // record
+        "RunCompleted",
+    ]);
+    Shape {
+        name: "fold",
+        graph,
+        // Pass 0 folds over this; the body counts `pass` up from here, so the
+        // pass sequence is a pure function of the recorded outputs.
+        input: json!({"pass": 0}),
+        run_id: fixed_run_id(54),
+        expected_kinds,
+        control_write_executions: 3,
+        build: Arc::new(|| {
+            // A Write body is what puts a reconciliation refusal inside the
+            // loop, one per pass.
+            let (worker, worker_calls) = PassTool::new(
+                "publish_worker",
+                Effect::Write,
+                vec![json!(1), json!(5), json!(2)],
+            );
+            let (record, record_calls) = EchoTool::new("record_tool", Effect::Idempotent);
+            Executors::new(
+                HashMap::new(),
+                vec![
+                    (Box::new(worker), worker_calls),
+                    (Box::new(record), record_calls),
+                ],
+            )
+        }),
+        resume: Arc::new(|status| panic!("the fold shape never parks, got {status:?}")),
+    }
+}
+
+/// Shape five: everything at once. An agent node that crosses a `max_steps`
 /// budget mid-node, a Read tool, an expression branch, a gate whose approval
 /// carries the map's item list, a map fan-out over a Write body, an Idempotent
 /// tool, and a skipped node.
@@ -1004,6 +1077,7 @@ async fn graph_release_gate_kill_at_every_event_boundary_resumes_identically() {
         gate_shape(&gate_model.uri()),
         branch_shape(),
         map_shape(),
+        fold_shape(),
         flagship_shape(&flagship_model.uri()),
     ];
 
@@ -1032,6 +1106,7 @@ async fn graph_release_gate_kill_at_every_event_boundary_resumes_identically() {
             ("gate", 15, 16, 1),
             ("branch", 14, 15, 1),
             ("map", 21, 22, 3),
+            ("fold", 21, 22, 3),
             ("flagship", 41, 42, 2),
         ],
         "each shape sweeps every boundary of its control log and refuses at each write intent"
@@ -1042,46 +1117,6 @@ async fn graph_release_gate_kill_at_every_event_boundary_resumes_identically() {
         "graph release gate: {total} boundaries swept across {} shapes in {:.2?}",
         reports.len(),
         started.elapsed()
-    );
-}
-
-/// A `fold` node has no run to sweep: the engine refuses it before recording
-/// its `NodeEntered`, so a fold graph produces a one-event log with no
-/// boundaries to kill at. This is why `fold` is absent from the corpus above,
-/// checked here rather than asserted in the module docs.
-#[tokio::test]
-async fn a_fold_node_has_no_run_to_sweep() {
-    let body = GraphBuilder::new()
-        .tool(ToolSpec::new("inner", "inner_tool"))
-        .build();
-    let graph = GraphBuilder::new()
-        .fold(FoldSpec::new(
-            "refine",
-            FoldBody::Subgraph(Box::new(body)),
-            3,
-            "score >= 0.85",
-            FoldJoin::BestBy("score".into()),
-        ))
-        .build();
-
-    let run_id = fixed_run_id(54);
-    let store = Arc::new(SqliteStore::in_memory().expect("store opens"));
-    let mut ctx = RunCtx::with_hooks(store.clone(), run_id, vec![], fixed_clock(), fixed_random())
-        .expect("ctx builds");
-    let agents: HashMap<String, Agent> = HashMap::new();
-    let tools: HashMap<String, Box<dyn DynTool>> = HashMap::new();
-
-    let error = run_graph(&mut ctx, &graph, &json!({"score": 0.9}), &agents, &tools)
-        .await
-        .expect_err("the engine does not execute a fold node");
-    assert!(
-        matches!(error, EngineError::UnsupportedNode { kind: "fold", .. }),
-        "expected the fold refusal, got {error:?}"
-    );
-    assert_eq!(
-        event_kinds(&store.read_log(run_id).await.expect("log reads")),
-        ["GraphRunStarted"],
-        "a refused fold leaves one event, so there is no boundary sweep to run"
     );
 }
 

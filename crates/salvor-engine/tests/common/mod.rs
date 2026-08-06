@@ -254,6 +254,134 @@ impl DynTool for ConstTool {
     }
 }
 
+/// A `fold` body tool whose output is a PURE function of its input, so a fold's
+/// passes are a deterministic sequence a kill and its resume reproduce exactly.
+///
+/// It reads the zero-based pass count at `pass` (absent reads as 0, which is how
+/// a graph input enters pass 0) and returns `{"pass": pass + 1, "score": ...}`,
+/// taking the score from the scripted list at that position. A position past the
+/// end of the list, or a scripted `null`, is returned without a usable score, so
+/// a test can script a pass the `best_by` join cannot choose. Because the fold
+/// threads each pass's output into the next, `pass` counts itself up and the
+/// scripted sequence plays out without the tool holding any state of its own.
+pub struct PassTool {
+    pub name: String,
+    pub effect: Effect,
+    pub scores: Vec<Value>,
+    pub calls: Arc<AtomicUsize>,
+}
+
+impl PassTool {
+    /// A named pass tool of the given effect, scripted with one score per pass,
+    /// plus the shared execution counter.
+    pub fn new(name: &str, effect: Effect, scores: Vec<Value>) -> (Self, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        (
+            Self {
+                name: name.to_owned(),
+                effect,
+                scores,
+                calls: calls.clone(),
+            },
+            calls,
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl DynTool for PassTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        "a scripted fold-pass test tool"
+    }
+
+    fn effect(&self) -> Effect {
+        self.effect
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({"type": "object"})
+    }
+
+    async fn call_json(
+        &self,
+        _ctx: &ToolCtx,
+        input: Value,
+    ) -> Result<ToolOutcome<Value>, ToolError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let pass = input.get("pass").and_then(Value::as_u64).unwrap_or(0);
+        let mut output = json!({"pass": pass + 1});
+        if let Some(score) = self.scores.get(pass as usize)
+            && !score.is_null()
+        {
+            output["score"] = score.clone();
+        }
+        Ok(ToolOutcome::Output(output))
+    }
+}
+
+/// A tool that always suspends, asking for the described input. What it asks for
+/// is a constant, so a replayed call re-derives the identical suspension. Used to
+/// park a run inside a `fold` pass, where the resume input becomes that pass's
+/// output.
+pub struct SuspendingTool {
+    pub name: String,
+    pub reason: String,
+    pub input_schema: Value,
+    pub calls: Arc<AtomicUsize>,
+}
+
+impl SuspendingTool {
+    /// A named suspending tool asking for `input_schema` under `reason`, plus
+    /// the shared execution counter.
+    pub fn new(name: &str, reason: &str, input_schema: Value) -> (Self, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        (
+            Self {
+                name: name.to_owned(),
+                reason: reason.to_owned(),
+                input_schema,
+                calls: calls.clone(),
+            },
+            calls,
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl DynTool for SuspendingTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        "a test tool that always suspends"
+    }
+
+    fn effect(&self) -> Effect {
+        Effect::Read
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({"type": "object"})
+    }
+
+    async fn call_json(
+        &self,
+        _ctx: &ToolCtx,
+        _input: Value,
+    ) -> Result<ToolOutcome<Value>, ToolError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolOutcome::Suspend(salvor_tools::Suspension {
+            reason: self.reason.clone(),
+            input_schema: self.input_schema.clone(),
+        }))
+    }
+}
+
 /// A tool that always fails, for the tool-failure path.
 pub struct FailingTool {
     pub name: String,
