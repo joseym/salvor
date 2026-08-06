@@ -747,6 +747,33 @@ mod tests {
             Event::NodeExited {
                 node: "fanout".into(),
             },
+            Event::NodeEntered {
+                node: "refine".into(),
+            },
+            Event::FoldIterationStarted {
+                node: "refine".into(),
+                index: 0,
+            },
+            Event::FoldIterationJoined {
+                node: "refine".into(),
+                index: 0,
+            },
+            Event::FoldIterationStarted {
+                node: "refine".into(),
+                index: 1,
+            },
+            Event::FoldIterationJoined {
+                node: "refine".into(),
+                index: 1,
+            },
+            Event::FoldConverged {
+                node: "refine".into(),
+                winner_index: 1,
+                reason: "stop predicate fired".into(),
+            },
+            Event::NodeExited {
+                node: "refine".into(),
+            },
             Event::RunCompleted {
                 output: serde_json::json!({"done": true}),
             },
@@ -766,13 +793,22 @@ mod tests {
         // The full fold is the expected end state.
         let end = derive_graph_projection(&full);
         assert_eq!(end.current_node, None);
-        assert_eq!(end.nodes.len(), 3);
+        assert_eq!(end.nodes.len(), 4);
         assert_eq!(
             end.node("gate").unwrap().branch_case.as_deref(),
             Some("approved")
         );
         let map = end.node("fanout").unwrap().map.as_ref().unwrap();
         assert!(map.iterations[0].joined);
+        let fold = end.node("refine").unwrap().fold.as_ref().unwrap();
+        assert!(fold.iterations.iter().all(|it| it.joined));
+        assert_eq!(
+            fold.converged,
+            Some(FoldConvergence {
+                winner_index: 1,
+                reason: "stop predicate fired".into(),
+            })
+        );
     }
 
     /// A join with no matching iteration and a fan-out marker with no prior
