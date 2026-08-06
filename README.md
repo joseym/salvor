@@ -176,7 +176,7 @@ Working on the UI from a checkout? `salvor serve --dev` runs the API and the Ang
 
 ## Graphs
 
-A graph is a JSON document: nodes are agents (referenced by content hash), tools, gates, branches and maps, and edges are the topology. Validation is strict, an unknown key is rejected, and an error names the node or edge at fault.
+A graph is a JSON document: nodes are agents (referenced by content hash), tools, gates, branches, maps and folds, and edges are the topology. Validation is strict, an unknown key is rejected, and an error names the node or edge at fault.
 
 ![salvor graph edit builds the payroll pay-run desk line by line in the terminal editor: the pull_roster and flag_exceptions tool nodes, the route branch and its two cases, the review_exceptions gate with its approval schema, the pay_each map over the roster with pay_employee as its body, the notify_summary agent node whose --file path resolves to a content hash on screen, the labeled edges, the validator naming a typoed edge target and then passing once it is fixed, and the finished document written to disk. It is the same document shown on the Bridge canvas above.](docs/graph-edit.gif)
 
@@ -186,7 +186,7 @@ salvor graph validate examples/graphs/invalid-dangling-edge.json
 
 names the dangling edge: ``edge `research` -> `aprove` references unknown node id `aprove` (did you mean `approve`?)``
 
-`salvor graph run` drives a document over the store exactly as `salvor run` drives an agent run: each walked node is recorded, a branch records `BranchTaken` while the losing arm records `NodeSkipped`, and a gate parks the run durably until a human answers. The kill-and-resume guarantee is the one from the top of this file, unchanged. Typed builders exist in Rust, TypeScript and Python, each reducing to the same document, and `salvor graph schema` emits the JSON Schema checked in at [`docs/graph-schema.json`](docs/graph-schema.json) for editor completion.
+`salvor graph run` drives a document over the store exactly as `salvor run` drives an agent run: each walked node is recorded, a branch records `BranchTaken` while the losing arm records `NodeSkipped`, a gate parks the run durably until a human answers, and a `fold` runs its body up to a declared bound, each pass folding over the last, until its stop condition holds and its join rule picks the winner, all of it recorded pass by pass. The kill-and-resume guarantee is the one from the top of this file, unchanged. Typed builders exist in Rust, TypeScript and Python, each reducing to the same document, and `salvor graph schema` emits the JSON Schema checked in at [`docs/graph-schema.json`](docs/graph-schema.json) for editor completion.
 
 Over HTTP the durability has one edge: a run's events are in the store, but the submitted document is not. `salvor serve` keeps it in a process-local memory registry, so a restart drops it and it has to be resubmitted before a run or fork references it again (see [Operating it](#operating-it)).
 
