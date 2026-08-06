@@ -7,6 +7,12 @@
 //! so `salvor resume` re-supplies the document through `--graph`, and its hash
 //! must match the one the run recorded. The rest pins the refusals: an invalid
 //! document, a hash mismatch on resume, and an unresolvable tool or agent.
+//!
+//! The last pair pins the permanent/transient split as an operator meets it: a
+//! PERMANENT engine refusal names the triage in the CLI's own voice and leaves
+//! the run reading `failed` in `salvor list`, while a refused approval (which a
+//! conforming one can still fix) records no terminal and the very same run
+//! resumes and completes.
 
 use std::fs;
 use std::path::Path;
@@ -287,5 +293,125 @@ fn resume_refuses_an_approval_the_gate_schema_does_not_describe() {
     assert!(
         stdout.contains("\"approved\": true"),
         "the gate's output is the approval: {stdout}"
+    );
+}
+
+/// A single expression `branch` whose cases cannot both be false only if the
+/// input has a `score`. Given an input with none, every case evaluates false and
+/// the engine refuses with `NoBranchCaseMatched`, needing neither a model nor a
+/// tool, so the whole refusal runs offline.
+const UNROUTABLE_GRAPH: &str = r#"{
+  "schema_version": 1,
+  "nodes": [
+    { "kind": "branch", "payload": {
+      "id": "route",
+      "on": "score",
+      "cases": [
+        { "name": "high", "when": { "kind": "expression", "value": "score >= 0.8" } },
+        { "name": "low", "when": { "kind": "expression", "value": "score < 0.8" } }
+      ]
+    } },
+    { "kind": "gate", "payload": { "id": "approve", "approval_schema": { "type": "object" } } },
+    { "kind": "gate", "payload": { "id": "reject", "approval_schema": { "type": "object" } } }
+  ],
+  "edges": [
+    { "from": "route", "to": "approve", "label": "high" },
+    { "from": "route", "to": "reject", "label": "low" }
+  ]
+}"#;
+
+/// A PERMANENT engine refusal ends the run: the CLI names the triage plainly,
+/// the terminal `RunFailed` is recorded, and `salvor list` shows the run as
+/// `failed` rather than leaving it reading as though it were still going.
+///
+/// This is the whole point of the permanent/transient split, end to end through
+/// the real binary. The refusal (no branch case matched a routed value with no
+/// `score` in it) is a pure function of the document and the recorded input, so
+/// re-driving it forever produces the same answer; a run in that state is dead,
+/// and a dead run that keeps reading `running` is a lie an operator acts on.
+#[test]
+fn a_permanent_graph_refusal_records_the_run_as_failed() {
+    let dir = tempdir().expect("tempdir");
+    let store = dir.path().join("salvor.db");
+    let graph = write(dir.path(), "unroutable.json", UNROUTABLE_GRAPH);
+
+    let output = salvor(&store)
+        .args(["graph", "run"])
+        .arg(&graph)
+        .args(["--input", r#"{"topic":"otters"}"#])
+        .output()
+        .expect("runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "an unroutable branch refuses: {output:?}"
+    );
+    assert!(
+        stderr.contains("branch node `route`"),
+        "the refusal names the node: {stderr}"
+    );
+    assert!(
+        stderr.contains("recorded as failed") && stderr.contains("salvor list"),
+        "the refusal names the triage plainly: {stderr}"
+    );
+    let run = run_id_from(&stdout);
+
+    // The terminal is on disk, so the operator's own listing says `failed`.
+    let output = salvor(&store).arg("list").output().expect("runs");
+    let listing = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "list runs: {output:?}");
+    assert!(
+        listing.contains(&run) && listing.contains("failed"),
+        "salvor list shows the run as failed: {listing}"
+    );
+}
+
+/// A TRANSIENT refusal records no terminal. The counterpart of the test above,
+/// and the half that matters more: `--input` that is not an object cannot even
+/// be parsed into a run, but an approval the gate's schema rejects is a live
+/// refusal against a run that IS on disk, and that run must stay resumable.
+#[test]
+fn a_refused_approval_leaves_the_run_parked_not_failed() {
+    let dir = tempdir().expect("tempdir");
+    let store = dir.path().join("salvor.db");
+    let graph = write(dir.path(), "gate.json", LOOSE_GATE_GRAPH);
+
+    let output = salvor(&store)
+        .args(["graph", "run"])
+        .arg(&graph)
+        .args(["--input", r#"{"topic":"otters"}"#])
+        .output()
+        .expect("runs");
+    assert!(output.status.success(), "graph run parks: {output:?}");
+    let run = run_id_from(&String::from_utf8_lossy(&output.stdout));
+
+    let output = salvor(&store)
+        .args(["resume", &run])
+        .arg("--graph")
+        .arg(&graph)
+        .args(["--input", "{}"])
+        .output()
+        .expect("runs");
+    assert!(!output.status.success(), "the approval is refused");
+
+    let output = salvor(&store).arg("list").output().expect("runs");
+    let listing = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !listing.contains("failed"),
+        "a refused approval never kills the run: {listing}"
+    );
+
+    // And the proof that it is still live: a conforming approval completes it.
+    let output = salvor(&store)
+        .args(["resume", &run])
+        .arg("--graph")
+        .arg(&graph)
+        .args(["--input", r#"{"approved":true}"#])
+        .output()
+        .expect("runs");
+    assert!(
+        output.status.success(),
+        "the same run resumes and completes: {output:?}"
     );
 }

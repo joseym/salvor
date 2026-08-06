@@ -34,7 +34,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use salvor_core::{Event, EventEnvelope, PendingCall, RunId, RunStatus, derive_state};
 use salvor_engine::{
-    ForkError, GraphOutcome, ToolResolver, WriteHazard, graph_hash, plan_fork, run_graph,
+    EngineError, ForkError, GraphOutcome, ToolResolver, WriteHazard, graph_hash, plan_fork,
+    run_graph,
 };
 use salvor_graph::{Graph, Node};
 use salvor_runtime::{
@@ -417,6 +418,7 @@ pub async fn fork(store_path: &Path, args: ForkArgs) -> Result<u8> {
     let child_log = store.read_log(child_id).await?;
     let mut ctx = RunCtx::new(store, child_id, child_log)?;
     let outcome = run_graph(&mut ctx, &graph, &Value::Null, &agents, &tools).await;
+    let outcome = settle_graph_drive(&mut ctx, &child_uuid, outcome).await;
     close_servers(servers).await;
     report_graph_outcome(outcome?, &child_uuid, &args.graph, &args.agents)
 }
@@ -1141,6 +1143,7 @@ pub async fn graph_run(store_path: &Path, args: GraphRunArgs) -> Result<u8> {
         ctx = ctx.with_labels(labels);
     }
     let outcome = run_graph(&mut ctx, &graph, &input, &agents, &tools).await;
+    let outcome = settle_graph_drive(&mut ctx, &uuid, outcome).await;
     close_servers(servers).await;
     report_graph_outcome(outcome?, &uuid, &args.graph, &args.agents)
 }
@@ -1215,6 +1218,7 @@ async fn resume_graph(
     }
     // The recorded input wins on replay, so a bare null is fine here.
     let outcome = run_graph(&mut ctx, &graph, &Value::Null, &agents, &tools).await;
+    let outcome = settle_graph_drive(&mut ctx, uuid, outcome).await;
     close_servers(servers).await;
     report_graph_outcome(outcome?, uuid, graph_path, &args.agents)
 }
@@ -1517,6 +1521,52 @@ fn seq_list(seqs: &[u64]) -> String {
         .map(u64::to_string)
         .collect::<Vec<_>>()
         .join(",")
+}
+
+/// Settles what a graph drive returned before it is reported: a PERMANENT
+/// engine refusal gets its terminal `RunFailed` recorded here, and the message
+/// the operator reads names the triage plainly.
+///
+/// This is the CLI half of the discipline
+/// [`salvor_engine::record_permanent_refusal`] documents. The engine refuses
+/// without writing a terminal, on purpose; whether the refused run is dead or
+/// merely stuck is the driver's call, and for `graph run`, `resume`, and
+/// `graph fork` this is that driver. A permanent refusal (a route no case
+/// matched, a fold that reached its bound under `on_bound: fail`, a body form
+/// that cannot run) will refuse identically on every future drive, so the run
+/// is dead and must say so rather than sitting in `salvor list` as `running`
+/// forever. A transient one (an agent nobody registered, a tool call that
+/// failed, a store hiccup) is left recoverable and reads exactly as it did.
+///
+/// A failure to record is deliberately not surfaced in place of the refusal:
+/// the refusal is the real news, and a missing terminal only means the run
+/// reads as recoverable when it is not. It is logged at `warn` and the drive's
+/// own error is returned.
+async fn settle_graph_drive(
+    ctx: &mut RunCtx,
+    uuid: &str,
+    outcome: Result<GraphOutcome, EngineError>,
+) -> Result<GraphOutcome> {
+    let error = match outcome {
+        Ok(outcome) => return Ok(outcome),
+        Err(error) => error,
+    };
+    match salvor_engine::record_permanent_refusal(ctx, &error).await {
+        Ok(true) => Err(anyhow::anyhow!(
+            "{error}\n\nthis refusal is a pure function of the graph document and the recorded \
+             log, so re-driving reproduces it exactly; run {uuid} is recorded as failed, and \
+             `salvor list` shows it as failed."
+        )),
+        Ok(false) => Err(error.into()),
+        Err(recording) => {
+            tracing::warn!(
+                run_id = %uuid,
+                %recording,
+                "could not record the terminal for a permanent graph refusal"
+            );
+            Err(error.into())
+        }
+    }
 }
 
 /// Prints the result of a graph drive: the final output on completion, or a
