@@ -1,0 +1,16 @@
+{
+  "notice_id": "ADJ-7741",
+  "employee": "R. Vance",
+  "pay_period": "2026-07-B",
+  "correction_cents": -18400,
+  "reason": "a shift differential paid at the wrong rate",
+  "lands_on": "2026-08-A",
+  "desk_contact": "payroll@northharbor.example",
+  "checklist": [
+    "names the pay period",
+    "states the corrected amount in dollars",
+    "says which payslip the correction lands on",
+    "names one desk contact",
+    "no payroll jargon"
+  ]
+}
