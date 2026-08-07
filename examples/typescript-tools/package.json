@@ -4,7 +4,7 @@
   "private": true,
   "description": "A bookmarks-manager MCP server that extends a Salvor agent, with no Salvor code.",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "zod": "^4.4.3"
   }
 }
