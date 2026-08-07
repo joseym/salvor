@@ -52,6 +52,10 @@ Use whatever tools you like, and say so in the pull request. A disclosed AI-assi
 
 You are responsible for every line you submit: that you understand it, that you can defend the design, and that the tests you added would genuinely fail without the change.
 
+## Compatibility
+
+Salvor is pre-1.0. A 0.x release may change the CLI or the HTTP API without a deprecation window, so pin the exact version you depend on rather than a range. The one promise that holds regardless is the schema-additivity invariant above ("Schema changes are additive"): an old log still folds under a new version, and a new log written without a field is byte-identical to what the previous version produced. [CHANGELOG.md](CHANGELOG.md) records what moved release to release.
+
 ## Licensing
 
 Contributions are dual-licensed under MIT or Apache-2.0, matching the project. By opening a pull request you agree to that, with no additional terms.
