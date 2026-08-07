@@ -107,18 +107,19 @@ The posture is single-tenant: no users, no roles, no per-run access
 control. Whoever holds the token reads and drives every run in the
 store.
 
-If the named variable is unset or empty, **the server logs a warning
-and serves without auth**. It still binds, still prints its listening
-line, and still answers every route to anyone who asks:
+If the named variable is unset or empty, **the server refuses to
+start**, before it binds the port:
 
 ```
-WARN --auth-token names $SALVOR_TOKN, but it is unset or empty; serving without auth
+salvor: --auth-token names $SALVOR_TOKN, but it is unset or empty; export $SALVOR_TOKN with the bearer token before serving, or drop --auth-token to serve without auth
 ```
 
-A typo in the variable name therefore produces an unauthenticated
-server that looks exactly like a healthy one, apart from that single
-line. Do not trust the flag's presence in your unit file or your
-`docker run`; check the result from outside after every start:
+So a typo in the variable name is a failed start rather than an open
+server, and serving unauthenticated takes omitting the flag, which is
+a deliberate act. That leaves one case the refusal cannot catch: a
+unit file or `docker run` that never passed `--auth-token` at all
+looks equally healthy. Check the result from outside after every
+start:
 
 ```sh
 curl -s -o /dev/null -w '%{http_code}\n' https://salvor.example.com/v1/runs
