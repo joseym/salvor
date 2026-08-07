@@ -95,6 +95,9 @@ export type RunStatusJson =
   | { kind: "AwaitingModel" }
   | { kind: "AwaitingTool" }
   | { kind: "Suspended"; reason: string; input_schema: unknown }
+  /** Parked on a durable timer until `wake_at` (RFC 3339). Distinct from
+   *  `Suspended`: nothing is waiting on a human. */
+  | { kind: "Sleeping"; wake_at: string }
   | { kind: "BudgetExceeded"; budget: Budget; observed: number }
   | { kind: "NeedsReconciliation" }
   | { kind: "Completed"; output: unknown }

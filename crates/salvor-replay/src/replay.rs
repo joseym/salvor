@@ -51,6 +51,10 @@
 //! - Suspension maps to [`ReplayCursor::suspend`] plus
 //!   [`ReplayCursor::await_resume`]; a live [`Parked`] value means the run
 //!   parks durably and the process may exit.
+//! - A durable timer maps to [`ReplayCursor::sleep_started`] plus
+//!   [`ReplayCursor::sleep_completed`]; a live [`Asleep`] value means the run
+//!   is still asleep and the process may exit, and only the IO edge (which has
+//!   a clock) can tell that the recorded wake instant has arrived.
 //! - Budget enforcement between events maps to
 //!   [`ReplayCursor::budget_exceeded`] plus [`ReplayCursor::await_resume`].
 //!   Budget checks must be computed from replayed data (recorded usage,
@@ -237,6 +241,13 @@ pub enum RequestedStep {
     },
     /// [`ReplayCursor::await_resume`].
     AwaitResume,
+    /// [`ReplayCursor::sleep_started`] with this wake instant.
+    SleepStarted {
+        /// The wake instant orchestration computed.
+        wake_at: OffsetDateTime,
+    },
+    /// [`ReplayCursor::sleep_completed`].
+    SleepCompleted,
     /// [`ReplayCursor::budget_exceeded`] with these parameters.
     BudgetExceeded {
         /// The budget the runtime reported as crossed.
@@ -1409,6 +1420,77 @@ impl ReplayCursor {
         Ok(Outcome::Live(Parked { cursor: self }))
     }
 
+    /// Requests that the run sleep until `wake_at`: a durable timer, recorded
+    /// as a fact rather than held as a live wait.
+    ///
+    /// Replayed: matches the recorded [`Event::SleepStarted`], `wake_at`
+    /// included. That match is exact on purpose. The caller derives the instant
+    /// from recorded data (an observed `ctx.now()` plus whatever it wanted to
+    /// wait), so a recomputed instant that differs is a genuine divergence:
+    /// the derivation changed, and continuing would give the run a different
+    /// deadline than the one already on disk. Live: returns the event to
+    /// persist. Either way, follow with [`ReplayCursor::sleep_completed`] to
+    /// learn whether the sleep is over.
+    ///
+    /// # Errors
+    ///
+    /// [`ReplayError::Divergence`] on a `wake_at` mismatch, a different
+    /// recorded event, or a request after the run already ended.
+    pub fn sleep_started(
+        &mut self,
+        wake_at: OffsetDateTime,
+    ) -> Result<Outcome<(), Emitted>, ReplayError> {
+        let requested = RequestedStep::SleepStarted { wake_at };
+        self.guard_terminal(&requested)?;
+        if self.pos < self.log.len() {
+            if let Event::SleepStarted {
+                wake_at: recorded_wake_at,
+            } = self.log[self.pos].event
+                && recorded_wake_at == wake_at
+            {
+                self.pos += 1;
+                return Ok(Outcome::Replayed(()));
+            }
+            return Err(self.mismatch(requested));
+        }
+        let emitted = self.emit(Event::SleepStarted { wake_at });
+        Ok(Outcome::Live(emitted))
+    }
+
+    /// Requests the end of the sleep the run parked on.
+    ///
+    /// Replayed: the log already holds the [`Event::SleepCompleted`], so the
+    /// sleep is over and the run carries on. Live: nothing has recorded the
+    /// end yet, so the run is still asleep; the [`Asleep`] value can be
+    /// redeemed once the wake instant has passed, or simply dropped, in which
+    /// case the run stays parked and the process may exit.
+    ///
+    /// The two cases are distinct for the same reason
+    /// [`await_resume`](Self::await_resume)'s are, and a driver must be able to
+    /// tell them apart: a replayed completion means "carry on, this already
+    /// happened", while a live [`Asleep`] means "stop driving". The cursor
+    /// cannot collapse them by checking whether `wake_at` has passed, because
+    /// answering that needs a clock and this crate reads none. Deciding a
+    /// deadline has arrived belongs to the IO edge, which redeems the value
+    /// when it has.
+    ///
+    /// # Errors
+    ///
+    /// [`ReplayError::Divergence`] when the log records a different kind of
+    /// event here, or the run already ended.
+    pub fn sleep_completed(&mut self) -> Result<Outcome<(), Asleep<'_>>, ReplayError> {
+        let requested = RequestedStep::SleepCompleted;
+        self.guard_terminal(&requested)?;
+        if self.pos < self.log.len() {
+            if let Event::SleepCompleted {} = self.log[self.pos].event {
+                self.pos += 1;
+                return Ok(Outcome::Replayed(()));
+            }
+            return Err(self.mismatch(requested));
+        }
+        Ok(Outcome::Live(Asleep { cursor: self }))
+    }
+
     /// Reports a budget crossing, recorded so replay parks at the same point.
     ///
     /// This is a runtime request, not an orchestration one: the budget gate
@@ -1779,6 +1861,34 @@ impl Parked<'_> {
     }
 }
 
+/// A run parked on a durable timer whose end is not recorded yet.
+///
+/// Handed out by [`ReplayCursor::sleep_completed`] when the log ends at a
+/// started sleep. Drop it to leave the run asleep (the process may exit; the
+/// recorded [`Event::SleepStarted`] already holds the deadline), or redeem it
+/// to record that the sleep is over.
+///
+/// The counterpart of [`Parked`], and separate from it because the two park
+/// for different reasons and end differently: a suspension ends when a human
+/// supplies an input, a sleep ends when an instant arrives and carries no
+/// input at all.
+#[derive(Debug)]
+pub struct Asleep<'c> {
+    cursor: &'c mut ReplayCursor,
+}
+
+impl Asleep<'_> {
+    /// Records the end of the sleep, returning the event to persist.
+    ///
+    /// The caller decides the wake instant has arrived; nothing here checks it,
+    /// because checking needs a clock (see
+    /// [`sleep_completed`](ReplayCursor::sleep_completed)).
+    #[must_use]
+    pub fn wake(self) -> Emitted {
+        self.cursor.emit(Event::SleepCompleted {})
+    }
+}
+
 /// The stable name of an event's kind, for error messages.
 fn kind_name(event: &Event) -> &'static str {
     match event {
@@ -1791,6 +1901,8 @@ fn kind_name(event: &Event) -> &'static str {
         Event::RandomObserved { .. } => "RandomObserved",
         Event::Suspended { .. } => "Suspended",
         Event::Resumed { .. } => "Resumed",
+        Event::SleepStarted { .. } => "SleepStarted",
+        Event::SleepCompleted {} => "SleepCompleted",
         Event::BudgetExceeded { .. } => "BudgetExceeded",
         Event::RunCompleted { .. } => "RunCompleted",
         Event::RunFailed { .. } => "RunFailed",
@@ -1865,6 +1977,10 @@ impl fmt::Display for RequestedStep {
             }
             Self::Suspend { reason, .. } => write!(f, "Suspend(reason={reason})"),
             Self::AwaitResume => write!(f, "AwaitResume"),
+            // The instant rides as its debug form: `time`'s own rendering,
+            // which needs no format description and so no optional feature.
+            Self::SleepStarted { wake_at } => write!(f, "SleepStarted(wake_at={wake_at:?})"),
+            Self::SleepCompleted => write!(f, "SleepCompleted"),
             Self::BudgetExceeded { budget, observed } => {
                 write!(
                     f,
@@ -1892,6 +2008,7 @@ fn event_summary(event: &Event) -> String {
             format!("{name}(tool={tool}, effect={effect:?})")
         }
         Event::Suspended { reason, .. } => format!("{name}(reason={reason})"),
+        Event::SleepStarted { wake_at } => format!("{name}(wake_at={wake_at:?})"),
         Event::BudgetExceeded { budget, observed } => format!(
             "{name}(kind={:?}, limit={}, observed={observed})",
             budget.kind, budget.limit

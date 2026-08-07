@@ -36,6 +36,8 @@ pub fn event_kind(event: &Event) -> &'static str {
         Event::RandomObserved { .. } => "RandomObserved",
         Event::Suspended { .. } => "Suspended",
         Event::Resumed { .. } => "Resumed",
+        Event::SleepStarted { .. } => "SleepStarted",
+        Event::SleepCompleted {} => "SleepCompleted",
         Event::BudgetExceeded { .. } => "BudgetExceeded",
         Event::RunCompleted { .. } => "RunCompleted",
         Event::RunFailed { .. } => "RunFailed",
@@ -138,6 +140,10 @@ pub fn event_detail(event: &Event) -> String {
         Event::RandomObserved { value } => format!("value {value}"),
         Event::Suspended { reason, .. } => format!("reason: {reason}"),
         Event::Resumed { input } => format!("input {}", truncate_json(input)),
+        // The wake instant is the whole of what a reader wants here, rendered
+        // by the same component-wise formatter `NowObserved` uses.
+        Event::SleepStarted { wake_at } => format!("until {}", format_ts(*wake_at)),
+        Event::SleepCompleted {} => "woke".to_owned(),
         Event::BudgetExceeded { budget, observed } => {
             format!(
                 "{} limit {}, observed {}",

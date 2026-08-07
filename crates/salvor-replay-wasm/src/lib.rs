@@ -42,6 +42,7 @@ use salvor_replay::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use time::OffsetDateTime;
 use wasm_bindgen::prelude::*;
 
 /// The run state, in the serializable shape the dashboard consumes.
@@ -70,6 +71,10 @@ enum RunStatusDto {
     Suspended {
         reason: String,
         input_schema: Value,
+    },
+    Sleeping {
+        #[serde(with = "time::serde::rfc3339")]
+        wake_at: OffsetDateTime,
     },
     BudgetExceeded {
         budget: Budget,
@@ -152,6 +157,7 @@ impl From<&RunStatus> for RunStatusDto {
                 reason: reason.clone(),
                 input_schema: input_schema.clone(),
             },
+            RunStatus::Sleeping { wake_at } => RunStatusDto::Sleeping { wake_at: *wake_at },
             RunStatus::BudgetExceeded { budget, observed } => RunStatusDto::BudgetExceeded {
                 budget: *budget,
                 observed: *observed,
@@ -571,6 +577,26 @@ mod tests {
         assert_eq!(
             out,
             r#"{"status":{"kind":"BudgetExceeded","budget":{"kind":"cost_usd","limit":2.5},"observed":2.500001},"next_seq":2,"usage":{"input_tokens":0,"output_tokens":0}}"#
+        );
+    }
+
+    /// A run parked on a durable timer pins the sleeping status and its
+    /// `wake_at`, which crosses as the RFC 3339 string the event recorded,
+    /// nanoseconds included. Its own `kind`, never `Suspended`: the dashboard
+    /// must be able to tell a timer from a run awaiting a human.
+    #[test]
+    fn surface_pin_sleeping() {
+        let log = wire_log(&[
+            started(0),
+            env(
+                1,
+                r#"{"kind":"SleepStarted","payload":{"wake_at":"2025-07-22T08:00:00.123456789Z"}}"#,
+            ),
+        ]);
+        let out = fold_prefix_to_json(&log, 2).unwrap();
+        assert_eq!(
+            out,
+            r#"{"status":{"kind":"Sleeping","wake_at":"2025-07-22T08:00:00.123456789Z"},"next_seq":2,"usage":{"input_tokens":0,"output_tokens":0}}"#
         );
     }
 

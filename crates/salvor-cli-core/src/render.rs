@@ -330,6 +330,11 @@ pub fn abandoned_report(
 /// Kept beside `status_label` and `status_group` because the three have to agree: a label the
 /// column can print but the filter rejects would be a state you can see and cannot select. A test
 /// asserts this list and `status_group` recognise exactly the same set.
+///
+/// `sleeping` is the one label deliberately absent for now. The status exists in the fold, so the
+/// STATUS column can already print it, but nothing records a durable timer yet and the surface
+/// that wakes one is unbuilt; it joins this list, `status_group`, and the committed render
+/// fixtures together, when it does.
 pub const STATUS_LABELS: [&str; 10] = [
     "not-started",
     "running",
@@ -504,6 +509,7 @@ pub fn status_label(status: &RunStatus) -> &'static str {
         RunStatus::AwaitingModel => "awaiting-model",
         RunStatus::AwaitingTool => "awaiting-tool",
         RunStatus::Suspended { .. } => "suspended",
+        RunStatus::Sleeping { .. } => "sleeping",
         RunStatus::BudgetExceeded { .. } => "budget-exceeded",
         RunStatus::NeedsReconciliation => "needs-reconciliation",
         RunStatus::Completed { .. } => "completed",

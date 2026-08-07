@@ -67,6 +67,14 @@ pub fn classify(state: &RunState) -> Disposition {
         RunStatus::Running | RunStatus::AwaitingModel | RunStatus::AwaitingTool => {
             Disposition::Recover
         }
+        // A sleeping run continues by being driven with no input, which is what
+        // `Recover` already means mechanically, so it takes that disposition
+        // rather than a new one. No log reaches here yet: nothing records the
+        // sleep events, and the wake path that will drive a sleeping run once
+        // its deadline passes is not built. This arm exists to keep the
+        // classification total, and the surface that owns waking should give
+        // sleeping its own considered treatment.
+        RunStatus::Sleeping { .. } => Disposition::Recover,
         RunStatus::NeedsReconciliation => {
             // A needs-reconciliation state always carries the pending write
             // intent whose completion is missing; if it somehow did not, there

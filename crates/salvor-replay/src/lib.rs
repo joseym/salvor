@@ -113,8 +113,9 @@ pub use id::{RunId, SequenceNumber};
 pub use park::ParkReason;
 pub use render::{event_detail, event_kind};
 pub use replay::{
-    BeginPermit, Emitted, GraphBeginPermit, LoggedStep, ModelCallPermit, ModelReply, NowPermit,
-    Outcome, Parked, RandomPermit, ReplayCursor, ReplayError, RequestedStep, ToolCallPermit,
+    Asleep, BeginPermit, Emitted, GraphBeginPermit, LoggedStep, ModelCallPermit, ModelReply,
+    NowPermit, Outcome, Parked, RandomPermit, ReplayCursor, ReplayError, RequestedStep,
+    ToolCallPermit,
 };
 pub use state::{PendingCall, RunState, RunStatus, TokenTotals, derive_state};
 pub use summary::RunSummary;

@@ -15,6 +15,10 @@
 //!   `{ "state": "awaiting_tool" }`, `{ "state": "not_started" }`,
 //!   `{ "state": "needs_reconciliation" }` carry nothing more.
 //! - `{ "state": "suspended", "reason": "...", "input_schema": { ... } }`
+//! - `{ "state": "sleeping", "wake_at": "<RFC 3339>" }`: the run is parked on
+//!   a durable timer until that instant, which is a different thing from
+//!   `suspended` and never reported as one, because nothing is waiting on a
+//!   human.
 //! - `{ "state": "budget_exceeded", "budget": { "kind": "...", "limit": n },
 //!    "observed": n }`
 //! - `{ "state": "completed", "output": <json> }`
@@ -34,6 +38,8 @@
 
 use salvor_core::{PendingCall, RunState, RunStatus};
 use serde_json::{Value, json};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 /// The status object for a derived status. See the module docs for the shapes.
 #[must_use]
@@ -50,6 +56,10 @@ pub fn status(status: &RunStatus) -> Value {
             "state": "suspended",
             "reason": reason,
             "input_schema": input_schema,
+        }),
+        RunStatus::Sleeping { wake_at } => json!({
+            "state": "sleeping",
+            "wake_at": rfc3339(*wake_at),
         }),
         RunStatus::BudgetExceeded { budget, observed } => json!({
             "state": "budget_exceeded",
@@ -108,6 +118,12 @@ pub fn pending(pending: Option<&PendingCall>) -> Value {
             "idempotency_key": idempotency_key,
         }),
     }
+}
+
+/// Formats a recorded instant as RFC 3339, the wire form every timestamp this
+/// API returns takes.
+fn rfc3339(timestamp: OffsetDateTime) -> String {
+    timestamp.format(&Rfc3339).unwrap_or_default()
 }
 
 /// The full derived-state object: the dry-run replay projection a client gets

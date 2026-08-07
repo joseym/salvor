@@ -432,6 +432,7 @@ fn status_name(status: &RunStatus) -> &'static str {
         RunStatus::AwaitingModel => "awaiting model (interrupted; use recover)",
         RunStatus::AwaitingTool => "awaiting tool (interrupted; use recover)",
         RunStatus::Suspended { .. } => "suspended",
+        RunStatus::Sleeping { .. } => "sleeping",
         RunStatus::BudgetExceeded { .. } => "budget exceeded",
         RunStatus::NeedsReconciliation => "needs reconciliation",
         RunStatus::Completed { .. } => "completed",

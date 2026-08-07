@@ -60,6 +60,14 @@ use crate::id::{RunId, SequenceNumber};
 /// entirely and serializes byte for byte as it did before, so a log recorded
 /// by an earlier binary replays unchanged and the version stays 1.
 ///
+/// # Why the durable-timer events do not bump this
+///
+/// [`Event::SleepStarted`] and [`Event::SleepCompleted`] are two more new
+/// variants, added the same read-compatible way: a log written before them
+/// contains neither kind, so every event in it parses to the identical value
+/// under the new build, and the version stays 1. Neither carries an optional
+/// field, so there is no additive-field question to answer for them.
+///
 /// # Why the graph events do not bump this
 ///
 /// The graph-run events ([`Event::GraphRunStarted`] and the node/branch/map/fold
@@ -376,6 +384,52 @@ pub enum Event {
         /// The input supplied on resume.
         input: serde_json::Value,
     },
+    /// The run parked until a recorded instant: a durable timer. Nothing holds
+    /// the run while it sleeps. A parked run is passive data in the store, and
+    /// this event is the whole of what makes it a sleeping one, so the sleep
+    /// survives a process restart the way every other recorded fact does.
+    ///
+    /// # Why `wake_at` is an instant and not a duration
+    ///
+    /// A duration would need a clock to interpret: "sleep ten minutes" only
+    /// means something alongside the moment it was said, and asking how much of
+    /// it is left is a question about now. Replay must not consult a clock, so
+    /// the instant is computed once while the run is live (from an observed
+    /// [`Event::NowObserved`] plus whatever the caller wanted to wait) and
+    /// recorded here. Every later reader, replaying or folding, reaches the
+    /// same wake time by reading it rather than by recomputing it.
+    ///
+    /// # Wire compatibility
+    ///
+    /// Added the same read-compatible way the deterministic-context, graph, and
+    /// abandonment events were: a new variant, so a log written before it
+    /// contains none of the kind. [`SCHEMA_VERSION`] stays 1; the constant's
+    /// docs carry the full argument.
+    SleepStarted {
+        /// The instant the run may continue at. RFC 3339 on the wire with
+        /// nanosecond precision, encoded exactly as [`Event::NowObserved`]'s
+        /// `now` is, so one reading rule covers every recorded instant in a log.
+        #[serde(with = "time::serde::rfc3339")]
+        wake_at: OffsetDateTime,
+    },
+    /// The sleep ended and the run may continue. Carries nothing: the sleep it
+    /// closes is the [`Event::SleepStarted`] before it, and that event already
+    /// holds every value either one has to say.
+    ///
+    /// # Why the pair is two events and not one with a nullable field
+    ///
+    /// A single `Slept { wake_at, completed: Option<..> }` would have to be
+    /// rewritten when the sleep ended, and no event in this log is ever
+    /// rewritten: the log is append-only, and an event records that something
+    /// happened rather than tracking the current state of something. Two events
+    /// also give a fold the two boundaries it needs. The status changes at each
+    /// of them (see [`RunStatus::Sleeping`](crate::RunStatus::Sleeping)), and a
+    /// wall-time budget excludes exactly the span between them.
+    ///
+    /// The payload is empty rather than absent so the wire form keeps the same
+    /// two-key shape as every other event, `{"kind":..,"payload":{}}`, which is
+    /// the shape a bare [`Event::RunAbandoned`] already serializes to.
+    SleepCompleted {},
     /// A declared budget was exceeded. The run suspends rather than dies, so a
     /// human can raise the limit and resume.
     BudgetExceeded {
@@ -806,6 +860,10 @@ mod tests {
         assert_round_trips(Event::Resumed {
             input: serde_json::json!({"approved": true}),
         });
+        assert_round_trips(Event::SleepStarted {
+            wake_at: datetime!(2026-07-16 12:00:00.123456789 UTC),
+        });
+        assert_round_trips(Event::SleepCompleted {});
         assert_round_trips(Event::BudgetExceeded {
             budget: Budget {
                 kind: BudgetKind::CostUsd,
@@ -1217,6 +1275,35 @@ mod tests {
         assert_eq!(
             json,
             r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"RandomObserved","payload":{"value":18446744073709551615}}}"#
+        );
+    }
+
+    /// Pins the exact serialized form of the durable-timer pair. `wake_at`
+    /// rides as RFC 3339 with all nine fractional digits, the same encoding
+    /// [`context_events_serialize_to_pinned_json`] pins for `NowObserved`, and
+    /// the payload-free completion still carries an (empty) `payload` object,
+    /// so both keep the two-key wire shape every other event has.
+    ///
+    /// The other half of this contract, that adding these variants changed no
+    /// byte of any log written before them, is proven by every pinned test
+    /// above passing untouched: [`envelope_serializes_to_pinned_json`] is the
+    /// representative one.
+    #[test]
+    fn sleep_events_serialize_to_pinned_json() {
+        let started = envelope(Event::SleepStarted {
+            wake_at: datetime!(2026-07-16 12:00:00.123456789 UTC),
+        });
+        let json = serde_json::to_string(&started).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"SleepStarted","payload":{"wake_at":"2026-07-16T12:00:00.123456789Z"}}}"#
+        );
+
+        let completed = envelope(Event::SleepCompleted {});
+        let json = serde_json::to_string(&completed).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"SleepCompleted","payload":{}}}"#
         );
     }
 

@@ -31,7 +31,9 @@
 //!   model calls (cost multiplies those integers by the agent's fixed
 //!   [`Pricing`]).
 //! - **wall time** is derived only from recorded `ctx.now()` observations
-//!   taken at each loop-iteration start, never from the ambient clock.
+//!   taken at each loop-iteration start, never from the ambient clock, minus
+//!   any span the run spent asleep on a durable timer (see
+//!   [`budget_observations`] for why).
 //!
 //! So a crossing that fired live recomputes identically on replay, and the
 //! cursor matches it against the recorded `BudgetExceeded` event. A check
@@ -68,6 +70,7 @@
 use std::time::Duration;
 
 use serde_json::Value;
+use time::OffsetDateTime;
 
 use crate::{Budget, BudgetKind, Event, EventEnvelope};
 
@@ -201,7 +204,8 @@ pub struct BudgetObservations {
     /// Recorded output tokens accumulated so far.
     pub output_tokens: u64,
     /// Seconds between the first recorded `ctx.now()` observation and the
-    /// latest one.
+    /// latest one, less every recorded sleep span (see
+    /// [`budget_observations`]). Never negative.
     pub elapsed_seconds: f64,
 }
 
@@ -216,12 +220,32 @@ pub struct BudgetObservations {
 ///   "completed model calls".
 /// - **tokens** are the recorded `usage` totals on those same events.
 /// - **elapsed** is the span between the first and the last `NowObserved`,
-///   the loop's baseline and its latest reading. Fewer than two observations
-///   means no span has elapsed, which is zero.
+///   the loop's baseline and its latest reading, less every span the run spent
+///   asleep. Fewer than two observations means no span has elapsed, which is
+///   zero.
 ///
 /// Pass the prefix the check would have seen. The loop checks *before* each
 /// model call, so the observations behind a recorded
 /// [`Event::BudgetExceeded`] at position `n` are the fold of `log[..n]`.
+///
+/// # Why recorded sleep is excluded from wall time
+///
+/// A wall-time budget bounds how long a run may take, and a durable timer is
+/// time the run deliberately did not take: a run told to sleep a week would
+/// cross any declared `max_wall_time` the instant it woke, before doing a
+/// single further step, which would turn every timer into a budget crossing.
+/// So each span between an [`Event::SleepStarted`] and its
+/// [`Event::SleepCompleted`] is summed and subtracted, using the two events'
+/// recorded envelope timestamps as the span's endpoints. A sleep still open at
+/// the end of the log contributes the span from its start to the last
+/// observation, so a prefix cut mid-sleep excludes what it has seen of the
+/// sleep so far.
+///
+/// Gate-wait time is deliberately not excluded. A run waiting on a human is
+/// blocked on the outside world with no promised end, which is exactly the
+/// thing a wall-time budget is there to catch, and every log recorded before
+/// timers existed holds none of these events, so its elapsed figure and its
+/// budget verdict are unchanged to the byte.
 ///
 /// # Scope
 ///
@@ -240,6 +264,8 @@ pub fn budget_observations(log: &[EventEnvelope]) -> BudgetObservations {
     let mut observations = BudgetObservations::default();
     let mut first_now = None;
     let mut last_now = None;
+    let mut slept_seconds = 0.0;
+    let mut sleeping_since: Option<OffsetDateTime> = None;
 
     for envelope in log {
         match &envelope.event {
@@ -256,14 +282,41 @@ pub fn budget_observations(log: &[EventEnvelope]) -> BudgetObservations {
                 first_now.get_or_insert(*now);
                 last_now = Some(*now);
             }
+            // The sleep span's endpoints are the two events' recorded
+            // timestamps, the one instant each of them carries. A sleep with
+            // no start before it closes nothing: the fold stays total over
+            // every prefix, including one cut between the two.
+            Event::SleepStarted { .. } => {
+                sleeping_since = Some(envelope.recorded_at);
+            }
+            Event::SleepCompleted {} => {
+                if let Some(started) = sleeping_since.take() {
+                    slept_seconds += span_seconds(started, envelope.recorded_at);
+                }
+            }
             _ => {}
         }
     }
 
     if let (Some(first), Some(last)) = (first_now, last_now) {
-        observations.elapsed_seconds = (last - first).as_seconds_f64();
+        // A sleep the log never closed still ran until the last thing the run
+        // observed, so it excludes what elapsed counted of it: no more, since
+        // elapsed itself stops at that observation.
+        if let Some(started) = sleeping_since {
+            slept_seconds += span_seconds(started, last);
+        }
+        observations.elapsed_seconds = (span_seconds(first, last) - slept_seconds).max(0.0);
     }
     observations
+}
+
+/// The seconds from `from` to `to`, floored at zero.
+///
+/// Recorded timestamps come off the wire and this fold is total over whatever
+/// a log holds, so a span that runs backwards contributes nothing rather than
+/// crediting a run with time it never spent.
+fn span_seconds(from: OffsetDateTime, to: OffsetDateTime) -> f64 {
+    (to - from).as_seconds_f64().max(0.0)
 }
 
 /// The accumulated budget extensions granted by recorded resume inputs.
@@ -389,7 +442,198 @@ fn to_f64(count: u64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::id::{RunId, SequenceNumber};
     use serde_json::json;
+    use time::macros::datetime;
+    use uuid::Uuid;
+
+    /// The run every log in these tests belongs to.
+    fn run_id() -> RunId {
+        RunId::from_uuid(Uuid::parse_str("00000000-0000-4000-8000-000000000008").unwrap())
+    }
+
+    /// The baseline instant every scripted timestamp is an offset from.
+    fn base() -> OffsetDateTime {
+        datetime!(2026-07-09 12:00:00 UTC)
+    }
+
+    /// Wraps events, each carrying the recorded timestamp its `(seconds after
+    /// base)` says. The envelope timestamp matters here: it is the endpoint a
+    /// sleep span is measured from.
+    fn log(events: Vec<(i64, Event)>) -> Vec<EventEnvelope> {
+        events
+            .into_iter()
+            .enumerate()
+            .map(|(i, (offset, event))| {
+                EventEnvelope::new(
+                    run_id(),
+                    SequenceNumber::new(i as u64),
+                    base() + time::Duration::seconds(offset),
+                    event,
+                )
+            })
+            .collect()
+    }
+
+    fn started() -> Event {
+        Event::RunStarted {
+            agent_def_hash: "sha256:agent".into(),
+            input: json!({}),
+            labels: None,
+        }
+    }
+
+    /// A one-minute wall-time budget, the limit every wall-time case below
+    /// asks about.
+    fn one_minute() -> Budgets {
+        Budgets {
+            max_wall_time: Some(Duration::from_secs(60)),
+            ..Budgets::default()
+        }
+    }
+
+    /// Whether the declared wall-time budget is crossed by these observations.
+    fn crosses_wall_time(observations: &BudgetObservations) -> bool {
+        matches!(
+            one_minute().first_crossing(&BudgetExtensions::default(), None, observations),
+            Some((budget, _)) if budget.kind == BudgetKind::WallTime
+        )
+    }
+
+    const WEEK: i64 = 7 * 24 * 60 * 60;
+
+    /// The same span as a count of seconds, for comparing against a derived
+    /// `elapsed_seconds` without casting an integer by hand.
+    fn seconds(count: i64) -> f64 {
+        time::Duration::seconds(count).as_seconds_f64()
+    }
+
+    /// A run that slept a week and then worked for five seconds has five
+    /// seconds of wall time, and does not cross a one-minute budget. The same
+    /// log with the two sleep events removed does cross it, which is what the
+    /// exclusion is for: without it every timer longer than the budget would
+    /// park the run the moment it woke.
+    #[test]
+    fn a_week_long_sleep_is_excluded_from_wall_time() {
+        let slept = budget_observations(&log(vec![
+            (0, started()),
+            (0, Event::NowObserved { now: base() }),
+            (
+                0,
+                Event::SleepStarted {
+                    wake_at: base() + time::Duration::seconds(WEEK),
+                },
+            ),
+            (WEEK, Event::SleepCompleted {}),
+            (
+                WEEK + 5,
+                Event::NowObserved {
+                    now: base() + time::Duration::seconds(WEEK + 5),
+                },
+            ),
+        ]));
+        assert!((slept.elapsed_seconds - 5.0).abs() < 1e-9);
+        assert!(!crosses_wall_time(&slept));
+
+        let without_the_sleep = budget_observations(&log(vec![
+            (0, started()),
+            (0, Event::NowObserved { now: base() }),
+            (
+                WEEK + 5,
+                Event::NowObserved {
+                    now: base() + time::Duration::seconds(WEEK + 5),
+                },
+            ),
+        ]));
+        assert!(
+            (without_the_sleep.elapsed_seconds - seconds(WEEK + 5)).abs() < 1e-9,
+            "the same span, uncredited, is the whole week"
+        );
+        assert!(
+            crosses_wall_time(&without_the_sleep),
+            "without the exclusion this run crosses the budget on waking"
+        );
+    }
+
+    /// A sleep the log never closed is handled at both shapes a prefix can cut
+    /// it at: a log ending at the sleep start has nothing observed after it, so
+    /// elapsed stops where it already stopped; a log that observed the clock
+    /// again without recording a completion excludes the span it saw.
+    #[test]
+    fn an_open_sleep_at_the_end_of_a_log_is_handled() {
+        let parked = budget_observations(&log(vec![
+            (0, started()),
+            (0, Event::NowObserved { now: base() }),
+            (
+                2,
+                Event::SleepStarted {
+                    wake_at: base() + time::Duration::seconds(WEEK),
+                },
+            ),
+        ]));
+        assert_eq!(
+            parked.elapsed_seconds, 0.0,
+            "one observation is no span, and the open sleep never credits one back"
+        );
+
+        let observed_while_open = budget_observations(&log(vec![
+            (0, started()),
+            (0, Event::NowObserved { now: base() }),
+            (
+                0,
+                Event::SleepStarted {
+                    wake_at: base() + time::Duration::seconds(WEEK),
+                },
+            ),
+            (
+                WEEK,
+                Event::NowObserved {
+                    now: base() + time::Duration::seconds(WEEK),
+                },
+            ),
+        ]));
+        assert_eq!(
+            observed_while_open.elapsed_seconds, 0.0,
+            "the open sleep runs to the last observation, so nothing is left over"
+        );
+        assert!(!crosses_wall_time(&observed_while_open));
+    }
+
+    /// The no-change proof: a run that waited a week on a human gate still
+    /// counts every second of it. Gate waiting is exactly what a wall-time
+    /// budget is meant to catch, and no log recorded before durable timers
+    /// existed changes its verdict.
+    #[test]
+    fn a_gate_suspension_still_counts_as_wall_time() {
+        let waited = budget_observations(&log(vec![
+            (0, started()),
+            (0, Event::NowObserved { now: base() }),
+            (
+                0,
+                Event::Suspended {
+                    reason: "awaiting approval".into(),
+                    input_schema: json!({"type": "object"}),
+                },
+            ),
+            (
+                WEEK,
+                Event::Resumed {
+                    input: json!({"approved": true}),
+                },
+            ),
+            (
+                WEEK,
+                Event::NowObserved {
+                    now: base() + time::Duration::seconds(WEEK),
+                },
+            ),
+        ]));
+        assert!((waited.elapsed_seconds - seconds(WEEK)).abs() < 1e-9);
+        assert!(
+            crosses_wall_time(&waited),
+            "a week spent waiting on a human is a week of wall time"
+        );
+    }
 
     /// Checks fire on reaching the limit and honor absorbed extensions.
     #[test]

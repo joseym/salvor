@@ -713,6 +713,150 @@ fn labels_recorded_live_survive_a_replayed_log() {
     };
 }
 
+/// The wake instant the sleeping tests park on, with all nine fractional
+/// digits populated so precision loss anywhere on the wire would be caught.
+const WAKE_AT: OffsetDateTime = datetime!(2026-07-16 09:15:42.123456789 UTC);
+
+/// A one-event log holding just the run head, the base every sleep test builds
+/// its own tail onto.
+fn head_only_log() -> Vec<EventEnvelope> {
+    vec![EventEnvelope::new(
+        run_id(),
+        SequenceNumber::new(0),
+        ts(SequenceNumber::new(0)),
+        Event::RunStarted {
+            agent_def_hash: AGENT_HASH.into(),
+            input: json!({"topic": "otters"}),
+            labels: None,
+        },
+    )]
+}
+
+/// A durable timer recorded live replays from the log without executing
+/// anything: the start matches on its recorded instant and the wake is read
+/// back, so a resumed run never re-parks on a timer it already served.
+#[test]
+fn a_recorded_sleep_replays_from_the_log() {
+    let mut cursor = ReplayCursor::new(head_only_log()).expect("log is valid");
+    cursor.begin(AGENT_HASH, None).expect("begin replays");
+
+    let Outcome::Live(emitted) = cursor.sleep_started(WAKE_AT).expect("sleep starts") else {
+        panic!("an exhausted log must hand back a live emission");
+    };
+    assert_eq!(emitted.seq, SequenceNumber::new(1));
+    assert_eq!(emitted.event, Event::SleepStarted { wake_at: WAKE_AT });
+    let started = wrap(emitted);
+
+    let Outcome::Live(asleep) = cursor.sleep_completed().expect("sleep is asked about") else {
+        panic!("an unrecorded wake must park the run");
+    };
+    let woke = wrap(asleep.wake());
+    assert_eq!(woke.event, Event::SleepCompleted {});
+
+    // Round-trip the recorded pair through the wire form, exactly as a store
+    // would, then replay the same two requests over it.
+    let log: Vec<EventEnvelope> = [head_only_log(), vec![started, woke]]
+        .concat()
+        .iter()
+        .map(|env| {
+            let wire = serde_json::to_string(env).expect("serialize");
+            serde_json::from_str(&wire).expect("deserialize")
+        })
+        .collect();
+    let mut cursor = ReplayCursor::new(log).expect("recorded log is valid");
+    cursor.begin(AGENT_HASH, None).expect("begin replays");
+    let Outcome::Replayed(()) = cursor.sleep_started(WAKE_AT).expect("sleep start replays") else {
+        panic!("the recorded sleep must replay");
+    };
+    let Outcome::Replayed(()) = cursor.sleep_completed().expect("wake replays") else {
+        panic!("the recorded wake must replay");
+    };
+    assert!(!cursor.is_replaying(), "every recorded event was consumed");
+}
+
+/// A recomputed wake instant that differs from the recorded one is a
+/// divergence, not a detail to paper over: the caller derives the instant from
+/// recorded data, so a different one means the derivation changed and the run
+/// would continue under a deadline that is not the one on disk.
+#[test]
+fn a_mismatched_wake_instant_diverges() {
+    let mut log = head_only_log();
+    log.push(EventEnvelope::new(
+        run_id(),
+        SequenceNumber::new(1),
+        ts(SequenceNumber::new(1)),
+        Event::SleepStarted { wake_at: WAKE_AT },
+    ));
+    let mut cursor = ReplayCursor::new(log).expect("log is valid");
+    cursor.begin(AGENT_HASH, None).expect("begin replays");
+
+    let drifted = WAKE_AT + Duration::nanoseconds(1);
+    let err = cursor
+        .sleep_started(drifted)
+        .expect_err("a different wake instant must not replay");
+    let ReplayError::Divergence {
+        position,
+        recorded,
+        requested,
+    } = err
+    else {
+        panic!("expected a divergence");
+    };
+    assert_eq!(position, SequenceNumber::new(1));
+    assert_eq!(
+        *recorded,
+        LoggedStep::Event(Event::SleepStarted { wake_at: WAKE_AT })
+    );
+    assert_eq!(*requested, RequestedStep::SleepStarted { wake_at: drifted });
+}
+
+/// The park-versus-continue distinction, which is the whole reason
+/// `sleep_completed` returns an outcome rather than nothing: a log that stops
+/// at the started sleep parks the run (and the fold agrees it is sleeping),
+/// while the same log with the wake recorded carries on. The cursor decides
+/// this by reading the log, never by comparing the deadline against a clock it
+/// does not have: the run below is asked about its sleep with the recorded
+/// wake instant still in the future, and still continues, because what it asks
+/// is whether the wake was recorded.
+#[test]
+fn an_unrecorded_wake_parks_and_a_recorded_one_continues() {
+    let mut parked_log = head_only_log();
+    parked_log.push(EventEnvelope::new(
+        run_id(),
+        SequenceNumber::new(1),
+        ts(SequenceNumber::new(1)),
+        Event::SleepStarted { wake_at: WAKE_AT },
+    ));
+
+    let mut cursor = ReplayCursor::new(parked_log.clone()).expect("log is valid");
+    cursor.begin(AGENT_HASH, None).expect("begin replays");
+    cursor.sleep_started(WAKE_AT).expect("sleep start replays");
+    // Never redeeming the value is how a driver leaves the run parked: the log
+    // is unchanged and the fold reads the run as sleeping.
+    let Outcome::Live(_) = cursor.sleep_completed().expect("sleep is asked about") else {
+        panic!("an unrecorded wake must park the run, not continue it");
+    };
+    assert_eq!(
+        derive_state(&parked_log).status,
+        RunStatus::Sleeping { wake_at: WAKE_AT }
+    );
+
+    let mut woken_log = parked_log;
+    woken_log.push(EventEnvelope::new(
+        run_id(),
+        SequenceNumber::new(2),
+        ts(SequenceNumber::new(2)),
+        Event::SleepCompleted {},
+    ));
+    let mut cursor = ReplayCursor::new(woken_log.clone()).expect("log is valid");
+    cursor.begin(AGENT_HASH, None).expect("begin replays");
+    cursor.sleep_started(WAKE_AT).expect("sleep start replays");
+    let Outcome::Replayed(()) = cursor.sleep_completed().expect("wake replays") else {
+        panic!("a recorded wake must continue the run");
+    };
+    assert_eq!(derive_state(&woken_log).status, RunStatus::Running);
+}
+
 /// The cursor can be asked whether it is standing in front of a dangling
 /// intent, without taking a step. That look-before-you-leap is what lets the
 /// IO edge consult the outside world before committing to `tool_call`, which
