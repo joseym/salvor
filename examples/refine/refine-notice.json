@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "nodes": [
+    {
+      "kind": "fold",
+      "payload": {
+        "id": "refine",
+        "name": "Refine the notice to the desk threshold",
+        "body": { "kind": "node", "value": "tailor" },
+        "max_iterations": 4,
+        "stop_when": "score >= 0.8",
+        "join": { "kind": "best_by", "value": "score" },
+        "on_bound": "fail"
+      }
+    },
+    {
+      "kind": "agent",
+      "payload": {
+        "id": "tailor",
+        "agent_hash": "sha256:6f92dceb3f50d6f86a8cdbe947a7a5c9fbd3944ff72b1afa02fe01228fd36714",
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "draft": { "type": "string" },
+            "score": { "type": "number" }
+          },
+          "required": ["draft", "score"]
+        }
+      }
+    }
+  ],
+  "edges": []
+}

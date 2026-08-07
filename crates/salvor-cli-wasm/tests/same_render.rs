@@ -959,6 +959,7 @@ const REPO_AGENT_FILES: &[&str] = &[
     "examples/polyglot-service/agent.toml",
     "examples/python-tools/agent.toml",
     "examples/reconciliation/agent.toml",
+    "examples/refine/agents/tailor.toml",
     "examples/support-ops/agent.toml",
     "examples/typescript-tools/agent.toml",
     "examples/wasm-tools/agent.toml",

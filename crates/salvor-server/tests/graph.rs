@@ -11,7 +11,10 @@
 //! The rest pins the new surface: submit (strict, idempotent), list, get,
 //! validate-only, the per-node projection, and every new error code
 //! (`invalid_graph`, `unknown_graph`, `unknown_tool`, `unknown_agent`,
-//! `not_a_graph_run`).
+//! `not_a_graph_run`), and the terminal a PERMANENT engine refusal earns: the
+//! driver records `RunFailed`, so a run that will refuse identically forever
+//! reads `failed` on both `GET /v1/runs/{id}` and the enriched list rather than
+//! sitting there looking like it is still going.
 
 mod common;
 
@@ -692,4 +695,81 @@ async fn resume_refuses_an_approval_that_violates_the_gates_schema() {
         json!({ "published": { "approved": true } })
     );
     assert_eq!(publish_calls.load(Ordering::SeqCst), 1);
+}
+
+/// A PERMANENT engine refusal on the server ends the run: the spawned driver
+/// records the terminal `RunFailed`, so `GET /v1/runs/{id}` reports `failed`
+/// and the enriched list agrees, rather than showing a run that will never
+/// move again as though it were still going.
+///
+/// Nothing in the status vocabulary or the dispatch needed changing for this:
+/// `RunFailed` is an event `derive_state` has always mapped to `failed`. What
+/// changed is that a refusal the engine will reproduce forever now writes one.
+/// The graph here refuses offline: an entry `branch` whose two cases both read
+/// a `score` the input does not carry, so no case matches and no model or tool
+/// is ever reached.
+#[tokio::test]
+async fn a_permanent_engine_refusal_leaves_the_graph_run_failed_not_running() {
+    let model = ScriptedModel::mount(vec![]).await;
+    let state = graph_state(model_only_factory(model.uri()), ToolRegistry::new());
+    let server = TestServer::spawn(state).await;
+    let client = reqwest::Client::new();
+
+    let document = json!({
+        "schema_version": 1,
+        "nodes": [
+            { "kind": "branch", "payload": {
+                "id": "route",
+                "on": "score",
+                "cases": [
+                    { "name": "high", "when": { "kind": "expression", "value": "score >= 0.8" } },
+                    { "name": "low", "when": { "kind": "expression", "value": "score < 0.8" } }
+                ]
+            } },
+            { "kind": "gate", "payload": { "id": "approve", "approval_schema": { "type": "object" } } },
+            { "kind": "gate", "payload": { "id": "reject", "approval_schema": { "type": "object" } } }
+        ],
+        "edges": [
+            { "from": "route", "to": "approve", "label": "high" },
+            { "from": "route", "to": "reject", "label": "low" }
+        ]
+    });
+    let (status, body) = post_json(
+        &client,
+        &format!("{}/v1/graphs", server.base),
+        document,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "submit: {body}");
+    let graph_hash = body["graph"].as_str().expect("graph hash").to_owned();
+
+    // The document resolves (no agents, no tools), so the run really starts.
+    let (status, body) = post_json(
+        &client,
+        &format!("{}/v1/graph-runs", server.base),
+        json!({ "graph_hash": graph_hash, "input": {"topic": "otters"} }),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "graph-run: {body}");
+    let run = body["run"].as_str().expect("run id").to_owned();
+
+    // The driver's terminal, read back through the endpoints that always
+    // existed.
+    let body = wait_for_state(&client, &server.base, &run, "failed").await;
+    let error = body["status"]["error"].as_str().expect("a failure message");
+    assert!(
+        error.contains("branch node `route`"),
+        "the recorded failure names the node that refused: {error}"
+    );
+
+    let (_, list) = get_json(&client, &format!("{}/v1/runs", server.base), None).await;
+    let entry = list["runs"]
+        .as_array()
+        .expect("runs array")
+        .iter()
+        .find(|entry| entry["run"] == run)
+        .expect("the refused run is listed");
+    assert_eq!(entry["status"]["state"], "failed");
 }

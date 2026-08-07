@@ -80,7 +80,7 @@ use serde_json::Value;
 
 use crate::document::{
     AgentNode, BranchCase, BranchCondition, BranchNode, Edge, FoldBody, FoldJoin, FoldNode,
-    GateNode, Graph, MapBody, MapNode, Node, SCHEMA_VERSION, ToolNode,
+    GateNode, Graph, MapBody, MapNode, Node, OnBound, SCHEMA_VERSION, ToolNode,
 };
 
 /// Accumulates nodes and edges, then freezes them into a [`Graph`].
@@ -513,6 +513,7 @@ pub struct FoldSpec {
     max_iterations: u32,
     stop_when: String,
     join: FoldJoin,
+    on_bound: Option<OnBound>,
     accumulator_schema: Option<Value>,
 }
 
@@ -536,6 +537,7 @@ impl FoldSpec {
             max_iterations,
             stop_when: stop_when.into(),
             join,
+            on_bound: None,
             accumulator_schema: None,
         }
     }
@@ -548,6 +550,17 @@ impl FoldSpec {
     #[must_use]
     pub fn name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
+        self
+    }
+
+    /// Declares what a reached iteration bound means. Left unset, the field
+    /// stays off the wire and the fold means [`OnBound::Join`], which is what a
+    /// fold written before the field existed does; set it to
+    /// [`OnBound::Fail`] when the stop predicate is a requirement rather than
+    /// an early exit.
+    #[must_use]
+    pub fn on_bound(mut self, on_bound: OnBound) -> Self {
+        self.on_bound = Some(on_bound);
         self
     }
 
@@ -567,6 +580,7 @@ impl FoldSpec {
             max_iterations: self.max_iterations,
             stop_when: self.stop_when,
             join: self.join,
+            on_bound: self.on_bound,
             accumulator_schema: self.accumulator_schema,
         })
     }
@@ -836,6 +850,41 @@ mod tests {
             payload.get("accumulator_schema").is_none(),
             "unset optional field must stay off the wire: {payload}"
         );
+        assert!(
+            payload.get("on_bound").is_none(),
+            "unset optional field must stay off the wire: {payload}"
+        );
+    }
+
+    /// `.on_bound(...)` puts the word on the wire; leaving it off leaves the
+    /// payload as it was before the field existed, and either way the document
+    /// validates.
+    #[test]
+    fn fold_spec_declares_what_a_reached_bound_means() {
+        use crate::document::{FoldBody, FoldJoin, OnBound};
+
+        for (on_bound, expected) in [(OnBound::Join, "join"), (OnBound::Fail, "fail")] {
+            let graph = GraphBuilder::new()
+                .agent(AgentSpec::new(
+                    "tailor",
+                    format!("sha256:{}", "a".repeat(64)),
+                ))
+                .fold(
+                    FoldSpec::new(
+                        "refine",
+                        FoldBody::Node("tailor".into()),
+                        3,
+                        "score >= 0.85",
+                        FoldJoin::BestBy("score".into()),
+                    )
+                    .on_bound(on_bound),
+                )
+                .build();
+
+            crate::validate(&graph).expect("the fold flow is valid");
+            let value = serde_json::to_value(&graph).expect("serialize");
+            assert_eq!(value["nodes"][1]["payload"]["on_bound"], json!(expected));
+        }
     }
 
     /// `.name(...)` is available on every node kind's spec, puts the name on

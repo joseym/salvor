@@ -1,0 +1,140 @@
+{
+  "adj-7741-pass-0": {
+    "when": "ADJ-7741",
+    "turns": [
+      {
+        "id": "msg_adj7741_pass0",
+        "model": "salvor-demo-model",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "tu_adj7741_pass0",
+            "name": "salvor_answer",
+            "input": {
+              "draft": "Your 2026-07-B pay was adjusted by -$184.00 following a differential reclass. Contact the desk with questions. [rev A1]",
+              "score": 0.55
+            }
+          }
+        ],
+        "stop_reason": "tool_use",
+        "usage": { "input_tokens": 340, "output_tokens": 96 }
+      }
+    ]
+  },
+  "adj-7741-pass-1": {
+    "when": "rev A1",
+    "turns": [
+      {
+        "id": "msg_adj7741_pass1",
+        "model": "salvor-demo-model",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "tu_adj7741_pass1",
+            "name": "salvor_answer",
+            "input": {
+              "draft": "Hello R. Vance. Your pay for the 2026-07-B period was $184.00 too high, because a shift differential was paid at the wrong rate. We will take that $184.00 back from your next payslip, the one dated 2026-08-A, and nothing else changes. If any of this looks wrong to you, write to payroll@northharbor.example and we will go through it with you. [rev A2]",
+              "score": 0.85
+            }
+          }
+        ],
+        "stop_reason": "tool_use",
+        "usage": { "input_tokens": 410, "output_tokens": 168 }
+      }
+    ]
+  },
+  "adj-9002-pass-0": {
+    "when": "ADJ-9002",
+    "turns": [
+      {
+        "id": "msg_adj9002_pass0",
+        "model": "salvor-demo-model",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "tu_adj9002_pass0",
+            "name": "salvor_answer",
+            "input": {
+              "draft": "A retro grade change has been applied across four periods; net -$962.50 will be recovered. [rev B1]",
+              "score": 0.41
+            }
+          }
+        ],
+        "stop_reason": "tool_use",
+        "usage": { "input_tokens": 360, "output_tokens": 88 }
+      }
+    ]
+  },
+  "adj-9002-pass-1": {
+    "when": "rev B1",
+    "turns": [
+      {
+        "id": "msg_adj9002_pass1",
+        "model": "salvor-demo-model",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "tu_adj9002_pass1",
+            "name": "salvor_answer",
+            "input": {
+              "draft": "Hello T. Okafor. A grade change was backdated across four pay periods, and $962.50 of it was overpaid to you. The recovery lands on your 2026-08-A payslip. [rev B2]",
+              "score": 0.52
+            }
+          }
+        ],
+        "stop_reason": "tool_use",
+        "usage": { "input_tokens": 420, "output_tokens": 122 }
+      }
+    ]
+  },
+  "adj-9002-pass-2": {
+    "when": "rev B2",
+    "turns": [
+      {
+        "id": "msg_adj9002_pass2",
+        "model": "salvor-demo-model",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "tu_adj9002_pass2",
+            "name": "salvor_answer",
+            "input": {
+              "draft": "Hello T. Okafor. Your grade changed with effect from an earlier date, so four of your pay periods were recalculated. Across those four, $962.50 more was paid to you than the new grade allows. That amount comes off your 2026-08-A payslip. Questions go to payroll@northharbor.example. [rev B3]",
+              "score": 0.58
+            }
+          }
+        ],
+        "stop_reason": "tool_use",
+        "usage": { "input_tokens": 450, "output_tokens": 150 }
+      }
+    ]
+  },
+  "adj-9002-pass-3": {
+    "when": "rev B3",
+    "turns": [
+      {
+        "id": "msg_adj9002_pass3",
+        "model": "salvor-demo-model",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "tu_adj9002_pass3",
+            "name": "salvor_answer",
+            "input": {
+              "draft": "Hello T. Okafor. Your grade change was backdated, so the desk recalculated four of your pay periods, two of which had already closed. Taken together they paid you $962.50 more than the new grade allows, and that $962.50 comes off the payslip dated 2026-08-A. Write to payroll@northharbor.example if you would like the four periods listed out. [rev B4]",
+              "score": 0.61
+            }
+          }
+        ],
+        "stop_reason": "tool_use",
+        "usage": { "input_tokens": 480, "output_tokens": 176 }
+      }
+    ]
+  }
+}

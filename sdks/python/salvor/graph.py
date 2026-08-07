@@ -231,6 +231,13 @@ def all_passes() -> Json:
     return {"kind": "all"}
 
 
+#: What a fold reaching its ``max_iterations`` bound means, when ``stop_when``
+#: never held. ``"join"`` is today's behavior and what an absent field means;
+#: ``"fail"`` is for a stop predicate that is a requirement rather than an early
+#: exit.
+ON_BOUND_WORDS = ("join", "fail")
+
+
 @dataclass
 class FoldNode:
     """A ``fold`` node: bounded iteration that accumulates across passes."""
@@ -242,6 +249,7 @@ class FoldNode:
     join: Json
     name: Optional[str] = None
     accumulator_schema: Optional[JsonValue] = None
+    on_bound: Optional[str] = None
 
     def to_node(self) -> Json:
         payload: Json = {"id": self.id}
@@ -251,6 +259,14 @@ class FoldNode:
         payload["max_iterations"] = self.max_iterations
         payload["stop_when"] = self.stop_when
         payload["join"] = self.join
+        if self.on_bound is not None:
+            if self.on_bound not in ON_BOUND_WORDS:
+                raise ValueError(
+                    f'fold("{self.id}", ...) on_bound must be "join" or "fail" (what a '
+                    f"reached max_iterations bound means), but received "
+                    f"{self.on_bound!r}. Leave it unset for the default, which is join."
+                )
+            payload["on_bound"] = self.on_bound
         if self.accumulator_schema is not None:
             payload["accumulator_schema"] = self.accumulator_schema
         return {"kind": "fold", "payload": payload}
@@ -432,14 +448,27 @@ class GraphBuilder:
         *,
         name: Optional[str] = None,
         accumulator_schema: Optional[JsonValue] = None,
+        on_bound: Optional[str] = None,
     ) -> "GraphBuilder":
         """Adds a ``fold`` node: bounded iteration with a stop predicate and a
         join rule. The bound's positivity, the predicate's parse, and a
         ``best_by`` reference's shape are checked by ``salvor graph validate``,
-        not here."""
+        not here.
+
+        ``on_bound`` says what a reached ``max_iterations`` bound means:
+        ``"join"`` (today's behavior, and what leaving it unset means) or
+        ``"fail"``, for a stop predicate that is a requirement rather than an
+        early exit. Left unset it stays off the wire entirely."""
         self._nodes.append(
             FoldNode(
-                id, body, max_iterations, stop_when, join, name, accumulator_schema
+                id,
+                body,
+                max_iterations,
+                stop_when,
+                join,
+                name,
+                accumulator_schema,
+                on_bound,
             ).to_node()
         )
         return self

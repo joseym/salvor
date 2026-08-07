@@ -669,6 +669,17 @@ fn spawn_graph_drive(
 /// Builds the run's [`RunCtx`] and drives the engine over it. A resume seeds the
 /// recorded input through [`RunCtx::set_resume_input`] before driving, exactly
 /// as `Runtime::resume` does for an agent run; a fresh start stamps the labels.
+///
+/// A PERMANENT engine refusal gets its terminal `RunFailed` recorded here
+/// before the error surfaces, the server half of the discipline
+/// [`salvor_engine::record_permanent_refusal`] documents. Without it a run the
+/// engine will refuse identically forever would keep reading `running` on
+/// `GET /v1/runs` as long as its log stayed terminal-free; with it,
+/// `derive_state` sees the terminal and reports `failed`. Nothing else needs
+/// changing for that: `RunFailed` is an event the status vocabulary and the
+/// dispatch already know. A transient refusal is left exactly as it was, so a
+/// resume or a recover still picks the run up. A recording failure is logged
+/// and the drive's own error is still returned: the refusal is the news.
 async fn drive_graph(
     state: &AppState,
     run_id: RunId,
@@ -697,7 +708,17 @@ async fn drive_graph(
         }
         GraphVerb::Recover => Value::Null,
     };
-    run_graph(&mut ctx, graph, &input, agents, registry).await
+    let outcome = run_graph(&mut ctx, graph, &input, agents, registry).await;
+    if let Err(error) = &outcome
+        && let Err(recording) = salvor_engine::record_permanent_refusal(&mut ctx, error).await
+    {
+        tracing::error!(
+            run_id = %run_id.as_uuid(),
+            %recording,
+            "could not record the terminal for a permanent graph refusal"
+        );
+    }
+    outcome
 }
 
 /// Builds every agent the graph references (an `agent` node's hash, or a
@@ -892,6 +913,18 @@ fn graph_error_json(error: &GraphError) -> Value {
         } => json!({
             "code": "invalid_fold_join_reference", "message": message,
             "node": node, "reference": reference, "error": error,
+        }),
+        GraphError::FoldStopPathNotInBodySchema { node, path, body } => json!({
+            "code": "fold_stop_path_not_in_body_schema", "message": message,
+            "node": node, "path": path, "body": body,
+        }),
+        GraphError::FoldJoinReferenceNotInBodySchema {
+            node,
+            reference,
+            body,
+        } => json!({
+            "code": "fold_join_reference_not_in_body_schema", "message": message,
+            "node": node, "reference": reference, "body": body,
         }),
         GraphError::NodeNameTooLong { id, len, max } => json!({
             "code": "node_name_too_long", "message": message, "node": id, "len": len, "max": max,
