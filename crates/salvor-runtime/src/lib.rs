@@ -88,7 +88,7 @@ pub use compact::{
     compact_error_message,
 };
 pub use ctx::{
-    ClockFn, MAX_TOOL_ATTEMPTS, ModelTurn, RandomFn, Resumption, RunCtx, ToolCallResult,
+    ClockFn, MAX_TOOL_ATTEMPTS, ModelTurn, RandomFn, Resumption, RunCtx, ToolCallResult, Waking,
 };
 pub use driver::{ANSWER_TOOL, LoopOutcome, drive_loop, drive_loop_structured};
 pub use error::RuntimeError;

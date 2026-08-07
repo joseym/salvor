@@ -613,6 +613,7 @@ mod tests {
                 Event::Suspended {
                     reason: "awaiting approval".into(),
                     input_schema: json!({"type": "object"}),
+                    kind: None,
                 },
             ),
             (

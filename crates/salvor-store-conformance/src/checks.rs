@@ -127,6 +127,7 @@ fn all_event_kinds() -> Vec<Event> {
         Event::Suspended {
             reason: "awaiting approval".into(),
             input_schema: serde_json::json!({"type": "object"}),
+            kind: None,
         },
         Event::Resumed {
             input: serde_json::json!({"approved": true}),

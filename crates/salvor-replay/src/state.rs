@@ -233,9 +233,16 @@ pub fn derive_state(log: &[EventEnvelope]) -> RunState {
             // Deterministic-context observations change no run status; they
             // only exist so replay can hand the same values back.
             Event::NowObserved { .. } | Event::RandomObserved { .. } => {}
+            // The recorded `kind` is deliberately not folded into a status. A
+            // run waiting on a signal is suspended in every sense this fold
+            // reports: parked, not running, resumable only by input the
+            // recorded schema accepts. What differs is who supplies that
+            // input, which is a routing question for a surface reading the
+            // event, not a state the run is in.
             Event::Suspended {
                 reason,
                 input_schema,
+                kind: _,
             } => {
                 state.status = RunStatus::Suspended {
                     reason: reason.clone(),
@@ -498,6 +505,7 @@ mod tests {
             Event::Suspended {
                 reason: "awaiting approval".into(),
                 input_schema: schema.clone(),
+                kind: None,
             },
         ]));
         assert_eq!(
@@ -517,6 +525,7 @@ mod tests {
             Event::Suspended {
                 reason: "awaiting approval".into(),
                 input_schema: serde_json::json!({"type": "object"}),
+                kind: None,
             },
             Event::Resumed {
                 input: serde_json::json!({"approved": true}),
@@ -586,6 +595,7 @@ mod tests {
             Event::Suspended {
                 reason: "awaiting approval".into(),
                 input_schema: serde_json::json!({"type": "object"}),
+                kind: None,
             },
         ];
         let full = log(events);

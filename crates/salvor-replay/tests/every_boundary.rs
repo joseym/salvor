@@ -347,9 +347,12 @@ fn expected_status(prefix: &[EventEnvelope]) -> RunStatus {
             Effect::Write => RunStatus::NeedsReconciliation,
             Effect::Read | Effect::Idempotent => RunStatus::AwaitingTool,
         },
+        // Whatever the suspension waits on, the status it implies is the
+        // same: parked, awaiting input the recorded schema accepts.
         Event::Suspended {
             reason,
             input_schema,
+            kind: _,
         } => RunStatus::Suspended {
             reason: reason.clone(),
             input_schema: input_schema.clone(),

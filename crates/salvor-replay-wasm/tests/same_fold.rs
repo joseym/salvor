@@ -156,6 +156,7 @@ fn reference_logs() -> Vec<(&'static str, Vec<EventEnvelope>)> {
             Event::Suspended {
                 reason: "awaiting approval".into(),
                 input_schema: json!({"type": "object", "required": ["approved"]}),
+                kind: None,
             },
             Event::Resumed {
                 input: json!({"approved": true}),

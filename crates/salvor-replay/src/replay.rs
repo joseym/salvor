@@ -50,7 +50,9 @@
 //!   crashed `Write` detectable), execute, redeem, persist.
 //! - Suspension maps to [`ReplayCursor::suspend`] plus
 //!   [`ReplayCursor::await_resume`]; a live [`Parked`] value means the run
-//!   parks durably and the process may exit.
+//!   parks durably and the process may exit. A wait on an external signal
+//!   takes the same pair through [`ReplayCursor::suspend_for_signal`], which
+//!   records what is expected to answer it and changes nothing else.
 //! - A durable timer maps to [`ReplayCursor::sleep_started`] plus
 //!   [`ReplayCursor::sleep_completed`]; a live [`Asleep`] value means the run
 //!   is still asleep and the process may exit, and only the IO edge (which has
@@ -71,7 +73,9 @@ use thiserror::Error;
 use time::OffsetDateTime;
 
 use crate::effect::Effect;
-use crate::event::{Budget, DedupOrigin, Event, EventEnvelope, ForkOrigin, TokenUsage};
+use crate::event::{
+    Budget, DedupOrigin, Event, EventEnvelope, ForkOrigin, SuspensionKind, TokenUsage,
+};
 use crate::id::{RunId, SequenceNumber};
 use crate::state::PendingCall;
 
@@ -232,12 +236,16 @@ pub enum RequestedStep {
         /// The idempotency key orchestration presented.
         idempotency_key: Option<String>,
     },
-    /// [`ReplayCursor::suspend`] with these parameters.
+    /// [`ReplayCursor::suspend`] or [`ReplayCursor::suspend_for_signal`] with
+    /// these parameters.
     Suspend {
         /// The suspension reason orchestration presented.
         reason: String,
         /// The resume-input schema orchestration presented.
         input_schema: Value,
+        /// The discriminator orchestration presented: `None` for a human
+        /// gate.
+        kind: Option<SuspensionKind>,
     },
     /// [`ReplayCursor::await_resume`].
     AwaitResume,
@@ -1355,7 +1363,7 @@ impl ReplayCursor {
         })
     }
 
-    /// Requests suspension of the run.
+    /// Requests suspension of the run on a human gate: someone must answer it.
     ///
     /// Replayed: matches the recorded [`Event::Suspended`]. Live: returns the
     /// event to persist. Either way, follow with [`ReplayCursor::await_resume`]
@@ -1370,18 +1378,67 @@ impl ReplayCursor {
         reason: &str,
         input_schema: &Value,
     ) -> Result<Outcome<(), Emitted>, ReplayError> {
+        self.suspend_with_kind(reason, input_schema, None)
+    }
+
+    /// Requests suspension of the run on an external signal: a webhook or
+    /// callback will resume it with a payload, and no operator is being asked
+    /// for anything.
+    ///
+    /// Identical to [`suspend`](Self::suspend) in every mechanical respect,
+    /// down to the events: the run parks awaiting schema-validated input and
+    /// resumes through [`Event::Resumed`], because that is genuinely what is
+    /// happening. The only difference is the recorded
+    /// [`SuspensionKind::Signal`], which is what lets a surface keep this run
+    /// out of an approval inbox.
+    ///
+    /// A separate method rather than a kind argument on `suspend`, because the
+    /// absent discriminator is not a value a caller should have to pass: every
+    /// existing gate keeps calling `suspend` and keeps recording the identical
+    /// bytes, and the exception names itself at the call site. This is the same
+    /// shape [`ToolCallPermit::record_deduplicated`] takes beside
+    /// [`ToolCallPermit::record`].
+    ///
+    /// # Errors
+    ///
+    /// [`ReplayError::Divergence`] on a payload mismatch (the discriminator
+    /// included), a different recorded event, or a request after the run
+    /// already ended.
+    pub fn suspend_for_signal(
+        &mut self,
+        reason: &str,
+        input_schema: &Value,
+    ) -> Result<Outcome<(), Emitted>, ReplayError> {
+        self.suspend_with_kind(reason, input_schema, Some(SuspensionKind::Signal))
+    }
+
+    /// The shared body of the two suspension requests.
+    ///
+    /// `kind` participates in the replay-equality check exactly as `reason`
+    /// and `input_schema` do: a recomputed suspension that changed what it is
+    /// waiting on is waiting for a different answer from a different party,
+    /// which is a divergence and not a detail.
+    fn suspend_with_kind(
+        &mut self,
+        reason: &str,
+        input_schema: &Value,
+        kind: Option<SuspensionKind>,
+    ) -> Result<Outcome<(), Emitted>, ReplayError> {
         let requested = RequestedStep::Suspend {
             reason: reason.to_owned(),
             input_schema: input_schema.clone(),
+            kind,
         };
         self.guard_terminal(&requested)?;
         if self.pos < self.log.len() {
             if let Event::Suspended {
                 reason: recorded_reason,
                 input_schema: recorded_schema,
+                kind: recorded_kind,
             } = &self.log[self.pos].event
                 && recorded_reason == reason
                 && recorded_schema == input_schema
+                && *recorded_kind == kind
             {
                 self.pos += 1;
                 return Ok(Outcome::Replayed(()));
@@ -1391,6 +1448,7 @@ impl ReplayCursor {
         let emitted = self.emit(Event::Suspended {
             reason: reason.to_owned(),
             input_schema: input_schema.clone(),
+            kind,
         });
         Ok(Outcome::Live(emitted))
     }
@@ -1975,7 +2033,13 @@ impl fmt::Display for RequestedStep {
             Self::ToolCall { tool, effect, .. } => {
                 write!(f, "ToolCall(tool={tool}, effect={effect:?})")
             }
-            Self::Suspend { reason, .. } => write!(f, "Suspend(reason={reason})"),
+            // The discriminator rides along because two suspensions can share
+            // a reason and differ only in what is expected to answer them,
+            // and a divergence message that showed both sides as identical
+            // text would be useless exactly there.
+            Self::Suspend { reason, kind, .. } => {
+                write!(f, "Suspend(reason={reason}, kind={})", waiting_on(*kind))
+            }
             Self::AwaitResume => write!(f, "AwaitResume"),
             // The instant rides as its debug form: `time`'s own rendering,
             // which needs no format description and so no optional feature.
@@ -1994,6 +2058,16 @@ impl fmt::Display for RequestedStep {
     }
 }
 
+/// Names what a suspension waits on, for divergence messages. The absent
+/// discriminator reads as `gate` rather than as nothing, so a message about
+/// two suspensions that differ only there says something at both ends.
+fn waiting_on(kind: Option<SuspensionKind>) -> &'static str {
+    match kind {
+        None => "gate",
+        Some(SuspensionKind::Signal) => "signal",
+    }
+}
+
 /// A one-line summary of a recorded event, for divergence messages.
 fn event_summary(event: &Event) -> String {
     let name = kind_name(event);
@@ -2007,7 +2081,9 @@ fn event_summary(event: &Event) -> String {
         Event::ToolCallRequested { tool, effect, .. } => {
             format!("{name}(tool={tool}, effect={effect:?})")
         }
-        Event::Suspended { reason, .. } => format!("{name}(reason={reason})"),
+        Event::Suspended { reason, kind, .. } => {
+            format!("{name}(reason={reason}, kind={})", waiting_on(*kind))
+        }
         Event::SleepStarted { wake_at } => format!("{name}(wake_at={wake_at:?})"),
         Event::BudgetExceeded { budget, observed } => format!(
             "{name}(kind={:?}, limit={}, observed={observed})",

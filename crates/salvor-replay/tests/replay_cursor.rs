@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use salvor_replay::{
     DedupOrigin, Effect, Emitted, Event, EventEnvelope, LoggedStep, ModelReply, Outcome,
     PendingCall, ReplayCursor, ReplayError, RequestedStep, RunId, RunStatus, SequenceNumber,
-    TokenUsage, derive_state,
+    SuspensionKind, TokenUsage, derive_state,
 };
 use serde_json::{Value, json};
 use time::macros::datetime;
@@ -1021,4 +1021,174 @@ fn a_proven_unexecuted_intent_records_a_deduplicated_completion() {
         Some(origin),
         "the completion must name what it copied"
     );
+}
+
+/// The schema a signal's payload is validated against, shared by the tests
+/// below so a divergence between them can only come from the discriminator.
+fn signal_schema() -> Value {
+    json!({"type": "object", "required": ["tracking_number"]})
+}
+
+/// A suspension recorded as a signal wait round-trips the wire and replays,
+/// and the discriminator survives with it: an external wait resumed through
+/// the same `Resumed` event a gate uses, still knowing it was never a gate.
+#[test]
+fn a_signal_suspension_round_trips_and_replays() {
+    let mut cursor = ReplayCursor::new(head_only_log()).expect("log is valid");
+    cursor.begin(AGENT_HASH, None).expect("begin replays");
+
+    let reason = "awaiting the carrier webhook";
+    let Outcome::Live(emitted) = cursor
+        .suspend_for_signal(reason, &signal_schema())
+        .expect("the signal wait is recorded")
+    else {
+        panic!("an exhausted log must hand back a live emission");
+    };
+    assert_eq!(
+        emitted.event,
+        Event::Suspended {
+            reason: reason.to_owned(),
+            input_schema: signal_schema(),
+            kind: Some(SuspensionKind::Signal),
+        }
+    );
+    let suspended = wrap(emitted);
+
+    let Outcome::Live(parked) = cursor.await_resume().expect("the wait is asked about") else {
+        panic!("an unrecorded resume must park the run");
+    };
+    let payload = json!({"tracking_number": "1Z999"});
+    let resumed = wrap(parked.resume(payload.clone()));
+
+    // Through the wire form, exactly as a store would carry it, then replayed.
+    let log: Vec<EventEnvelope> = [head_only_log(), vec![suspended, resumed]]
+        .concat()
+        .iter()
+        .map(|env| {
+            let wire = serde_json::to_string(env).expect("serialize");
+            serde_json::from_str(&wire).expect("deserialize")
+        })
+        .collect();
+    let mut cursor = ReplayCursor::new(log).expect("recorded log is valid");
+    cursor.begin(AGENT_HASH, None).expect("begin replays");
+    let Outcome::Replayed(()) = cursor
+        .suspend_for_signal(reason, &signal_schema())
+        .expect("the signal wait replays")
+    else {
+        panic!("the recorded suspension must replay");
+    };
+    let Outcome::Replayed(input) = cursor.await_resume().expect("the payload replays") else {
+        panic!("the recorded resume must replay");
+    };
+    assert_eq!(input, payload);
+    assert!(!cursor.is_replaying(), "every recorded event was consumed");
+}
+
+/// A suspension recorded as a gate replays as one, unchanged: the existing
+/// call, the existing events, no discriminator anywhere. This is the other
+/// half of the compatibility claim, checked through the cursor rather than
+/// through the wire form.
+#[test]
+fn a_gate_suspension_replays_unchanged() {
+    let mut cursor = ReplayCursor::new(head_only_log()).expect("log is valid");
+    cursor.begin(AGENT_HASH, None).expect("begin replays");
+    let schema = json!({"type": "object", "required": ["approved"]});
+
+    let Outcome::Live(emitted) = cursor
+        .suspend("awaiting approval", &schema)
+        .expect("the gate is recorded")
+    else {
+        panic!("an exhausted log must hand back a live emission");
+    };
+    assert_eq!(
+        emitted.event,
+        Event::Suspended {
+            reason: "awaiting approval".to_owned(),
+            input_schema: schema.clone(),
+            kind: None,
+        },
+        "a gate records no discriminator at all"
+    );
+
+    let log = [head_only_log(), vec![wrap(emitted)]].concat();
+    let mut cursor = ReplayCursor::new(log).expect("recorded log is valid");
+    cursor.begin(AGENT_HASH, None).expect("begin replays");
+    let Outcome::Replayed(()) = cursor
+        .suspend("awaiting approval", &schema)
+        .expect("the gate replays")
+    else {
+        panic!("the recorded suspension must replay");
+    };
+}
+
+/// A recomputed suspension that changed what it waits on is a divergence, not
+/// a detail: the run would go on expecting an answer from a party the log says
+/// was never asked. Both directions fail, gate against signal and signal
+/// against gate, with reason and schema identical either way so nothing but
+/// the discriminator can be what fails.
+#[test]
+fn a_suspension_whose_kind_changed_diverges() {
+    let reason = "awaiting the carrier webhook";
+    let recorded = |kind| {
+        let mut log = head_only_log();
+        log.push(EventEnvelope::new(
+            run_id(),
+            SequenceNumber::new(1),
+            ts(SequenceNumber::new(1)),
+            Event::Suspended {
+                reason: reason.to_owned(),
+                input_schema: signal_schema(),
+                kind,
+            },
+        ));
+        log
+    };
+
+    // Recorded as a signal, recomputed as a gate.
+    let mut cursor =
+        ReplayCursor::new(recorded(Some(SuspensionKind::Signal))).expect("log is valid");
+    cursor.begin(AGENT_HASH, None).expect("begin replays");
+    let err = cursor
+        .suspend(reason, &signal_schema())
+        .expect_err("a gate must not replay a recorded signal wait");
+    let ReplayError::Divergence {
+        position,
+        recorded: logged,
+        requested,
+    } = err
+    else {
+        panic!("expected a divergence");
+    };
+    assert_eq!(position, SequenceNumber::new(1));
+    assert_eq!(
+        *logged,
+        LoggedStep::Event(Event::Suspended {
+            reason: reason.to_owned(),
+            input_schema: signal_schema(),
+            kind: Some(SuspensionKind::Signal),
+        })
+    );
+    assert_eq!(
+        *requested,
+        RequestedStep::Suspend {
+            reason: reason.to_owned(),
+            input_schema: signal_schema(),
+            kind: None,
+        }
+    );
+
+    // Recorded as a gate, recomputed as a signal.
+    let mut cursor = ReplayCursor::new(recorded(None)).expect("log is valid");
+    cursor.begin(AGENT_HASH, None).expect("begin replays");
+    let err = cursor
+        .suspend_for_signal(reason, &signal_schema())
+        .expect_err("a signal wait must not replay a recorded gate");
+    assert!(matches!(err, ReplayError::Divergence { .. }), "{err}");
+
+    // The message names both sides, which is the whole point of carrying the
+    // discriminator into the divergence report: two suspensions sharing a
+    // reason would otherwise print identically.
+    let message = err.to_string();
+    assert!(message.contains("kind=gate"), "{message}");
+    assert!(message.contains("kind=signal"), "{message}");
 }

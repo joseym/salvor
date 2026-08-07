@@ -898,6 +898,7 @@ fn reference_logs() -> Vec<(&'static str, Vec<EventEnvelope>)> {
             Event::Suspended {
                 reason: "a human must approve the payout".to_owned(),
                 input_schema: json!({"type": "object"}),
+                kind: None,
             },
             Event::Resumed {
                 input: json!({"approved": true}),

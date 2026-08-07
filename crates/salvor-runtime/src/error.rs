@@ -15,11 +15,13 @@
 //!   mark the two places JSON conversion can fail around a model call.
 //! - **Runtime protocol.** Starting a run that already has history, resuming
 //!   a run that is not parked, resuming with input the recorded schema
-//!   rejects, or naming a run the store does not know.
+//!   rejects, naming a run the store does not know, or asking to sleep past
+//!   the end of representable time.
 
 use salvor_core::{ReplayError, RunId};
 use salvor_store::StoreError;
 use thiserror::Error;
+use time::{Duration, OffsetDateTime};
 
 /// What can go wrong while driving a run.
 ///
@@ -88,6 +90,18 @@ pub enum RuntimeError {
     /// for a budget crossing, the budget-extension shape).
     #[error("resume input rejected: {0}")]
     ResumeInputRejected(String),
+
+    /// A sleep asked for a wake instant no timestamp can hold: the duration
+    /// added to the observed clock reading falls outside the representable
+    /// range. Refused rather than clamped, because a silently shortened
+    /// deadline is a run that wakes at a time nobody asked for.
+    #[error("sleep of {duration:?} from {now:?} overflows the representable range of an instant")]
+    SleepOverflow {
+        /// The recorded clock reading the sleep was derived from.
+        now: OffsetDateTime,
+        /// The duration asked for.
+        duration: Duration,
+    },
 
     /// The labels a run is about to be created with violate the sanity
     /// bounds (too many, or a key/value over its length cap). See

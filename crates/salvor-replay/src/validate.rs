@@ -456,6 +456,7 @@ mod tests {
             Event::Suspended {
                 reason: "approval".into(),
                 input_schema: serde_json::json!({"type": "object"}),
+                kind: None,
             },
             Event::Resumed {
                 input: serde_json::json!({"approved": true}),
