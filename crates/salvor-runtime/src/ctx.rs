@@ -520,6 +520,77 @@ impl RunCtx {
         }
     }
 
+    /// Records (or replays) that a fold node began one bounded pass of its
+    /// accumulate-and-refine loop. A fold's passes run inline in this log rather
+    /// than as child runs, so `index` is both the pass position and its recorded
+    /// order, and replay matches it exactly: a replayed pass returns without
+    /// re-recording anything.
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeError::Replay`] on divergence; [`RuntimeError::Store`] when
+    /// persistence fails.
+    pub async fn fold_iteration_started(
+        &mut self,
+        node: &str,
+        index: u64,
+    ) -> Result<(), RuntimeError> {
+        match self.cursor.fold_iteration_started(node, index)? {
+            Outcome::Replayed(()) => Ok(()),
+            Outcome::Live(emitted) => {
+                persist(self.store.as_ref(), self.run_id, &self.clock, &emitted).await
+            }
+        }
+    }
+
+    /// Records (or replays) that one fold pass joined back into the fold node's
+    /// accumulated value. Recorded in index order, which for a fold is already
+    /// completion order because its passes are sequential. A replayed join
+    /// returns without re-recording anything.
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeError::Replay`] on divergence; [`RuntimeError::Store`] when
+    /// persistence fails.
+    pub async fn fold_iteration_joined(
+        &mut self,
+        node: &str,
+        index: u64,
+    ) -> Result<(), RuntimeError> {
+        match self.cursor.fold_iteration_joined(node, index)? {
+            Outcome::Replayed(()) => Ok(()),
+            Outcome::Live(emitted) => {
+                persist(self.store.as_ref(), self.run_id, &self.clock, &emitted).await
+            }
+        }
+    }
+
+    /// Records (or replays) that a fold node settled: its loop stopped and its
+    /// `join` rule selected the pass at `winner_index`, for the recorded
+    /// `reason`. This is the sole authority for which pass the fold's output
+    /// came from, as [`branch_taken`](Self::branch_taken) is for a branch's
+    /// route. Both the winner and the reason must be deterministic functions of
+    /// the recorded pass values, because replay matches all three fields and a
+    /// replayed convergence returns without re-recording anything.
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeError::Replay`] on divergence; [`RuntimeError::Store`] when
+    /// persistence fails.
+    pub async fn fold_converged(
+        &mut self,
+        node: &str,
+        winner_index: u64,
+        reason: &str,
+    ) -> Result<(), RuntimeError> {
+        match self.cursor.fold_converged(node, winner_index, reason)? {
+            Outcome::Replayed(()) => Ok(()),
+            Outcome::Live(emitted) => {
+                persist(self.store.as_ref(), self.run_id, &self.clock, &emitted).await
+            }
+        }
+    }
+
     /// The recorded clock: reads the injected clock once, live, and replays
     /// the identical instant forever after.
     ///

@@ -9,7 +9,7 @@ Try it in your browser at **[salvor.run](https://salvor.run)**. The demo termina
 ![Salvor kills a research agent mid-run and resumes it to completion with no duplicate side effects](docs/demo.gif)
 
 - **Crash-exact resume.** Every event is written before the runtime acts on it, so a resume replays what already happened and re-executes none of it.
-- **No duplicate side effects.** Tools declare an effect (read, write, or idempotent) and a write is never replayed blind. A write left dangling by a crash blocks the resume until a human reconciles it. Within one run this holds always; across separate runs it holds for a call whose tool declares an idempotency key, which the store then lets exactly one run execute. Declare it as `idempotency_keys` on an `[[mcp_servers]]` entry, a map from tool name to the input field that names the operation: `idempotency_keys = { pay_claim = "claim_id" }`.
+- **No duplicate side effects.** Tools declare an effect (read, write, or idempotent) and a write is never replayed blind. A write left dangling by a crash blocks the resume until a human reconciles it. Within one run this holds always; across separate runs it holds for a call whose tool declares an idempotency key, which the store then lets exactly one run execute. Declare it as `idempotency_keys` on an `[[mcp_servers]]` entry, a map from tool name to the input field that names the operation: `idempotency_keys = { pay_claim = "claim_id" }`. That guarantee does not cover a model call: one still in flight at the moment of a kill is re-issued live on resume, and the provider may have billed the interrupted attempt, while a completed call replays from the log and is never re-paid.
 - **The log is the run.** State is a pure fold over events: the same code in the runtime, in `salvor replay`, and in the browser via wasm.
 - **Hard budgets.** Ceilings on steps, tokens, dollars, and wall time, enforced by the runtime rather than suggested to the model. Wall time is measured between recorded clock observations, never against the ambient clock.
 - **One static binary.** The event store and the web UI ship inside it.
@@ -176,7 +176,7 @@ Working on the UI from a checkout? `salvor serve --dev` runs the API and the Ang
 
 ## Graphs
 
-A graph is a JSON document: nodes are agents (referenced by content hash), tools, gates, branches and maps, and edges are the topology. Validation is strict, an unknown key is rejected, and an error names the node or edge at fault.
+A graph is a JSON document: nodes are agents (referenced by content hash), tools, gates, branches, maps and folds, and edges are the topology. Validation is strict, an unknown key is rejected, and an error names the node or edge at fault.
 
 ![salvor graph edit builds the payroll pay-run desk line by line in the terminal editor: the pull_roster and flag_exceptions tool nodes, the route branch and its two cases, the review_exceptions gate with its approval schema, the pay_each map over the roster with pay_employee as its body, the notify_summary agent node whose --file path resolves to a content hash on screen, the labeled edges, the validator naming a typoed edge target and then passing once it is fixed, and the finished document written to disk. It is the same document shown on the Bridge canvas above.](docs/graph-edit.gif)
 
@@ -186,7 +186,7 @@ salvor graph validate examples/graphs/invalid-dangling-edge.json
 
 names the dangling edge: ``edge `research` -> `aprove` references unknown node id `aprove` (did you mean `approve`?)``
 
-`salvor graph run` drives a document over the store exactly as `salvor run` drives an agent run: each walked node is recorded, a branch records `BranchTaken` while the losing arm records `NodeSkipped`, and a gate parks the run durably until a human answers. The kill-and-resume guarantee is the one from the top of this file, unchanged. Typed builders exist in Rust, TypeScript and Python, each reducing to the same document, and `salvor graph schema` emits the JSON Schema checked in at [`docs/graph-schema.json`](docs/graph-schema.json) for editor completion.
+`salvor graph run` drives a document over the store exactly as `salvor run` drives an agent run: each walked node is recorded, a branch records `BranchTaken` while the losing arm records `NodeSkipped`, a gate parks the run durably until a human answers, and a `fold` runs its body up to a declared bound, each pass folding over the last, until its stop condition holds and its join rule picks the winner, all of it recorded pass by pass. The kill-and-resume guarantee is the one from the top of this file, unchanged. Typed builders exist in Rust, TypeScript and Python, each reducing to the same document, and `salvor graph schema` emits the JSON Schema checked in at [`docs/graph-schema.json`](docs/graph-schema.json) for editor completion.
 
 Over HTTP the durability has one edge: a run's events are in the store, but the submitted document is not. `salvor serve` keeps it in a process-local memory registry, so a restart drops it and it has to be resubmitted before a run or fork references it again (see [Operating it](#operating-it)).
 
@@ -305,7 +305,7 @@ The kill demo is one crash at one boundary. The release gate is the property sui
 | `salvor-wasm` | Sandboxed WebAssembly component tools (wasmtime, WASI p2, deny-all) |
 | `salvor-runtime` | The IO edge: `RunCtx`, the `Agent` builder, the built-in loop |
 | `salvor-graph` | Graph document model, validation, JSON Schema emission |
-| `salvor-engine` | Executes graph documents: linear chains, gates, branches, maps, forks |
+| `salvor-engine` | Executes graph documents: linear chains, gates, branches, maps, folds, forks |
 | `salvor-server` | The control plane: HTTP + SSE, server-driven and client-driven |
 | `salvor-cli` | The `salvor` binary |
 | `salvor` | Facade over the family: `cargo add salvor` for the library, with `graph`, `engine`, `server`, `llm` and `wasm` as opt-in features |

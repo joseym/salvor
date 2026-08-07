@@ -185,6 +185,29 @@ pub enum RequestedStep {
         /// The zero-based iteration index orchestration presented.
         index: u64,
     },
+    /// [`ReplayCursor::fold_iteration_started`] for this fold node and index.
+    FoldIterationStarted {
+        /// The fold node id orchestration presented.
+        node: String,
+        /// The zero-based pass index orchestration presented.
+        index: u64,
+    },
+    /// [`ReplayCursor::fold_iteration_joined`] for this fold node and index.
+    FoldIterationJoined {
+        /// The fold node id orchestration presented.
+        node: String,
+        /// The zero-based pass index orchestration presented.
+        index: u64,
+    },
+    /// [`ReplayCursor::fold_converged`] for this fold node.
+    FoldConverged {
+        /// The fold node id orchestration presented.
+        node: String,
+        /// The winning pass index orchestration presented.
+        winner_index: u64,
+        /// The stop reason orchestration presented.
+        reason: String,
+    },
     /// [`ReplayCursor::now`].
     Now,
     /// [`ReplayCursor::random`].
@@ -804,6 +827,143 @@ impl ReplayCursor {
         let emitted = self.emit(Event::MapIterationJoined {
             node: node.to_owned(),
             index,
+        });
+        Ok(Outcome::Live(emitted))
+    }
+
+    /// Records (or replays) that a fold node began one bounded pass of its
+    /// accumulate-and-refine loop.
+    ///
+    /// A fold's passes run inline in this log, never as child runs, so there is
+    /// no derived child id to carry and nothing here is trusted from the record:
+    /// replay matches the recorded [`Event::FoldIterationStarted`] on `node` and
+    /// `index` exactly, unlike
+    /// [`map_iteration_started`](ReplayCursor::map_iteration_started), whose
+    /// recorded child id wins. Live: returns the event to persist.
+    ///
+    /// # Errors
+    ///
+    /// [`ReplayError::Divergence`] on a node-id or index mismatch, a different
+    /// recorded event, or a request after the run already ended.
+    pub fn fold_iteration_started(
+        &mut self,
+        node: &str,
+        index: u64,
+    ) -> Result<Outcome<(), Emitted>, ReplayError> {
+        let requested = RequestedStep::FoldIterationStarted {
+            node: node.to_owned(),
+            index,
+        };
+        self.guard_terminal(&requested)?;
+        if self.pos < self.log.len() {
+            if let Event::FoldIterationStarted {
+                node: recorded_node,
+                index: recorded_index,
+            } = &self.log[self.pos].event
+                && recorded_node == node
+                && *recorded_index == index
+            {
+                self.pos += 1;
+                return Ok(Outcome::Replayed(()));
+            }
+            return Err(self.mismatch(requested));
+        }
+        let emitted = self.emit(Event::FoldIterationStarted {
+            node: node.to_owned(),
+            index,
+        });
+        Ok(Outcome::Live(emitted))
+    }
+
+    /// Records (or replays) that one fold pass joined back into the fold node's
+    /// accumulated value.
+    ///
+    /// Recorded in index order, which for a fold is already completion order:
+    /// the passes are sequential. Replayed: matches the recorded
+    /// [`Event::FoldIterationJoined`] for `node` and `index`. Live: returns the
+    /// event to persist.
+    ///
+    /// # Errors
+    ///
+    /// [`ReplayError::Divergence`] on a node-id or index mismatch, a different
+    /// recorded event, or a request after the run already ended.
+    pub fn fold_iteration_joined(
+        &mut self,
+        node: &str,
+        index: u64,
+    ) -> Result<Outcome<(), Emitted>, ReplayError> {
+        let requested = RequestedStep::FoldIterationJoined {
+            node: node.to_owned(),
+            index,
+        };
+        self.guard_terminal(&requested)?;
+        if self.pos < self.log.len() {
+            if let Event::FoldIterationJoined {
+                node: recorded_node,
+                index: recorded_index,
+            } = &self.log[self.pos].event
+                && recorded_node == node
+                && *recorded_index == index
+            {
+                self.pos += 1;
+                return Ok(Outcome::Replayed(()));
+            }
+            return Err(self.mismatch(requested));
+        }
+        let emitted = self.emit(Event::FoldIterationJoined {
+            node: node.to_owned(),
+            index,
+        });
+        Ok(Outcome::Live(emitted))
+    }
+
+    /// Records (or replays) that a fold node settled: its loop stopped and its
+    /// `join` rule selected the pass at `winner_index`. This is the sole
+    /// recorded authority for which pass the fold's output came from, exactly as
+    /// [`branch_taken`](ReplayCursor::branch_taken) is for a branch's route.
+    ///
+    /// Replayed: matches the recorded [`Event::FoldConverged`] on `node`,
+    /// `winner_index`, and `reason`, all three. The winner and the stop reason
+    /// are recomputed on replay from the recorded pass values, so a recomputed
+    /// pair that differs from the recorded one is a real divergence, not a
+    /// re-derivation to be tolerated. Live: returns the event to persist.
+    ///
+    /// # Errors
+    ///
+    /// [`ReplayError::Divergence`] on a node-id, winner-index, or reason
+    /// mismatch, a different recorded event, or a request after the run already
+    /// ended.
+    pub fn fold_converged(
+        &mut self,
+        node: &str,
+        winner_index: u64,
+        reason: &str,
+    ) -> Result<Outcome<(), Emitted>, ReplayError> {
+        let requested = RequestedStep::FoldConverged {
+            node: node.to_owned(),
+            winner_index,
+            reason: reason.to_owned(),
+        };
+        self.guard_terminal(&requested)?;
+        if self.pos < self.log.len() {
+            if let Event::FoldConverged {
+                node: recorded_node,
+                winner_index: recorded_winner,
+                reason: recorded_reason,
+            } = &self.log[self.pos].event
+                && recorded_node == node
+                && *recorded_winner == winner_index
+                && recorded_reason == reason
+            {
+                self.pos += 1;
+                return Ok(Outcome::Replayed(()));
+            }
+            return Err(self.mismatch(requested));
+        }
+        let emitted = self.emit(Event::FoldConverged {
+            node: node.to_owned(),
+            winner_index,
+            reason: reason.to_owned(),
         });
         Ok(Outcome::Live(emitted))
     }
@@ -1683,6 +1843,20 @@ impl fmt::Display for RequestedStep {
             Self::MapIterationJoined { node, index } => {
                 write!(f, "MapIterationJoined(node={node}, index={index})")
             }
+            Self::FoldIterationStarted { node, index } => {
+                write!(f, "FoldIterationStarted(node={node}, index={index})")
+            }
+            Self::FoldIterationJoined { node, index } => {
+                write!(f, "FoldIterationJoined(node={node}, index={index})")
+            }
+            Self::FoldConverged {
+                node,
+                winner_index,
+                reason,
+            } => write!(
+                f,
+                "FoldConverged(node={node}, winner_index={winner_index}, reason={reason})"
+            ),
             Self::Now => write!(f, "Now"),
             Self::Random => write!(f, "Random"),
             Self::ModelCall { request_hash } => write!(f, "ModelCall(request_hash={request_hash})"),
@@ -2133,6 +2307,204 @@ mod tests {
         let err = cursor
             .map_iteration_started("fanout", 1, "sha256:origin-derived")
             .expect_err("a different index must diverge");
+        assert!(
+            matches!(err, ReplayError::Divergence { position, .. } if position == SequenceNumber::new(1))
+        );
+    }
+
+    /// A graph-run head followed by one recorded marker at position 1: the
+    /// smallest log a marker divergence can be provoked against.
+    fn head_then(run_id: RunId, marker: Event) -> Vec<EventEnvelope> {
+        vec![
+            EventEnvelope::new(
+                run_id,
+                SequenceNumber::new(0),
+                datetime!(2026-07-14 12:00:00 UTC),
+                Event::GraphRunStarted {
+                    graph_hash: "sha256:g".into(),
+                    input: serde_json::json!({}),
+                    labels: None,
+                    forked_from: None,
+                },
+            ),
+            EventEnvelope::new(
+                run_id,
+                SequenceNumber::new(1),
+                datetime!(2026-07-14 12:00:00 UTC),
+                marker,
+            ),
+        ]
+    }
+
+    /// The three fold markers emit live at contiguous positions and replay from
+    /// history with no divergence: two sequential passes, joined in index order,
+    /// then a convergence naming the winning pass.
+    #[test]
+    fn fold_markers_emit_live_and_replay() {
+        let run_id =
+            RunId::from_uuid(Uuid::parse_str("00000000-0000-4000-8000-00000000000d").unwrap());
+
+        let mut cursor = ReplayCursor::new(vec![]).expect("fresh run");
+        let mut emitted = Vec::new();
+        match cursor.begin_graph("sha256:g", None, None).expect("begin") {
+            Outcome::Live(p) => emitted.push(p.record(serde_json::json!({}))),
+            Outcome::Replayed(_) => panic!("fresh must be live"),
+        }
+        let mut push_live = |outcome: Outcome<(), Emitted>| match outcome {
+            Outcome::Live(e) => emitted.push(e),
+            Outcome::Replayed(()) => panic!("fresh must be live"),
+        };
+        push_live(cursor.node_entered("refine").expect("enter"));
+        push_live(cursor.fold_iteration_started("refine", 0).expect("start 0"));
+        push_live(cursor.fold_iteration_joined("refine", 0).expect("join 0"));
+        push_live(cursor.fold_iteration_started("refine", 1).expect("start 1"));
+        push_live(cursor.fold_iteration_joined("refine", 1).expect("join 1"));
+        push_live(
+            cursor
+                .fold_converged("refine", 1, "stop predicate fired")
+                .expect("converged"),
+        );
+        push_live(cursor.node_exited("refine").expect("exit"));
+
+        let positions: Vec<u64> = emitted.iter().map(|e| e.seq.get()).collect();
+        assert_eq!(positions, [0, 1, 2, 3, 4, 5, 6, 7], "contiguous positions");
+
+        let log: Vec<EventEnvelope> = emitted
+            .iter()
+            .map(|e| {
+                EventEnvelope::new(
+                    run_id,
+                    e.seq,
+                    datetime!(2026-07-14 12:00:00 UTC),
+                    e.event.clone(),
+                )
+            })
+            .collect();
+        let mut replay = ReplayCursor::new(log).expect("well formed");
+        replay.begin_graph("sha256:g", None, None).expect("begin");
+        assert!(matches!(
+            replay.node_entered("refine").expect("enter"),
+            Outcome::Replayed(())
+        ));
+        assert!(matches!(
+            replay.fold_iteration_started("refine", 0).expect("start 0"),
+            Outcome::Replayed(())
+        ));
+        assert!(matches!(
+            replay.fold_iteration_joined("refine", 0).expect("join 0"),
+            Outcome::Replayed(())
+        ));
+        assert!(matches!(
+            replay.fold_iteration_started("refine", 1).expect("start 1"),
+            Outcome::Replayed(())
+        ));
+        assert!(matches!(
+            replay.fold_iteration_joined("refine", 1).expect("join 1"),
+            Outcome::Replayed(())
+        ));
+        assert!(matches!(
+            replay
+                .fold_converged("refine", 1, "stop predicate fired")
+                .expect("converged"),
+            Outcome::Replayed(())
+        ));
+        assert!(matches!(
+            replay.node_exited("refine").expect("exit"),
+            Outcome::Replayed(())
+        ));
+        assert!(!replay.is_replaying(), "history fully consumed");
+    }
+
+    /// A fold pass replays on `node` and `index`, both exactly: unlike a map
+    /// iteration there is no derived child id to take from the record, so
+    /// neither field is forgiven.
+    #[test]
+    fn a_mismatched_fold_iteration_start_diverges() {
+        let run_id =
+            RunId::from_uuid(Uuid::parse_str("00000000-0000-4000-8000-00000000000e").unwrap());
+        let recorded = Event::FoldIterationStarted {
+            node: "refine".into(),
+            index: 0,
+        };
+
+        let mut cursor =
+            ReplayCursor::new(head_then(run_id, recorded.clone())).expect("well formed");
+        cursor.begin_graph("sha256:g", None, None).expect("begin");
+        let err = cursor
+            .fold_iteration_started("refine", 1)
+            .expect_err("a different index must diverge");
+        assert!(
+            matches!(err, ReplayError::Divergence { position, .. } if position == SequenceNumber::new(1))
+        );
+
+        let mut cursor = ReplayCursor::new(head_then(run_id, recorded)).expect("well formed");
+        cursor.begin_graph("sha256:g", None, None).expect("begin");
+        let err = cursor
+            .fold_iteration_started("polish", 0)
+            .expect_err("a different node must diverge");
+        assert!(
+            matches!(err, ReplayError::Divergence { position, .. } if position == SequenceNumber::new(1))
+        );
+    }
+
+    /// A fold join replays on `node` and `index`, both exactly.
+    #[test]
+    fn a_mismatched_fold_iteration_join_diverges() {
+        let run_id =
+            RunId::from_uuid(Uuid::parse_str("00000000-0000-4000-8000-00000000000f").unwrap());
+        let recorded = Event::FoldIterationJoined {
+            node: "refine".into(),
+            index: 2,
+        };
+
+        let mut cursor =
+            ReplayCursor::new(head_then(run_id, recorded.clone())).expect("well formed");
+        cursor.begin_graph("sha256:g", None, None).expect("begin");
+        let err = cursor
+            .fold_iteration_joined("polish", 2)
+            .expect_err("a different node must diverge");
+        assert!(
+            matches!(err, ReplayError::Divergence { position, .. } if position == SequenceNumber::new(1))
+        );
+
+        let mut cursor = ReplayCursor::new(head_then(run_id, recorded)).expect("well formed");
+        cursor.begin_graph("sha256:g", None, None).expect("begin");
+        let err = cursor
+            .fold_iteration_joined("refine", 0)
+            .expect_err("a different index must diverge");
+        assert!(
+            matches!(err, ReplayError::Divergence { position, .. } if position == SequenceNumber::new(1))
+        );
+    }
+
+    /// A convergence that recomputes a different winner, or the same winner for
+    /// a different reason, is a divergence: the recorded settlement is
+    /// authoritative on all three fields.
+    #[test]
+    fn a_mismatched_fold_convergence_diverges() {
+        let run_id =
+            RunId::from_uuid(Uuid::parse_str("00000000-0000-4000-8000-000000000010").unwrap());
+        let recorded = Event::FoldConverged {
+            node: "refine".into(),
+            winner_index: 1,
+            reason: "stop predicate fired".into(),
+        };
+
+        let mut cursor =
+            ReplayCursor::new(head_then(run_id, recorded.clone())).expect("well formed");
+        cursor.begin_graph("sha256:g", None, None).expect("begin");
+        let err = cursor
+            .fold_converged("refine", 0, "stop predicate fired")
+            .expect_err("a different winner must diverge");
+        assert!(
+            matches!(err, ReplayError::Divergence { position, .. } if position == SequenceNumber::new(1))
+        );
+
+        let mut cursor = ReplayCursor::new(head_then(run_id, recorded)).expect("well formed");
+        cursor.begin_graph("sha256:g", None, None).expect("begin");
+        let err = cursor
+            .fold_converged("refine", 1, "iteration bound reached")
+            .expect_err("a different reason must diverge");
         assert!(
             matches!(err, ReplayError::Divergence { position, .. } if position == SequenceNumber::new(1))
         );

@@ -17,7 +17,7 @@ That engine backs `salvor graph run`, `POST /v1/graphs`, and
 | `gate` | optional `prompt`, `approval_schema` | Human approval that suspends the run. The `approval_schema` is enforced against the resume input before the approval is recorded: a non-conforming approval is refused, nothing is appended, and the run stays parked at the gate. A schema that names `required` or `properties` without a `type` is read as asking for an object, so a bare `null`, number, or string is refused too. |
 | `branch` | optional `on`, `cases` (each a `name` + a `when` condition) | Routes on a typed output. Conditions are recorded as DATA and evaluated by the engine at run time, never by this crate. |
 | `map` | `over`, `concurrency` cap, `body` (a node id or an embedded sub-graph), optional `output_schema` | Fan-out a sub-run per element of a list. The engine runs iterations inline and sequentially; the `concurrency` cap is accepted and validated but not enforced, a deliberate choice for v0.4. A `subgraph` body, or any body node that is not an `agent` or `tool`, is refused with a typed `UnsupportedMapBody` error rather than driven. |
-| `fold` | `body` (a node id or an embedded sub-graph), `max_iterations`, `stop_when` condition, `join` strategy, optional `accumulator_schema` | A bounded iteration loop. The format, validator, and builders support it fully; the engine deliberately refuses to drive one, recording a typed `UnsupportedNode` error rather than executing it. |
+| `fold` | `body` (a node id or an embedded sub-graph), `max_iterations`, `stop_when` condition, `join` strategy, optional `accumulator_schema` | A bounded iteration loop. The engine drives a `node` body: passes run inline and sequentially, each folding over the previous pass's output, until `stop_when` holds or the bound is reached, and then the `join` rule (`best_by` argmax, `last`, or `all`) picks the value the node produces. A `subgraph` body, or any body node that is not an `agent` or `tool`, is refused with a typed `UnsupportedFoldBody` error rather than driven. |
 
 Edges are the topology: `{ "from": "<node id>", "to": "<node id>" }`, with an
 optional `label` (used to name the branch case an edge realizes). Every node
@@ -33,9 +33,23 @@ ignored.
 | [`linear-research-publish.json`](linear-research-publish.json) | A simpler linear flow with no gate: a research `agent` drafts, a review `agent` checks, a `tool` publishes. |
 | [`branch-review.json`](branch-review.json) | An `agent` drafts, a `tool` scores it, a `branch` routes on the score: the high case reaches a `gate` then publishes, the low case reaches a rejection `tool` directly. |
 | [`branch-model-decision.json`](branch-model-decision.json) | An `agent` drafts, a `tool` scores it, a `branch` carries BOTH an expression case and a `model_decision` case with a well-formed `agent_hash`: the high case reaches a `gate` then publishes, the review case reaches an escalation `tool` directly. The shared fixture the Rust, TypeScript, and Python builders all reduce to for a branch's `agent_hash`. |
-| [`fold-refine.json`](fold-refine.json) | A single `fold` node whose body is an `agent`, bounded to 3 iterations with a `stop_when` condition and a `best_by` join. Validates clean; the engine refuses to run it (see the `fold` row above). |
+| [`fold-refine.json`](fold-refine.json) | A single `fold` node whose body is an `agent`, bounded to 3 iterations with a `stop_when` condition and a `best_by` join. Validates clean, and the engine drives the loop: `tailor` runs once per pass as the fold's per-pass worker, never as a node of its own. Its `best_by` join then needs a `score` inside each pass's value, and an `agent` node's output is the model's reply text, so with a plain text reply the join has nothing to order and refuses (`FoldNoComparableCandidate`) rather than guessing a winner. A `tool` body, whose output is arbitrary JSON, is what carries a scored accumulator today. |
 | [`invalid-dangling-edge.json`](invalid-dangling-edge.json) | An edge whose target `aprove` is a typo of the node `approve`. Produces a precise dangling-edge error with a nearest-name suggestion. |
 | [`invalid-cycle.json`](invalid-cycle.json) | Two agents pointing at each other. Produces a precise cycle error naming the path. |
+
+A `map` or `fold` body-by-id node, such as `fold-refine.json`'s `tailor`, has
+no edges of its own, so `salvor graph validate`'s summary reports it as both
+an entry and a terminal node.
+
+`fold-refine.json`'s `agent_hash` (`sha256:` followed by sixty-four `3`s) is a
+placeholder; no real agent file hashes to it, so the document only validates,
+it does not run, until you splice in a real one: `jq --arg h "$(salvor agent
+hash agents/tailor.toml)" '.nodes[0].payload.agent_hash = $h'
+examples/graphs/fold-refine.json > fold-refine.local.json`. `--agent` supplies
+the TOOL inventory too, not just an agent node's hash: a `tool` node's tools
+come from the tools the supplied `--agent` files' MCP servers carry (see the
+comment in `examples/payroll/agents/notify-summary.toml`), so even a graph
+with no `agent` nodes at all still needs `--agent` when it has `tool` nodes.
 
 ## Learning an agent's hash first
 
@@ -157,7 +171,10 @@ $ salvor graph run examples/graphs/research-review-publish.json \
 ```
 
 A `gate` node parks the run the same way a tool suspension does; continue it
-with `salvor resume <RUN_ID> --graph examples/graphs/research-review-publish.json --input '{"approved": true}'`.
+with `salvor resume <RUN_ID> --graph examples/graphs/research-review-publish.json --agent agents/research.toml --agent agents/review.toml --input '{"approved": true}'`.
+The same `--agent` files `graph run` needed above are needed again here: a
+`tool` node's tools come from the agents' MCP servers, so a resume that omits
+one names a tool none of the supplied agents carry.
 `salvor fork <RUN_ID> --from-node <NODE> --graph <FILE>` re-walks a run from a
 node boundary into a new run.
 
@@ -188,8 +205,9 @@ replays into the identical document.
 
 All checks run and every failure is reported (never just the first):
 
-- **Referential integrity.** Every edge endpoint, and every `map` body that
-  names a node, must be a real node id. A near miss gets a suggestion.
+- **Referential integrity.** Every edge endpoint, and every `map` or `fold`
+  body that names a node, must be a real node id. A near miss gets a
+  suggestion.
 - **Per-node required fields.** An `agent` hash is a well-formed
   `sha256:<64 hex>` string; a `map` concurrency cap is at least 1; a `gate`
   approval schema is a JSON object.

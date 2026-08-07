@@ -239,13 +239,20 @@ pub fn reconciliation_report(
 /// was given (see [`crate::cli::ResolveArgs`]); when the operator supplied
 /// them, the printed command is the real, complete one, exactly as a graph
 /// run's own parked report is (see `report_graph_outcome` in
-/// `salvor_cli::commands`). When neither was given, the command falls back to
-/// a `--agent <FILE>` placeholder, since there is nothing real to print.
+/// `salvor_cli::commands`). `graph_run` is whether the resolved run itself is
+/// a graph run, which the caller reads off the run's own log (its head event
+/// is `GraphRunStarted`) rather than off `graph.is_some()`, because an
+/// operator can resolve a graph run without happening to pass `--graph`; that
+/// is what lets the printed command still hint at a `--graph <FILE>`
+/// placeholder in that case instead of silently dropping the flag. Likewise a
+/// missing agent falls back to an `--agent <FILE>` placeholder, since there is
+/// nothing real to print.
 #[must_use]
 pub fn resolved_report(
     run_uuid: &str,
     agents: &[PathBuf],
     graph: Option<&Path>,
+    graph_run: bool,
     width: usize,
 ) -> String {
     let mut out = wrap(
@@ -258,10 +265,12 @@ pub fn resolved_report(
         "",
     );
     let mut command = format!("salvor resume {run_uuid}");
-    if let Some(graph) = graph {
-        command.push_str(&format!(" --graph {}", graph.display()));
+    match graph {
+        Some(graph) => command.push_str(&format!(" --graph {}", graph.display())),
+        None if graph_run => command.push_str(" --graph <FILE>"),
+        None => {}
     }
-    if agents.is_empty() && graph.is_none() {
+    if agents.is_empty() {
         command.push_str(" --agent <FILE>");
     } else {
         for agent in agents {
@@ -830,12 +839,14 @@ mod tests {
                 UUID,
                 &[PathBuf::from("agent.toml")],
                 None,
+                false,
                 40
             )),
             words(&resolved_report(
                 UUID,
                 &[PathBuf::from("agent.toml")],
                 None,
+                false,
                 100
             ))
         );
@@ -856,7 +867,13 @@ mod tests {
             "the resolve command must survive on one line:\n{report}"
         );
 
-        let report = resolved_report(UUID, &[PathBuf::from("agents/writer.toml")], None, 40);
+        let report = resolved_report(
+            UUID,
+            &[PathBuf::from("agents/writer.toml")],
+            None,
+            false,
+            40,
+        );
         assert!(
             report
                 .lines()
@@ -867,12 +884,25 @@ mod tests {
         // A `resolve` that was given no `--agent`/`--graph` still prints a
         // parseable command, with a bracketed placeholder standing in for the
         // one thing it does not know.
-        let unfilled = resolved_report(UUID, &[], None, 40);
+        let unfilled = resolved_report(UUID, &[], None, false, 40);
         assert!(
             unfilled
                 .lines()
                 .any(|line| line == format!("  salvor resume {UUID} --agent <FILE>")),
             "the fallback resume command must survive on one line:\n{unfilled}"
+        );
+
+        // The graph-run counterpart: the operator resolved a graph run but
+        // passed neither `--agent` nor `--graph`, so both are unknown. The
+        // caller still knows from the run's own log that this is a graph run,
+        // so the printed command hints at both placeholders rather than
+        // silently dropping `--graph`.
+        let unfilled_graph = resolved_report(UUID, &[], None, true, 40);
+        assert!(
+            unfilled_graph
+                .lines()
+                .any(|line| line == format!("  salvor resume {UUID} --graph <FILE> --agent <FILE>")),
+            "the graph fallback resume command must survive on one line:\n{unfilled_graph}"
         );
 
         let report = parked_report(
@@ -912,6 +942,7 @@ mod tests {
             UUID,
             &[PathBuf::from("agents/writer.toml")],
             Some(Path::new("flow.json")),
+            true,
             80,
         );
         let line = report
@@ -974,7 +1005,7 @@ mod tests {
         let reports = [
             reconciliation_report(UUID, Some(&sample_pending()), sample_recorded_at(), WIDTH),
             reconciliation_report(UUID, None, None, WIDTH),
-            resolved_report(UUID, &[PathBuf::from("agent.toml")], None, WIDTH),
+            resolved_report(UUID, &[PathBuf::from("agent.toml")], None, false, WIDTH),
             abandoned_report(UUID, 12, Some((3, "send_email")), WIDTH),
             abandoned_report(UUID, 12, None, WIDTH),
             parked_report(

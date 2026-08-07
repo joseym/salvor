@@ -147,6 +147,27 @@ impl Expr {
     }
 }
 
+/// Orders two JSON values by the expression language's OWN ordering rule, the
+/// one `<`, `<=`, `>`, and `>=` are defined by: two numbers compare by
+/// mathematical value (exactly through `i128` when both are integral, as `f64`
+/// when either is fractional), two strings compare lexicographically, and every
+/// other pairing is unordered (`None`).
+///
+/// Exported because a second consumer needs the identical order: a `fold`
+/// node's `FoldJoin::BestBy` is an argmax over the passes, and an argmax that
+/// ordered values even slightly differently from the `stop_when` predicate
+/// beside it would make one node speak two languages. Calling this is what
+/// keeps the two from ever drifting; re-deriving the rule would not.
+///
+/// `None` also answers "is this value orderable at all", because a value orders
+/// against itself exactly when its type is one this rule orders. That is the
+/// check a `best_by` argmax needs to decide which passes may win, and it needs
+/// no type list of its own.
+#[must_use]
+pub fn compare(left: &Value, right: &Value) -> Option<Ordering> {
+    order(left, right)
+}
+
 /// A parsed reference into a routed value: a dot-separated path with array
 /// indexing, the same `path` grammar the expression language uses for an
 /// operand, standing alone as a value reference rather than inside a boolean.
@@ -1033,6 +1054,47 @@ mod tests {
             "a.-1 == 1",
         ] {
             assert!(parse(bad).is_err(), "`{bad}` should be a parse error");
+        }
+    }
+
+    // --- The exported ordering (the `fold` `best_by` argmax). ---
+
+    #[test]
+    fn the_exported_order_is_the_one_the_operators_use() {
+        // Numbers by mathematical value, integers exactly, strings
+        // lexicographically: the same answers `<` and `>` give.
+        assert_eq!(compare(&json!(1), &json!(2)), Some(Ordering::Less));
+        assert_eq!(compare(&json!(1), &json!(1.0)), Some(Ordering::Equal));
+        assert_eq!(
+            compare(
+                &json!(9_007_199_254_740_993_i64),
+                &json!(9_007_199_254_740_992_i64)
+            ),
+            Some(Ordering::Greater)
+        );
+        assert_eq!(compare(&json!("a"), &json!("b")), Some(Ordering::Less));
+        // Everything else is unordered, so nothing outside numbers and strings
+        // can win an argmax.
+        for value in [json!(true), json!(null), json!({"a": 1}), json!([1])] {
+            assert_eq!(compare(&value, &value), None, "{value} must not order");
+        }
+        assert_eq!(compare(&json!(1), &json!("1")), None);
+    }
+
+    proptest! {
+        /// The export agrees with the operators for every pair of values: an
+        /// ordering the argmax reads is one `<` would have agreed with.
+        #[test]
+        fn the_export_agrees_with_the_ordering_operators(
+            left in json_strategy(),
+            right in json_strategy(),
+        ) {
+            let value = json!({"l": left, "r": right});
+            let less = parse("l < r").unwrap().eval(&value);
+            let greater = parse("l > r").unwrap().eval(&value);
+            let (l, r) = (&value["l"], &value["r"]);
+            prop_assert_eq!(compare(l, r) == Some(Ordering::Less), less);
+            prop_assert_eq!(compare(l, r) == Some(Ordering::Greater), greater);
         }
     }
 

@@ -55,19 +55,41 @@
 //!   already proven for linear and branching graphs. Concurrent child runs are
 //!   not yet supported. A
 //!   `subgraph` body, or a body node that is not an `agent` or `tool`, is a typed
-//!   [`EngineError::UnsupportedMapBody`] refused before `NodeEntered`.
+//!   [`EngineError::UnsupportedMapBody`] refused before `NodeEntered`;
+//! - a **fold** node runs its body up to `max_iterations` times, inline and
+//!   sequentially in the same log. Pass 0's input is the fold's routed value;
+//!   every later pass's input is the previous pass's output, which IS the
+//!   accumulated value: there is no separate accumulator state and no merge rule,
+//!   because the document has no vocabulary for one. The engine records
+//!   `NodeEntered`, then per pass `FoldIterationStarted`, the body's work inline,
+//!   and `FoldIterationJoined`, and stops when the `stop_when` predicate holds
+//!   over the pass just joined or when the bound is reached (there is no third
+//!   cause: nothing stops a fold for "failing to improve"). The `join` rule then
+//!   picks the value the node produces: `last` takes the final pass, `all` takes
+//!   every pass's value as a list in pass order, and `best_by` is an argmax over
+//!   ALL passes of the reference's value, ordered by the expression language's
+//!   own comparison ([`salvor_graph::expr::compare`]) so the argmax and the
+//!   predicate beside it can never order values differently, keeping the earliest
+//!   pass on a tie. A `best_by` with no comparable candidate in any pass is a
+//!   typed [`EngineError::FoldNoComparableCandidate`] refused before
+//!   `FoldConverged`. The chosen winner and the stop reason are recorded on
+//!   `FoldConverged`, then `NodeExited`. A `subgraph` body, or a body node that
+//!   is not an `agent` or `tool`, is a typed
+//!   [`EngineError::UnsupportedFoldBody`] refused before `NodeEntered`.
 //!
-//! A node that is a map's body is executed ONLY as that map's per-item worker; it
-//! is never walked independently, so its own events (a tool call, an agent loop)
-//! are recorded inline between the map's iteration markers and its node id is
-//! never framed with a `NodeEntered` of its own. That keeps node ids unambiguous
-//! in the one log and is why forking INTO a map iteration is refused: an iteration
-//! is not a node boundary (see [`plan_fork`]).
+//! A node that is a map's or a fold's body is executed ONLY as that owner's
+//! per-item or per-pass worker; it is never walked independently, so its own
+//! events (a tool call, an agent loop) are recorded inline between the owner's
+//! iteration markers and its node id is never framed with a `NodeEntered` of its
+//! own. That keeps node ids unambiguous in the one log and is why forking INTO a
+//! map iteration or a fold pass is refused: neither is a node boundary (see
+//! [`plan_fork`]).
 //!
 //! After the last node the engine records the single terminal `RunCompleted`.
 //! There is no ambient clock or randomness in any decision: everything the
 //! engine feeds forward (the walk order, each node's input, the branch route, a
-//! map's resolved item list and its per-iteration child ids, an idempotent tool's
+//! map's resolved item list and its per-iteration child ids, a fold's stop
+//! decision, its winner and its recorded reason, an idempotent tool's
 //! idempotency key) is a pure function of the document or of values the `RunCtx`
 //! recorded, so a second drive over the recorded log replays with no live calls
 //! and produces a byte-identical log. A map iteration's child-run id is
@@ -105,11 +127,15 @@ mod error;
 pub mod fork;
 mod walk;
 
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
 use salvor_core::{Effect, RunId};
-use salvor_graph::expr::Expr;
-use salvor_graph::{BranchCondition, BranchNode, Edge, GateNode, Graph, MapBody, MapNode, Node};
+use salvor_graph::expr::{Expr, Reference};
+use salvor_graph::{
+    BranchCondition, BranchNode, Edge, FoldBody, FoldJoin, FoldNode, GateNode, Graph, MapBody,
+    MapNode, Node,
+};
 use salvor_runtime::{
     Agent, LoopOutcome, ParkReason, Resumption, RunCtx, ToolCallResult, drive_loop, hash_value,
 };
@@ -205,6 +231,10 @@ pub fn graph_hash(graph: &Graph) -> Result<String, EngineError> {
 /// [`EngineError::MapOverNotAList`] when a map node's `over` reference does not
 /// resolve to a list, and [`EngineError::UnsupportedMapBody`] for a `subgraph` or
 /// non-`agent`/`tool` body (both before the map's `NodeEntered` is recorded);
+/// [`EngineError::UnsupportedFoldBody`] for a fold node's `subgraph` or
+/// non-`agent`/`tool` body (before the fold's `NodeEntered`), and
+/// [`EngineError::FoldNoComparableCandidate`] when a `best_by` join finds no
+/// comparable value in any pass (after the passes ran, before `FoldConverged`);
 /// [`EngineError::NoBranchCaseMatched`] when an expression branch
 /// matches no case (also before its `NodeEntered`);
 /// [`EngineError::BranchDecisionUnmatched`] when a model-decision branch's agent
@@ -235,16 +265,24 @@ pub async fn run_graph(
     // Branch conditions are parsed ONCE here (the validator already guarantees
     // they parse; a failure now is a MalformedGraph unreachable in practice).
     let branches = parse_branches(graph)?;
-    // The ids of every node used as a `map` body: they are the per-item workers
-    // of their map and are executed ONLY inside its fan-out, never walked
-    // independently, so their events stay unambiguous inside the one log.
-    let map_body_targets: HashSet<&str> = graph
+    // Every fold's `stop_when` (and its `best_by` reference) is parsed ONCE
+    // here, on the same terms the branch conditions are.
+    let folds = parse_folds(graph)?;
+    // The ids of every node used as a `map` or `fold` body: they are the
+    // per-item workers of their map and the per-pass workers of their fold, and
+    // are executed ONLY inside that owner's loop, never walked independently, so
+    // their events stay unambiguous inside the one log.
+    let body_targets: HashSet<&str> = graph
         .nodes
         .iter()
         .filter_map(|node| match node {
             Node::Map(map) => match &map.body {
                 MapBody::Node(target) => Some(target.as_str()),
                 MapBody::Subgraph(_) => None,
+            },
+            Node::Fold(fold) => match &fold.body {
+                FoldBody::Node(target) => Some(target.as_str()),
+                FoldBody::Subgraph(_) => None,
             },
             _ => None,
         })
@@ -261,10 +299,11 @@ pub async fn run_graph(
 
     for node in walk::walk_order(graph)? {
         let id = node.id();
-        // A node used as a map body is not walked independently: it runs only as
-        // its map's per-item worker, inline in the fan-out below. Nothing is
-        // recorded for it here: it is map-owned, not "skipped".
-        if map_body_targets.contains(id) {
+        // A node used as a map or fold body is not walked independently: it runs
+        // only as its owner's per-item or per-pass worker, inline in the loop
+        // below. Nothing is recorded for it here: it is body-owned, not
+        // "skipped".
+        if body_targets.contains(id) {
             continue;
         }
         // A node with no live inbound edge was routed past: record the skip (its
@@ -472,16 +511,19 @@ pub async fn run_graph(
                     }
                 }
             }
-            // A fold's execution semantics are not implemented yet, so the
-            // engine refuses it with a typed error BEFORE recording its
-            // `NodeEntered`. The fold still validates as a legal
-            // document, and its markers and projection exist for client-driven
-            // runs to record against; the engine simply does not drive the loop.
-            Node::Fold(fold) => {
-                return Err(EngineError::UnsupportedNode {
-                    node: fold.id.clone(),
-                    kind: "fold",
-                });
+            // A fold's parsed plan carries the node itself, so the drive takes
+            // one argument for both.
+            Node::Fold(_) => {
+                let plan = folds.get(id).expect("every fold node is parsed");
+                match drive_fold(ctx, plan, &node_input, &by_id, agents, tools, &hash).await? {
+                    FoldOutcome::Converged(output) => {
+                        last_output = output.clone();
+                        outputs.insert(id, output);
+                    }
+                    FoldOutcome::Parked { node, reason } => {
+                        return Ok(GraphOutcome::Parked { node, reason });
+                    }
+                }
             }
         }
     }
@@ -573,12 +615,13 @@ async fn drive_map(
         let child_run = map_child_run_id(ctx.run_id(), node_id, index);
         ctx.map_iteration_started(node_id, index, &child_run)
             .await?;
-        let call = MapCall {
+        let call = BodyCall {
+            owner: BodyOwner::Map,
             graph_hash,
             node_id,
             index,
         };
-        match run_map_body(ctx, body, item, agents, tools, call).await? {
+        match run_body(ctx, body, item, agents, tools, call).await? {
             IterationOutcome::Output(output) => joined.push(output),
             IterationOutcome::Parked(reason) => {
                 return Ok(MapOutcome::Parked {
@@ -594,36 +637,67 @@ async fn drive_map(
     Ok(MapOutcome::Joined(Value::Array(joined)))
 }
 
-/// How one map iteration's body work ended.
+/// How one map iteration's or fold pass's body work ended.
 enum IterationOutcome {
-    /// The body produced this output for the iteration.
+    /// The body produced this output for the iteration or pass.
     Output(Value),
     /// The body parked (an agent budget crossing or a tool suspension).
     Parked(ParkReason),
 }
 
-/// Where one map iteration's tool call sits, for deriving its fork-safe
-/// idempotency key: the graph hash, the map node id, and the iteration index.
-struct MapCall<'a> {
+/// Which node kind owns an inline body run. Carried only so the unsupported-body
+/// error the shared runner returns names the right kind; the two owners run the
+/// body identically.
+#[derive(Clone, Copy)]
+enum BodyOwner {
+    Map,
+    Fold,
+}
+
+/// Where one map iteration's or fold pass's tool call sits, for deriving its
+/// fork-safe idempotency key: the graph hash, the owning node's id, and the
+/// iteration or pass index.
+struct BodyCall<'a> {
+    /// Which node kind owns this run.
+    owner: BodyOwner,
     /// The graph document hash.
     graph_hash: &'a str,
-    /// The map node id (the "node" this iteration is a call of).
+    /// The owning map or fold node id (the "node" this call belongs to).
     node_id: &'a str,
-    /// The zero-based iteration index (the call index within the map node).
+    /// The zero-based iteration or pass index (the call index within the node).
     index: u64,
 }
 
-/// Runs one map iteration's body work inline: the referenced `agent` or `tool`
-/// node's work with `item` as its input, recorded in the parent log WITHOUT a
-/// `NodeEntered` frame of its own (the iteration markers bracket it instead). The
-/// body kind was already validated as `agent` or `tool` by [`drive_map`].
-async fn run_map_body(
+impl BodyCall<'_> {
+    /// The refusal for a body node kind that cannot be a worker, named for the
+    /// owner. Both callers validate the body kind before the loop, so this is
+    /// only ever built on a path the caller already proved unreachable.
+    fn unsupported_body(&self, detail: String) -> EngineError {
+        match self.owner {
+            BodyOwner::Map => EngineError::UnsupportedMapBody {
+                node: self.node_id.to_owned(),
+                detail,
+            },
+            BodyOwner::Fold => EngineError::UnsupportedFoldBody {
+                node: self.node_id.to_owned(),
+                detail,
+            },
+        }
+    }
+}
+
+/// Runs one map iteration's or fold pass's body work inline: the referenced
+/// `agent` or `tool` node's work with `item` as its input, recorded in the parent
+/// log WITHOUT a `NodeEntered` frame of its own (the owner's markers bracket it
+/// instead). The body kind was already validated as `agent` or `tool` by
+/// [`drive_map`] or [`drive_fold`].
+async fn run_body(
     ctx: &mut RunCtx,
     body: &Node,
     item: &Value,
     agents: &impl AgentResolver,
     tools: &impl ToolResolver,
-    call: MapCall<'_>,
+    call: BodyCall<'_>,
 ) -> Result<IterationOutcome, EngineError> {
     match body {
         Node::Agent(agent_node) => {
@@ -646,11 +720,12 @@ async fn run_map_body(
                         node: tool_node.id.clone(),
                         tool: tool_node.tool.clone(),
                     })?;
-            // Each iteration is a distinct call of the MAP node, so its idempotent
-            // key is derived from the map node id and the index: the "several
-            // calls within one node" case `fork_safe_idempotency_key`'s call-index
-            // parameter exists for. A fork re-walking the fan-out presents each
-            // iteration's identical key; Read/Write carry none.
+            // Each iteration or pass is a distinct call of the OWNING node, so
+            // its idempotent key is derived from that node's id and the index:
+            // the "several calls within one node" case
+            // `fork_safe_idempotency_key`'s call-index parameter exists for. A
+            // fork re-walking the loop presents each call's identical key;
+            // Read/Write carry none.
             let idempotency_key = match tool.effect() {
                 Effect::Idempotent => Some(fork_safe_idempotency_key(
                     call.graph_hash,
@@ -683,14 +758,231 @@ async fn run_map_body(
                 }
             }
         }
-        // `drive_map` validated the body kind as agent or tool before calling here.
-        other => Err(EngineError::UnsupportedMapBody {
-            node: call.node_id.to_owned(),
+        // The caller validated the body kind as agent or tool before the loop.
+        other => Err(call.unsupported_body(format!(
+            "a `{}` body node cannot be a worker",
+            other.kind_name()
+        ))),
+    }
+}
+
+/// How driving one fold node's loop ended.
+enum FoldOutcome {
+    /// The loop stopped and the `join` rule chose the value the node produces.
+    Converged(Value),
+    /// A pass parked the run (an `agent` body's budget crossing or a `tool`
+    /// body's suspension), propagated up as a graph park at the fold node. No
+    /// join is recorded for that pass, so a later drive re-drives the SAME pass.
+    Parked {
+        /// The fold node that parked.
+        node: String,
+        /// Why it parked.
+        reason: ParkReason,
+    },
+}
+
+/// Drives one fold node's bounded loop inline and sequentially into the parent
+/// log.
+///
+/// Refuses an unsupported body form **before** recording the fold's
+/// `NodeEntered`, so nothing lands in the log past such a refusal. Then records
+/// `NodeEntered` and, for each pass in index order, `FoldIterationStarted`, the
+/// body's work inline, and `FoldIterationJoined`. Pass 0's input is the fold's
+/// routed value; every later pass's input is the previous pass's output, which
+/// IS the accumulated value (the document has no vocabulary for a separate
+/// accumulator or a merge rule). The loop stops when `stop_when` holds over the
+/// pass just joined, or when `max_iterations` passes have run; then the `join`
+/// rule picks the winner, `FoldConverged` records it with the stop reason, and
+/// `NodeExited` closes the node.
+async fn drive_fold(
+    ctx: &mut RunCtx,
+    plan: &FoldPlan<'_>,
+    routed: &Value,
+    by_id: &HashMap<&str, &Node>,
+    agents: &impl AgentResolver,
+    tools: &impl ToolResolver,
+    graph_hash: &str,
+) -> Result<FoldOutcome, EngineError> {
+    let fold = plan.node;
+    let node_id = fold.id.as_str();
+
+    // Resolve the body up front so an unsupported body form refuses BEFORE the
+    // fold's NodeEntered is recorded.
+    let body: &Node = match &fold.body {
+        FoldBody::Node(target) => {
+            let body_node =
+                by_id
+                    .get(target.as_str())
+                    .copied()
+                    .ok_or_else(|| EngineError::MalformedGraph {
+                        detail: format!(
+                            "fold node `{node_id}`: body names unknown node `{target}`"
+                        ),
+                    })?;
+            match body_node {
+                Node::Agent(_) | Node::Tool(_) => body_node,
+                other => {
+                    return Err(EngineError::UnsupportedFoldBody {
+                        node: node_id.to_owned(),
+                        detail: format!(
+                            "a `{}` body node cannot be a per-pass worker; only `agent` and `tool` bodies run",
+                            other.kind_name()
+                        ),
+                    });
+                }
+            }
+        }
+        FoldBody::Subgraph(_) => {
+            return Err(EngineError::UnsupportedFoldBody {
+                node: node_id.to_owned(),
+                detail: "an embedded `subgraph` body is not executed yet".to_owned(),
+            });
+        }
+    };
+
+    // The validator requires a bound of at least 1; the engine re-checks it
+    // defensively, before NodeEntered, because a zero bound would leave the
+    // join with no pass to choose.
+    if fold.max_iterations < 1 {
+        return Err(EngineError::MalformedGraph {
             detail: format!(
-                "a `{}` body node cannot be a per-item worker",
-                other.kind_name()
+                "fold node `{node_id}`: max_iterations must be at least 1, found {}",
+                fold.max_iterations
             ),
-        }),
+        });
+    }
+
+    ctx.node_entered(node_id).await?;
+
+    // Every pass's output, in pass order. The latest entry is the accumulated
+    // value the next pass folds over and the predicate reads; the whole list is
+    // what the join rule chooses from. Not pre-sized to the bound: the bound is
+    // author-supplied and may be enormous, and each pass does real work, so
+    // growing costs nothing next to reserving for passes that may never run.
+    let mut passes: Vec<Value> = Vec::new();
+    let mut stopped_by_predicate = false;
+    for position in 0..fold.max_iterations {
+        let index = u64::from(position);
+        ctx.fold_iteration_started(node_id, index).await?;
+        let call = BodyCall {
+            owner: BodyOwner::Fold,
+            graph_hash,
+            node_id,
+            index,
+        };
+        // Pass 0 folds over the routed value; every later pass folds over the
+        // pass before it. Bound to its own statement so the borrow of `passes`
+        // ends before the outcome is pushed onto it.
+        let outcome = {
+            let input = passes.last().unwrap_or(routed);
+            run_body(ctx, body, input, agents, tools, call).await?
+        };
+        match outcome {
+            IterationOutcome::Output(output) => passes.push(output),
+            // No join is recorded for a parked pass, so the next drive re-enters
+            // this same pass and re-runs its body.
+            IterationOutcome::Parked(reason) => {
+                return Ok(FoldOutcome::Parked {
+                    node: node_id.to_owned(),
+                    reason,
+                });
+            }
+        }
+        ctx.fold_iteration_joined(node_id, index).await?;
+        // The predicate reads the pass that just joined. It is a pure function
+        // of recorded output, so replay re-decides identically.
+        let joined = passes.last().expect("the pass that just joined");
+        if plan.stop_when.eval(joined) {
+            stopped_by_predicate = true;
+            break;
+        }
+    }
+
+    // The bound is at least 1 and every pass either pushed its output or
+    // returned, so there is always a last pass here.
+    let last = passes.len() - 1;
+    let last_index = last as u64;
+    let (winner_index, output) = match &fold.join {
+        FoldJoin::Last => (last_index, passes[last].clone()),
+        // Every pass contributes to an `all` join's output, so no single pass is
+        // the winner; the recorded winner_index reads as the pass the loop
+        // stopped at, which is what bounds the list.
+        FoldJoin::All => (last_index, Value::Array(passes.clone())),
+        FoldJoin::BestBy(reference) => {
+            let parsed = plan
+                .best_by
+                .as_ref()
+                .expect("a best_by join parses its reference at load");
+            let index = best_by_index(&passes, parsed).ok_or_else(|| {
+                EngineError::FoldNoComparableCandidate {
+                    node: node_id.to_owned(),
+                    reference: reference.clone(),
+                }
+            })?;
+            (index as u64, passes[index].clone())
+        }
+    };
+
+    ctx.fold_converged(
+        node_id,
+        winner_index,
+        &stop_reason(fold, stopped_by_predicate, passes.len()),
+    )
+    .await?;
+    ctx.node_exited(node_id).await?;
+    Ok(FoldOutcome::Converged(output))
+}
+
+/// The index of the pass a `best_by` join wins with: the argmax over every
+/// pass of the value `reference` names, ordered by the expression language's OWN
+/// comparison ([`salvor_graph::expr::compare`]), so an argmax and the
+/// `stop_when` predicate beside it can never order values differently.
+///
+/// A pass whose reference is missing, or names a value that does not order
+/// (anything but a number or a string), cannot win: `compare` answers both
+/// questions, so no type list is re-derived here. Ties keep the EARLIEST pass,
+/// because only a strictly greater candidate displaces the incumbent. `None`
+/// when no pass has a comparable value at all, which the caller refuses with
+/// before recording a convergence.
+fn best_by_index(passes: &[Value], reference: &Reference) -> Option<usize> {
+    let mut best: Option<(usize, &Value)> = None;
+    for (index, pass) in passes.iter().enumerate() {
+        let Some(candidate) = reference
+            .resolve(pass)
+            .filter(|value| salvor_graph::expr::compare(value, value).is_some())
+        else {
+            continue;
+        };
+        let wins = match best {
+            None => true,
+            Some((_, incumbent)) => {
+                salvor_graph::expr::compare(candidate, incumbent) == Some(Ordering::Greater)
+            }
+        };
+        if wins {
+            best = Some((index, candidate));
+        }
+    }
+    best.map(|(index, _)| index)
+}
+
+/// The human-readable reason recorded on `FoldConverged`: which of the two stop
+/// causes ended the loop, naming the predicate that fired or the bound that was
+/// reached. A pure function of the document and the pass count, so it reproduces
+/// byte for byte on replay (the cursor matches the recorded reason). There is no
+/// third cause: no "failed to improve" rule stops a fold.
+fn stop_reason(fold: &FoldNode, stopped_by_predicate: bool, passes: usize) -> String {
+    if stopped_by_predicate {
+        format!(
+            "stop_when `{}` held after pass {}",
+            fold.stop_when,
+            passes - 1
+        )
+    } else {
+        format!(
+            "reached the max_iterations bound of {} without stop_when `{}` holding",
+            fold.max_iterations, fold.stop_when
+        )
     }
 }
 
@@ -811,6 +1103,65 @@ fn parse_branches(graph: &Graph) -> Result<ParsedBranches<'_>, EngineError> {
             cases.push((case.name.as_str(), expr));
         }
         parsed.insert(branch.id.as_str(), cases);
+    }
+    Ok(parsed)
+}
+
+/// One fold node's parsed plan: the node itself plus its expression fields,
+/// parsed once at load rather than once per pass.
+struct FoldPlan<'a> {
+    /// The document's fold node, borrowed for the drive.
+    node: &'a FoldNode,
+    /// The `stop_when` predicate, evaluated against each pass's output.
+    stop_when: Expr,
+    /// The `best_by` join's reference, `None` for the `last` and `all` joins,
+    /// which carry no reference.
+    best_by: Option<Reference>,
+}
+
+/// Every fold node's plan, keyed by node id (both borrow the graph document).
+type ParsedFolds<'a> = HashMap<&'a str, FoldPlan<'a>>;
+
+/// Parses every fold node's expression fields once, up front, exactly as
+/// [`parse_branches`] does for the branch conditions: the `stop_when` predicate
+/// and, for a `best_by` join, its reference. The validator already guarantees
+/// both parse, so a failure here is a [`EngineError::MalformedGraph`] that does
+/// not arise for a validated document.
+fn parse_folds(graph: &Graph) -> Result<ParsedFolds<'_>, EngineError> {
+    let mut parsed = HashMap::new();
+    for node in &graph.nodes {
+        let Node::Fold(fold) = node else {
+            continue;
+        };
+        let stop_when = salvor_graph::expr::parse(&fold.stop_when).map_err(|error| {
+            EngineError::MalformedGraph {
+                detail: format!(
+                    "fold node `{}`: `stop_when` is unparseable: {error}",
+                    fold.id
+                ),
+            }
+        })?;
+        let best_by = match &fold.join {
+            FoldJoin::BestBy(reference) => Some(
+                salvor_graph::expr::parse_reference(reference).map_err(|error| {
+                    EngineError::MalformedGraph {
+                        detail: format!(
+                            "fold node `{}`: the `best_by` reference `{reference}` is unparseable: {error}",
+                            fold.id
+                        ),
+                    }
+                })?,
+            ),
+            FoldJoin::Last | FoldJoin::All => None,
+        };
+        parsed.insert(
+            fold.id.as_str(),
+            FoldPlan {
+                node: fold,
+                stop_when,
+                best_by,
+            },
+        );
     }
     Ok(parsed)
 }

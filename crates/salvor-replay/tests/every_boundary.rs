@@ -4,13 +4,14 @@
 //! the identical final state (in fact, the identical final log) as the
 //! uninterrupted run.
 //!
-//! Three reference runs cover the log shapes a crash can leave behind: a
+//! Four reference runs cover the log shapes a crash can leave behind: a
 //! completed run touching every event kind, a run that dies between a write
-//! intent and its completion, and a run that ends in failure. The one
-//! deliberate exception to "continuing reaches the same final state" is a
-//! prefix ending in a dangling write intent: continuing from there must
-//! refuse with needs-reconciliation rather than re-execute the write, and
-//! the test asserts exactly that.
+//! intent and its completion, a run that ends in failure, and a graph run
+//! whose fold node runs two passes and settles. The one deliberate exception
+//! to "continuing reaches the same final state" is a prefix ending in a
+//! dangling write intent: continuing from there must refuse with
+//! needs-reconciliation rather than re-execute the write, and the test
+//! asserts exactly that.
 
 use salvor_replay::{
     Budget, BudgetKind, Effect, Emitted, Event, EventEnvelope, Outcome, PendingCall, ReplayCursor,
@@ -29,6 +30,31 @@ enum Step {
     Begin {
         hash: &'static str,
         input: Value,
+    },
+    /// A graph run's head, the counterpart of `Begin` for a log that opens
+    /// with `GraphRunStarted`.
+    BeginGraph {
+        hash: &'static str,
+        input: Value,
+    },
+    Enter {
+        node: &'static str,
+    },
+    Exit {
+        node: &'static str,
+    },
+    FoldStart {
+        node: &'static str,
+        index: u64,
+    },
+    FoldJoin {
+        node: &'static str,
+        index: u64,
+    },
+    FoldConverged {
+        node: &'static str,
+        winner_index: u64,
+        reason: &'static str,
     },
     Now {
         value: OffsetDateTime,
@@ -113,6 +139,34 @@ fn drive(script: &[Step], prefix: &[EventEnvelope]) -> Result<Drive, ReplayError
             Step::Begin { hash, input } => match cursor.begin(hash, None)? {
                 Outcome::Replayed(recorded) => assert_eq!(&recorded, input),
                 Outcome::Live(permit) => push!(permit.record(input.clone())),
+            },
+            Step::BeginGraph { hash, input } => match cursor.begin_graph(hash, None, None)? {
+                Outcome::Replayed(recorded) => assert_eq!(&recorded, input),
+                Outcome::Live(permit) => push!(permit.record(input.clone())),
+            },
+            Step::Enter { node } => match cursor.node_entered(node)? {
+                Outcome::Replayed(()) => {}
+                Outcome::Live(emitted) => push!(emitted),
+            },
+            Step::Exit { node } => match cursor.node_exited(node)? {
+                Outcome::Replayed(()) => {}
+                Outcome::Live(emitted) => push!(emitted),
+            },
+            Step::FoldStart { node, index } => match cursor.fold_iteration_started(node, *index)? {
+                Outcome::Replayed(()) => {}
+                Outcome::Live(emitted) => push!(emitted),
+            },
+            Step::FoldJoin { node, index } => match cursor.fold_iteration_joined(node, *index)? {
+                Outcome::Replayed(()) => {}
+                Outcome::Live(emitted) => push!(emitted),
+            },
+            Step::FoldConverged {
+                node,
+                winner_index,
+                reason,
+            } => match cursor.fold_converged(node, *winner_index, reason)? {
+                Outcome::Replayed(()) => {}
+                Outcome::Live(emitted) => push!(emitted),
             },
             Step::Now { value } => match cursor.now()? {
                 Outcome::Replayed(recorded) => assert_eq!(recorded, *value),
@@ -244,10 +298,10 @@ fn expected_status(prefix: &[EventEnvelope]) -> RunStatus {
     };
     match &last.event {
         // The graph events share the agent run's status vocabulary: the head
-        // starts the run and the node/branch/map markers change no status, so a
-        // prefix ending at any of them reads as `Running`, exactly as the fold
-        // derives. This agent-run property script never emits them, but the
-        // match stays exhaustive so a new event kind cannot slip past it.
+        // starts the run and the node/branch/map/fold markers change no status,
+        // so a prefix ending at any of them reads as `Running`, exactly as the
+        // fold derives. Only the graph fold script below emits any of them, but
+        // the match stays exhaustive so a new event kind cannot slip past it.
         Event::RunStarted { .. }
         | Event::GraphRunStarted { .. }
         | Event::NodeEntered { .. }
@@ -452,6 +506,60 @@ fn write_crash_script() -> Vec<Step> {
     ]
 }
 
+/// A graph run whose one fold node runs two passes and settles on the second.
+/// The passes run inline in this log, so every fold marker is a boundary a
+/// crash can land on, and each one has to replay on the way back.
+fn fold_script() -> Vec<Step> {
+    vec![
+        Step::BeginGraph {
+            hash: "sha256:graph-v1",
+            input: json!({"draft": "otters"}),
+        },
+        Step::Enter { node: "refine" },
+        Step::FoldStart {
+            node: "refine",
+            index: 0,
+        },
+        Step::Model {
+            request_hash: "sha256:pass-0",
+            response: json!({"text": "first pass"}),
+            usage: TokenUsage {
+                input_tokens: 30,
+                output_tokens: 10,
+            },
+        },
+        Step::FoldJoin {
+            node: "refine",
+            index: 0,
+        },
+        Step::FoldStart {
+            node: "refine",
+            index: 1,
+        },
+        Step::Model {
+            request_hash: "sha256:pass-1",
+            response: json!({"text": "second pass"}),
+            usage: TokenUsage {
+                input_tokens: 40,
+                output_tokens: 12,
+            },
+        },
+        Step::FoldJoin {
+            node: "refine",
+            index: 1,
+        },
+        Step::FoldConverged {
+            node: "refine",
+            winner_index: 1,
+            reason: "stop predicate fired",
+        },
+        Step::Exit { node: "refine" },
+        Step::Complete {
+            output: json!({"text": "second pass"}),
+        },
+    ]
+}
+
 /// A run that ends in failure.
 fn failed_script() -> Vec<Step> {
     vec![
@@ -504,6 +612,21 @@ fn every_boundary_of_a_write_crash_run() {
         }
         other => panic!("expected the dangling write as pending call, got {other:?}"),
     }
+    assert_every_boundary(&script);
+}
+
+/// Every prefix of the fold run folds coherently and continues to the
+/// identical final log: a kill between any two fold markers replays the
+/// markers it already recorded and never re-records one.
+#[test]
+fn every_boundary_of_a_graph_fold_run() {
+    let script = fold_script();
+    let reference = drive(&script, &[]).expect("reference run succeeds");
+    assert_eq!(reference.log.len(), 13);
+    assert!(matches!(
+        derive_state(&reference.log).status,
+        RunStatus::Completed { .. }
+    ));
     assert_every_boundary(&script);
 }
 
