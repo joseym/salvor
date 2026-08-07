@@ -5,6 +5,7 @@ Usage: salvor [OPTIONS] <COMMAND>
 Commands:
   run          Start a fresh run of an agent
   resume       Continue an existing run: resume a parked one, or recover a crashed one
+  wake         Wake every run whose durable timer has come due, then exit. Nothing wakes a sleeping run on its own, so run this from cron when no server is doing it
   fork         Fork a graph run from a node boundary into a NEW run, refusing to re-execute a recorded write the operator has not acknowledged
   resolve      Record the completion of a dangling write by hand, after verifying it
   abandon      Abandon a run: retire it by hand without finishing or failing it, for a run that is dead forever or no longer worth carrying

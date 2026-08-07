@@ -330,17 +330,13 @@ pub fn abandoned_report(
 /// Kept beside `status_label` and `status_group` because the three have to agree: a label the
 /// column can print but the filter rejects would be a state you can see and cannot select. A test
 /// asserts this list and `status_group` recognise exactly the same set.
-///
-/// `sleeping` is the one label deliberately absent for now. The status exists in the fold, so the
-/// STATUS column can already print it, but nothing records a durable timer yet and the surface
-/// that wakes one is unbuilt; it joins this list, `status_group`, and the committed render
-/// fixtures together, when it does.
-pub const STATUS_LABELS: [&str; 10] = [
+pub const STATUS_LABELS: [&str; 11] = [
     "not-started",
     "running",
     "awaiting-model",
     "awaiting-tool",
     "suspended",
+    "sleeping",
     "budget-exceeded",
     "needs-reconciliation",
     "completed",
@@ -377,11 +373,18 @@ impl StatusGroup {
 
 /// The group a status label belongs to, or `None` for a label this build does not recognise,
 /// which a future status would be until someone teaches this function about it.
+///
+/// `sleeping` is in `progress`, not `waiting`, and the group definitions decide it rather than
+/// the fact that the run has stopped. `waiting` means a person is the only thing that will move
+/// this run; a sleeping run is waiting on an instant, and it continues when that instant arrives
+/// whether anyone reads the list or not. Grouping it with the approval queue would put a run
+/// nobody can act on into the one group that exists to be a to-do list, and `--group waiting`
+/// would stop selecting exactly the rows that need a human.
 #[must_use]
 pub fn status_group(status: &str) -> Option<StatusGroup> {
     match status {
         "suspended" | "needs-reconciliation" | "budget-exceeded" => Some(StatusGroup::Waiting),
-        "running" | "awaiting-model" | "awaiting-tool" => Some(StatusGroup::Progress),
+        "running" | "awaiting-model" | "awaiting-tool" | "sleeping" => Some(StatusGroup::Progress),
         "completed" | "failed" | "abandoned" | "not-started" => Some(StatusGroup::Terminal),
         _ => None,
     }
@@ -578,7 +581,8 @@ fn fmt_num(value: f64) -> String {
 /// Formats a timestamp as `YYYY-MM-DD HH:MM:SSZ` from its components, avoiding
 /// a dependency on the `time` crate's optional `formatting` feature so the
 /// change stays contained to this crate.
-fn format_ts(ts: OffsetDateTime) -> String {
+#[must_use]
+pub fn format_ts(ts: OffsetDateTime) -> String {
     let utc = ts.to_offset(time::UtcOffset::UTC);
     format!(
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}Z",
@@ -589,6 +593,26 @@ fn format_ts(ts: OffsetDateTime) -> String {
         utc.minute(),
         utc.second(),
     )
+}
+
+/// Formats a span as the coarsest unit that still reads as a number, for
+/// "overdue by" in a wake report.
+///
+/// One unit, not a breakdown: an operator reading how far past its deadline a
+/// timer is wants the magnitude, and `2d` answers that where `2d 3h 14m 7s`
+/// makes them do the reading. A negative span (a deadline in the future,
+/// which a due-run listing never holds but a caller may still hand over)
+/// formats as `0s` rather than a minus sign, since "overdue by minus an hour"
+/// is not a sentence.
+#[must_use]
+pub fn format_duration(span: time::Duration) -> String {
+    let seconds = span.whole_seconds().max(0);
+    match seconds {
+        0..=59 => format!("{seconds}s"),
+        60..=3599 => format!("{}m", seconds / 60),
+        3600..=86_399 => format!("{}h", seconds / 3600),
+        _ => format!("{}d", seconds / 86_400),
+    }
 }
 
 /// Indents every line of `text` by `spaces`, for nesting a pretty JSON block
@@ -675,6 +699,7 @@ mod tests {
             "awaiting-model",
             "awaiting-tool",
             "suspended",
+            "sleeping",
             "needs-reconciliation",
             "budget-exceeded",
         ];
@@ -717,6 +742,25 @@ mod tests {
         assert_ne!(
             waiting[0], progress[0],
             "a reader must not have to check the label to tell the two apart"
+        );
+    }
+
+    /// A run on a durable timer prints `sleeping`, and that label sits in `progress`: it is
+    /// waiting on an instant, not on a person, so it continues on its own and must not appear in
+    /// the group that exists to be a to-do list.
+    #[test]
+    fn a_sleeping_run_is_in_progress_not_waiting() {
+        let wake_at = OffsetDateTime::from_unix_timestamp(1_752_566_400).unwrap();
+        assert_eq!(status_label(&RunStatus::Sleeping { wake_at }), "sleeping");
+        assert!(
+            STATUS_LABELS.contains(&"sleeping"),
+            "the STATUS column prints it, so --status must accept it"
+        );
+        assert_eq!(status_group("sleeping"), Some(StatusGroup::Progress));
+        assert_eq!(
+            status_style("sleeping"),
+            status_style("running"),
+            "a sleeping run reads as motion, the same as a running one"
         );
     }
 

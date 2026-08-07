@@ -6,7 +6,7 @@ List runs in the store, newest activity last. Filters narrow what is printed; wi
       [1m--status[0m <STATUS>
           Keep only runs with this status. Repeatable; a run matching ANY of them is kept. Values are the labels the STATUS column prints. To filter by a whole group of states instead, use `--group`
           
-          [possible values: not-started, running, awaiting-model, awaiting-tool, suspended, budget-exceeded, needs-reconciliation, completed, failed, abandoned]
+          [possible values: not-started, running, awaiting-model, awaiting-tool, suspended, sleeping, budget-exceeded, needs-reconciliation, completed, failed, abandoned]
 
       [1m--store[0m <PATH>
           Path to the SQLite event store.

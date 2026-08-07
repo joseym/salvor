@@ -72,7 +72,7 @@ use salvor_cli_core::agent_config;
 use salvor_cli_core::cli::{
     AbandonArgs, AgentCommand, AgentHashArgs, AgentValidateArgs, BuildArgs, Cli, Command,
     CompletionsArgs, ForkArgs, GraphCommand, GraphEditArgs, GraphRunArgs, GraphValidateArgs,
-    HistoryArgs, ListArgs, ReplayArgs, ResolveArgs, ResumeArgs, RunArgs, ServeArgs,
+    HistoryArgs, ListArgs, ReplayArgs, ResolveArgs, ResumeArgs, RunArgs, ServeArgs, WakeArgs,
 };
 use salvor_cli_core::render;
 use salvor_replay::{EventEnvelope, RunSummary};
@@ -187,6 +187,12 @@ enum CommandDto {
         #[serde(skip_serializing_if = "Option::is_none")]
         input: Option<String>,
     },
+    Wake {
+        agents: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        graph: Option<String>,
+        dry_run: bool,
+    },
     Fork {
         run_id: String,
         from_node: String,
@@ -237,6 +243,7 @@ enum CommandDto {
         dev: bool,
         demo_tools: bool,
         client_tools: Vec<String>,
+        wake_interval: u64,
     },
     Build {
         install: bool,
@@ -328,6 +335,15 @@ impl From<&Command> for CommandDto {
                 graph: graph.as_deref().map(path),
                 input: input.clone(),
             },
+            Command::Wake(WakeArgs {
+                agents,
+                graph,
+                dry_run,
+            }) => CommandDto::Wake {
+                agents: paths(agents),
+                graph: graph.as_deref().map(path),
+                dry_run: *dry_run,
+            },
             Command::Fork(ForkArgs {
                 run_id,
                 from_node,
@@ -387,6 +403,7 @@ impl From<&Command> for CommandDto {
                 dev,
                 demo_tools,
                 client_tools,
+                wake_interval,
             }) => CommandDto::Serve {
                 bind: bind.clone(),
                 auth_token: auth_token.clone(),
@@ -394,6 +411,7 @@ impl From<&Command> for CommandDto {
                 dev: *dev,
                 demo_tools: *demo_tools,
                 client_tools: paths(client_tools),
+                wake_interval: *wake_interval,
             },
             Command::Build(BuildArgs { install }) => CommandDto::Build { install: *install },
             Command::Agent { command } => CommandDto::Agent {

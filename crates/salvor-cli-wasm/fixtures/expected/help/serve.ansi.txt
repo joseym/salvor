@@ -25,6 +25,13 @@ Run the control-plane HTTP + server-sent-events server over the store
       [1m--dev[0m
           Also start the Angular dev server (`ng serve`) for `bridge/`, hot module reloading included, with `/v1` proxied to this API so a browser at the dev server's own URL calls straight through. This process's own bind/store handling is otherwise unchanged: the API binds and serves exactly as plain `serve` does. Requires a salvor checkout with a `bridge/` directory alongside it; the dashboard an installed `salvor` embeds is prebuilt and does not hot-reload
 
+      [1m--wake-interval[0m <SECS>
+          How often, in seconds, to look for runs whose durable timer has come due and re-drive them. Default 60.
+          
+          The sweeper is ON by default: a sleeping run wakes only when something re-drives it, so a server that held the store and let its timers pass would be silently wrong. `0` turns it off, for an operator who wakes runs from cron with `salvor wake` instead and does not want two things reaching for the same run. Each sweep folds every run's log (status is not a stored column), so the shorter this is, the more that costs.
+          
+          [default: 60]
+
       [1m--demo-tools[0m
           Register a small set of deterministic demo tools (`lookup_invoice` read, `issue_refund` write, `send_email` idempotent) instead of the stock empty tool registry.
           

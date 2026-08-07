@@ -5,6 +5,7 @@ Salvor CLI: run, resume, list, history, and replay for durable agent runs
 [1m[4mCommands:[0m
   [1mrun[0m          Start a fresh run of an agent
   [1mresume[0m       Continue an existing run: resume a parked one, or recover a crashed one
+  [1mwake[0m         Wake every run whose durable timer has come due, then exit. Nothing wakes a sleeping run on its own, so run this from cron when no server is doing it
   [1mfork[0m         Fork a graph run from a node boundary into a NEW run, refusing to re-execute a recorded write the operator has not acknowledged
   [1mresolve[0m      Record the completion of a dangling write by hand, after verifying it
   [1mabandon[0m      Abandon a run: retire it by hand without finishing or failing it, for a run that is dead forever or no longer worth carrying

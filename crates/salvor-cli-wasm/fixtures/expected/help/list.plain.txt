@@ -6,7 +6,7 @@ Options:
       --status <STATUS>
           Keep only runs with this status. Repeatable; a run matching ANY of them is kept. Values are the labels the STATUS column prints. To filter by a whole group of states instead, use `--group`
           
-          [possible values: not-started, running, awaiting-model, awaiting-tool, suspended, budget-exceeded, needs-reconciliation, completed, failed, abandoned]
+          [possible values: not-started, running, awaiting-model, awaiting-tool, suspended, sleeping, budget-exceeded, needs-reconciliation, completed, failed, abandoned]
 
       --store <PATH>
           Path to the SQLite event store.

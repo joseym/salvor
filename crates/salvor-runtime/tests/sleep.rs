@@ -284,6 +284,73 @@ async fn a_recorded_wake_continues_the_run_and_replays() {
     assert_eq!(calls.load(Ordering::SeqCst), 2, "and executes nothing");
 }
 
+/// A waker, whole: the store says which runs are due, and driving one of those
+/// is the entire act of waking it.
+///
+/// This is what both real wakers do (`salvor wake` once and exit, the `serve`
+/// sweeper on an interval), stripped of the terminal and the HTTP around it.
+/// The point is that the two halves agree: `due_runs` never offers a run a
+/// re-drive would send straight back to sleep, and never withholds one a
+/// re-drive would wake. Nothing here reads a real clock.
+#[tokio::test]
+async fn selection_and_a_re_drive_are_the_whole_of_waking() {
+    let store = store();
+    let run_id = fixed_run_id(63);
+    let clock = TestClock::new();
+    let (poll, calls) = poll_tool();
+
+    // The run parks on its timer.
+    let outcome = drive_once(store.clone(), run_id, &clock, &poll, NAP)
+        .await
+        .expect("the first drive parks");
+    let FlowOutcome::Sleeping(wake_at) = outcome else {
+        panic!("expected the run to park on its timer");
+    };
+
+    // Nothing is due while the deadline is ahead, so a waker sweeping now
+    // leaves the run alone rather than driving it and achieving nothing.
+    assert!(
+        salvor_runtime::due_runs(store.as_ref(), clock.read())
+            .await
+            .expect("selection reads")
+            .is_empty(),
+        "a sleeping run is not due before its instant"
+    );
+
+    // Past the deadline it is due, with the instant the log recorded.
+    clock.set(wake_at);
+    let due = salvor_runtime::due_runs(store.as_ref(), clock.read())
+        .await
+        .expect("selection reads");
+    assert_eq!(due.len(), 1, "exactly the one sleeping run");
+    assert_eq!(due[0].run_id, run_id);
+    assert_eq!(due[0].wake_at, wake_at);
+
+    // Driving the selected run is the wake: no verb of its own, no input, and
+    // the run carries on to its end.
+    let outcome = drive_once(store.clone(), run_id, &clock, &poll, NAP)
+        .await
+        .expect("the due run drives");
+    assert!(
+        matches!(outcome, FlowOutcome::Completed(_)),
+        "a run driven past its deadline wakes and continues, got {outcome:?}"
+    );
+    let finished = store.read_log(run_id).await.expect("log reads");
+    assert_eq!(event_kinds(&finished), COMPLETED_KINDS);
+    assert_eq!(calls.load(Ordering::SeqCst), 2, "each poll executed once");
+
+    // And it is not offered again. A waker sweeping a store of finished runs
+    // has nothing to do, however far past every deadline it now is.
+    clock.set(wake_at + Duration::days(30));
+    assert!(
+        salvor_runtime::due_runs(store.as_ref(), clock.read())
+            .await
+            .expect("selection reads")
+            .is_empty(),
+        "a woken run is not due a second time"
+    );
+}
+
 /// `sleep_for` is exactly `now() + duration`, recorded: the reading lands in
 /// the log as a `NowObserved` and the wake instant is derived from it, so a
 /// replay under a completely different ambient clock reproduces the same

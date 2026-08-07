@@ -69,11 +69,11 @@ pub fn classify(state: &RunState) -> Disposition {
         }
         // A sleeping run continues by being driven with no input, which is what
         // `Recover` already means mechanically, so it takes that disposition
-        // rather than a new one. No log reaches here yet: nothing records the
-        // sleep events, and the wake path that will drive a sleeping run once
-        // its deadline passes is not built. This arm exists to keep the
-        // classification total, and the surface that owns waking should give
-        // sleeping its own considered treatment.
+        // rather than a new one. That is what makes waking need no verb: both
+        // wakers (`salvor wake`, the server's sweeper) re-drive through this
+        // arm, and `RunCtx::await_wake` reads the clock and decides whether the
+        // deadline arrived. So a run driven early is not woken early; it
+        // records nothing and stays asleep, whoever asked and whyever.
         RunStatus::Sleeping { .. } => Disposition::Recover,
         RunStatus::NeedsReconciliation => {
             // A needs-reconciliation state always carries the pending write

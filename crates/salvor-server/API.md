@@ -361,15 +361,28 @@ data: {"run_id":"6f...","seq":4,"schema_version":1,"recorded_at":"...","event":{
 - `id` is the event's sequence number.
 - Envelope frames carry no `event:` field, so a browser `EventSource` receives
   them through `onmessage`.
-- When the run reaches a resting point (completed, failed, suspended,
-  budget-exceeded, or needs-reconciliation) the stream sends one final frame
-  with `event: end` carrying the final status, then closes:
+- When the run reaches a resting point (completed, failed, abandoned,
+  suspended, sleeping, budget-exceeded, or needs-reconciliation) the stream
+  sends one final frame with `event: end` carrying the status it rested at,
+  then closes:
 
 ```text
 event: end
 data: {"status":{"state":"completed","output":...}}
 
 ```
+
+  A run parked on a durable timer rests too, and its frame carries the deadline:
+
+```text
+event: end
+data: {"status":{"state":"sleeping","wake_at":"2026-08-14T09:00:00Z"}}
+
+```
+
+  Nothing drives a sleeping run, and its nap is measured in hours or days, so
+  the stream closes rather than polling for the duration. `wake_at` is when to
+  open a fresh stream; the events the wake records are read by that one.
 
 If the driving task was killed and no driver is running the run in this process,
 the end frame also carries `"detached": true`; recovering the run opens a fresh
@@ -1292,3 +1305,37 @@ dropping the whole server mid-run loses nothing: a fresh server over the same
 store recovers the run from its log and continues it, re-executing no completed
 model or tool call. That is the same durability the CLI has, over HTTP, and it
 is exercised by the kill-safety test.
+
+### Waking a sleeping run
+
+A run parked on a durable timer (`{"state":"sleeping","wake_at":...}`) is
+passive data. Nothing in the server holds it and nothing fires at its instant;
+it continues only when something re-drives it, at which point the runtime reads
+the clock and either records the wake or leaves the run asleep. Driving a run
+early therefore cannot wake it: the deadline is enforced inside the run, not by
+whoever asked.
+
+`salvor serve` runs a **wake sweeper** for this. On an interval it lists the
+runs whose recorded `wake_at` is at or before now and re-drives each one through
+the same path `POST /v1/runs/{id}/resume` takes for a recoverable run, so a
+woken run behaves identically whether a person or the clock woke it.
+
+- **On by default**, every `--wake-interval` seconds (default `60`). A server
+  that held a store and let its timers pass would be silently wrong, so this is
+  not an opt-in.
+- **`--wake-interval 0` turns it off**, for an operator who sweeps from cron
+  with `salvor wake` instead and does not want two things reaching for the same
+  run.
+- **It never fights a driver already running.** A run a task in this process is
+  still driving is skipped, and the sweep drives sequentially, so no run is
+  driven twice at once.
+- **A run this server cannot rebuild is left asleep.** An agent that is not
+  registered here, or a graph this process does not hold, is logged and skipped;
+  the run stays due, so registering the definition is enough to make the next
+  sweep wake it.
+- **One bad run does not stop the sweep.** Every failure is per-run, and the
+  loop carries on to the next.
+
+There is no wake endpoint. Waking is a re-drive, and `POST /v1/runs/{id}/resume`
+already is one: sending it to a sleeping run whose deadline has passed wakes it,
+and sending it before the deadline records nothing and leaves it asleep.

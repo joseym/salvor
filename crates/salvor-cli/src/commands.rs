@@ -50,6 +50,7 @@ use salvor_store::{EventStore, SqliteStore};
 use salvor_tools::DynTool;
 use salvor_tools::mcp::McpServer;
 use serde_json::Value;
+use time::OffsetDateTime;
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
@@ -58,7 +59,7 @@ use crate::checkout;
 use crate::cli::{
     AbandonArgs, AgentHashArgs, AgentValidateArgs, BuildArgs, CompletionsArgs, ForkArgs,
     GraphRunArgs, GraphValidateArgs, HistoryArgs, ListArgs, ReplayArgs, ResolveArgs, ResumeArgs,
-    RunArgs, ServeArgs,
+    RunArgs, ServeArgs, WakeArgs,
 };
 use crate::dev_server::DevServer;
 use crate::render;
@@ -297,6 +298,123 @@ pub async fn resume(store_path: &Path, args: ResumeArgs) -> Result<u8> {
         &uuid,
         agent_path,
     )
+}
+
+/// `salvor wake`: drive every run whose durable timer has come due, then exit.
+///
+/// Nothing wakes a sleeping run on its own. A run parked on a timer is passive
+/// data with the deadline recorded in its log, and it moves again only when
+/// something re-drives it; `salvor serve` has a sweeper doing that on an
+/// interval, and this verb is the same job for an operator with no long-lived
+/// server, one pass per invocation, cron-shaped.
+///
+/// It routes every due run through [`resume`], because waking a run IS resuming
+/// it: a sleeping run continues with no input supplied, which is exactly what
+/// `resume` already does for a run it classifies as recoverable, and
+/// [`RunCtx::await_wake`](salvor_runtime::RunCtx::await_wake) enforces the
+/// deadline itself against the clock. So this handler holds no drive loop of
+/// its own, and `--agent`/`--graph` are `resume`'s flags with `resume`'s
+/// validation: whatever that verb needs to rebuild a run, this one needs too.
+///
+/// # Exit code
+///
+/// `0` unless a drive genuinely failed. A run that woke and went straight back
+/// to sleep, or woke and parked at a gate, is ordinary operation and reported
+/// as such; a cron entry that alerted on either would alert on nothing being
+/// wrong. What does fail is a run this invocation could not drive at all: a
+/// missing `--agent` or `--graph`, a document whose hash does not match, a
+/// divergence. That exits `1`, but only after every other due run has still had
+/// its turn, so one unwakeable run never costs the rest their sweep.
+pub async fn wake(store_path: &Path, args: WakeArgs) -> Result<u8> {
+    let store = open_store(store_path)?;
+    // The real clock, read once, so every run in this sweep is measured
+    // against one instant rather than against a time that drifts as the sweep
+    // works through the list.
+    let now = OffsetDateTime::now_utc();
+    let due = salvor_runtime::due_runs(store.as_ref(), now).await?;
+
+    if due.is_empty() {
+        println!(
+            "nothing to wake: no run in {} is sleeping past its deadline",
+            store_path.display()
+        );
+        return Ok(0);
+    }
+
+    if args.dry_run {
+        print!("{}", render_wake_preview(&due, now));
+        return Ok(0);
+    }
+
+    println!(
+        "{} run(s) due to wake at {now}:",
+        due.len(),
+        now = render::format_ts(now)
+    );
+    let mut failures = 0_usize;
+    for run in &due {
+        let uuid = run.run_id.as_uuid().to_string();
+        println!("\n{uuid} (due {})", render::format_ts(run.wake_at));
+        let outcome = resume(
+            store_path,
+            ResumeArgs {
+                run_id: uuid.clone(),
+                agents: args.agents.clone(),
+                graph: args.graph.clone(),
+                input: None,
+            },
+        )
+        .await;
+        match outcome {
+            Ok(_) => {
+                // What the re-drive actually left behind, folded from the log
+                // it just wrote, so the report states the run's state rather
+                // than assuming the drive's own report covered it.
+                let log = store.read_log(run.run_id).await?;
+                println!(
+                    "  {uuid} is now {}",
+                    render::status_label(&derive_state(&log).status)
+                );
+            }
+            Err(error) => {
+                failures += 1;
+                println!("  {uuid} was not woken: {error:#}");
+            }
+        }
+    }
+
+    if failures > 0 {
+        println!(
+            "\n{failures} of {} due run(s) could not be driven; every due run was tried",
+            due.len()
+        );
+        return Ok(1);
+    }
+    Ok(0)
+}
+
+/// The `--dry-run` listing: which runs are due, how overdue each is, and what
+/// waking it would need. Prints and drives nothing, mirroring how
+/// `salvor fork --dry-run` previews a fork it does not create.
+fn render_wake_preview(due: &[salvor_runtime::DueRun], now: OffsetDateTime) -> String {
+    let mut out = format!(
+        "{} run(s) due to wake at {} (dry run):\n",
+        due.len(),
+        render::format_ts(now)
+    );
+    for run in due {
+        out.push_str(&format!(
+            "  {} due {}, overdue by {}\n",
+            run.run_id.as_uuid(),
+            render::format_ts(run.wake_at),
+            render::format_duration(now - run.wake_at)
+        ));
+    }
+    out.push_str(
+        "nothing was driven. Drop --dry-run to wake these, passing the --agent (and --graph) \
+         files they need.\n",
+    );
+    out
 }
 
 /// `salvor fork`: fork a graph run from a node boundary into a NEW run, refusing
@@ -769,7 +887,10 @@ pub async fn serve(store_path: &Path, args: ServeArgs) -> Result<u8> {
     let mut state = AppState::new(store, factory)
         .with_model_executor(Arc::new(LlmModelExecutor::new(model_client)))
         .with_tool_registry(Arc::new(tool_registry))
-        .with_client_tools(Arc::new(client_tools));
+        .with_client_tools(Arc::new(client_tools))
+        // The wake sweeper's interval, on by default at 60s; `0` turns it off
+        // for an operator who wakes runs from cron with `salvor wake`.
+        .with_wake_interval(std::time::Duration::from_secs(args.wake_interval));
     // The client-driven-run lease TTL: how long a client run reports an attached
     // driver after its last guarded operation. Default 60s (set in AppState);
     // `SALVOR_CLIENT_LEASE_TTL_SECS`, when a positive integer, shortens it so a

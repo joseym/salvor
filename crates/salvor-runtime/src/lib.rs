@@ -75,6 +75,7 @@ mod model;
 mod progress;
 mod runtime;
 mod validate;
+mod wake;
 mod wire;
 
 pub use agent::{Agent, AgentBuildError, AgentBuilder, DEFAULT_MAX_RESPONSE_TOKENS};
@@ -102,6 +103,7 @@ pub use salvor_core::{
     validate_extension_input,
 };
 pub use validate::validate_against_schema;
+pub use wake::{DueRun, due_runs};
 pub use wire::{
     ERROR_SENTINEL_KEY, SUSPEND_SENTINEL_KEY, ToolFailure, ToolFailureKind, content_string,
     decode_failure, decode_suspension, encode_failure, encode_suspension, error_chain,

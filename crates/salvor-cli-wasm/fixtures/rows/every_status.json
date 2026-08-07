@@ -39,34 +39,41 @@
     "first_recorded_at": "2025-07-15T08:05:00Z",
     "last_recorded_at": "2025-07-15T08:10:00Z",
     "run_id": "00000000-0000-4000-8000-000000000005",
-    "status": "budget-exceeded"
+    "status": "sleeping"
   },
   {
     "event_count": 21,
     "first_recorded_at": "2025-07-15T08:06:00Z",
     "last_recorded_at": "2025-07-15T08:11:00Z",
     "run_id": "00000000-0000-4000-8000-000000000006",
-    "status": "needs-reconciliation"
+    "status": "budget-exceeded"
   },
   {
     "event_count": 24,
     "first_recorded_at": "2025-07-15T08:07:00Z",
     "last_recorded_at": "2025-07-15T08:12:00Z",
     "run_id": "00000000-0000-4000-8000-000000000007",
-    "status": "completed"
+    "status": "needs-reconciliation"
   },
   {
     "event_count": 27,
     "first_recorded_at": "2025-07-15T08:08:00Z",
     "last_recorded_at": "2025-07-15T08:13:00Z",
     "run_id": "00000000-0000-4000-8000-000000000008",
-    "status": "failed"
+    "status": "completed"
   },
   {
     "event_count": 30,
     "first_recorded_at": "2025-07-15T08:09:00Z",
     "last_recorded_at": "2025-07-15T08:14:00Z",
     "run_id": "00000000-0000-4000-8000-000000000009",
+    "status": "failed"
+  },
+  {
+    "event_count": 33,
+    "first_recorded_at": "2025-07-15T08:10:00Z",
+    "last_recorded_at": "2025-07-15T08:15:00Z",
+    "run_id": "00000000-0000-4000-8000-00000000000a",
     "status": "abandoned"
   }
 ]

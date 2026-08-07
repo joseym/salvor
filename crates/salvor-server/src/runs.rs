@@ -37,7 +37,7 @@ use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use salvor_core::{Event, EventEnvelope, PendingCall, RunId, RunStatus, derive_state};
 use salvor_runtime::{
     RuntimeError, validate_against_schema, validate_extension_input, validate_labels,
@@ -438,17 +438,43 @@ pub async fn resume(
                     "this run crashed mid-step; the resume input is ignored when recovering"
                 );
             }
-            // The graph branch, mirroring the Resume arm: a crashed graph run
-            // recovers over the engine (no resume input), an agent run over the
-            // built-in loop.
-            if crate::graph::is_graph_run(&log) {
-                return crate::graph::drive_resume(state, run_id, &log, None).await;
-            }
-            let built = rebuild_agent(&state, &log).await?;
-            spawn_drive(state, run_id, built, DriveVerb::Recover);
-            Ok(driving(run_id).into_response())
+            redrive(state, run_id, &log).await
         }
     }
+}
+
+/// Re-drives a run from its recorded log with no new input: replay, then
+/// continue from the first unrecorded step.
+///
+/// The whole of the resume endpoint's `Recover` arm, factored out because it
+/// is also the whole of waking. A sleeping run continues by being driven with
+/// nothing supplied, and [`RunCtx::await_wake`](salvor_runtime::RunCtx::await_wake)
+/// decides against the injected clock whether the deadline has arrived, so a
+/// waker needs no verb of its own: it re-drives, and the run either wakes or
+/// records nothing and goes back to sleep. Routing the sweeper through this
+/// function rather than a parallel loop is what makes a run behave identically
+/// whether a person or the clock woke it.
+///
+/// The graph branch mirrors the resume endpoint's: a graph run continues over
+/// the engine, resolving its document by the hash the log records; an agent run
+/// rebuilds its agent and continues the built-in loop.
+///
+/// # Errors
+///
+/// [`ApiError::UnknownAgent`] when the agent the run started under is not
+/// registered here, [`ApiError::UnknownGraph`] for the graph equivalent, or
+/// whatever building the agent reports.
+pub(crate) async fn redrive(
+    state: AppState,
+    run_id: RunId,
+    log: &[EventEnvelope],
+) -> Result<Response, ApiError> {
+    if crate::graph::is_graph_run(log) {
+        return crate::graph::drive_resume(state, run_id, log, None).await;
+    }
+    let built = rebuild_agent(&state, log).await?;
+    spawn_drive(state, run_id, built, DriveVerb::Recover);
+    Ok(driving(run_id).into_response())
 }
 
 /// `POST /v1/runs/{id}/resolve`: record a dangling write's completion by hand.

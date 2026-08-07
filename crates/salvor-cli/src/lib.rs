@@ -119,6 +119,7 @@ pub async fn dispatch(cli: Cli) -> Result<u8> {
     match cli.command {
         Command::Run(args) => commands::run(store, args).await,
         Command::Resume(args) => commands::resume(store, args).await,
+        Command::Wake(args) => commands::wake(store, args).await,
         Command::Fork(args) => commands::fork(store, args).await,
         Command::Resolve(args) => commands::resolve(store, args).await,
         Command::Abandon(args) => commands::abandon(store, args).await,

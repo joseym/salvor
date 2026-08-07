@@ -104,6 +104,44 @@
         "subcommands": []
       },
       {
+        "name": "wake",
+        "about": "Wake every run whose durable timer has come due, then exit. Nothing wakes a sleeping run on its own, so run this from cron when no server is doing it",
+        "hidden": false,
+        "args": [
+          {
+            "long": "--agent",
+            "short": null,
+            "value_name": "FILE",
+            "required": false,
+            "repeatable": true,
+            "global": false,
+            "help": "Path to an agent definition (TOML) a due run may need to rebuild its agent. Repeatable, exactly as on `resume`: an agent run is woken under exactly one, and a graph run under the files its `agent` nodes reference",
+            "possible_values": null
+          },
+          {
+            "long": "--graph",
+            "short": null,
+            "value_name": "FILE",
+            "required": false,
+            "repeatable": false,
+            "global": false,
+            "help": "Path to the graph document (JSON), needed to wake a GRAPH run, whose log records only the graph's hash. Its hash must match the one the run recorded. Omit when no due run is a graph run",
+            "possible_values": null
+          },
+          {
+            "long": "--dry-run",
+            "short": null,
+            "value_name": null,
+            "required": false,
+            "repeatable": false,
+            "global": false,
+            "help": "Print which runs are due and what waking each would need, then exit without driving anything",
+            "possible_values": null
+          }
+        ],
+        "subcommands": []
+      },
+      {
         "name": "fork",
         "about": "Fork a graph run from a node boundary into a NEW run, refusing to re-execute a recorded write the operator has not acknowledged",
         "hidden": false,
@@ -266,6 +304,7 @@
               "awaiting-model",
               "awaiting-tool",
               "suspended",
+              "sleeping",
               "budget-exceeded",
               "needs-reconciliation",
               "completed",
@@ -433,6 +472,16 @@
             "repeatable": false,
             "global": false,
             "help": "Also start the Angular dev server (`ng serve`) for `bridge/`, hot module reloading included, with `/v1` proxied to this API so a browser at the dev server's own URL calls straight through. This process's own bind/store handling is otherwise unchanged: the API binds and serves exactly as plain `serve` does. Requires a salvor checkout with a `bridge/` directory alongside it; the dashboard an installed `salvor` embeds is prebuilt and does not hot-reload",
+            "possible_values": null
+          },
+          {
+            "long": "--wake-interval",
+            "short": null,
+            "value_name": "SECS",
+            "required": false,
+            "repeatable": false,
+            "global": false,
+            "help": "How often, in seconds, to look for runs whose durable timer has come due and re-drive them. Default 60",
             "possible_values": null
           },
           {
