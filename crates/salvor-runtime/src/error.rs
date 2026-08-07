@@ -110,6 +110,18 @@ pub enum RuntimeError {
         status: String,
     },
 
+    /// A structured-output drive was asked to run for an agent that already
+    /// offers a real tool named `salvor_answer`.
+    ///
+    /// Under a declared output schema the loop offers a synthetic tool of that
+    /// name and reads a call to it as the final answer. A real tool sharing the
+    /// name would make the two indistinguishable in the response, so the drive
+    /// refuses before its first model call and records nothing.
+    #[error(
+        "the agent offers a tool named `salvor_answer`, the name a declared output schema reserves for its answer call; rename the tool or drop the schema"
+    )]
+    AnswerToolNameTaken,
+
     /// A keyed call could not proceed because another run holds the same
     /// `(tool, idempotency key)` identity and has not finished with it.
     ///

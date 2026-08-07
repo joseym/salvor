@@ -18,6 +18,8 @@
     "mcp_servers": [],
     "model": "claude-opus-4-8",
     "name": null,
+    "output_schema": null,
+    "output_schema_path": null,
     "pricing": {
       "input_per_mtok": 5.0,
       "output_per_mtok": 25.0

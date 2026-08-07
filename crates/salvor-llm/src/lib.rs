@@ -96,6 +96,6 @@ pub use config::{AuthKind, Config};
 pub use error::{ApiError, Error};
 pub use types::{
     CacheControl, Content, ContentBlock, ContentDelta, Message, MessageDeltaUsage, MessageRequest,
-    MessageResponse, Role, Source, StopReason, StreamEvent, System, SystemBlock, Tool,
+    MessageResponse, Role, Source, StopReason, StreamEvent, System, SystemBlock, Tool, ToolChoice,
     ToolResultContent, Usage,
 };

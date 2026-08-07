@@ -807,3 +807,98 @@ async fn wasm_tools_example_guest_runs() {
         salvor_tools::ToolOutcome::Suspend(_) => panic!("wasm tools cannot suspend"),
     }
 }
+
+/// A declared output shape reaches the built agent, and both forms of the
+/// declaration are the same declaration: the inline `[output_schema]` table
+/// and a JSON file naming the same schema build to the SAME `agent_def_hash`,
+/// because the hash covers the schema VALUE and not where it was written. An
+/// operator who moves a growing schema out into its own file keeps the agent's
+/// identity, and every graph document pinning it keeps resolving.
+#[tokio::test]
+async fn inline_and_file_output_schemas_build_the_same_agent() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("answer.json"),
+        "{\"type\": \"object\", \"required\": [\"score\"], \
+          \"properties\": {\"score\": {\"type\": \"number\"}}}",
+    )
+    .expect("write schema file");
+
+    let inline_path = dir.path().join("inline.toml");
+    std::fs::write(
+        &inline_path,
+        "model = \"m\"\n\n\
+         [output_schema]\n\
+         type = \"object\"\n\
+         required = [\"score\"]\n\n\
+         [output_schema.properties.score]\n\
+         type = \"number\"\n",
+    )
+    .expect("write inline agent");
+    let by_path_path = dir.path().join("by-path.toml");
+    std::fs::write(
+        &by_path_path,
+        "model = \"m\"\noutput_schema_path = \"answer.json\"\n",
+    )
+    .expect("write path agent");
+
+    let inline = AgentConfig::load(&inline_path).expect("inline config parses");
+    let by_path = AgentConfig::load(&by_path_path).expect("path config parses");
+    let (inline_agent, inline_servers) = build_agent(&inline, &inline_path, false)
+        .await
+        .expect("inline agent builds");
+    let (by_path_agent, path_servers) = build_agent(&by_path, &by_path_path, false)
+        .await
+        .expect("path agent builds");
+
+    let expected = serde_json::json!({
+        "type": "object",
+        "required": ["score"],
+        "properties": {"score": {"type": "number"}}
+    });
+    assert_eq!(inline_agent.output_schema(), Some(&expected));
+    assert_eq!(by_path_agent.output_schema(), Some(&expected));
+    assert_eq!(inline_agent.def_hash(), by_path_agent.def_hash());
+
+    // And a file that declares no schema at all is a different agent from
+    // both, because the declaration is part of what the agent produces.
+    let (plain, plain_file) = load_from_str("model = \"m\"\n");
+    let (plain_agent, plain_servers) = build_agent(&plain, plain_file.path(), false)
+        .await
+        .expect("plain agent builds");
+    assert_eq!(plain_agent.output_schema(), None);
+    assert_ne!(plain_agent.def_hash(), inline_agent.def_hash());
+
+    for server in inline_servers
+        .into_iter()
+        .chain(path_servers)
+        .chain(plain_servers)
+    {
+        server.close().await.expect("server closes");
+    }
+}
+
+/// An `output_schema_path` naming a file that holds a bare JSON value is
+/// refused at build time, for the same reason the inline form refuses a
+/// scalar: a non-object schema accepts everything, so a run under it would be
+/// structured in name only.
+#[tokio::test]
+async fn an_output_schema_file_that_is_not_an_object_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("answer.json"), "\"not a schema\"").expect("write schema file");
+    let agent_path = dir.path().join("agent.toml");
+    std::fs::write(
+        &agent_path,
+        "model = \"m\"\noutput_schema_path = \"answer.json\"\n",
+    )
+    .expect("write agent");
+
+    let config = AgentConfig::load(&agent_path).expect("config parses");
+    let error = match build_agent(&config, &agent_path, false).await {
+        Ok(_) => panic!("a bare value is not a schema"),
+        Err(error) => error,
+    };
+    let message = format!("{error:#}");
+    assert!(message.contains("answer.json"), "{message}");
+    assert!(message.contains("JSON Schema object"), "{message}");
+}

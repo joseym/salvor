@@ -18,6 +18,8 @@
     "mcp_servers": [],
     "model": "llama3.2",
     "name": null,
+    "output_schema": null,
+    "output_schema_path": null,
     "pricing": null,
     "record_prompts": null,
     "system_prompt": "You are a plain assistant with no tools. Your input is a JSON object with one\nfield, `question`. Read it, answer it directly in a few sentences, and stop.\nDo not ask follow-up questions and do not invent tool calls; you have none.\n",

@@ -80,6 +80,12 @@ export interface AgentConfigJson {
   budgets: BudgetsConfigJson;
   pricing: PricingConfigJson | null;
   max_response_tokens: number | null;
+  /** The declared shape of the agent's final answer, as a JSON Schema, when
+   *  the file wrote one inline. Part of `agent_def_hash`, unlike `name`. */
+  output_schema: unknown | null;
+  /** A path to a JSON file holding that schema instead, resolved relative to
+   *  the agent file. Never set at the same time as `output_schema`. */
+  output_schema_path: string | null;
   mcp_servers: McpServerConfigJson[];
   wasm_tools: WasmToolConfigJson[];
   record_prompts: boolean | null;

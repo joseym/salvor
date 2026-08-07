@@ -50,9 +50,9 @@ pub mod validate;
 pub use builder::{AgentSpec, BranchSpec, FoldSpec, GateSpec, GraphBuilder, MapSpec, ToolSpec};
 pub use document::{
     AgentNode, BranchCase, BranchCondition, BranchNode, Edge, FoldBody, FoldJoin, FoldNode,
-    GateNode, Graph, MapBody, MapNode, Node, SCHEMA_VERSION, ToolNode,
+    GateNode, Graph, MapBody, MapNode, Node, OnBound, SCHEMA_VERSION, ToolNode,
 };
-pub use expr::{Expr, ExprError, MAX_EXPRESSION_LEN, parse as parse_expression};
+pub use expr::{Expr, ExprError, MAX_EXPRESSION_LEN, Segment, parse as parse_expression};
 pub use validate::{GraphError, GraphSummary, MAX_NODE_NAME_LEN, validate};
 
 /// Returns the graph document's JSON Schema as a [`serde_json::Value`].

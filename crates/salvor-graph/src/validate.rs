@@ -14,6 +14,8 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use serde_json::Value;
+
 use crate::document::{BranchCondition, FoldBody, FoldJoin, Graph, MapBody, Node, SCHEMA_VERSION};
 use crate::expr;
 
@@ -188,6 +190,38 @@ pub enum GraphError {
         error: String,
     },
 
+    /// A `fold` node's `stop_when` predicate reads a path the body node's
+    /// declared `output_schema` does not describe. See
+    /// [`check_fold_reference_shapes`] for when this fires and, more
+    /// importantly, when it stays quiet.
+    #[error(
+        "fold node `{node}`: `stop_when` reads `{path}`, which body node `{body}`'s declared output schema does not describe"
+    )]
+    FoldStopPathNotInBodySchema {
+        /// The fold node's id.
+        node: String,
+        /// The path the predicate reads, as the expression names it.
+        path: String,
+        /// The id of the body node whose schema does not describe it.
+        body: String,
+    },
+
+    /// A `fold` node's `best_by` join reference names a path the body node's
+    /// declared `output_schema` does not describe. The join half of
+    /// [`GraphError::FoldStopPathNotInBodySchema`], reported separately because
+    /// the two are fixed in different places.
+    #[error(
+        "fold node `{node}`: the `best_by` join reference `{reference}` is not described by body node `{body}`'s declared output schema"
+    )]
+    FoldJoinReferenceNotInBodySchema {
+        /// The fold node's id.
+        node: String,
+        /// The join reference, as the document writes it.
+        reference: String,
+        /// The id of the body node whose schema does not describe it.
+        body: String,
+    },
+
     /// A node's optional `name` is over [`MAX_NODE_NAME_LEN`] characters.
     #[error("node `{id}`: `name` is {len} characters, over the {max}-character cap")]
     NodeNameTooLong {
@@ -251,6 +285,7 @@ pub fn validate(graph: &Graph) -> Result<GraphSummary, Vec<GraphError>> {
     check_node_names(graph, &mut errors);
     check_branch_expressions(graph, &mut errors);
     check_fold_expressions(graph, &mut errors);
+    check_fold_reference_shapes(graph, &mut errors);
     check_acyclic(graph, &mut errors);
     check_edge_type_compat(graph, &mut errors);
 
@@ -490,6 +525,190 @@ fn check_fold_expressions(graph: &Graph, errors: &mut Vec<GraphError>) {
             });
         }
     }
+}
+
+/// Every `fold` whose body names a node that DECLARES an output schema has its
+/// expression references read against that schema, AT SUBMIT.
+///
+/// A fold's accumulated value is what its body produced: the body's declared
+/// `output_schema` is therefore the shape `stop_when` and a `best_by` reference
+/// read, path for path, with no envelope or prefix in front of it. So a
+/// predicate reading `scoer >= 0.85` against a body that declares only `score`
+/// is a typo the author can be told about now rather than a loop that silently
+/// never stops.
+///
+/// # When this stays quiet
+///
+/// A path is reported ONLY when walking it POSITIVELY fails: a segment is
+/// absent from a `properties` map that exists and does not admit extra keys.
+/// Everything else is unjudged, and deliberately so, because a check that
+/// guessed would cost an author a legal document:
+///
+/// - a body that declares no `output_schema`, or a `subgraph` body, or a body
+///   id that names no node: nothing to read the path against;
+/// - a schema with no `properties` (`{"type": "object"}` on its own), or one
+///   whose declared `type` is not the kind the segment steps into;
+/// - a schema that composes its shape elsewhere (`$ref`, `anyOf`, `oneOf`,
+///   `allOf`, `not`), or admits extra keys (`additionalProperties` set to
+///   anything but `false`, or any `patternProperties`);
+/// - every segment past the first that could not be walked, since a walk that
+///   stopped knowing nothing cannot judge what comes after it.
+///
+/// The bound, the body reference, and the expressions' own parse are checked
+/// elsewhere ([`check_node_fields`], [`check_referential_integrity`],
+/// [`check_fold_expressions`]); a `stop_when` that does not parse is skipped
+/// here, because the parse error is the error worth printing.
+fn check_fold_reference_shapes(graph: &Graph, errors: &mut Vec<GraphError>) {
+    let by_id: HashMap<&str, &Node> = graph.nodes.iter().map(|n| (n.id(), n)).collect();
+
+    for node in &graph.nodes {
+        let Node::Fold(fold) = node else {
+            continue;
+        };
+        let FoldBody::Node(body_id) = &fold.body else {
+            continue;
+        };
+        let Some(schema) = by_id
+            .get(body_id.as_str())
+            .and_then(|body| body.output_schema())
+        else {
+            continue;
+        };
+
+        if let Ok(predicate) = expr::parse(&fold.stop_when) {
+            for path in predicate.paths() {
+                if !schema_describes(schema, path) {
+                    errors.push(GraphError::FoldStopPathNotInBodySchema {
+                        node: fold.id.clone(),
+                        path: render_path(path),
+                        body: body_id.clone(),
+                    });
+                }
+            }
+        }
+
+        if let FoldJoin::BestBy(reference) = &fold.join
+            && let Ok(parsed) = expr::parse_reference(reference)
+            && !schema_describes(schema, parsed.segments())
+        {
+            errors.push(GraphError::FoldJoinReferenceNotInBodySchema {
+                node: fold.id.clone(),
+                reference: reference.clone(),
+                body: body_id.clone(),
+            });
+        }
+    }
+}
+
+/// Whether `schema` leaves `path` plausible: false ONLY when a step positively
+/// fails. A step that the schema says nothing about ends the walk in the
+/// author's favor.
+fn schema_describes(schema: &Value, path: &[expr::Segment]) -> bool {
+    let mut here = schema;
+    for segment in path {
+        match step_into(here, segment) {
+            Step::Into(next) => here = next,
+            Step::Unjudged => return true,
+            Step::Absent => return false,
+        }
+    }
+    true
+}
+
+/// What one step of a path finds in a schema.
+enum Step<'a> {
+    /// The sub-schema the step lands in, which the next step reads.
+    Into(&'a Value),
+    /// The schema does not say, so nothing after this point can be judged.
+    Unjudged,
+    /// The schema positively excludes this step.
+    Absent,
+}
+
+/// Takes one path step through a schema. The whole judgment of this check lives
+/// here; see [`check_fold_reference_shapes`] for why each `Unjudged` is one.
+fn step_into<'a>(schema: &'a Value, segment: &expr::Segment) -> Step<'a> {
+    let Some(object) = schema.as_object() else {
+        return Step::Unjudged;
+    };
+    // A schema that names its shape somewhere else is not one this walk reads.
+    if ["$ref", "anyOf", "oneOf", "allOf", "not"]
+        .iter()
+        .any(|keyword| object.contains_key(*keyword))
+    {
+        return Step::Unjudged;
+    }
+
+    match segment {
+        expr::Segment::Key(key) => {
+            if !admits_type(object, "object") {
+                return Step::Unjudged;
+            }
+            let Some(properties) = object.get("properties").and_then(Value::as_object) else {
+                return Step::Unjudged;
+            };
+            if let Some(property) = properties.get(key) {
+                return Step::Into(property);
+            }
+            if admits_extra_keys(object) {
+                Step::Unjudged
+            } else {
+                Step::Absent
+            }
+        }
+        expr::Segment::Index(index) => {
+            if !admits_type(object, "array") {
+                return Step::Unjudged;
+            }
+            match object.get("items") {
+                Some(items) if items.is_object() => Step::Into(items),
+                // The tuple form: an index inside it is that entry, an index
+                // past it is not something this check will call a mistake.
+                Some(Value::Array(entries)) => {
+                    entries.get(*index).map_or(Step::Unjudged, Step::Into)
+                }
+                _ => Step::Unjudged,
+            }
+        }
+    }
+}
+
+/// Whether a schema's declared `type`, if it declares one at all, admits
+/// `wanted`. A schema with no `type` is read as its `properties` describe it.
+fn admits_type(object: &serde_json::Map<String, Value>, wanted: &str) -> bool {
+    match object.get("type") {
+        None => true,
+        Some(Value::String(declared)) => declared == wanted,
+        Some(Value::Array(declared)) => declared.iter().any(|one| one.as_str() == Some(wanted)),
+        // A malformed `type` is not this check's to report.
+        Some(_) => true,
+    }
+}
+
+/// Whether a schema admits keys its `properties` does not name. A declared
+/// `properties` map is read as the author's statement of the shape, so silence
+/// about `additionalProperties` is CLOSED here: an author who means open says
+/// so, and that is the one reading under which this check can say anything at
+/// all.
+fn admits_extra_keys(object: &serde_json::Map<String, Value>) -> bool {
+    if object.contains_key("patternProperties") {
+        return true;
+    }
+    match object.get("additionalProperties") {
+        None | Some(Value::Bool(false)) => false,
+        Some(_) => true,
+    }
+}
+
+/// A path as its source spells it, for an error message: `review.scores.0`.
+fn render_path(path: &[expr::Segment]) -> String {
+    path.iter()
+        .map(|segment| match segment {
+            expr::Segment::Key(key) => key.clone(),
+            expr::Segment::Index(index) => index.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 /// An agent hash is `sha256:` followed by exactly 64 lowercase hex digits.
@@ -1067,6 +1286,7 @@ mod tests {
             max_iterations,
             stop_when: stop_when.into(),
             join,
+            on_bound: None,
             accumulator_schema: None,
         })
     }
@@ -1175,6 +1395,284 @@ mod tests {
                     if node == "refine" && reference == "42")
             ),
             "names the node and the bad reference: {errors:?}"
+        );
+    }
+
+    // --- A fold's references against the shape its body declares. ---
+
+    /// An agent node declaring the given output schema, to be a fold's body.
+    fn scorer(id: &str, output_schema: Value) -> Node {
+        Node::Agent(AgentNode {
+            name: None,
+            id: id.into(),
+            agent_hash: hash(),
+            input_schema: None,
+            output_schema: Some(output_schema),
+        })
+    }
+
+    /// The object schema a scored pass declares: one numeric `score`.
+    fn score_schema() -> Value {
+        json!({
+            "type": "object",
+            "properties": { "score": { "type": "number" } },
+            "required": ["score"]
+        })
+    }
+
+    /// A predicate and a join reference that both name a declared property
+    /// validate clean, at any depth the schema actually describes.
+    #[test]
+    fn fold_references_inside_the_body_schema_pass() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "score": { "type": "number" },
+                "review": {
+                    "type": "object",
+                    "properties": {
+                        "overall_score": { "type": "number" },
+                        "notes": {
+                            "type": "array",
+                            "items": { "type": "object", "properties": { "text": { "type": "string" } } }
+                        }
+                    }
+                }
+            }
+        });
+        let g = graph(
+            vec![
+                scorer("tailor", schema),
+                fold(
+                    "refine",
+                    "tailor",
+                    3,
+                    "score >= 0.85 && review.notes.0.text != \"\"",
+                    FoldJoin::BestBy("review.overall_score".into()),
+                ),
+            ],
+            vec![],
+        );
+        assert!(validate(&g).is_ok(), "{:?}", validate(&g));
+    }
+
+    /// A `stop_when` path the body's schema positively excludes is reported,
+    /// naming the path and the body node. This is the typo the check exists
+    /// for: `scoer` never resolves, so the loop would never stop.
+    #[test]
+    fn fold_stop_path_outside_the_body_schema_is_reported() {
+        let g = graph(
+            vec![
+                scorer("tailor", score_schema()),
+                fold(
+                    "refine",
+                    "tailor",
+                    3,
+                    "scoer >= 0.85",
+                    FoldJoin::BestBy("score".into()),
+                ),
+            ],
+            vec![],
+        );
+        let errors = validate(&g).expect_err("invalid");
+        assert_eq!(
+            errors,
+            vec![GraphError::FoldStopPathNotInBodySchema {
+                node: "refine".into(),
+                path: "scoer".into(),
+                body: "tailor".into(),
+            }]
+        );
+        let message = errors[0].to_string();
+        assert!(
+            message.contains("scoer") && message.contains("tailor"),
+            "names the path and the body node: {message}"
+        );
+    }
+
+    /// A nested `stop_when` path that leaves the declared shape partway down is
+    /// reported by the whole path, not by the segment that failed, because the
+    /// path is what the author wrote.
+    #[test]
+    fn fold_nested_stop_path_outside_the_body_schema_is_reported() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "review": { "type": "object", "properties": { "score": { "type": "number" } } }
+            }
+        });
+        let g = graph(
+            vec![
+                scorer("tailor", schema),
+                fold("refine", "tailor", 3, "review.rating > 3", FoldJoin::Last),
+            ],
+            vec![],
+        );
+        let errors = validate(&g).expect_err("invalid");
+        assert!(
+            errors.contains(&GraphError::FoldStopPathNotInBodySchema {
+                node: "refine".into(),
+                path: "review.rating".into(),
+                body: "tailor".into(),
+            }),
+            "{errors:?}"
+        );
+    }
+
+    /// A `best_by` reference outside the declared shape is its own error,
+    /// naming the reference as the document writes it.
+    #[test]
+    fn fold_join_reference_outside_the_body_schema_is_reported() {
+        let g = graph(
+            vec![
+                scorer("tailor", score_schema()),
+                fold(
+                    "refine",
+                    "tailor",
+                    3,
+                    "score >= 0.85",
+                    FoldJoin::BestBy("review.overall_score".into()),
+                ),
+            ],
+            vec![],
+        );
+        let errors = validate(&g).expect_err("invalid");
+        assert_eq!(
+            errors,
+            vec![GraphError::FoldJoinReferenceNotInBodySchema {
+                node: "refine".into(),
+                reference: "review.overall_score".into(),
+                body: "tailor".into(),
+            }]
+        );
+    }
+
+    /// Every failing path is collected, the predicate's and the join's alike,
+    /// so an author fixes them in one pass.
+    #[test]
+    fn every_fold_reference_fault_is_collected() {
+        let g = graph(
+            vec![
+                scorer("tailor", score_schema()),
+                fold(
+                    "refine",
+                    "tailor",
+                    3,
+                    "scoer >= 0.85 || rating > 3",
+                    FoldJoin::BestBy("overall".into()),
+                ),
+            ],
+            vec![],
+        );
+        let errors = validate(&g).expect_err("invalid");
+        assert_eq!(errors.len(), 3, "{errors:?}");
+    }
+
+    /// The silence rules, each one a document this check must not touch: a body
+    /// declaring no schema, a schema with no `properties`, a non-object schema,
+    /// a schema that admits extra keys, one that names its shape elsewhere, and
+    /// a subgraph body, which has no single node to read a schema from.
+    #[test]
+    fn fold_references_go_unjudged_where_the_schema_says_nothing() {
+        let quiet: Vec<Option<Value>> = vec![
+            None,
+            Some(json!({ "type": "object" })),
+            Some(json!({ "type": "string" })),
+            Some(json!({
+                "type": "object",
+                "properties": { "score": { "type": "number" } },
+                "additionalProperties": true
+            })),
+            Some(json!({
+                "type": "object",
+                "properties": { "score": { "type": "number" } },
+                "patternProperties": { "^x_": { "type": "string" } }
+            })),
+            Some(json!({ "$ref": "#/$defs/pass" })),
+            Some(json!({
+                "anyOf": [{ "type": "object", "properties": { "score": { "type": "number" } } }]
+            })),
+        ];
+        for schema in quiet {
+            let body = match schema {
+                Some(schema) => scorer("tailor", schema),
+                None => agent("tailor"),
+            };
+            let g = graph(
+                vec![
+                    body,
+                    fold(
+                        "refine",
+                        "tailor",
+                        3,
+                        "anything.at.all >= 0.85",
+                        FoldJoin::BestBy("nothing.declared".into()),
+                    ),
+                ],
+                vec![],
+            );
+            assert!(validate(&g).is_ok(), "{:?}", validate(&g));
+        }
+
+        let subgraph = Node::Fold(FoldNode {
+            name: None,
+            id: "refine".into(),
+            body: FoldBody::Subgraph(Box::new(graph(
+                vec![scorer("tailor", score_schema())],
+                vec![],
+            ))),
+            max_iterations: 3,
+            stop_when: "anything.at.all >= 0.85".into(),
+            join: FoldJoin::BestBy("nothing.declared".into()),
+            on_bound: None,
+            accumulator_schema: None,
+        });
+        assert!(validate(&graph(vec![subgraph], vec![])).is_ok());
+    }
+
+    /// A schema that closes itself with `additionalProperties: false` is read
+    /// exactly as one that stays silent about extra keys: a declared
+    /// `properties` map is the shape either way.
+    #[test]
+    fn a_closed_body_schema_reports_the_same_missing_path() {
+        let schema = json!({
+            "type": "object",
+            "properties": { "score": { "type": "number" } },
+            "additionalProperties": false
+        });
+        let g = graph(
+            vec![
+                scorer("tailor", schema),
+                fold("refine", "tailor", 3, "scoer >= 0.85", FoldJoin::Last),
+            ],
+            vec![],
+        );
+        let errors = validate(&g).expect_err("invalid");
+        assert!(errors.contains(&GraphError::FoldStopPathNotInBodySchema {
+            node: "refine".into(),
+            path: "scoer".into(),
+            body: "tailor".into(),
+        }));
+    }
+
+    /// A `stop_when` that does not parse is reported once, by the parse check
+    /// alone: there are no segments to walk, so this check says nothing.
+    #[test]
+    fn an_unparseable_stop_predicate_is_not_also_a_shape_error() {
+        let g = graph(
+            vec![
+                scorer("tailor", score_schema()),
+                fold("refine", "tailor", 3, "score >", FoldJoin::Last),
+            ],
+            vec![],
+        );
+        let errors = validate(&g).expect_err("invalid");
+        assert!(
+            matches!(
+                errors.as_slice(),
+                [GraphError::InvalidFoldStopExpression { node, .. }] if node == "refine"
+            ),
+            "only the parse error: {errors:?}"
         );
     }
 

@@ -30,6 +30,8 @@
     ],
     "model": "claude-opus-4-8",
     "name": "salvage-claim",
+    "output_schema": null,
+    "output_schema_path": null,
     "pricing": null,
     "record_prompts": null,
     "system_prompt": "You are recording salvage claims against a wreck manifest.\n\nCall save_claim exactly once, with the item named in the input, then reply\nwith one short sentence confirming what you recorded. Never call save_claim\ntwice for the same item.\n",

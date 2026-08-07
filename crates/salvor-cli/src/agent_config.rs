@@ -306,6 +306,44 @@ fn resolved_input_schema(tool: &WasmToolConfig, agent_dir: &Path) -> Result<serd
     })
 }
 
+/// The agent's declared output schema as a JSON value: the inline
+/// `[output_schema]` table as parsed, or the JSON file `output_schema_path`
+/// names (relative to `agent_dir`). `None` when the file declares neither,
+/// which is what leaves the agent on the plain text loop.
+///
+/// The object check the inline form got at parse time is repeated on the file's
+/// contents here, for the same reason it exists there: a schema that is not an
+/// object accepts everything, so a run under it would be structured in name
+/// only.
+///
+/// # Errors
+///
+/// Fails when the named file cannot be read, does not hold valid JSON, or holds
+/// something other than a JSON object.
+fn resolved_output_schema(
+    config: &AgentConfig,
+    agent_dir: &Path,
+) -> Result<Option<serde_json::Value>> {
+    if let Some(inline) = &config.output_schema {
+        return Ok(Some(inline.clone()));
+    }
+    let Some(rel) = &config.output_schema_path else {
+        return Ok(None);
+    };
+    let path = agent_dir.join(rel);
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading output schema file {}", path.display()))?;
+    let schema: serde_json::Value = serde_json::from_str(&text)
+        .with_context(|| format!("output schema file {} is not valid JSON", path.display()))?;
+    if !schema.is_object() {
+        bail!(
+            "output schema file {} must hold a JSON Schema object, not a bare value",
+            path.display()
+        );
+    }
+    Ok(Some(schema))
+}
+
 /// Builds a live [`Agent`] from a parsed config, spawning every declared MCP
 /// server and registering its tools.
 ///
@@ -331,9 +369,10 @@ fn resolved_input_schema(tool: &WasmToolConfig, agent_dir: &Path) -> Result<serd
 ///
 /// # Errors
 ///
-/// Fails when the system prompt file cannot be read, an MCP server cannot be
-/// spawned or initialized (unless `no_connect` is set), or the builder rejects
-/// the definition (a duplicate tool name, or a cost budget with no pricing).
+/// Fails when the system prompt file or a named `output_schema_path` cannot be
+/// read (or does not hold a JSON object), an MCP server cannot be spawned or
+/// initialized (unless `no_connect` is set), or the builder rejects the
+/// definition (a duplicate tool name, or a cost budget with no pricing).
 pub async fn build_agent(
     config: &AgentConfig,
     agent_path: &Path,
@@ -360,6 +399,12 @@ pub async fn build_agent(
     }
     if let Some(max_tokens) = config.max_response_tokens {
         builder = builder.max_response_tokens(max_tokens);
+    }
+    // Whichever form the file used, the builder sees the schema value, and the
+    // value is what `agent_def_hash` covers: an agent that moves its schema
+    // between the inline table and a JSON file keeps its identity.
+    if let Some(schema) = resolved_output_schema(config, agent_dir)? {
+        builder = builder.output_schema(schema);
     }
     // Resolve the prompt-recording flag once, here, so both the CLI and the
     // server factory (which both call this function) get the same precedence.

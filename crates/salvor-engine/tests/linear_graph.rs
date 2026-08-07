@@ -15,13 +15,13 @@ use std::sync::atomic::Ordering;
 
 use common::{
     EchoTool, ScriptedModel, agent_builder, event_kinds, fixed_clock, fixed_random, fixed_run_id,
-    text_response,
+    text_response, tool_use_response,
 };
 use salvor_core::{Effect, EventEnvelope};
 use salvor_engine::{EngineError, GraphOutcome, graph_hash, run_graph};
 use salvor_graph::{AgentSpec, Graph, GraphBuilder, MapBody, MapSpec, ToolSpec};
 use salvor_replay::{NodeState, derive_graph_projection};
-use salvor_runtime::RunCtx;
+use salvor_runtime::{ANSWER_TOOL, RunCtx};
 use salvor_store::{EventStore, SqliteStore};
 use salvor_tools::DynTool;
 use serde_json::{Value, json};
@@ -46,9 +46,21 @@ fn linear_fixture() -> Graph {
 #[tokio::test]
 async fn linear_graph_runs_replays_and_projects() {
     // Each agent points at its own mock server, so the two single-turn calls
-    // are scripted independently (both carry one message).
-    let research_server =
-        ScriptedModel::mount(vec![(1, text_response("a draft about otters", 5, 3))]).await;
+    // are scripted independently (both carry one message). `research` declares
+    // an `output_schema` in the fixture and so answers through the runtime's
+    // forced `salvor_answer` call; `review` declares none and answers in prose,
+    // which is what the two shapes below are.
+    let research_server = ScriptedModel::mount(vec![(
+        1,
+        tool_use_response(
+            "tu_research",
+            ANSWER_TOOL,
+            json!({"draft": "a draft about otters"}),
+            5,
+            3,
+        ),
+    )])
+    .await;
     let review_server =
         ScriptedModel::mount(vec![(1, text_response("reviewed: publish it", 4, 2))]).await;
 

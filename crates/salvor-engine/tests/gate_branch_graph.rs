@@ -20,13 +20,13 @@ use std::sync::atomic::Ordering;
 
 use common::{
     ConstTool, EchoTool, ScriptedModel, agent_builder, event_kinds, fixed_clock, fixed_random,
-    fixed_run_id, text_response,
+    fixed_run_id, text_response, tool_use_response,
 };
 use salvor_core::Effect;
 use salvor_engine::{EngineError, GraphOutcome, run_graph};
 use salvor_graph::{BranchCondition, BranchSpec, GateSpec, Graph, GraphBuilder, ToolSpec};
 use salvor_replay::{NodeState, derive_graph_projection};
-use salvor_runtime::{Agent, ParkReason, RunCtx};
+use salvor_runtime::{ANSWER_TOOL, Agent, ParkReason, RunCtx};
 use salvor_store::{EventStore, SqliteStore};
 use salvor_tools::DynTool;
 use serde_json::json;
@@ -51,12 +51,35 @@ fn fixture(name: &str) -> Graph {
 /// drive parks at the gate, a resume through the runtime's own machinery appends
 /// the approval, and a second drive completes. This is the kill-at-the-gate loop
 /// a purely linear graph cannot express.
+///
+/// Both agent nodes in this fixture declare an `output_schema` of `{draft}`, so
+/// both answer through the runtime's forced `salvor_answer` call rather than in
+/// prose. What the gate parks on and what the resume publishes is unchanged;
+/// only the shape of a scripted reply is.
 #[tokio::test]
 async fn flagship_gate_fixture_parks_resumes_and_completes() {
-    let research_server =
-        ScriptedModel::mount(vec![(1, text_response("a draft about otters", 5, 3))]).await;
-    let review_server =
-        ScriptedModel::mount(vec![(1, text_response("reviewed: publish it", 4, 2))]).await;
+    let research_server = ScriptedModel::mount(vec![(
+        1,
+        tool_use_response(
+            "tu_research",
+            ANSWER_TOOL,
+            json!({"draft": "a draft about otters"}),
+            5,
+            3,
+        ),
+    )])
+    .await;
+    let review_server = ScriptedModel::mount(vec![(
+        1,
+        tool_use_response(
+            "tu_review",
+            ANSWER_TOOL,
+            json!({"draft": "reviewed: publish it"}),
+            4,
+            2,
+        ),
+    )])
+    .await;
     let mut agents: HashMap<String, Agent> = HashMap::new();
     agents.insert(
         RESEARCH_HASH.to_owned(),

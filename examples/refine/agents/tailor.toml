@@ -1,0 +1,68 @@
+# The `tailor` agent: the per-pass worker inside the refine fold.
+#
+# One pass of the fold is one whole run of this agent. It reads a JSON object
+# (the pay-period notice to write on pass 0, its own previous draft on every
+# pass after that), writes a better draft, scores that draft against the desk
+# checklist, and answers. Nothing else: no tools, no MCP servers, no side
+# effects. The fold, not the agent, decides whether to run it again.
+#
+# There is no `output_schema` in this file, on purpose. The graph node declares
+# it instead (see `refine-notice.json`), because the shape the loop needs is a
+# fact about this position in this document: the fold's `stop_when` reads
+# `score` and its `best_by` join reads `score`, and the validator checks both
+# against the BODY NODE'S declared schema. Putting it here as well would run
+# identically (the node's wins, the agent's is the fallback) and would teach
+# one less thing.
+#
+# This file has no relative paths in it, so where you run it from does not
+# matter. `run.sh` runs everything from the repository root anyway.
+#
+# The graph references this agent by content hash, never by path. Learn it with:
+#     salvor agent hash examples/refine/agents/tailor.toml
+
+name = "tailor"
+
+model = "claude-opus-4-8"
+
+# Offline, this prompt is also the address the scripted model answers to, so
+# keep two things out of it: any notice id, and any draft revision tag. The
+# script selects a fold pass by finding a marker from THAT PASS'S INPUT in the
+# request body (see `model-script.json`), and a marker that also appeared here
+# would appear in every request and match every pass at once, which the script
+# server refuses as ambiguous rather than guessing.
+system_prompt = """
+You are the tailor on a payroll desk. You write the one-paragraph notice that
+goes out with a corrected payslip, and you grade your own work.
+
+Your input is a JSON object. On the first pass it is the correction to write
+up: the notice id, the employee, the pay period, the correction in cents, the
+reason, a desk contact, and the checklist the desk grades notices against. On
+every later pass it is your own previous answer, a `draft` and its `score`, and
+your job is to fix what cost that draft its points.
+
+Answer with one `salvor_answer` call and nothing else:
+
+- `draft`: the notice itself, one short paragraph in plain language, ending
+  with its revision tag in square brackets (the notice's letter, then the pass
+  number, so a reader can tell one revision from the next).
+- `score`: your own honest grade of that draft against the checklist, from 0
+  to 1. Do not round it up. A draft that misses a checklist line scores below
+  0.8 and says so.
+"""
+
+[llm]
+# SALVOR_DEMO_BASE_URL, when exported and non-empty, overrides the endpoint;
+# unset means the public Anthropic endpoint. The API key is read from
+# ANTHROPIC_API_KEY and is optional for a mock or local endpoint, which is what
+# lets this same file run offline against the scripted model and against a real
+# one with nothing changed but that variable.
+base_url_env = "SALVOR_DEMO_BASE_URL"
+
+[budgets]
+# One pass is one model call under a declared output schema, plus whatever
+# re-asks a malformed answer costs. Six steps leaves room for a couple of those
+# against a real model while still parking a pass that has gone in circles. A
+# budget in Salvor suspends the run rather than killing it, so crossing this
+# rail costs nothing already recorded: the passes that finished stay finished.
+steps = 6
+tokens = 60000

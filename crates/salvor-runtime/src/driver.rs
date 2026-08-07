@@ -26,6 +26,28 @@
 //! }
 //! ```
 //!
+//! # Structured output
+//!
+//! [`drive_loop_structured`] runs the same loop under a declared output
+//! schema. The request then carries one synthetic tool beyond the agent's
+//! own, [`ANSWER_TOOL`], whose `input_schema` IS the declared schema, and a
+//! `tool_choice` of `any`, so a bare-text terminal turn cannot happen by API
+//! contract. The loop ends when that tool is called alone in a turn and its
+//! input passes [`crate::validate_against_schema`]; the input, verbatim, is
+//! the loop's output. Anything else feeds back and the loop asks again: an
+//! answer called beside real tool work gets a `tool_error` saying so (the
+//! real calls run normally), a violating answer gets a `tool_error` naming
+//! the violation, and a turn with no tool call at all (providers vary) gets
+//! a re-ask. There is no retry counter: the steps budget is the bound, and a
+//! crossing mid-re-ask parks like any other.
+//!
+//! Nothing has to ask for that path by name. An [`Agent`] that declares an
+//! [`output_schema`](Agent::output_schema) drives it automatically through
+//! [`drive`], so a schema written into an `agent.toml` reaches every
+//! server-side loop that runs the agent; [`drive_loop_structured`] is the
+//! same thing for a caller driving a schema of its own, which is how a
+//! graph's `agent` node overrides its agent's default.
+//!
 //! # Determinism inventory
 //!
 //! Everything the loop feeds forward is a pure function of recorded data:
@@ -41,8 +63,15 @@
 //! a tool the agent does not have) becomes an error `tool_result` without
 //! any event, and the count-based repeat summary replaces repeated error
 //! text without changing the log.
+//!
+//! Structured output adds no third edge: every string it feeds back is one of
+//! this module's fixed templates plus, for a violation, the verdict string
+//! [`crate::validate_against_schema`] returned. That verdict decides whether
+//! another hashed model call happens, which is exactly why it comes from this
+//! repo's own validator and not a library whose message text is free to
+//! change under a version bump.
 
-use salvor_llm::{ContentBlock, Message, MessageRequest, Tool};
+use salvor_llm::{ContentBlock, Message, MessageRequest, Tool, ToolChoice};
 use serde_json::Value;
 
 use crate::agent::Agent;
@@ -50,10 +79,43 @@ use crate::compact::FailureTracker;
 use crate::ctx::{Resumption, RunCtx, ToolCallResult};
 use crate::error::RuntimeError;
 use crate::runtime::ParkReason;
+use crate::validate::validate_against_schema;
 use crate::wire::content_string;
 use salvor_core::Effect;
 use salvor_core::{BudgetExtensions, BudgetObservations};
 use time::OffsetDateTime;
+
+/// The name of the synthetic tool a structured-output loop answers through.
+///
+/// An agent that offers a real tool under this name cannot run under a
+/// declared output schema: the two calls would be indistinguishable in the
+/// response, so [`drive_loop_structured`] refuses with
+/// [`RuntimeError::AnswerToolNameTaken`] before any model call.
+pub const ANSWER_TOOL: &str = "salvor_answer";
+
+/// The answer tool's description. Fixed text, like every other string this
+/// loop puts in a request: it is hashed into `ModelCallRequested`.
+const ANSWER_TOOL_DESCRIPTION: &str = "Deliver your final reply by calling this tool; its input is \
+     the reply itself, and nothing else you write is read as the answer.";
+
+/// Fed back when the answer call shared a turn with real tool calls.
+const ANSWER_NOT_ALONE: &str = "`salvor_answer` was called alongside other tools; it ends the turn, \
+     so call it alone once the tool work it depends on has come back.";
+
+/// Fed back when a turn carried no tool call at all, which `tool_choice` was
+/// supposed to make impossible. Providers vary; the loop asks again rather
+/// than reading a bare-text turn as an answer it never validated.
+const NO_TOOL_CALL_REASK: &str = "That turn called no tool. Call a tool, or deliver your final \
+     reply by calling `salvor_answer`.";
+
+/// The content a schema violation feeds back: our validator's own verdict,
+/// wrapped in a fixed template naming what to do about it.
+fn violation_content(violation: &str) -> String {
+    format!(
+        "`salvor_answer` was called with input that does not match its schema: {violation}. Call \
+         it again with input in the declared shape."
+    )
+}
 
 /// How one drive of the loop ended: it produced a final output, or it parked
 /// and the process should stop driving it.
@@ -76,18 +138,28 @@ pub enum LoopOutcome {
 /// Drives one run (fresh, recovering, or resuming; the `ctx` knows which)
 /// to a final output or a park.
 ///
-/// This is exactly [`begin`] followed by [`drive_loop`], with the terminal
+/// This is exactly [`begin`] followed by the loop, with the terminal
 /// `RunCompleted` recorded here on completion. Splitting those two halves out
 /// is what lets the graph engine run [`drive_loop`] against a `RunCtx` whose
 /// log it already opened with `GraphRunStarted`: the agent node contributes its
 /// model and tool events without a second run head and without closing the run.
+///
+/// Which loop runs is the agent's own decision: an agent that declares an
+/// [`output_schema`](Agent::output_schema) drives the structured path, and one
+/// that declares none drives the plain one. So the declaration in an
+/// `agent.toml` reaches `salvor run`, `Runtime::start`, `recover`, and
+/// `resume` without any of them being told about it a second time. (A
+/// structured drive whose agent already owns a real `salvor_answer` tool still
+/// fails with [`RuntimeError::AnswerToolNameTaken`], but here the head is
+/// already recorded when it does, exactly as for any other failure on the
+/// first step.)
 pub(crate) async fn drive(
     ctx: &mut RunCtx,
     agent: &Agent,
     initial_input: &Value,
 ) -> Result<LoopOutcome, RuntimeError> {
     let input = begin(ctx, agent, initial_input).await?;
-    let outcome = drive_loop(ctx, agent, &input).await?;
+    let outcome = drive_loop_inner(ctx, agent, &input, agent.output_schema()).await?;
     // The built-in path records the terminal itself, in the same position and
     // with the same output the loop used to record inline. Moving the call here
     // changes no bytes: `begin`, the loop's events, then `RunCompleted`, in that
@@ -133,8 +205,46 @@ pub async fn drive_loop(
     agent: &Agent,
     input: &Value,
 ) -> Result<LoopOutcome, RuntimeError> {
+    drive_loop_inner(ctx, agent, input, None).await
+}
+
+/// Runs the built-in agent loop under a declared output schema, returning a
+/// [`LoopOutcome::Completed`] whose value is the model's structured answer
+/// (never a string of prose) or a park.
+///
+/// Same loop, same events, same caller contract as [`drive_loop`]: the
+/// difference is how the loop is allowed to end. The request offers
+/// [`ANSWER_TOOL`] beside the agent's own tools with `schema` as its input
+/// schema and forces some tool call, and the loop ends only when that tool is
+/// called alone and its input satisfies `schema` under
+/// [`crate::validate_against_schema`]. See the module docs for what each other
+/// shape of turn feeds back.
+///
+/// # Errors
+///
+/// Everything [`drive_loop`] surfaces, plus
+/// [`RuntimeError::AnswerToolNameTaken`] when the agent already offers a real
+/// tool named [`ANSWER_TOOL`]. That one is checked before the first model
+/// call, so a refused drive records nothing.
+pub async fn drive_loop_structured(
+    ctx: &mut RunCtx,
+    agent: &Agent,
+    input: &Value,
+    schema: &Value,
+) -> Result<LoopOutcome, RuntimeError> {
+    drive_loop_inner(ctx, agent, input, Some(schema)).await
+}
+
+/// The one implementation behind [`drive_loop`] and
+/// [`drive_loop_structured`]; `output_schema` is what separates them.
+async fn drive_loop_inner(
+    ctx: &mut RunCtx,
+    agent: &Agent,
+    input: &Value,
+    output_schema: Option<&Value>,
+) -> Result<LoopOutcome, RuntimeError> {
     let mut conversation: Vec<Message> = vec![Message::user(content_string(input))];
-    let llm_tools: Vec<Tool> = agent
+    let mut llm_tools: Vec<Tool> = agent
         .tools()
         .descriptors()
         .into_iter()
@@ -144,6 +254,19 @@ pub async fn drive_loop(
             input_schema: descriptor.input_schema,
         })
         .collect();
+
+    if let Some(schema) = output_schema {
+        // Before anything is recorded: two tools under one name would make the
+        // answer call unreadable in the response.
+        if llm_tools.iter().any(|tool| tool.name == ANSWER_TOOL) {
+            return Err(RuntimeError::AnswerToolNameTaken);
+        }
+        llm_tools.push(Tool {
+            name: ANSWER_TOOL.to_owned(),
+            description: Some(ANSWER_TOOL_DESCRIPTION.to_owned()),
+            input_schema: schema.clone(),
+        });
+    }
 
     let mut steps: u64 = 0;
     let mut input_tokens: u64 = 0;
@@ -196,6 +319,12 @@ pub async fn drive_loop(
         if !llm_tools.is_empty() {
             request = request.with_tools(llm_tools.clone());
         }
+        if output_schema.is_some() {
+            // Some tool, the model's pick: the answer tool is one of them, so
+            // the turn that ends the loop is a tool call like any other and a
+            // bare-text terminal turn is off the table by API contract.
+            request = request.with_tool_choice(ToolChoice::any());
+        }
 
         let turn = ctx.model_call(agent.client(), &request).await?;
         steps += 1;
@@ -211,16 +340,55 @@ pub async fn drive_loop(
 
         conversation.push(Message::assistant_blocks(turn.response.content.clone()));
 
-        // No tool calls: the text is the final answer. The loop returns it
-        // without recording the terminal; the caller records `RunCompleted`
-        // (`drive` straight away, the graph engine once after its last node).
+        // No tool calls. Unstructured, the text is the final answer: the loop
+        // returns it without recording the terminal; the caller records
+        // `RunCompleted` (`drive` straight away, the graph engine once after
+        // its last node). Structured, `tool_choice` asked for a call and none
+        // came, so the loop asks again rather than reading prose as an answer
+        // it never validated.
         if tool_uses.is_empty() {
-            let output = Value::String(turn.response.text());
-            return Ok(LoopOutcome::Completed(output));
+            if output_schema.is_none() {
+                let output = Value::String(turn.response.text());
+                return Ok(LoopOutcome::Completed(output));
+            }
+            conversation.push(Message::user(NO_TOOL_CALL_REASK));
+            continue;
+        }
+
+        // The one way a structured loop ends: the answer tool alone in its
+        // turn, carrying input the declared schema accepts. The input is the
+        // output, verbatim.
+        if let Some(schema) = output_schema
+            && let [(tool_use_id, name, answer)] = tool_uses.as_slice()
+            && name == ANSWER_TOOL
+        {
+            match validate_against_schema(answer, schema) {
+                Ok(()) => return Ok(LoopOutcome::Completed(answer.clone())),
+                Err(violation) => {
+                    // A violation is a failed call like any other, streak
+                    // collapse included: an answer that keeps missing the
+                    // shape the same way stops re-sending the same wall of
+                    // text back.
+                    let content =
+                        failures.content_for_failure(ANSWER_TOOL, &violation_content(&violation));
+                    conversation.push(Message::user_blocks(vec![ContentBlock::tool_error(
+                        tool_use_id.clone(),
+                        content,
+                    )]));
+                    continue;
+                }
+            }
         }
 
         let mut result_blocks: Vec<ContentBlock> = Vec::with_capacity(tool_uses.len());
         for (tool_use_id, name, tool_input) in tool_uses {
+            // An answer call that got here shared its turn with other calls
+            // (or repeated itself). The real calls run; this one is told to
+            // come back alone, so the answer is always the whole turn.
+            if output_schema.is_some() && name == ANSWER_TOOL {
+                result_blocks.push(ContentBlock::tool_error(tool_use_id, ANSWER_NOT_ALONE));
+                continue;
+            }
             let Some(tool) = agent.tools().get(&name) else {
                 // The model named a tool the agent does not have. This is
                 // derived purely from the recorded response, so it needs no

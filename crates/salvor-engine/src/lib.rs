@@ -19,7 +19,14 @@
 //!
 //! - an **agent** node runs the built-in agent loop
 //!   ([`drive_loop`](salvor_runtime::drive_loop)) inside the same log, framed by
-//!   `NodeEntered` / `NodeExited`;
+//!   `NodeEntered` / `NodeExited`. A node that declares an `output_schema` runs
+//!   the structured form of that loop
+//!   ([`drive_loop_structured`](salvor_runtime::drive_loop_structured)) instead,
+//!   so the node's output is the validated object the schema describes rather
+//!   than the reply text, and downstream expressions can read its fields. The
+//!   resolved agent may declare a schema of its own, in which case the node's
+//!   declaration wins and the agent's is the fallback (see
+//!   [`Agent::output_schema`](salvor_runtime::Agent::output_schema));
 //! - a **tool** node records one tool call through the same write-ahead
 //!   intent/completion machinery the built-in loop uses, honoring the tool's
 //!   effect class;
@@ -60,11 +67,35 @@
 //!   sequentially in the same log. Pass 0's input is the fold's routed value;
 //!   every later pass's input is the previous pass's output, which IS the
 //!   accumulated value: there is no separate accumulator state and no merge rule,
-//!   because the document has no vocabulary for one. The engine records
-//!   `NodeEntered`, then per pass `FoldIterationStarted`, the body's work inline,
+//!   because the document has no vocabulary for one. A value that is an MCP
+//!   result envelope (an object with a `content` ARRAY and a
+//!   `structuredContent` key) contributes that PAYLOAD as the accumulated
+//!   value, not the object around it: an MCP tool answers with a
+//!   `{content, structuredContent}` envelope, and the payload is the value the
+//!   loop is folding, so the next pass's input, the `stop_when` predicate, a
+//!   `best_by` reference, and the join's own output all read the bare payload
+//!   and a fold expression never reaches through a transport detail. This holds
+//!   for the value ENTERING the fold as much as for one a pass produced, so a
+//!   fold fed by a `tool` node over an edge folds the same shape at pass 0 that
+//!   it folds at pass 3. Any other value (an agent body's structured object, a
+//!   native tool's flat struct, an object that merely carries a field called
+//!   `structuredContent` as data, a string, a list) is carried verbatim. The
+//!   unwrap is DERIVATION, not
+//!   recording: `ToolCallCompleted` still holds the whole envelope, and the
+//!   payload is a pure function of it (see [`unwrap_pass_output`]). Nothing
+//!   outside a fold is touched: an ordinary edge routes a node's recorded output
+//!   verbatim, so a branch expression reading `structuredContent.` still reads
+//!   what it always read. The engine
+//!   records `NodeEntered`, then per pass `FoldIterationStarted`, the body's
+//!   work inline,
 //!   and `FoldIterationJoined`, and stops when the `stop_when` predicate holds
 //!   over the pass just joined or when the bound is reached (there is no third
-//!   cause: nothing stops a fold for "failing to improve"). The `join` rule then
+//!   cause: nothing stops a fold for "failing to improve"). Reaching the bound
+//!   means what `on_bound` says it means: absent or `join` joins the passes
+//!   anyway, and `fail` is a typed [`EngineError::FoldBoundExceeded`] returned
+//!   from exactly where `FoldConverged` would have been recorded, so the passes
+//!   and their joins stay in the log and no convergence and no `NodeExited`
+//!   land. Otherwise the `join` rule
 //!   picks the value the node produces: `last` takes the final pass, `all` takes
 //!   every pass's value as a list in pass order, and `best_by` is an argmax over
 //!   ALL passes of the reference's value, ordered by the expression language's
@@ -86,7 +117,11 @@
 //! [`plan_fork`]).
 //!
 //! After the last node the engine records the single terminal `RunCompleted`.
-//! There is no ambient clock or randomness in any decision: everything the
+//! It records no terminal for a refusal: refuse-before-record is what keeps the
+//! log free of events past one. Whether a refused run is DEAD or merely stuck is
+//! the driver's call, and [`EngineError::is_permanent`] is how the engine tells
+//! it apart; [`record_permanent_refusal`] is the append the drivers make when
+//! the answer is dead. There is no ambient clock or randomness in any decision: everything the
 //! engine feeds forward (the walk order, each node's input, the branch route, a
 //! map's resolved item list and its per-iteration child ids, a fold's stop
 //! decision, its winner and its recorded reason, an idempotent tool's
@@ -133,11 +168,12 @@ use std::collections::{HashMap, HashSet};
 use salvor_core::{Effect, RunId};
 use salvor_graph::expr::{Expr, Reference};
 use salvor_graph::{
-    BranchCondition, BranchNode, Edge, FoldBody, FoldJoin, FoldNode, GateNode, Graph, MapBody,
-    MapNode, Node,
+    AgentNode, BranchCondition, BranchNode, Edge, FoldBody, FoldJoin, FoldNode, GateNode, Graph,
+    MapBody, MapNode, Node, OnBound,
 };
 use salvor_runtime::{
-    Agent, LoopOutcome, ParkReason, Resumption, RunCtx, ToolCallResult, drive_loop, hash_value,
+    Agent, LoopOutcome, ParkReason, Resumption, RunCtx, ToolCallResult, drive_loop,
+    drive_loop_structured, hash_value,
 };
 use salvor_tools::DynTool;
 use serde_json::{Value, json};
@@ -234,7 +270,9 @@ pub fn graph_hash(graph: &Graph) -> Result<String, EngineError> {
 /// [`EngineError::UnsupportedFoldBody`] for a fold node's `subgraph` or
 /// non-`agent`/`tool` body (before the fold's `NodeEntered`), and
 /// [`EngineError::FoldNoComparableCandidate`] when a `best_by` join finds no
-/// comparable value in any pass (after the passes ran, before `FoldConverged`);
+/// comparable value in any pass, and [`EngineError::FoldBoundExceeded`] when a
+/// fold declaring `on_bound: fail` reaches its bound with `stop_when` still
+/// unsatisfied (both after the passes ran, before `FoldConverged`);
 /// [`EngineError::NoBranchCaseMatched`] when an expression branch
 /// matches no case (also before its `NodeEntered`);
 /// [`EngineError::BranchDecisionUnmatched`] when a model-decision branch's agent
@@ -335,7 +373,7 @@ pub async fn run_graph(
                 // The agent loop runs inside this same log via the runtime's
                 // begin/drive_loop split: no second run head, and it returns the
                 // output without recording a terminal (the engine owns that).
-                match drive_loop(ctx, agent, &node_input).await? {
+                match drive_agent_node(ctx, agent_node, agent, &node_input).await? {
                     LoopOutcome::Completed(output) => {
                         ctx.node_exited(id).await?;
                         last_output = output.clone();
@@ -534,6 +572,63 @@ pub async fn run_graph(
     })
 }
 
+/// Records the terminal `RunFailed` a PERMANENT [`run_graph`] refusal deserves,
+/// so a dead run stops masquerading as a running one.
+///
+/// [`run_graph`] itself never writes a terminal for a refusal, and that is
+/// deliberate: refuse-before-record is what keeps the log free of events past a
+/// refusal, and the engine cannot know whether its caller intends to re-drive.
+/// The DRIVER does know, and it is the driver that owns the run's disposition.
+/// So the drivers (the CLI's `graph run`, `resume`, and `graph fork` paths, and
+/// the server's `drive_graph` task) call this with the error they just received
+/// and THE SAME `ctx` that produced it. The same one matters: the append claims
+/// the position that `ctx`'s cursor stands on, which is the position after
+/// everything the refused drive replayed or wrote. A fresh `RunCtx` over the
+/// same log stands at position zero and would diverge rather than append, which
+/// is the machinery refusing to write a terminal onto a run it has not read.
+///
+/// Only a permanent error is recorded: one that
+/// [`EngineError::is_permanent`] calls a pure function of the frozen document
+/// and the recorded log, so re-driving reproduces it forever. A transient error
+/// is left exactly as it was, and the run stays recoverable. Returns whether a
+/// terminal was recorded, so a caller can say so in its own voice.
+///
+/// # Ordering, and the kill between the refusal and this append
+///
+/// The append goes through [`RunCtx::fail_run`](salvor_runtime::RunCtx::fail_run),
+/// which is the same persist discipline every other event uses: the cursor
+/// claims the next sequence and the envelope is durable before this returns.
+/// That is also the "only when the log holds no terminal" guard, and it needs no
+/// second read of the store. A log whose recorded next event is the identical
+/// `RunFailed` (a driver that already did this) REPLAYS it and appends nothing;
+/// a log holding a different terminal is a divergence the caller surfaces
+/// rather than overwrites.
+///
+/// A `kill -9` landing between the refusal and this append therefore leaves a
+/// log with no terminal at all, ending at whatever the refusal was recorded
+/// past (for a fold, its last `FoldIterationJoined`). That log is not corrupt
+/// and not stuck: the next drive replays it, re-derives the SAME permanent
+/// refusal from the same recorded values, and this appends the `RunFailed`
+/// then. Nothing re-executes, because everything before the refusal is history.
+/// The window is a delay in the status an operator reads, never a divergence.
+///
+/// # Errors
+///
+/// [`RuntimeError`](salvor_runtime::RuntimeError) when the append does not
+/// persist, or when the log already holds a different terminal. Callers report
+/// the ORIGINAL engine refusal in that case: it is the real news, and losing
+/// the terminal only means the run reads as recoverable when it is not.
+pub async fn record_permanent_refusal(
+    ctx: &mut RunCtx,
+    error: &EngineError,
+) -> Result<bool, salvor_runtime::RuntimeError> {
+    if !error.is_permanent() {
+        return Ok(false);
+    }
+    ctx.fail_run(&error.to_string()).await?;
+    Ok(true)
+}
+
 /// How driving one map node's fan-out ended.
 enum MapOutcome {
     /// Every iteration joined; the map's output is the per-index outputs as a
@@ -686,6 +781,41 @@ impl BodyCall<'_> {
     }
 }
 
+/// Drives one `agent` node's loop, wherever it sits: walked as a node of its
+/// own, or run inline as a map's or fold's per-item worker.
+///
+/// A declared `output_schema` is the whole difference between the two loops.
+/// With one, the runtime offers the model its answer tool and validates the
+/// answer against the schema, so this node's output is that object and a
+/// downstream expression can read a field of it; without one, the output is the
+/// reply text as before.
+///
+/// Two places can declare it, and the rule is **node wins, else the agent's
+/// own**. The node's `output_schema` is the graph author's statement about what
+/// this position in this document needs, made with the whole document in view;
+/// the agent's is the agent author's statement about what the agent always
+/// produces, made without knowing which graph would call it. The more specific
+/// declaration is the more informed one, so it takes the node's when there is
+/// one and falls back to the agent's when there is not. A node that declares
+/// nothing and an agent that declares nothing stay on the plain text loop, as
+/// every graph did before either declaration existed.
+async fn drive_agent_node(
+    ctx: &mut RunCtx,
+    node: &AgentNode,
+    agent: &Agent,
+    input: &Value,
+) -> Result<LoopOutcome, EngineError> {
+    let schema = node
+        .output_schema
+        .as_ref()
+        .or_else(|| agent.output_schema());
+    let outcome = match schema {
+        Some(schema) => drive_loop_structured(ctx, agent, input, schema).await?,
+        None => drive_loop(ctx, agent, input).await?,
+    };
+    Ok(outcome)
+}
+
 /// Runs one map iteration's or fold pass's body work inline: the referenced
 /// `agent` or `tool` node's work with `item` as its input, recorded in the parent
 /// log WITHOUT a `NodeEntered` frame of its own (the owner's markers bracket it
@@ -707,7 +837,7 @@ async fn run_body(
                     node: agent_node.id.clone(),
                     agent_hash: agent_node.agent_hash.clone(),
                 })?;
-            match drive_loop(ctx, agent, item).await? {
+            match drive_agent_node(ctx, agent_node, agent, item).await? {
                 LoopOutcome::Completed(output) => Ok(IterationOutcome::Output(output)),
                 LoopOutcome::Parked(reason) => Ok(IterationOutcome::Parked(reason)),
             }
@@ -790,8 +920,15 @@ enum FoldOutcome {
 /// body's work inline, and `FoldIterationJoined`. Pass 0's input is the fold's
 /// routed value; every later pass's input is the previous pass's output, which
 /// IS the accumulated value (the document has no vocabulary for a separate
-/// accumulator or a merge rule). The loop stops when `stop_when` holds over the
-/// pass just joined, or when `max_iterations` passes have run; then the `join`
+/// accumulator or a merge rule). Both go through the same unwrap out of an MCP
+/// result envelope (see [`unwrap_pass_output`]), so the body sees ONE shape
+/// across the whole loop whether the fold was fed over an edge or by itself.
+/// The loop stops
+/// when `stop_when` holds over the
+/// pass just joined, or when `max_iterations` passes have run. A bound reached
+/// by a fold declaring `on_bound: fail` is a typed
+/// [`EngineError::FoldBoundExceeded`] returned in place of the convergence;
+/// otherwise the `join`
 /// rule picks the winner, `FoldConverged` records it with the stop reason, and
 /// `NodeExited` closes the node.
 async fn drive_fold(
@@ -860,6 +997,19 @@ async fn drive_fold(
     // author-supplied and may be enormous, and each pass does real work, so
     // growing costs nothing next to reserving for passes that may never run.
     let mut passes: Vec<Value> = Vec::new();
+    // THE ENTRY VALUE. The fold's routed value goes through the SAME unwrap its
+    // pass outputs do. A fold reached over an inbound edge from a `tool` node is
+    // handed that node's recorded output, which for a tool reached over MCP is
+    // the whole result envelope; without this, pass 0 would fold the envelope
+    // while every later pass folds a bare payload, so one body tool would see two
+    // shapes in a single run and pass 0 would read every field at a path that is
+    // not there. Derived once, here, because this is the single point pass 0's
+    // input is chosen, and a fold that IS the entry node folds its graph input
+    // exactly as before (a plain object is not an envelope and passes through
+    // verbatim). Nothing outside a fold changes: an ordinary edge still routes a
+    // node's recorded output verbatim, which is what branch expressions reading
+    // `structuredContent.` depend on.
+    let entry = unwrap_pass_output(routed.clone());
     let mut stopped_by_predicate = false;
     for position in 0..fold.max_iterations {
         let index = u64::from(position);
@@ -870,15 +1020,28 @@ async fn drive_fold(
             node_id,
             index,
         };
-        // Pass 0 folds over the routed value; every later pass folds over the
-        // pass before it. Bound to its own statement so the borrow of `passes`
-        // ends before the outcome is pushed onto it.
+        // Pass 0 folds over the unwrapped entry value; every later pass folds
+        // over the pass before it, which was unwrapped as it was pushed. Bound to
+        // its own statement so the borrow of `passes` ends before the outcome is
+        // pushed onto it.
         let outcome = {
-            let input = passes.last().unwrap_or(routed);
+            let input = passes.last().unwrap_or(&entry);
             run_body(ctx, body, input, agents, tools, call).await?
         };
         match outcome {
-            IterationOutcome::Output(output) => passes.push(output),
+            // THE UNWRAP POINT for a pass output; the entry value above is the
+            // only other one, and it calls the same function. The accumulated
+            // value the fold carries is the pass output's `structuredContent`
+            // payload when the output is an MCP result envelope, and the output
+            // verbatim otherwise (see `unwrap_pass_output`). Applying it here,
+            // where the output is pushed onto `passes`, is what makes every
+            // consumer agree: the next pass's input, the `stop_when` predicate,
+            // the `best_by` argmax, and the join's own output all read this
+            // vector and therefore all read the bare payload. Nothing about the
+            // RECORDING changes: `ToolCallCompleted` already holds the full
+            // envelope and still does. This is derivation from recorded data,
+            // pure and total, so a replay re-derives the identical value.
+            IterationOutcome::Output(output) => passes.push(unwrap_pass_output(output)),
             // No join is recorded for a parked pass, so the next drive re-enters
             // this same pass and re-runs its body.
             IterationOutcome::Parked(reason) => {
@@ -896,6 +1059,30 @@ async fn drive_fold(
             stopped_by_predicate = true;
             break;
         }
+    }
+
+    // THE BOUND VERDICT, before the join. A fold that declares `on_bound: fail`
+    // treats `stop_when` as a REQUIREMENT, not an early exit, so reaching the
+    // bound without it holding means the loop converged on nothing and there is
+    // no value to join. The join is not consulted at all: a `best_by` argmax
+    // over passes that all fell short would answer a question this fold did not
+    // ask, so this check sits ahead of it and wins.
+    //
+    // THE RECORDING POINT, chosen deliberately. The passes and their joins are
+    // already durably in the log and stay there: that work really happened, a
+    // replay must reproduce it, and an operator reading the run needs to see
+    // what the loop actually tried. What is refused is the CONVERGENCE. So this
+    // returns from exactly the line `fold_converged` would have occupied: no
+    // `FoldConverged`, no `NodeExited`, no terminal from the engine, which is
+    // the same before-the-record discipline `FoldNoComparableCandidate` already
+    // follows one arm below. An absent `on_bound`, or `OnBound::Join`, never
+    // reaches this branch and behaves exactly as it did before the field
+    // existed.
+    if !stopped_by_predicate && fold.on_bound == Some(OnBound::Fail) {
+        return Err(EngineError::FoldBoundExceeded {
+            node: node_id.to_owned(),
+            bound: fold.max_iterations,
+        });
     }
 
     // The bound is at least 1 and every pass either pushed its output or
@@ -931,6 +1118,65 @@ async fn drive_fold(
     .await?;
     ctx.node_exited(node_id).await?;
     Ok(FoldOutcome::Converged(output))
+}
+
+/// The value a fold actually folds, given a recorded one: the
+/// `structuredContent` payload when the value is an MCP result envelope, and the
+/// value verbatim otherwise. Applied to a pass's output and to the fold's own
+/// entry value, so a fold folds bare payloads whether they entered over an edge
+/// or were produced by a pass.
+///
+/// A fold pass whose body is a `tool` node produces the RECORDED TOOL RESULT.
+/// For a tool reached over MCP that result is an envelope,
+/// `{content, structuredContent?, isError?}`: the human-readable rendering
+/// beside the machine-readable payload. The payload is the value the loop is
+/// actually folding, so carrying the envelope forward would make every fold
+/// expression reach through a transport detail (`structuredContent.score`
+/// rather than `score`), and would make the same predicate wrong against a
+/// native tool, which returns its flat struct with no envelope at all. Unwrap
+/// once, here, and the document says the same thing whichever tool answers.
+///
+/// # What counts as an envelope
+///
+/// An object with BOTH a `content` array and a `structuredContent` key, which
+/// is the recorded shape and the whole recorded shape. `salvor-tools` hands the
+/// runtime `serde_json::to_value(&rmcp::model::CallToolResult)`, and that type
+/// serializes `content: Vec<ContentBlock>` unconditionally (no
+/// `skip_serializing_if`, so an empty result still writes `"content": []`)
+/// while `structuredContent`, `isError`, and `_meta` are each written only when
+/// present. So every MCP result carries a `content` ARRAY, and only a
+/// structured one carries the payload key beside it.
+///
+/// Keying on the payload key ALONE would be wrong, and that is the point of the
+/// pair: a bare tool or agent output is arbitrary author-shaped JSON, and an
+/// object that happens to carry a field called `structuredContent` as data is a
+/// legitimate accumulated value, not a transport wrapper. Such a value has no
+/// `content` array beside it and passes through whole.
+///
+/// Everything else is returned untouched, which is what makes this safe for
+/// every other body: an `agent` body with an `output_schema` produces a bare
+/// object, a native tool produces a flat struct, a graph input is whatever the
+/// operator submitted, and a non-object value (a string, a number, a list) has
+/// no keys at all.
+///
+/// This is a pure, total function of a recorded value, which is what lets it
+/// sit outside the recording entirely: `ToolCallCompleted` still holds the full
+/// envelope, and this is re-derived from it identically on every replay. The
+/// document validator's fold-reference check reads the same bare payload, so
+/// what it checks at submit is what the engine folds at run time.
+fn unwrap_pass_output(output: Value) -> Value {
+    match output {
+        // The guard is the envelope test; the `remove` below cannot then miss.
+        Value::Object(mut fields)
+            if fields.get("content").is_some_and(Value::is_array)
+                && fields.contains_key("structuredContent") =>
+        {
+            fields
+                .remove("structuredContent")
+                .expect("the guard proved the key is present")
+        }
+        other => other,
+    }
 }
 
 /// The index of the pass a `best_by` join wins with: the argmax over every
@@ -971,16 +1217,31 @@ fn best_by_index(passes: &[Value], reference: &Reference) -> Option<usize> {
 /// reached. A pure function of the document and the pass count, so it reproduces
 /// byte for byte on replay (the cursor matches the recorded reason). There is no
 /// third cause: no "failed to improve" rule stops a fold.
+///
+/// # Why both read verdict first, expression last
+///
+/// This string is rendered after a display prefix that is not this function's to
+/// change (`fold <node> converged on [<i>]: `), and readers truncate. So the
+/// VERDICT leads and the author's `stop_when` expression trails: truncation can
+/// then only ever eat the expression, never the word that says which way the
+/// loop went. The bound reason in particular has to survive standing beside the
+/// word "converged", so it says plainly that the join was taken at the bound and
+/// that the predicate never held, rather than opening with the bound and hiding
+/// the negation past the cut.
+///
+/// The `on_bound: fail` case never reaches here at all: it returns
+/// [`EngineError::FoldBoundExceeded`] from where `FoldConverged` would have been
+/// recorded, and that error text is verdict-first already.
 fn stop_reason(fold: &FoldNode, stopped_by_predicate: bool, passes: usize) -> String {
     if stopped_by_predicate {
         format!(
-            "stop_when `{}` held after pass {}",
-            fold.stop_when,
-            passes - 1
+            "stop_when held after pass {}: `{}`",
+            passes - 1,
+            fold.stop_when
         )
     } else {
         format!(
-            "reached the max_iterations bound of {} without stop_when `{}` holding",
+            "joined at the max_iterations bound of {}; stop_when never held: `{}`",
             fold.max_iterations, fold.stop_when
         )
     }

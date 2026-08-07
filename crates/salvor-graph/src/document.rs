@@ -527,6 +527,13 @@ pub struct FoldNode {
     pub stop_when: String,
     /// How the passes are folded into the value the node produces.
     pub join: FoldJoin,
+    /// What a reached `max_iterations` bound means, when `stop_when` never
+    /// held. Absent is `OnBound::Join`: the bound joins the best pass, which is
+    /// what every fold written before this field existed does, so an absent
+    /// field is both the default and byte-identical to those documents on the
+    /// wire. Additive: absent on the wire when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_bound: Option<OnBound>,
     /// Optional JSON Schema for the accumulated value the loop carries and
     /// produces. Data only, like an `AgentNode`'s `output_schema`: recorded
     /// for authoring and tooling, never wired into the edge type-compatibility
@@ -586,6 +593,35 @@ pub enum FoldJoin {
     Last,
     /// Produce every pass's value as a list, in pass order.
     All,
+}
+
+/// What a `FoldNode` reaching its iteration bound means, when `stop_when` never
+/// held.
+///
+/// A bare lowercase string on the wire (`"join"`, `"fail"`), not the adjacently
+/// tagged shape `FoldJoin` uses: the two variants carry no data and none is
+/// foreseen, so a tag object would be ceremony around a word. Adding a third
+/// variant later stays additive all the same, because an older document simply
+/// omits the field.
+///
+/// Absent means [`OnBound::Join`], which is what every fold written before this
+/// field existed does, so the default is the behavior already shipped rather
+/// than a new one chosen now. Authors reach for [`OnBound::Fail`] when the stop
+/// predicate is a REQUIREMENT rather than an early exit: a loop that must reach
+/// a score before its value is worth anything is better off saying so than
+/// handing a caller the best of several passes that all fell short. Data only;
+/// this crate never runs the loop, and the engine reads this field in a later
+/// slice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OnBound {
+    /// Reaching the bound joins the passes exactly as `stop_when` holding
+    /// would: the `join` rule picks the value the node produces. Today's
+    /// behavior, and what an absent field means.
+    Join,
+    /// Reaching the bound without `stop_when` holding is an error: the loop
+    /// converged on nothing, and the node produces no value.
+    Fail,
 }
 
 /// A directed edge: a typed payload flows from one node to another.
@@ -714,6 +750,7 @@ mod tests {
             max_iterations: 3,
             stop_when: "score >= 0.85".into(),
             join: FoldJoin::BestBy("score".into()),
+            on_bound: None,
             accumulator_schema: None,
         });
         let json = serde_json::to_string(&node).expect("serialize");
@@ -723,6 +760,68 @@ mod tests {
         );
         let restored: Node = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(node, restored, "fold round trip changed the value: {json}");
+    }
+
+    /// `on_bound` is a bare word on the wire, and only there when set: an unset
+    /// one leaves a fold's bytes exactly as they were before the field existed,
+    /// which is what makes the field additive rather than a re-encoding of
+    /// every document already written.
+    #[test]
+    fn fold_on_bound_is_a_bare_word_present_only_when_set() {
+        let fold = |on_bound| {
+            Node::Fold(FoldNode {
+                id: "refine".into(),
+                name: None,
+                body: FoldBody::Node("tailor".into()),
+                max_iterations: 3,
+                stop_when: "score >= 0.85".into(),
+                join: FoldJoin::BestBy("score".into()),
+                on_bound,
+                accumulator_schema: None,
+            })
+        };
+
+        let joining = fold(Some(OnBound::Join));
+        let json = serde_json::to_string(&joining).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"kind":"fold","payload":{"id":"refine","body":{"kind":"node","value":"tailor"},"max_iterations":3,"stop_when":"score >= 0.85","join":{"kind":"best_by","value":"score"},"on_bound":"join"}}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<Node>(&json).expect("deserialize"),
+            joining
+        );
+
+        let failing = fold(Some(OnBound::Fail));
+        let json = serde_json::to_string(&failing).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"kind":"fold","payload":{"id":"refine","body":{"kind":"node","value":"tailor"},"max_iterations":3,"stop_when":"score >= 0.85","join":{"kind":"best_by","value":"score"},"on_bound":"fail"}}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<Node>(&json).expect("deserialize"),
+            failing
+        );
+
+        assert!(
+            !serde_json::to_string(&fold(None))
+                .expect("serialize")
+                .contains("on_bound"),
+            "an unset on_bound must not appear on the wire"
+        );
+    }
+
+    /// A word outside the two the field allows is refused at parse, exactly as
+    /// a stray field is: strict in, because a fold that silently forgot it was
+    /// told to fail is the failure this rejects.
+    #[test]
+    fn unknown_on_bound_word_is_rejected() {
+        let text = r#"{"kind":"fold","payload":{"id":"refine","body":{"kind":"node","value":"tailor"},"max_iterations":3,"stop_when":"done","join":{"kind":"last"},"on_bound":"retry"}}"#;
+        let error = serde_json::from_str::<Node>(text).expect_err("must reject");
+        assert!(
+            error.to_string().contains("retry"),
+            "error should name the stray word: {error}"
+        );
     }
 
     /// The two unit `join` variants serialize with just their `kind` tag, no

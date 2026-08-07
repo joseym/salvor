@@ -1,0 +1,17 @@
+{
+  "notice_id": "ADJ-9002",
+  "employee": "T. Okafor",
+  "pay_period": "2026-07-B",
+  "correction_cents": -96250,
+  "reason": "a retroactive grade change spanning four pay periods, two of them already closed",
+  "lands_on": "2026-08-A",
+  "desk_contact": "payroll@northharbor.example",
+  "checklist": [
+    "names the pay period",
+    "states the corrected amount in dollars",
+    "says which payslip the correction lands on",
+    "names one desk contact",
+    "no payroll jargon",
+    "explains the four affected periods without a table"
+  ]
+}

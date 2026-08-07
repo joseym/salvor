@@ -18,12 +18,28 @@
 //!   pass, `all` takes every pass's value in order;
 //! - both stop causes: the predicate firing early, and the bound being reached,
 //!   each naming itself in the recorded reason;
+//! - the accumulated value is the `structuredContent` a tool result carries and
+//!   the whole output when there is none, per pass: the next pass's input, the
+//!   predicate, the argmax, and the join all read bare paths, while the log
+//!   still records the whole envelope, and an unwrapped run replays free. The
+//!   value ENTERING the fold over an edge is unwrapped the same way, so one body
+//!   tool sees one shape across a whole run, and the envelope test is the PAIR
+//!   of keys (a `content` array beside the payload), so an author's own
+//!   `structuredContent` field is data and survives whole;
+//! - `on_bound` decides what a reached bound MEANS: `fail` refuses with a typed
+//!   `FoldBoundExceeded` where the convergence would have been, and the driver
+//!   records the terminal `RunFailed` a permanent refusal earns, while `join`
+//!   and an absent field are the same run they always were. The window between
+//!   the refusal and that terminal is swept at every boundary, and a transient
+//!   refusal beside it records nothing at all;
 //! - a parked pass records no join, so a resume re-drives that same pass;
 //! - a `subgraph` body, or a body node that is not an `agent` or `tool`, is a
 //!   typed `UnsupportedFoldBody` refused before the fold's `NodeEntered`;
 //! - the committed `fold-refine.json` fixture drives under the engine with its
 //!   `tailor` agent as the per-pass worker, walked once per pass and never as a
-//!   node of its own.
+//!   node of its own, and CONVERGES: the node's declared `output_schema` runs,
+//!   so each pass hands the fold a scored object, the predicate fires on it, and
+//!   the `best_by` join picks a winner.
 
 mod common;
 
@@ -32,16 +48,18 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use common::{
-    PassTool, ScriptedModel, SuspendingTool, agent_builder, event_kinds, fixed_clock, fixed_random,
-    fixed_run_id, text_response,
+    ContentScriptedModel, EnvelopePassTool, PassTool, SuspendingTool, agent_builder, event_kinds,
+    fixed_clock, fixed_random, fixed_run_id, tool_use_response,
 };
-use salvor_core::{Effect, Event, EventEnvelope, RunId};
-use salvor_engine::{EngineError, ForkError, GraphOutcome, plan_fork, run_graph};
+use salvor_core::{Effect, Event, EventEnvelope, RunId, RunStatus, derive_state};
+use salvor_engine::{
+    EngineError, ForkError, GraphOutcome, plan_fork, record_permanent_refusal, run_graph,
+};
 use salvor_graph::{
-    FoldBody, FoldJoin, FoldSpec, GateSpec, Graph, GraphBuilder, ToolSpec, validate,
+    FoldBody, FoldJoin, FoldSpec, GateSpec, Graph, GraphBuilder, OnBound, ToolSpec, validate,
 };
 use salvor_replay::{NodeState, derive_graph_projection};
-use salvor_runtime::{Agent, ParkReason, RunCtx};
+use salvor_runtime::{ANSWER_TOOL, Agent, ParkReason, RunCtx};
 use salvor_store::{EventStore, SqliteStore};
 use salvor_tools::DynTool;
 use serde_json::{Value, json};
@@ -61,6 +79,49 @@ fn fold_only_graph(max_iterations: u32, stop_when: &str, join: FoldJoin) -> Grap
             stop_when,
             join,
         ))
+        .tool(ToolSpec::new("worker", "refine_tool"))
+        .build()
+}
+
+/// A fold FED BY an ordinary node: `seed` runs first and an edge carries its
+/// output into `refine`, whose body is `worker`. Both tool nodes name the SAME
+/// registered tool, so the value a pass is handed and the value the feeding node
+/// produced are answered by one body, and any disagreement in their shapes is
+/// that body's problem to read.
+fn fed_fold_graph(max_iterations: u32, stop_when: &str, join: FoldJoin) -> Graph {
+    GraphBuilder::new()
+        .tool(ToolSpec::new("seed", "refine_tool"))
+        .fold(FoldSpec::new(
+            "refine",
+            FoldBody::Node("worker".into()),
+            max_iterations,
+            stop_when,
+            join,
+        ))
+        .tool(ToolSpec::new("worker", "refine_tool"))
+        .edge("seed", "refine")
+        .build()
+}
+
+/// The same one-fold-node graph, with an explicit `on_bound` declared. Only
+/// that field differs, so a difference in behavior can only be `on_bound`'s.
+fn fold_graph_on_bound(
+    max_iterations: u32,
+    stop_when: &str,
+    join: FoldJoin,
+    on_bound: OnBound,
+) -> Graph {
+    GraphBuilder::new()
+        .fold(
+            FoldSpec::new(
+                "refine",
+                FoldBody::Node("worker".into()),
+                max_iterations,
+                stop_when,
+                join,
+            )
+            .on_bound(on_bound),
+        )
         .tool(ToolSpec::new("worker", "refine_tool"))
         .build()
 }
@@ -496,7 +557,7 @@ async fn stop_when_fires_early_and_records_the_predicate_reason() {
     assert_eq!(event_kinds(&log), expected_kinds(2));
     let (winner_index, reason) = convergence(&log);
     assert_eq!(winner_index, 1);
-    assert_eq!(reason, "stop_when `score >= 5` held after pass 1");
+    assert_eq!(reason, "stop_when held after pass 1: `score >= 5`");
 }
 
 /// A predicate that never holds runs the loop to its bound, and the recorded
@@ -511,7 +572,7 @@ async fn the_bound_stops_the_loop_and_records_the_bound_reason() {
     let (_, reason) = convergence(&log);
     assert_eq!(
         reason,
-        "reached the max_iterations bound of 3 without stop_when `score >= 99` holding"
+        "joined at the max_iterations bound of 3; stop_when never held: `score >= 99`"
     );
 }
 
@@ -748,23 +809,614 @@ async fn forking_into_a_fold_pass_is_refused_but_the_fold_node_is_a_boundary() {
 }
 
 // ---------------------------------------------------------------------------
+// The envelope unwrap
+// ---------------------------------------------------------------------------
+
+/// Every recorded tool-call INPUT, in call order: what each pass was actually
+/// handed, which is the only place the accumulated value is observable from
+/// outside the engine.
+fn tool_inputs(log: &[EventEnvelope]) -> Vec<Value> {
+    log.iter()
+        .filter_map(|env| match &env.event {
+            Event::ToolCallRequested { input, .. } => Some(input.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every recorded tool-call OUTPUT, in call order, for asserting the log still
+/// holds what the tool really said.
+fn tool_outputs(log: &[EventEnvelope]) -> Vec<Value> {
+    log.iter()
+        .filter_map(|env| match &env.event {
+            Event::ToolCallCompleted { output, .. } => Some(output.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Drives a fold over the envelope-answering body and returns the log plus the
+/// execution count, the envelope sibling of [`drive_fresh`].
+async fn drive_enveloped(
+    graph: &Graph,
+    scores: Vec<Value>,
+    envelopes: Vec<bool>,
+    run_id: RunId,
+) -> (Vec<EventEnvelope>, usize) {
+    let store = Arc::new(SqliteStore::in_memory().expect("store opens"));
+    let (worker, calls) =
+        EnvelopePassTool::new("refine_tool", Effect::Idempotent, scores, envelopes);
+    let mut tools: HashMap<String, Box<dyn DynTool>> = HashMap::new();
+    tools.insert("refine_tool".to_owned(), Box::new(worker));
+    let mut ctx = RunCtx::with_hooks(store.clone(), run_id, vec![], fixed_clock(), fixed_random())
+        .expect("ctx builds");
+    let outcome = run_graph(&mut ctx, graph, &seed(), &no_agents(), &tools)
+        .await
+        .expect("graph drives");
+    assert!(
+        matches!(outcome, GraphOutcome::Completed { .. }),
+        "fold graph completes, got {outcome:?}"
+    );
+    (
+        store.read_log(run_id).await.expect("log reads"),
+        calls.load(Ordering::SeqCst),
+    )
+}
+
+/// THE UNWRAP. A tool body answering the way an MCP tool does, with the pass
+/// value inside a `{content, structuredContent}` envelope, folds the PAYLOAD:
+///
+///   (a) pass 1's recorded `ToolCallRequested.input` is the bare payload pass 0
+///       produced, not the envelope around it;
+///   (b) the `stop_when` predicate reads a BARE path (`score`), and fires;
+///   (c) the join's output is bare;
+///   (d) and the log is untouched by any of it: `ToolCallCompleted` still
+///       records the whole envelope, because the unwrap is derivation, not
+///       recording.
+#[tokio::test]
+async fn a_fold_folds_the_structured_content_a_tool_result_carries() {
+    let graph = fold_only_graph(3, "score >= 5", FoldJoin::Last);
+    let (log, calls) = drive_enveloped(
+        &graph,
+        vec![json!(1), json!(5), json!(2)],
+        vec![true, true, true],
+        fixed_run_id(57),
+    )
+    .await;
+
+    // (b) The predicate read `score` off the bare payload and fired on pass 1,
+    // two passes into a bound of three.
+    assert_eq!(calls, 2, "the predicate fired on the bare path");
+    assert_eq!(event_kinds(&log), expected_kinds(2));
+    let (winner_index, reason) = convergence(&log);
+    assert_eq!(winner_index, 1);
+    assert_eq!(reason, "stop_when held after pass 1: `score >= 5`");
+
+    // (a) Pass 0 folded the graph input; pass 1 folded pass 0's PAYLOAD.
+    assert_eq!(
+        tool_inputs(&log),
+        vec![json!({"pass": 0}), json!({"pass": 1, "score": 1})],
+        "the next pass's input is the bare payload, never the envelope"
+    );
+
+    // (c) The join produces the bare payload too.
+    assert_eq!(
+        final_output(&log),
+        json!({"pass": 2, "score": 5}),
+        "`last` produces the unwrapped accumulated value"
+    );
+
+    // (d) The recording is unchanged: the envelope is what the tool said, and
+    // the log says exactly that.
+    assert_eq!(
+        tool_outputs(&log),
+        vec![
+            json!({
+                "content": [{"type": "text", "text": json!({"pass": 1, "score": 1}).to_string()}],
+                "structuredContent": {"pass": 1, "score": 1},
+            }),
+            json!({
+                "content": [{"type": "text", "text": json!({"pass": 2, "score": 5}).to_string()}],
+                "structuredContent": {"pass": 2, "score": 5},
+            }),
+        ],
+        "ToolCallCompleted still records the whole envelope"
+    );
+}
+
+/// The rule is per pass, not per run: pass 0 answers with an envelope and pass 1
+/// answers bare (the mix a graph gets when an MCP tool and a native tool are
+/// both in play). Each is treated on its own terms, so the fold threads the
+/// same values either way.
+#[tokio::test]
+async fn a_pass_answering_bare_is_folded_verbatim_beside_one_that_wraps() {
+    let graph = fold_only_graph(3, "score >= 5", FoldJoin::Last);
+    let (log, calls) = drive_enveloped(
+        &graph,
+        vec![json!(1), json!(5), json!(2)],
+        vec![true, false, true],
+        fixed_run_id(58),
+    )
+    .await;
+
+    assert_eq!(calls, 2, "the predicate fired on pass 1");
+    assert_eq!(
+        tool_inputs(&log),
+        vec![json!({"pass": 0}), json!({"pass": 1, "score": 1})],
+        "pass 0's envelope unwrapped to the same value a bare answer would give"
+    );
+    assert_eq!(
+        tool_outputs(&log),
+        vec![
+            json!({
+                "content": [{"type": "text", "text": json!({"pass": 1, "score": 1}).to_string()}],
+                "structuredContent": {"pass": 1, "score": 1},
+            }),
+            // Pass 1 answered bare, and the log records exactly that: no
+            // envelope is invented for it, and none is stripped from it.
+            json!({"pass": 2, "score": 5}),
+        ],
+    );
+    assert_eq!(
+        final_output(&log),
+        json!({"pass": 2, "score": 5}),
+        "a bare pass output is the accumulated value verbatim"
+    );
+}
+
+/// THE ENTRY VALUE, the shape a fold meets when something upstream feeds it.
+/// `seed` is an ordinary `tool` node answering the way an MCP tool does, and an
+/// edge carries its output into `refine`. Pass 0 must fold the PAYLOAD, exactly
+/// as pass 1 does:
+///
+///   (a) pass 0's recorded `ToolCallRequested.input` is the bare payload `seed`
+///       produced, never the envelope around it;
+///   (b) so the ONE body tool sees ONE shape across the whole loop: every
+///       recorded input is a bare payload with no transport keys on it.
+///
+/// Both tool nodes resolve the same registered tool, which is what makes (b) a
+/// claim about a real body rather than about two lookalikes: if the entry value
+/// were threaded verbatim, this single tool would be handed an envelope at pass
+/// 0 and a bare payload afterwards, read no `pass` at all out of the envelope,
+/// and silently fall back to zero.
+#[tokio::test]
+async fn a_fold_fed_over_an_edge_folds_the_payload_from_pass_zero() {
+    let graph = fed_fold_graph(2, "score >= 99", FoldJoin::Last);
+    let (log, calls) = drive_enveloped(
+        &graph,
+        vec![json!(1), json!(5), json!(2)],
+        vec![true, true, true],
+        fixed_run_id(67),
+    )
+    .await;
+
+    // One call for the feeding node, then one per pass of a two-pass bound.
+    assert_eq!(calls, 3, "the feeding node plus both passes ran");
+
+    let inputs = tool_inputs(&log);
+    assert_eq!(
+        inputs,
+        vec![
+            // The graph input, into the feeding node.
+            json!({"pass": 0}),
+            // (a) Pass 0 folded `seed`'s PAYLOAD, not the envelope it arrived in.
+            json!({"pass": 1, "score": 1}),
+            // Pass 1 folded pass 0's payload, as it always did.
+            json!({"pass": 2, "score": 5}),
+        ],
+        "the value entering the fold is unwrapped exactly like one a pass produced"
+    );
+    // (b) One shape, every call: no input carries the transport keys.
+    for input in &inputs {
+        assert!(
+            input.get("content").is_none() && input.get("structuredContent").is_none(),
+            "the body tool sees one shape all run: {input}"
+        );
+    }
+
+    // And the fold still produced a bare payload, so the edge in front of it
+    // changed nothing downstream.
+    assert_eq!(final_output(&log), json!({"pass": 3, "score": 2}));
+}
+
+/// The envelope test is the PAIR of keys, not the payload key alone. A fold's
+/// value is arbitrary author-shaped JSON, so a field that happens to be called
+/// `structuredContent` is data, and an MCP result with nothing structured in it
+/// is not a wrapper around anything. Both pass through whole:
+///
+///   (a) an object with a `structuredContent` key and NO `content` array is
+///       folded verbatim, so pass 0 reads the fields the author put there;
+///   (b) an object with a `content` array and no `structuredContent` key is
+///       folded verbatim too, because there is no payload to take.
+///
+/// (a) is also the fold-as-entry-node guarantee: the graph input reaches pass 0
+/// as submitted.
+#[tokio::test]
+async fn a_coincidental_structured_content_field_is_folded_verbatim() {
+    for (index, input) in [
+        json!({"pass": 0, "structuredContent": {"pass": 41}}),
+        json!({"pass": 0, "content": [{"type": "text", "text": "no payload"}]}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let graph = fold_only_graph(1, "score >= 99", FoldJoin::Last);
+        let store = Arc::new(SqliteStore::in_memory().expect("store opens"));
+        let (tools, calls) = worker_tools(vec![json!(1)]);
+        let run_id = fixed_run_id(68 + index as u8);
+        let mut ctx =
+            RunCtx::with_hooks(store.clone(), run_id, vec![], fixed_clock(), fixed_random())
+                .expect("ctx builds");
+        run_graph(&mut ctx, &graph, &input, &no_agents(), &tools)
+            .await
+            .expect("graph drives");
+
+        let log = store.read_log(run_id).await.expect("log reads");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "one pass under a bound of 1"
+        );
+        assert_eq!(
+            tool_inputs(&log),
+            vec![input.clone()],
+            "a value that is not an MCP result envelope reaches pass 0 whole"
+        );
+        // Read at the bare path, so pass 0 really did see `pass: 0` rather than
+        // the 41 a wrongly-stripped payload would have handed it.
+        assert_eq!(final_output(&log), json!({"pass": 1, "score": 1}));
+    }
+}
+
+/// An unwrapped run replays with ZERO live calls and a byte-identical log. The
+/// unwrap is a pure function of the recorded envelope, so a replay that never
+/// calls the tool still re-derives every accumulated value, every predicate
+/// verdict, and the same winner.
+#[tokio::test]
+async fn an_unwrapped_fold_run_replays_free_and_byte_identical() {
+    let graph = fold_only_graph(3, "score >= 99", FoldJoin::BestBy("score".into()));
+    let scores = vec![json!(1), json!(5), json!(2)];
+    let envelopes = vec![true, true, true];
+    let run_id = fixed_run_id(59);
+
+    let store = Arc::new(SqliteStore::in_memory().expect("store opens"));
+    let (worker, calls) = EnvelopePassTool::new(
+        "refine_tool",
+        Effect::Idempotent,
+        scores.clone(),
+        envelopes.clone(),
+    );
+    let mut tools: HashMap<String, Box<dyn DynTool>> = HashMap::new();
+    tools.insert("refine_tool".to_owned(), Box::new(worker));
+    let mut ctx = RunCtx::with_hooks(store.clone(), run_id, vec![], fixed_clock(), fixed_random())
+        .expect("ctx builds");
+    run_graph(&mut ctx, &graph, &seed(), &no_agents(), &tools)
+        .await
+        .expect("graph drives");
+    let live_log = store.read_log(run_id).await.expect("log reads");
+    assert_eq!(calls.load(Ordering::SeqCst), 3, "three body calls live");
+    // The argmax ordered the bare payloads, so the middle pass wins.
+    assert_eq!(convergence(&live_log).0, 1);
+    assert_eq!(final_output(&live_log), json!({"pass": 2, "score": 5}));
+
+    let (replay_worker, replay_calls) =
+        EnvelopePassTool::new("refine_tool", Effect::Idempotent, scores, envelopes);
+    let mut replay_tools: HashMap<String, Box<dyn DynTool>> = HashMap::new();
+    replay_tools.insert("refine_tool".to_owned(), Box::new(replay_worker));
+    let mut ctx2 = RunCtx::with_hooks(
+        store.clone(),
+        run_id,
+        live_log.clone(),
+        fixed_clock(),
+        fixed_random(),
+    )
+    .expect("replay ctx builds");
+    let outcome = run_graph(&mut ctx2, &graph, &seed(), &no_agents(), &replay_tools)
+        .await
+        .expect("replay drives");
+    assert!(matches!(outcome, GraphOutcome::Completed { .. }));
+    assert_eq!(
+        replay_calls.load(Ordering::SeqCst),
+        0,
+        "replay makes zero live body calls"
+    );
+    assert_eq!(
+        serde_json::to_string(&store.read_log(run_id).await.expect("log reads")).unwrap(),
+        serde_json::to_string(&live_log).unwrap(),
+        "replay leaves the log byte-identical"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// on_bound: what a reached bound MEANS
+// ---------------------------------------------------------------------------
+
+/// The event-kind sequence a refused `on_bound: fail` run records: every pass
+/// the bound allowed, and then nothing. No `FoldConverged`, no `NodeExited`, no
+/// terminal from the engine.
+fn expected_refused_kinds(passes: usize) -> Vec<&'static str> {
+    let mut kinds = vec!["GraphRunStarted", "NodeEntered"];
+    for _ in 0..passes {
+        kinds.extend([
+            "FoldIterationStarted",
+            "ToolCallRequested",
+            "ToolCallCompleted",
+            "FoldIterationJoined",
+        ]);
+    }
+    kinds
+}
+
+/// Drives an `on_bound: fail` fold that reaches its bound, over a store the
+/// caller keeps, and returns the store, the DRIVING context, and the refusal.
+/// The drive is left exactly where the engine left it: nothing has recorded a
+/// terminal yet, which is the state a kill between the refusal and the driver's
+/// append leaves. The context comes back because the driver's append belongs on
+/// the context that drove, standing where the refusal left its cursor.
+async fn drive_to_refusal(
+    graph: &Graph,
+    scores: Vec<Value>,
+    run_id: RunId,
+) -> (Arc<SqliteStore>, RunCtx, EngineError) {
+    let store = Arc::new(SqliteStore::in_memory().expect("store opens"));
+    let (tools, _) = worker_tools(scores);
+    let mut ctx = RunCtx::with_hooks(store.clone(), run_id, vec![], fixed_clock(), fixed_random())
+        .expect("ctx builds");
+    let error = run_graph(&mut ctx, graph, &seed(), &no_agents(), &tools)
+        .await
+        .expect_err("a fold declaring on_bound: fail refuses at its bound");
+    (store, ctx, error)
+}
+
+/// A fold declaring `on_bound: fail` whose predicate never holds REFUSES at the
+/// bound instead of joining: the typed error names the node and the bound, the
+/// passes and their joins stay in the log because they really happened, and no
+/// `FoldConverged` and no `NodeExited` land. The refusal is permanent, so the
+/// driver records the terminal `RunFailed` and the run reads `failed`.
+#[tokio::test]
+async fn on_bound_fail_refuses_at_the_bound_and_the_run_is_recorded_failed() {
+    let graph = fold_graph_on_bound(3, "score >= 99", FoldJoin::Last, OnBound::Fail);
+    let run_id = fixed_run_id(60);
+    let (store, mut ctx, error) =
+        drive_to_refusal(&graph, vec![json!(1), json!(5), json!(2)], run_id).await;
+
+    match &error {
+        EngineError::FoldBoundExceeded { node, bound } => {
+            assert_eq!(node, "refine");
+            assert_eq!(*bound, 3);
+        }
+        other => panic!("expected FoldBoundExceeded, got {other:?}"),
+    }
+    assert!(
+        error.is_permanent(),
+        "a bound reached under on_bound: fail re-fails on every future drive"
+    );
+
+    // The engine's own log ends after the last join: the work is recorded, the
+    // convergence that never happened is not.
+    let refused = store.read_log(run_id).await.expect("log reads");
+    assert_eq!(event_kinds(&refused), expected_refused_kinds(3));
+
+    // The driver's append, on the very context that refused, and what an
+    // operator then sees.
+    assert!(
+        record_permanent_refusal(&mut ctx, &error)
+            .await
+            .expect("the terminal records"),
+        "a permanent refusal records its terminal"
+    );
+    let failed = store.read_log(run_id).await.expect("log reads");
+    let mut expected = expected_refused_kinds(3);
+    expected.push("RunFailed");
+    assert_eq!(event_kinds(&failed), expected);
+    match derive_state(&failed).status {
+        RunStatus::Failed { error: recorded } => assert_eq!(recorded, error.to_string()),
+        other => panic!("the run must read as failed, got {other:?}"),
+    }
+}
+
+/// The predicate holding early never reaches the bound, so `on_bound: fail`
+/// changes nothing at all: the same passes, the same convergence, the same
+/// output an `on_bound: join` fold gives. A fold that converges is a fold that
+/// converged, whatever it says about a bound it did not reach.
+#[tokio::test]
+async fn on_bound_fail_is_invisible_when_the_predicate_holds_first() {
+    let scores = vec![json!(1), json!(5), json!(2), json!(3), json!(4)];
+    let fail = fold_graph_on_bound(5, "score >= 5", FoldJoin::Last, OnBound::Fail);
+    let (failing, fail_calls) = drive_fresh(&fail, scores.clone(), fixed_run_id(61)).await;
+
+    let join = fold_graph_on_bound(5, "score >= 5", FoldJoin::Last, OnBound::Join);
+    let (joining, join_calls) = drive_fresh(&join, scores, fixed_run_id(62)).await;
+
+    assert_eq!(fail_calls, join_calls, "the same passes ran");
+    assert_eq!(event_kinds(&failing), event_kinds(&joining));
+    assert_eq!(event_kinds(&failing), expected_kinds(2));
+    assert_eq!(convergence(&failing), convergence(&joining));
+    assert_eq!(final_output(&failing), final_output(&joining));
+    assert_eq!(final_output(&failing), json!({"pass": 2, "score": 5}));
+}
+
+/// An explicit `on_bound: join` reaches its bound exactly as an ABSENT
+/// `on_bound` does: the same events, the same convergence reason, the same
+/// output. The default is the shipped behavior, not a new one, so a document
+/// written before the field existed and one that spells the default out are the
+/// same run.
+#[tokio::test]
+async fn an_explicit_join_reaches_the_bound_exactly_as_an_absent_on_bound_does() {
+    let scores = vec![json!(1), json!(5), json!(2)];
+    let absent = fold_only_graph(3, "score >= 99", FoldJoin::BestBy("score".into()));
+    let (without, without_calls) = drive_fresh(&absent, scores.clone(), fixed_run_id(63)).await;
+
+    let explicit = fold_graph_on_bound(
+        3,
+        "score >= 99",
+        FoldJoin::BestBy("score".into()),
+        OnBound::Join,
+    );
+    let (with, with_calls) = drive_fresh(&explicit, scores, fixed_run_id(64)).await;
+
+    assert_eq!(without_calls, with_calls, "both ran every pass");
+    assert_eq!(event_kinds(&without), event_kinds(&with));
+    assert_eq!(event_kinds(&without), expected_kinds(3));
+    assert_eq!(convergence(&without), convergence(&with));
+    assert_eq!(
+        convergence(&with).1,
+        "joined at the max_iterations bound of 3; stop_when never held: `score >= 99`"
+    );
+    assert_eq!(final_output(&without), final_output(&with));
+}
+
+/// THE KILL BOUNDARY BETWEEN THE REFUSAL AND ITS TERMINAL. A permanent refusal
+/// and the `RunFailed` that records it are two steps, and a `kill -9` can land
+/// between them. This sweeps EVERY prefix of a refused run's log, including the
+/// exact one that window leaves (the whole log, no terminal), and asserts:
+///
+///   (a) the continuation re-derives the SAME permanent refusal, every time;
+///   (b) the log it leaves is byte-identical to the uninterrupted refused log,
+///       so nothing was appended past the refusal;
+///   (c) the driver's append then lands exactly once, and
+///   (d) re-driving a run that ALREADY carries the terminal replays it and
+///       appends nothing, so the window is idempotent rather than duplicating.
+#[tokio::test]
+async fn a_kill_between_the_refusal_and_its_terminal_resolves_on_the_next_drive() {
+    let graph = fold_graph_on_bound(3, "score >= 99", FoldJoin::Last, OnBound::Fail);
+    let scores = vec![json!(1), json!(5), json!(2)];
+    let run_id = fixed_run_id(65);
+    let (control_store, _control_ctx, control_error) =
+        drive_to_refusal(&graph, scores.clone(), run_id).await;
+    let control = control_store.read_log(run_id).await.expect("log reads");
+    assert_eq!(event_kinds(&control), expected_refused_kinds(3));
+
+    for k in 0..=control.len() {
+        let store = Arc::new(SqliteStore::in_memory().expect("store opens"));
+        for env in &control[..k] {
+            store.append(env).await.expect("seed append");
+        }
+        let prefix: Vec<EventEnvelope> = control[..k].to_vec();
+        let (tools, _) = worker_tools(scores.clone());
+        let mut ctx =
+            RunCtx::with_hooks(store.clone(), run_id, prefix, fixed_clock(), fixed_random())
+                .expect("resume ctx builds");
+
+        // (a) The same refusal, re-derived from the same recorded values.
+        let error = match run_graph(&mut ctx, &graph, &seed(), &no_agents(), &tools).await {
+            Err(error) => error,
+            Ok(outcome) => panic!("cut {k} must refuse, not reach {outcome:?}"),
+        };
+        assert_eq!(
+            error.to_string(),
+            control_error.to_string(),
+            "cut {k} re-derives the identical refusal"
+        );
+
+        // (b) Nothing landed past the refusal.
+        let recovered = store.read_log(run_id).await.expect("log reads");
+        assert_eq!(
+            serde_json::to_string(&recovered).unwrap(),
+            serde_json::to_string(&control).unwrap(),
+            "cut {k} reproduces the refused log byte for byte"
+        );
+
+        // (c) The driver's append, exactly once.
+        assert!(
+            record_permanent_refusal(&mut ctx, &error)
+                .await
+                .expect("the terminal records"),
+        );
+        let failed = store.read_log(run_id).await.expect("log reads");
+        let mut expected = expected_refused_kinds(3);
+        expected.push("RunFailed");
+        assert_eq!(event_kinds(&failed), expected, "cut {k} ends failed");
+
+        // (d) A drive over the ALREADY-terminal log refuses the same way, and
+        // the append replays instead of duplicating.
+        let (tools, _) = worker_tools(scores.clone());
+        let mut ctx = RunCtx::with_hooks(
+            store.clone(),
+            run_id,
+            failed.clone(),
+            fixed_clock(),
+            fixed_random(),
+        )
+        .expect("re-drive ctx builds");
+        let error = match run_graph(&mut ctx, &graph, &seed(), &no_agents(), &tools).await {
+            Err(error) => error,
+            Ok(outcome) => panic!("cut {k}: the terminal log must still refuse, got {outcome:?}"),
+        };
+        record_permanent_refusal(&mut ctx, &error)
+            .await
+            .expect("the recorded terminal replays");
+        assert_eq!(
+            serde_json::to_string(&store.read_log(run_id).await.expect("log reads")).unwrap(),
+            serde_json::to_string(&failed).unwrap(),
+            "cut {k}: a second drive appends no second terminal"
+        );
+    }
+}
+
+/// A TRANSIENT refusal records nothing: the run stays exactly as it was, with
+/// no terminal, so a resume that supplies the missing tool still picks it up.
+/// This is the other half of the split, and the half that must never kill a
+/// recoverable run.
+#[tokio::test]
+async fn a_transient_refusal_leaves_the_run_recoverable() {
+    let graph = fold_only_graph(2, "score >= 99", FoldJoin::Last);
+    let run_id = fixed_run_id(66);
+    let store = Arc::new(SqliteStore::in_memory().expect("store opens"));
+    // No tool registered at all: an UnknownTool, which is registration rather
+    // than meaning.
+    let tools: HashMap<String, Box<dyn DynTool>> = HashMap::new();
+    let mut ctx = RunCtx::with_hooks(store.clone(), run_id, vec![], fixed_clock(), fixed_random())
+        .expect("ctx builds");
+    let error = run_graph(&mut ctx, &graph, &seed(), &no_agents(), &tools)
+        .await
+        .expect_err("an unregistered tool refuses");
+    assert!(matches!(error, EngineError::UnknownTool { .. }));
+    assert!(!error.is_permanent(), "registration is not meaning");
+
+    assert!(
+        !record_permanent_refusal(&mut ctx, &error)
+            .await
+            .expect("recording a transient refusal is a no-op"),
+        "nothing is recorded for a transient refusal"
+    );
+    let log = store.read_log(run_id).await.expect("log reads");
+    assert_eq!(
+        event_kinds(&log),
+        ["GraphRunStarted", "NodeEntered", "FoldIterationStarted"],
+        "the pass that could not resolve its tool is started and never joined"
+    );
+    assert!(
+        !matches!(derive_state(&log).status, RunStatus::Failed { .. }),
+        "the run stays recoverable"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // The committed fixture
 // ---------------------------------------------------------------------------
 
 /// The committed `fold-refine.json` fixture, the cross-language pin, validates
-/// and now DRIVES under the engine: its `tailor` agent runs once per pass as the
-/// fold's per-pass worker and is never walked as a node of its own (no
-/// `NodeEntered` names it, and the model is called exactly once per pass rather
-/// than four times).
+/// and CONVERGES under the engine: its `tailor` agent runs once per pass as the
+/// fold's per-pass worker, never walked as a node of its own (no `NodeEntered`
+/// names it, and the model is called exactly once per pass rather than four
+/// times), and the `best_by` join picks a winner.
 ///
-/// The fixture's `best_by` join then refuses, and that is the honest reading of
-/// what it asks for: a built-in `agent` node's output is the model's reply TEXT,
-/// so no pass value carries the `score` the join names, and an argmax with no
-/// comparable candidate has no answer. The loop itself is what this pins; the
-/// refusal at the join is the documented boundary of what an agent body can
-/// currently produce.
+/// The join is what this test exists to pin. It used to refuse: an agent node's
+/// output was the model's reply TEXT, so no pass value carried the `score` the
+/// join names and the argmax had nothing to order. The fixture's `tailor` node
+/// declares an `output_schema`, and that declaration now RUNS: the loop offers
+/// the model its answer tool carrying that schema, validates the call, and hands
+/// the fold a scored object per pass. So the predicate reads a real score, the
+/// argmax orders real candidates, and the document means at runtime exactly what
+/// it says on the page.
+///
+/// The scripted passes score 0.6, then 0.9, then 0.7. `stop_when`
+/// (`score >= 0.85`) fires on the middle one, so the third is never asked for
+/// and the run stops one short of its `max_iterations` bound; `best_by` then
+/// picks that middle pass, index 1, out of the two that ran.
 #[tokio::test]
-async fn the_fold_refine_fixture_drives_without_double_running_its_body() {
+async fn the_fold_refine_fixture_converges_on_its_best_scoring_pass() {
     let path = format!(
         "{}/../../examples/graphs/fold-refine.json",
         env!("CARGO_MANIFEST_DIR")
@@ -775,8 +1427,44 @@ async fn the_fold_refine_fixture_drives_without_double_running_its_body() {
         validate(&graph).is_ok(),
         "the committed fixture validates clean"
     );
+    let document: Value = serde_json::from_str(&text).expect("the fixture parses as JSON");
+    let declared_schema = document["nodes"][0]["payload"]["output_schema"].clone();
 
-    let server = ScriptedModel::mount(vec![(1, text_response("a tailored draft", 5, 3))]).await;
+    // Each pass folds over the pass before it, so the pass input is what tells
+    // the turns apart: the graph input first, then each answer in turn.
+    let server = ContentScriptedModel::mount(vec![
+        (
+            "otters",
+            tool_use_response(
+                "tu_pass_0",
+                ANSWER_TOOL,
+                json!({"draft": "first pass", "score": 0.6}),
+                5,
+                3,
+            ),
+        ),
+        (
+            "0.6",
+            tool_use_response(
+                "tu_pass_1",
+                ANSWER_TOOL,
+                json!({"draft": "second pass", "score": 0.9}),
+                5,
+                3,
+            ),
+        ),
+        (
+            "0.9",
+            tool_use_response(
+                "tu_pass_2",
+                ANSWER_TOOL,
+                json!({"draft": "third pass", "score": 0.7}),
+                5,
+                3,
+            ),
+        ),
+    ])
+    .await;
     let mut agents: HashMap<String, Agent> = HashMap::new();
     agents.insert(
         TAILOR_HASH.to_owned(),
@@ -788,7 +1476,7 @@ async fn the_fold_refine_fixture_drives_without_double_running_its_body() {
     let store = Arc::new(SqliteStore::in_memory().expect("store opens"));
     let mut ctx = RunCtx::with_hooks(store.clone(), run_id, vec![], fixed_clock(), fixed_random())
         .expect("ctx builds");
-    let error = run_graph(
+    let outcome = run_graph(
         &mut ctx,
         &graph,
         &json!({"topic": "otters"}),
@@ -796,16 +1484,21 @@ async fn the_fold_refine_fixture_drives_without_double_running_its_body() {
         &tools,
     )
     .await
-    .expect_err("a text reply carries no `score` for the best_by join to order");
-    assert!(
-        matches!(error, EngineError::FoldNoComparableCandidate { .. }),
-        "expected the argmax refusal, got {error:?}"
+    .expect("the fixture converges");
+    let GraphOutcome::Completed { output } = outcome else {
+        panic!("expected completion, got {outcome:?}");
+    };
+    assert_eq!(
+        output,
+        json!({"draft": "second pass", "score": 0.9}),
+        "the run's output is the winning pass's structured answer, verbatim"
     );
 
     let log = store.read_log(run_id).await.expect("log reads");
-    // Three passes, each one agent loop inline between the fold's markers.
+    // Two passes, each one agent loop inline between the fold's markers, then
+    // the convergence and the terminal.
     let mut kinds = vec!["GraphRunStarted", "NodeEntered"];
-    for _ in 0..3 {
+    for _ in 0..2 {
         kinds.extend([
             "FoldIterationStarted",
             "NowObserved",
@@ -814,7 +1507,16 @@ async fn the_fold_refine_fixture_drives_without_double_running_its_body() {
             "FoldIterationJoined",
         ]);
     }
+    kinds.extend(["FoldConverged", "NodeExited", "RunCompleted"]);
     assert_eq!(event_kinds(&log), kinds);
+
+    let (winner_index, reason) = convergence(&log);
+    assert_eq!(winner_index, 1, "the 0.9 pass wins the argmax");
+    assert!(
+        reason.contains("stop_when") && reason.contains("after pass 1"),
+        "the recorded reason names the predicate and the pass: {reason}"
+    );
+
     assert!(
         !log.iter().any(|env| matches!(
             &env.event,
@@ -822,11 +1524,23 @@ async fn the_fold_refine_fixture_drives_without_double_running_its_body() {
         )),
         "the body agent is fold-owned: it is never entered as a node of its own"
     );
+    let requests = server.received_requests().await.expect("requests recorded");
     assert_eq!(
-        log.iter()
-            .filter(|env| matches!(env.event, Event::ModelCallRequested { .. }))
-            .count(),
-        3,
-        "one model call per pass: the body did not also run as a walked node"
+        requests.len(),
+        2,
+        "one model call per pass, and the third pass never ran"
     );
+
+    // The declared `output_schema` is what the model was actually offered: the
+    // answer tool carries it verbatim, and some tool call is required.
+    let body: Value = serde_json::from_slice(&requests[0].body).expect("request body is JSON");
+    let offered = body["tools"].as_array().expect("the request offers tools");
+    assert_eq!(
+        offered.len(),
+        1,
+        "the fixture's agent has no tools of its own"
+    );
+    assert_eq!(offered[0]["name"], json!(ANSWER_TOOL));
+    assert_eq!(offered[0]["input_schema"], declared_schema);
+    assert_eq!(body["tool_choice"], json!({"type": "any"}));
 }

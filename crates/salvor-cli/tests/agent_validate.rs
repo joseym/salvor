@@ -161,7 +161,7 @@ fn an_unknown_top_level_field_is_refused_precisely() {
         stderr.contains(
             "unknown field `system_promt`, expected one of `model`, `name`, `system_prompt`, \
              `system_prompt_path`, `llm`, `budgets`, `pricing`, `max_response_tokens`, \
-             `mcp_servers`, `wasm_tools`, `record_prompts`"
+             `output_schema`, `output_schema_path`, `mcp_servers`, `wasm_tools`, `record_prompts`"
         ),
         "{stderr}"
     );
@@ -313,4 +313,94 @@ fn nothing_to_validate_and_an_unreadable_file_are_both_refused() {
         stderr.contains(&missing.display().to_string()),
         "names the file it could not read: {stderr}"
     );
+}
+
+/// A declared output shape is a key `validate` accepts in both its forms, and
+/// refuses in the ways the parser refuses it. There is nothing verb-specific
+/// about any of this: the acceptance decision is the shared parse, and these
+/// cases are here to prove the binary really does inherit it rather than
+/// carrying a second, drifting copy.
+#[test]
+fn a_declared_output_schema_validates_in_both_forms() {
+    let dir = tempdir().expect("tempdir");
+
+    let inline = write(
+        dir.path(),
+        "inline.toml",
+        "model = \"claude-test-model\"\n\n[output_schema]\ntype = \"object\"\nrequired = [\"score\"]\n",
+    );
+    let output = salvor()
+        .args(["agent", "validate"])
+        .arg(&inline)
+        .output()
+        .expect("runs");
+    assert!(
+        output.status.success(),
+        "an inline schema validates: {output:?}"
+    );
+
+    write(
+        dir.path(),
+        "answer.json",
+        "{\"type\": \"object\", \"required\": [\"score\"]}",
+    );
+    let by_path = write(
+        dir.path(),
+        "by-path.toml",
+        "model = \"claude-test-model\"\noutput_schema_path = \"answer.json\"\n",
+    );
+    let output = salvor()
+        .args(["agent", "validate"])
+        .arg(&by_path)
+        .output()
+        .expect("runs");
+    assert!(
+        output.status.success(),
+        "a schema file validates: {output:?}"
+    );
+
+    // Both at once, and a schema that is not a table, are refused with the
+    // parser's own messages.
+    let both = write(
+        dir.path(),
+        "both.toml",
+        "model = \"claude-test-model\"\noutput_schema_path = \"answer.json\"\n\n[output_schema]\ntype = \"object\"\n",
+    );
+    let output = salvor()
+        .args(["agent", "validate"])
+        .arg(&both)
+        .output()
+        .expect("runs");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(stderr.contains("not both"), "{stderr}");
+
+    let scalar = write(
+        dir.path(),
+        "scalar.toml",
+        "model = \"claude-test-model\"\noutput_schema = \"answer.json\"\n",
+    );
+    let output = salvor()
+        .args(["agent", "validate"])
+        .arg(&scalar)
+        .output()
+        .expect("runs");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(stderr.contains("output_schema_path"), "{stderr}");
+
+    // A path that names nothing readable fails at the build, naming the file.
+    let missing = write(
+        dir.path(),
+        "missing.toml",
+        "model = \"claude-test-model\"\noutput_schema_path = \"nowhere.json\"\n",
+    );
+    let output = salvor()
+        .args(["agent", "validate"])
+        .arg(&missing)
+        .output()
+        .expect("runs");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(stderr.contains("nowhere.json"), "{stderr}");
 }

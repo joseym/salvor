@@ -542,6 +542,91 @@ impl Tool {
     }
 }
 
+/// Which tool, if any, the model must call when it responds.
+///
+/// Constrains [`MessageRequest::tool_choice`]. The three variants are the
+/// Anthropic API's three ways to steer tool use: let the model decide
+/// (`auto`), require some tool call without picking which one (`any`), or
+/// pin the call to a specific tool (`tool`). Internally tagged on `type` so
+/// each variant serializes to the API's exact wire shape, for example
+/// `{"type":"tool","name":"get_weather"}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolChoice {
+    /// The model decides on its own whether to call a tool and which one;
+    /// it may also answer without calling any tool at all.
+    Auto {
+        /// When set, caps the response at one tool call. Left unset, the
+        /// model may request several tools in the same turn.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        disable_parallel_tool_use: Option<bool>,
+    },
+    /// The model must call one of the tools offered, but may pick any of
+    /// them.
+    Any {
+        /// When set, caps the response at one tool call. Left unset, the
+        /// model may request several tools in the same turn.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        disable_parallel_tool_use: Option<bool>,
+    },
+    /// The model must call the named tool.
+    Tool {
+        /// The tool the model is forced to call.
+        name: String,
+        /// When set, caps the response at one tool call. Left unset, the
+        /// model may request several tools in the same turn.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        disable_parallel_tool_use: Option<bool>,
+    },
+}
+
+impl ToolChoice {
+    /// Leave the choice to the model: it may call any offered tool, several
+    /// of them, or none at all.
+    #[must_use]
+    pub fn auto() -> Self {
+        ToolChoice::Auto {
+            disable_parallel_tool_use: None,
+        }
+    }
+
+    /// Require the model to call some tool, without pinning which one.
+    #[must_use]
+    pub fn any() -> Self {
+        ToolChoice::Any {
+            disable_parallel_tool_use: None,
+        }
+    }
+
+    /// Require the model to call this specific tool.
+    pub fn tool(name: impl Into<String>) -> Self {
+        ToolChoice::Tool {
+            name: name.into(),
+            disable_parallel_tool_use: None,
+        }
+    }
+
+    /// Cap the response at one tool call, whichever variant this is.
+    #[must_use]
+    pub fn with_disable_parallel_tool_use(mut self, disable: bool) -> Self {
+        match &mut self {
+            ToolChoice::Auto {
+                disable_parallel_tool_use,
+            }
+            | ToolChoice::Any {
+                disable_parallel_tool_use,
+            }
+            | ToolChoice::Tool {
+                disable_parallel_tool_use,
+                ..
+            } => {
+                *disable_parallel_tool_use = Some(disable);
+            }
+        }
+        self
+    }
+}
+
 /// A prompt-cache marker for a [`SystemBlock`].
 ///
 /// The Anthropic API caches the request prefix up to and including a block that
@@ -734,6 +819,12 @@ pub struct MessageRequest {
     /// The tools the model may call.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<Tool>>,
+    /// Constrains which tool, if any, the model must call. Unset lets the
+    /// model decide freely, including answering without any tool call, and
+    /// serializes to nothing, so a request that never sets this is
+    /// byte-for-byte what it was before this field existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<ToolChoice>,
     /// Custom sequences that stop generation when produced.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_sequences: Option<Vec<String>>,
@@ -760,6 +851,7 @@ impl MessageRequest {
             system: None,
             messages: Vec::new(),
             tools: None,
+            tool_choice: None,
             stop_sequences: None,
             stream: false,
         }
@@ -795,6 +887,13 @@ impl MessageRequest {
     #[must_use]
     pub fn with_tools(mut self, tools: Vec<Tool>) -> Self {
         self.tools = Some(tools);
+        self
+    }
+
+    /// Constrain which tool, if any, the model must call.
+    #[must_use]
+    pub fn with_tool_choice(mut self, tool_choice: ToolChoice) -> Self {
+        self.tool_choice = Some(tool_choice);
         self
     }
 
@@ -1296,5 +1395,122 @@ mod system_tests {
                 .expect("tolerates unknown field");
         assert_eq!(block.text, "x");
         assert_eq!(block.cache_control, None);
+    }
+}
+
+#[cfg(test)]
+mod tool_choice_tests {
+    use super::{Message, MessageRequest, Tool, ToolChoice};
+    use serde_json::json;
+
+    // A request that never touches `tool_choice` must serialize to exactly
+    // what it did before the field existed: the runtime hashes
+    // `serde_json::to_value(request)` into the durable event log, so this
+    // byte-for-byte pin is what proves the field is safe to add. This mirrors
+    // `system_tests::string_system_serializes_byte_identically`, extended
+    // with a `tools` list so both skip-if-none optional fields are exercised
+    // side by side.
+    #[test]
+    fn no_tool_choice_serializes_byte_identically_to_before() {
+        let request = MessageRequest::new("claude-opus-4-8", 16)
+            .with_tools(vec![Tool::new(
+                "get_weather",
+                "Get the weather",
+                json!({ "type": "object" }),
+            )])
+            .push_message(Message::user("Hi"));
+        let wire = serde_json::to_string(&request).expect("serializes");
+        assert_eq!(
+            wire,
+            r#"{"model":"claude-opus-4-8","max_tokens":16,"messages":[{"role":"user","content":"Hi"}],"tools":[{"name":"get_weather","description":"Get the weather","input_schema":{"type":"object"}}]}"#
+        );
+    }
+
+    // Pinned wire shape for each `ToolChoice` variant, cited from the
+    // `claude-api` skill's Tool Choice quick reference: `{"type":"auto"}`,
+    // `{"type":"any"}`, `{"type":"tool","name":"..."}`.
+    #[test]
+    fn auto_matches_pinned_wire_shape() {
+        assert_eq!(
+            serde_json::to_value(ToolChoice::auto()).expect("to_value"),
+            json!({ "type": "auto" })
+        );
+    }
+
+    #[test]
+    fn any_matches_pinned_wire_shape() {
+        assert_eq!(
+            serde_json::to_value(ToolChoice::any()).expect("to_value"),
+            json!({ "type": "any" })
+        );
+    }
+
+    #[test]
+    fn tool_matches_pinned_wire_shape() {
+        assert_eq!(
+            serde_json::to_value(ToolChoice::tool("get_weather")).expect("to_value"),
+            json!({ "type": "tool", "name": "get_weather" })
+        );
+    }
+
+    // `disable_parallel_tool_use` is optional on every variant and only
+    // appears on the wire when set explicitly.
+    #[test]
+    fn disable_parallel_tool_use_is_optional_and_appears_when_set() {
+        assert_eq!(
+            serde_json::to_value(ToolChoice::any()).expect("to_value"),
+            json!({ "type": "any" }),
+            "unset stays absent from the wire"
+        );
+        assert_eq!(
+            serde_json::to_value(ToolChoice::any().with_disable_parallel_tool_use(true))
+                .expect("to_value"),
+            json!({ "type": "any", "disable_parallel_tool_use": true })
+        );
+        assert_eq!(
+            serde_json::to_value(
+                ToolChoice::tool("get_weather").with_disable_parallel_tool_use(false)
+            )
+            .expect("to_value"),
+            json!({ "type": "tool", "name": "get_weather", "disable_parallel_tool_use": false })
+        );
+    }
+
+    // A full request WITH `tool_choice` set, pinned end to end: `tool_choice`
+    // lands right after `tools` in the serialized body.
+    #[test]
+    fn request_with_tool_choice_matches_pinned_wire_shape() {
+        let request = MessageRequest::new("claude-opus-4-8", 16)
+            .with_tools(vec![Tool::new(
+                "get_weather",
+                "Get the weather",
+                json!({ "type": "object" }),
+            )])
+            .with_tool_choice(ToolChoice::tool("get_weather"))
+            .push_message(Message::user("What's the weather?"));
+        let wire = serde_json::to_string(&request).expect("serializes");
+        assert_eq!(
+            wire,
+            r#"{"model":"claude-opus-4-8","max_tokens":16,"messages":[{"role":"user","content":"What's the weather?"}],"tools":[{"name":"get_weather","description":"Get the weather","input_schema":{"type":"object"}}],"tool_choice":{"type":"tool","name":"get_weather"}}"#
+        );
+    }
+
+    // Round-trip: each variant, with and without `disable_parallel_tool_use`,
+    // survives a serialize/deserialize cycle unchanged.
+    #[test]
+    fn variants_round_trip() {
+        let variants = [
+            ToolChoice::auto(),
+            ToolChoice::auto().with_disable_parallel_tool_use(true),
+            ToolChoice::any(),
+            ToolChoice::any().with_disable_parallel_tool_use(true),
+            ToolChoice::tool("get_weather"),
+            ToolChoice::tool("get_weather").with_disable_parallel_tool_use(true),
+        ];
+        for variant in variants {
+            let value = serde_json::to_value(&variant).expect("to_value");
+            let back: ToolChoice = serde_json::from_value(value).expect("round-trips");
+            assert_eq!(back, variant);
+        }
     }
 }

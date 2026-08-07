@@ -147,6 +147,52 @@ impl Respond for ScriptedModel {
     }
 }
 
+/// A scripted model that picks its response by a NEEDLE found in the raw
+/// request body, for the conversations [`ScriptedModel`]'s message count
+/// cannot tell apart.
+///
+/// A fold's passes are exactly that case: every pass drives a fresh agent loop
+/// whose conversation is one message long, so the count is 1 every time and
+/// only the pass's own input distinguishes them. Matching on request content
+/// keeps the script correct across replays and resumes the same way the count
+/// does: it reads the request, never a call counter, so a replayed call that
+/// never reaches the server changes nothing. Needles are tried in script
+/// order; the first one the body contains wins.
+pub struct ContentScriptedModel {
+    script: Vec<(String, Value)>,
+}
+
+impl ContentScriptedModel {
+    /// Mounts the script on a fresh mock server and returns it.
+    pub async fn mount(script: Vec<(&str, Value)>) -> MockServer {
+        let server = MockServer::start().await;
+        let script = script
+            .into_iter()
+            .map(|(needle, response)| (needle.to_owned(), response))
+            .collect();
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(Self { script })
+            .mount(&server)
+            .await;
+        server
+    }
+}
+
+impl Respond for ContentScriptedModel {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let body = String::from_utf8_lossy(&request.body);
+        for (needle, response) in &self.script {
+            if body.contains(needle.as_str()) {
+                return ResponseTemplate::new(200).set_body_json(response.clone());
+            }
+        }
+        ResponseTemplate::new(500).set_body_json(json!({
+            "error": {"type": "test_script", "message": "no scripted response matched the request"}
+        }))
+    }
+}
+
 /// A tool that echoes its input, counting each execution so a replay's
 /// zero-execution claim can be checked.
 pub struct EchoTool {
@@ -320,6 +366,94 @@ impl DynTool for PassTool {
             output["score"] = score.clone();
         }
         Ok(ToolOutcome::Output(output))
+    }
+}
+
+/// A [`PassTool`] that answers the way an MCP tool does: the pass value rides
+/// inside a `{"content": [...], "structuredContent": {...}}` envelope.
+///
+/// A tool reached over MCP returns a `CallToolResult`, and the engine records
+/// that whole result as the call's output. The value the fold is actually
+/// folding is the `structuredContent` payload, so this exists to prove the
+/// engine unwraps it: the pass value it computes is identical to `PassTool`'s,
+/// only wrapped. `envelopes` says which passes wrap, one flag per pass (a pass
+/// past the end of the list wraps), so one tool can script a run where pass 0
+/// answers with an envelope and a later pass answers bare, the way a graph
+/// mixing an MCP tool and a native one would.
+///
+/// It reads `pass` at the BARE path, never `structuredContent.pass`, which is
+/// the point: if the engine did not unwrap, the second pass would read no
+/// `pass` at all and the sequence would stall at 1.
+pub struct EnvelopePassTool {
+    pub name: String,
+    pub effect: Effect,
+    pub scores: Vec<Value>,
+    pub envelopes: Vec<bool>,
+    pub calls: Arc<AtomicUsize>,
+}
+
+impl EnvelopePassTool {
+    /// A named envelope tool of the given effect, scripted with one score and
+    /// one wrap flag per pass, plus the shared execution counter.
+    pub fn new(
+        name: &str,
+        effect: Effect,
+        scores: Vec<Value>,
+        envelopes: Vec<bool>,
+    ) -> (Self, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        (
+            Self {
+                name: name.to_owned(),
+                effect,
+                scores,
+                envelopes,
+                calls: calls.clone(),
+            },
+            calls,
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl DynTool for EnvelopePassTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        "a scripted fold-pass test tool answering in an MCP result envelope"
+    }
+
+    fn effect(&self) -> Effect {
+        self.effect
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({"type": "object"})
+    }
+
+    async fn call_json(
+        &self,
+        _ctx: &ToolCtx,
+        input: Value,
+    ) -> Result<ToolOutcome<Value>, ToolError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let pass = input.get("pass").and_then(Value::as_u64).unwrap_or(0);
+        let mut payload = json!({"pass": pass + 1});
+        if let Some(score) = self.scores.get(pass as usize)
+            && !score.is_null()
+        {
+            payload["score"] = score.clone();
+        }
+        let wrapped = self.envelopes.get(pass as usize).copied().unwrap_or(true);
+        if !wrapped {
+            return Ok(ToolOutcome::Output(payload));
+        }
+        Ok(ToolOutcome::Output(json!({
+            "content": [{"type": "text", "text": payload.to_string()}],
+            "structuredContent": payload,
+        })))
     }
 }
 

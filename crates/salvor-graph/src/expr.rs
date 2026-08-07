@@ -145,6 +145,50 @@ impl Expr {
     pub fn eval(&self, value: &Value) -> bool {
         eval_bool(&self.root, value)
     }
+
+    /// Every path this expression reads, in the order the source names them, as
+    /// borrowed segment slices.
+    ///
+    /// Literal operands are not paths and do not appear. A path repeated in the
+    /// source appears once per mention, because this reports what the
+    /// expression READS rather than a de-duplicated set of locations.
+    ///
+    /// Exported for the same reason [`compare`] is: a second consumer needs the
+    /// expression's own answer rather than one re-derived beside it. The graph
+    /// validator checks a fold's `stop_when` against the declared shape of the
+    /// value it will read, and the only honest source for "which locations does
+    /// this predicate read" is the parse that already found them. Eval is
+    /// untouched: this walks the same AST and changes nothing about it.
+    #[must_use]
+    pub fn paths(&self) -> Vec<&[Segment]> {
+        let mut found = Vec::new();
+        collect_paths(&self.root, &mut found);
+        found
+    }
+}
+
+/// Pushes every path operand under `node` onto `found`, left to right.
+fn collect_paths<'a>(node: &'a Bool, found: &mut Vec<&'a [Segment]>) {
+    match node {
+        Bool::Or(left, right) | Bool::And(left, right) => {
+            collect_paths(left, found);
+            collect_paths(right, found);
+        }
+        Bool::Not(inner) => collect_paths(inner, found),
+        Bool::Compare { left, right, .. } => {
+            if let Operand::Path(segments) = left {
+                found.push(segments);
+            }
+            if let Operand::Path(segments) = right {
+                found.push(segments);
+            }
+        }
+        Bool::Truthy(operand) => {
+            if let Operand::Path(segments) = operand {
+                found.push(segments);
+            }
+        }
+    }
 }
 
 /// Orders two JSON values by the expression language's OWN ordering rule, the
@@ -193,6 +237,18 @@ impl Reference {
     #[must_use]
     pub fn resolve<'a>(&self, value: &'a Value) -> Option<&'a Value> {
         resolve_path(&self.segments, value)
+    }
+
+    /// The path's steps, in order, as the parse read them.
+    ///
+    /// The counterpart of [`Expr::paths`] for a reference standing alone, and
+    /// exported for the same one reason: a caller that must judge a path
+    /// against a declared schema has to walk it a step at a time, and
+    /// [`Reference::resolve`] answers a different question (what does this name
+    /// in a value that already exists).
+    #[must_use]
+    pub fn segments(&self) -> &[Segment] {
+        &self.segments
     }
 }
 
@@ -257,9 +313,15 @@ enum Operand {
 }
 
 /// One step of a path: an object key or an array index.
+///
+/// Public because a path's steps are what a caller judging a path against a
+/// declared JSON Schema has to walk; the segments are read-only data either
+/// way, and no evaluation rule reads them through this type.
 #[derive(Clone, Debug, PartialEq)]
-enum Segment {
+pub enum Segment {
+    /// An object key: the `score` in `review.score`.
     Key(String),
+    /// An array index: the `0` in `results.0.score`.
     Index(usize),
 }
 
@@ -1163,6 +1225,51 @@ mod tests {
             parse_reference("").is_err(),
             "an empty reference is rejected"
         );
+    }
+
+    /// A reference hands back the steps it parsed, keys and indices alike, so a
+    /// caller can walk a declared schema by them.
+    #[test]
+    fn a_reference_reports_its_segments() {
+        let reference = parse_reference("results.0.review.score").expect("parses");
+        assert_eq!(
+            reference.segments(),
+            [
+                Segment::Key("results".to_owned()),
+                Segment::Index(0),
+                Segment::Key("review".to_owned()),
+                Segment::Key("score".to_owned()),
+            ]
+        );
+    }
+
+    /// An expression reports every path it reads and no literal, in source
+    /// order, including a path mentioned twice.
+    #[test]
+    fn an_expression_reports_the_paths_it_reads() {
+        let expr =
+            parse("score >= 0.85 && !(review.flags.0 == \"stale\") || score < 0").expect("parses");
+        let paths: Vec<Vec<Segment>> = expr.paths().iter().map(|p| p.to_vec()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                vec![Segment::Key("score".to_owned())],
+                vec![
+                    Segment::Key("review".to_owned()),
+                    Segment::Key("flags".to_owned()),
+                    Segment::Index(0),
+                ],
+                vec![Segment::Key("score".to_owned())],
+            ]
+        );
+    }
+
+    /// An expression made only of literals reads nothing, so it reports no
+    /// path at all.
+    #[test]
+    fn a_literal_only_expression_reads_no_path() {
+        assert!(parse("1 == 1").expect("parses").paths().is_empty());
+        assert!(parse("true").expect("parses").paths().is_empty());
     }
 
     // --- Property tests. ---

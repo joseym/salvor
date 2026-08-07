@@ -223,6 +223,52 @@ class BuildsCanonicalDocument(unittest.TestCase):
             list(unnamed.nodes[0]["payload"].keys()), ["id", "approval_schema"]
         )
 
+    def test_fold_declares_what_a_reached_bound_means(self):
+        for word in ("join", "fail"):
+            graph = (
+                GraphBuilder()
+                .agent("tailor", f"sha256:{'3' * 64}", output_schema=SCORE_SCHEMA)
+                .fold(
+                    "refine",
+                    fold_node("tailor"),
+                    3,
+                    "score >= 0.85",
+                    best_by("score"),
+                    on_bound=word,
+                )
+                .build()
+            )
+            self.assertEqual(graph.nodes[1]["payload"]["on_bound"], word)
+
+        # Unset stays entirely off the wire, so a fold's bytes are what they
+        # were before the field existed.
+        quiet = build_fold_flow()
+        self.assertEqual(
+            list(quiet.nodes[1]["payload"].keys()),
+            [
+                "id",
+                "name",
+                "body",
+                "max_iterations",
+                "stop_when",
+                "join",
+                "accumulator_schema",
+            ],
+        )
+
+    def test_fold_rejects_a_word_that_is_not_a_bound_rule(self):
+        builder = GraphBuilder()
+        with self.assertRaises(ValueError) as caught:
+            builder.fold(
+                "refine",
+                fold_node("tailor"),
+                3,
+                "score >= 0.85",
+                best_by("score"),
+                on_bound="retry",
+            )
+        self.assertIn('must be "join" or "fail"', str(caught.exception))
+
     def test_gate_accepts_an_intentionally_empty_schema(self):
         graph = GraphBuilder().gate("approve", {}).build()
         self.assertEqual(graph.nodes[0]["payload"]["approval_schema"], {})

@@ -12,12 +12,12 @@ That engine backs `salvor graph run`, `POST /v1/graphs`, and
 
 | Kind | Payload it carries | Meaning |
 |---|---|---|
-| `agent` | `agent_hash` (a `sha256:<64 hex>` string), optional `input_schema` / `output_schema` | A full agent loop, referenced BY CONTENT HASH, never an embedded definition. |
+| `agent` | `agent_hash` (a `sha256:<64 hex>` string), optional `input_schema` / `output_schema` | A full agent loop, referenced BY CONTENT HASH, never an embedded definition. An `output_schema` here has a RUNTIME meaning as well as a documentary one: the engine runs that node's loop in structured mode. The model is offered a synthetic `salvor_answer` tool whose input schema IS the declared schema, and the request requires it to call some tool, so the reply is delivered through that call and the node's output is the call's validated input rather than the reply text. The check is this repo's own structural validator, which honors `type`, `required`, `properties`, `items`, and `enum`, and never rejects a value over a keyword outside that set (`pattern`, numeric ranges, `oneOf`, and the rest are read but not enforced). An answer that fails the check goes back to the model with the violation named, and the loop asks again until the steps budget stops it. The same field is separately used at load time, on the document, for the edge type-compatibility check below; the two uses do not interact. |
 | `tool` | `tool` name, `input` mapping (data), optional schemas | One direct tool invocation, no model in the loop. |
 | `gate` | optional `prompt`, `approval_schema` | Human approval that suspends the run. The `approval_schema` is enforced against the resume input before the approval is recorded: a non-conforming approval is refused, nothing is appended, and the run stays parked at the gate. A schema that names `required` or `properties` without a `type` is read as asking for an object, so a bare `null`, number, or string is refused too. |
 | `branch` | optional `on`, `cases` (each a `name` + a `when` condition) | Routes on a typed output. Conditions are recorded as DATA and evaluated by the engine at run time, never by this crate. |
 | `map` | `over`, `concurrency` cap, `body` (a node id or an embedded sub-graph), optional `output_schema` | Fan-out a sub-run per element of a list. The engine runs iterations inline and sequentially; the `concurrency` cap is accepted and validated but not enforced, a deliberate choice for v0.4. A `subgraph` body, or any body node that is not an `agent` or `tool`, is refused with a typed `UnsupportedMapBody` error rather than driven. |
-| `fold` | `body` (a node id or an embedded sub-graph), `max_iterations`, `stop_when` condition, `join` strategy, optional `accumulator_schema` | A bounded iteration loop. The engine drives a `node` body: passes run inline and sequentially, each folding over the previous pass's output, until `stop_when` holds or the bound is reached, and then the `join` rule (`best_by` argmax, `last`, or `all`) picks the value the node produces. A `subgraph` body, or any body node that is not an `agent` or `tool`, is refused with a typed `UnsupportedFoldBody` error rather than driven. |
+| `fold` | `body` (a node id or an embedded sub-graph), `max_iterations`, `stop_when` condition, `join` strategy, optional `on_bound`, optional `accumulator_schema` | A bounded iteration loop. The engine drives a `node` body: passes run inline and sequentially, each folding over the previous pass's output, until `stop_when` holds or the bound is reached, and then the `join` rule (`best_by` argmax, `last`, or `all`) picks the value the node produces. The value a fold folds, ENTERING OR PRODUCED, is the `structuredContent` an MCP result envelope carries, and the value itself when it is not one: an MCP tool answers with a `{content, structuredContent}` envelope, so the fold folds the payload, whether that envelope arrived over an inbound edge from a `tool` node or came back from a pass. An agent body's structured object, a native tool's flat struct, and an object that merely has a field called `structuredContent` of its own are carried verbatim, because the envelope test is the pair: a `content` ARRAY beside the payload key. So `stop_when`, a `best_by` reference, the next pass's input, and the join's output all read bare paths (`score`, never `structuredContent.score`), the same paths validation checks against the body's declared shape, and the body sees one shape at pass 0 and at pass 3 alike. This is a fold's own rule: an ordinary edge outside a fold still routes a node's recorded output verbatim. The log is unaffected: `ToolCallCompleted` still records the whole envelope, and the payload is derived from it. A `subgraph` body, or any body node that is not an `agent` or `tool`, is refused with a typed `UnsupportedFoldBody` error rather than driven. `on_bound` says what reaching the bound with `stop_when` still unsatisfied MEANS, and the engine honors it: `"join"` joins the passes anyway (what an absent field means, so a document written before the field existed keeps its bytes and its meaning) or `"fail"`, for a stop predicate that is a requirement rather than an early exit, which refuses with a typed `FoldBoundExceeded` error where the convergence would have been recorded. The passes and their joins stay in the log, no `FoldConverged` and no `NodeExited` land, and the driver records the run as failed, because that refusal reproduces on every future drive. |
 
 Edges are the topology: `{ "from": "<node id>", "to": "<node id>" }`, with an
 optional `label` (used to name the branch case an edge realizes). Every node
@@ -33,7 +33,7 @@ ignored.
 | [`linear-research-publish.json`](linear-research-publish.json) | A simpler linear flow with no gate: a research `agent` drafts, a review `agent` checks, a `tool` publishes. |
 | [`branch-review.json`](branch-review.json) | An `agent` drafts, a `tool` scores it, a `branch` routes on the score: the high case reaches a `gate` then publishes, the low case reaches a rejection `tool` directly. |
 | [`branch-model-decision.json`](branch-model-decision.json) | An `agent` drafts, a `tool` scores it, a `branch` carries BOTH an expression case and a `model_decision` case with a well-formed `agent_hash`: the high case reaches a `gate` then publishes, the review case reaches an escalation `tool` directly. The shared fixture the Rust, TypeScript, and Python builders all reduce to for a branch's `agent_hash`. |
-| [`fold-refine.json`](fold-refine.json) | A single `fold` node whose body is an `agent`, bounded to 3 iterations with a `stop_when` condition and a `best_by` join. Validates clean, and the engine drives the loop: `tailor` runs once per pass as the fold's per-pass worker, never as a node of its own. Its `best_by` join then needs a `score` inside each pass's value, and an `agent` node's output is the model's reply text, so with a plain text reply the join has nothing to order and refuses (`FoldNoComparableCandidate`) rather than guessing a winner. A `tool` body, whose output is arbitrary JSON, is what carries a scored accumulator today. |
+| [`fold-refine.json`](fold-refine.json) | A single `fold` node whose body is an `agent`, bounded to 3 iterations with a `stop_when` condition and a `best_by` join. Validates clean, and the engine drives the loop to convergence: `tailor` runs once per pass as the fold's per-pass worker, never as a node of its own, and because that node declares an `output_schema` requiring a numeric `score`, each pass answers through the forced `salvor_answer` call and hands the fold a scored object. So `stop_when` (`score >= 0.85`) reads a real number, the `best_by` argmax orders real candidates, and the node's output is the winning pass's object. A `tool` body, whose output is arbitrary JSON, carries a scored accumulator the same way. |
 | [`invalid-dangling-edge.json`](invalid-dangling-edge.json) | An edge whose target `aprove` is a typo of the node `approve`. Produces a precise dangling-edge error with a nearest-name suggestion. |
 | [`invalid-cycle.json`](invalid-cycle.json) | Two agents pointing at each other. Produces a precise cycle error naming the path. |
 
@@ -217,9 +217,27 @@ All checks run and every failure is reported (never just the first):
 - **Edge type-compatibility.** Where BOTH endpoints of an edge declare a
   schema, the source's `output_schema` and the target's `input_schema` must be
   structurally identical. Where either is absent, the edge passes unchecked.
+  This is a document-level check, done at load time by comparing two declared
+  schemas; it is a separate use of the same field from the runtime enforcement
+  an `agent` node's `output_schema` carries (see the node-kind table above).
   This is deliberately conservative: it does NOT implement JSON Schema
   subtyping, so a compatible-but-not-identical pair is reported as a mismatch.
   Relaxing it to true schema compatibility is a later change to that one check.
+- **A fold's references against the shape its body declares.** A fold's
+  accumulated value is what its body produced, so where the body is named by id
+  and that node declares an `output_schema`, the paths in `stop_when` and in a
+  `best_by` join are read against it directly, with no envelope in front of
+  them: `fold-refine.json`'s `score >= 0.85` is checked against `tailor`'s
+  declared `score`. A path is reported ONLY when the walk positively fails, that
+  is when a segment is absent from a `properties` map that exists and does not
+  admit extra keys. Everything else stays silent, and deliberately: a body with
+  no `output_schema`, a `subgraph` body, a schema with no `properties`, a schema
+  whose declared `type` is not what the path steps into, one that admits extra
+  keys (`additionalProperties` set to anything but `false`, or any
+  `patternProperties`), and one that names its shape elsewhere (`$ref`, `anyOf`,
+  `oneOf`, `allOf`, `not`) are all left unjudged. So the check catches the typo
+  that would keep a loop from ever stopping, and never refuses a document it
+  cannot actually read.
 
 What `validate` does NOT do: check an expression branch case's `when` string
 against the grammar below. That string is stored as opaque data by this crate,

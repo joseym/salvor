@@ -115,6 +115,30 @@ pub fn tool_use_response(
     })
 }
 
+/// One `tool_use` content block, for a response that carries several.
+pub fn tool_use_block(tool_use_id: &str, tool: &str, input: Value) -> Value {
+    json!({"type": "tool_use", "id": tool_use_id, "name": tool, "input": input})
+}
+
+/// A canned response body carrying the given content blocks verbatim, for the
+/// turns [`tool_use_response`] cannot express: two tool calls at once, or a
+/// tool call beside text.
+pub fn blocks_response(
+    id: &str,
+    blocks: Vec<Value>,
+    input_tokens: u64,
+    output_tokens: u64,
+) -> Value {
+    json!({
+        "id": format!("msg_{id}"),
+        "model": "test-model",
+        "role": "assistant",
+        "content": blocks,
+        "stop_reason": "tool_use",
+        "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens}
+    })
+}
+
 /// A scripted model: responds to `POST /v1/messages` by matching the number
 /// of `messages` in the request body against the script. The conversation
 /// grows by two messages per loop iteration, so the count uniquely names

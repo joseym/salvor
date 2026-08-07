@@ -65,6 +65,20 @@
 //! input_per_mtok = 3.0
 //! output_per_mtok = 15.0
 //!
+//! # Optional. The shape of this agent's final answer, as a JSON Schema
+//! # written in TOML. Declaring it puts every server-side run of the agent on
+//! # the structured loop: the answer comes back as an object of this shape
+//! # instead of prose. Use `output_schema_path = "answer.json"` instead to
+//! # keep the schema in a JSON file beside the agent file; set one or the
+//! # other, never both. See "Declared output shape" below, and note that this
+//! # one IS part of `agent_def_hash`.
+//! [output_schema]
+//! type = "object"
+//! required = ["score"]
+//!
+//! [output_schema.properties.score]
+//! type = "number"
+//!
 //! # Optional, repeatable. Each MCP server contributes its tools to the agent.
 //! # A server is reached over EXACTLY ONE of two transports:
 //! #  - `command` (+ optional `args`/`env`) spawns a local child process and
@@ -140,6 +154,50 @@
 //! # accept that.
 //! record_prompts = false
 //! ```
+//!
+//! # Declared output shape (`output_schema`, `output_schema_path`)
+//!
+//! An agent with no declaration answers in prose, and a caller that wanted a
+//! number out of it goes looking for one in a sentence. `output_schema` is the
+//! agent file saying, once, what shape its answer takes. The built-in loop then
+//! offers the model a `salvor_answer` tool whose input schema IS this schema,
+//! requires a tool call, and ends the run only on an answer the schema accepts.
+//! The run's output is that object, verbatim.
+//!
+//! Write it inline as a `[output_schema]` table, or keep it in a JSON file and
+//! name it with `output_schema_path` (resolved relative to this file), the same
+//! pair a `[[wasm_tools]]` entry offers for its `input_schema`. Setting both is
+//! a parse error, as is an inline `output_schema` that is not a table: a JSON
+//! Schema is an object, and a scalar there accepts everything, which is the one
+//! thing a declared shape must not quietly do.
+//!
+//! **The enforced subset.** Validation is structural, not a full JSON Schema
+//! implementation: `type`, `required`, `properties`, `items`, and `enum` are
+//! checked, and every other keyword (`pattern`, `format`, numeric ranges,
+//! `oneOf`, `$ref`) is carried to the model verbatim but never enforced by the
+//! runtime. Write the richer keywords if they help the model; do not rely on
+//! them to refuse an answer.
+//!
+//! **A graph node can override it.** An `agent` node in a graph document may
+//! declare its own `output_schema`, and for that node it wins; this file's is
+//! the fallback used wherever the agent runs without a node speaking for it
+//! (`salvor run`, a `Runtime::start`, a node that declares nothing). The graph
+//! author has the whole document in view, so the more specific declaration is
+//! the more informed one.
+//!
+//! **It is part of the agent's identity.** Unlike `name`, `record_prompts`, and
+//! labels, this key is hashed into `agent_def_hash`: it changes what the agent
+//! produces, not how it is deployed or described. Adding it to an existing
+//! agent file mints a new hash, so any graph document pinning the old one must
+//! be repinned (`salvor agent hash` prints the new value). A file WITHOUT the
+//! key hashes exactly as it always has. Which form carried the schema makes no
+//! difference either: the hash covers the schema value, so inline and
+//! `output_schema_path` produce the same hash for the same schema.
+//!
+//! **Server-side loops only.** This key drives the loops salvor runs: `salvor
+//! run`, a resume, a graph node, a run driven through the control plane. A
+//! client-driven run owns its own loop and its own model calls, so nothing here
+//! reaches it; a client that wants a declared shape enforces one itself.
 //!
 //! # Idempotency keys (`idempotency_keys`, `idempotency_key`)
 //!
@@ -277,6 +335,22 @@ pub struct AgentConfig {
     /// runtime's `DEFAULT_MAX_RESPONSE_TOKENS`.
     #[serde(default)]
     pub max_response_tokens: Option<u32>,
+    /// The shape of the agent's final answer, inline: a JSON Schema written
+    /// as a TOML table. Mutually exclusive with `output_schema_path`, and
+    /// must be a table (an object), not a scalar. Setting either one puts
+    /// every server-side run of this agent on the structured loop.
+    ///
+    /// Unlike `name`, this IS part of `agent_def_hash`: it changes what the
+    /// agent produces. See the module docs (`output_schema`) and
+    /// `salvor_runtime::Agent::output_schema`.
+    #[serde(default)]
+    pub output_schema: Option<serde_json::Value>,
+    /// A path to a JSON file holding that same schema, resolved relative to
+    /// the agent file's directory. Mutually exclusive with `output_schema`.
+    /// The two forms are interchangeable: the hash covers the schema VALUE,
+    /// so moving a schema between them never changes `agent_def_hash`.
+    #[serde(default)]
+    pub output_schema_path: Option<String>,
     /// MCP servers whose tools the agent may call.
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
@@ -689,7 +763,8 @@ impl AgentConfig {
     ///
     /// # Errors
     ///
-    /// Fails when both prompt fields are set, when `name` is set but empty,
+    /// Fails when both prompt fields are set, when both output-schema fields
+    /// are set or the inline one is not a table, when `name` is set but empty,
     /// all whitespace, or over [`MAX_NAME_LEN`] characters, when any
     /// `[[mcp_servers]]` entry breaks the `command`/`url`
     /// transport-exclusivity rules (see [`McpServerConfig`]), or when any
@@ -698,6 +773,23 @@ impl AgentConfig {
     pub fn validate(&self) -> Result<()> {
         if self.system_prompt.is_some() && self.system_prompt_path.is_some() {
             bail!("set only one of `system_prompt` or `system_prompt_path`, not both");
+        }
+        if self.output_schema.is_some() && self.output_schema_path.is_some() {
+            bail!("set only one of `output_schema` or `output_schema_path`, not both");
+        }
+        if let Some(schema) = &self.output_schema
+            && !schema.is_object()
+        {
+            // A JSON Schema is an object. A scalar here is almost always an
+            // author reaching for the path form and writing the value inline,
+            // and a validator that silently accepts everything (which is what
+            // a non-object schema means) would let that mistake through as a
+            // structured run that checks nothing.
+            bail!(
+                "`output_schema` must be a schema table (for example `[output_schema]` with \
+                 `type = \"object\"`), not a {}; use `output_schema_path` to name a JSON file",
+                json_kind(schema)
+            );
         }
         if let Some(name) = &self.name {
             if name.trim().is_empty() {
@@ -754,6 +846,19 @@ impl AgentConfig {
             }
         }
         keys
+    }
+}
+
+/// What a JSON value is, in one word, for an error message that has to tell
+/// an author what they wrote instead of a schema table.
+fn json_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "table",
     }
 }
 
@@ -849,5 +954,87 @@ mod tests {
         .expect_err("an empty path segment is refused");
         let message = format!("{error:#}");
         assert!(message.contains("pay_claim"), "{message}");
+    }
+
+    /// The inline `[output_schema]` table round-trips into the JSON value the
+    /// runtime hashes and hands the model, nested tables and all. Absent, both
+    /// schema fields stay `None`, which is what leaves an agent on the plain
+    /// text loop.
+    #[test]
+    fn an_inline_output_schema_parses_from_toml() {
+        let absent = AgentConfig::from_toml_str("model = \"m\"\n").expect("parses");
+        assert_eq!(absent.output_schema, None);
+        assert_eq!(absent.output_schema_path, None);
+
+        let config = AgentConfig::from_toml_str(
+            "model = \"m\"\n\n\
+             [output_schema]\n\
+             type = \"object\"\n\
+             required = [\"score\"]\n\n\
+             [output_schema.properties.score]\n\
+             type = \"number\"\n",
+        )
+        .expect("parses");
+        assert_eq!(
+            config.output_schema,
+            Some(serde_json::json!({
+                "type": "object",
+                "required": ["score"],
+                "properties": {"score": {"type": "number"}}
+            }))
+        );
+        assert_eq!(config.output_schema_path, None);
+    }
+
+    /// The path form parses as the string it is; reading the file it names is
+    /// the IO edge's job (`salvor_cli::agent_config::build_agent`), so nothing
+    /// here touches the filesystem.
+    #[test]
+    fn an_output_schema_path_parses_from_toml() {
+        let config =
+            AgentConfig::from_toml_str("model = \"m\"\noutput_schema_path = \"answer.json\"\n")
+                .expect("parses");
+        assert_eq!(config.output_schema_path.as_deref(), Some("answer.json"));
+        assert_eq!(config.output_schema, None);
+    }
+
+    /// Both forms at once is a refusal naming both keys, exactly as the
+    /// `system_prompt` pair and a wasm tool's `input_schema` pair are refused:
+    /// two sources for one value is an unanswerable question, not a precedence
+    /// puzzle to solve quietly.
+    #[test]
+    fn both_output_schema_forms_at_once_are_refused() {
+        let error = AgentConfig::from_toml_str(
+            "model = \"m\"\n\
+             output_schema_path = \"answer.json\"\n\n\
+             [output_schema]\n\
+             type = \"object\"\n",
+        )
+        .expect_err("both schema sources are refused");
+        let message = format!("{error:#}");
+        assert!(message.contains("output_schema"), "{message}");
+        assert!(message.contains("output_schema_path"), "{message}");
+        assert!(message.contains("not both"), "{message}");
+    }
+
+    /// A non-table `output_schema` is refused. A scalar is not a JSON Schema,
+    /// and the structural validator treats a non-object schema as accepting
+    /// everything, so letting it through would produce a structured run that
+    /// checks nothing.
+    #[test]
+    fn a_non_table_output_schema_is_refused() {
+        for (literal, kind) in [
+            ("\"answer.json\"", "string"),
+            ("42", "number"),
+            ("[\"a\"]", "array"),
+            ("true", "boolean"),
+        ] {
+            let error =
+                AgentConfig::from_toml_str(&format!("model = \"m\"\noutput_schema = {literal}\n"))
+                    .expect_err("a non-table schema is refused");
+            let message = format!("{error:#}");
+            assert!(message.contains(kind), "should name the kind: {message}");
+            assert!(message.contains("output_schema_path"), "{message}");
+        }
     }
 }
