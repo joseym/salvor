@@ -140,7 +140,87 @@ pub fn parked_report(
             ));
             out
         }
+        // The one park that asks nothing of the reader. It carries no schema
+        // and no limit to raise, so the report names the instant and the
+        // command that drives whatever is due, with no `--input` on it: a
+        // sleeping run takes none.
+        ParkReason::Sleeping { wake_at } => {
+            let mut out = wrap(
+                &format!(
+                    "Run {run_uuid} parked: sleeping until {}.",
+                    format_ts(*wake_at)
+                ),
+                width,
+                "",
+                "",
+            );
+            out.push('\n');
+            out.push_str(&wrap(
+                "Nothing is waiting on you. The run continues once its deadline passes and \
+                 something re-drives it:",
+                width,
+                "",
+                "",
+            ));
+            out.push_str(&format!("\n  salvor wake --agent {agent}\n"));
+            out
+        }
     }
+}
+
+/// The refusal report for a `resume` of a run that is still sleeping: the
+/// deadline it is waiting for and how much of the wait is left.
+///
+/// A sleeping run is not refused because anything is wrong with it, so this
+/// says what the reader has to do about it, which is nothing. `remaining` is
+/// `wake_at` less the caller's clock, formatted by the same
+/// [`format_duration`] the wake preview uses for "overdue by", so one span
+/// reads one way across the CLI. `agents` and `graph` are the values `resume`
+/// itself was given, printed into the `wake` command so it is the real one to
+/// type, with a placeholder standing in for anything the operator did not
+/// supply (the same rule [`resolved_report`] follows). Printed before a
+/// non-zero exit. `width` is the column count its prose wraps to; the command
+/// line never wraps, see [`wrap`].
+#[must_use]
+pub fn sleeping_report(
+    run_uuid: &str,
+    wake_at: OffsetDateTime,
+    remaining: time::Duration,
+    agents: &[PathBuf],
+    graph: Option<&Path>,
+    width: usize,
+) -> String {
+    let mut out = wrap(
+        &format!(
+            "Run {run_uuid} is sleeping until {} and will not resume for another {}. It is not \
+             parked on you: a sleeping run takes no input, and driving it early records nothing.",
+            format_ts(wake_at),
+            format_duration(remaining),
+        ),
+        width,
+        "",
+        "",
+    );
+    out.push('\n');
+    out.push_str(&wrap(
+        "Wait for the deadline, then drive whatever is due:",
+        width,
+        "",
+        "",
+    ));
+    let mut command = "salvor wake".to_owned();
+    if let Some(graph) = graph {
+        command.push_str(&format!(" --graph {}", graph.display()));
+    }
+    if agents.is_empty() {
+        command.push_str(" --agent <FILE>");
+    } else {
+        for agent in agents {
+            command.push_str(&format!(" --agent {}", agent.display()));
+        }
+    }
+    out.push_str(&format!("\n  {command}\n"));
+    out
 }
 
 /// The refusal report for a run that derived to
@@ -803,6 +883,51 @@ mod tests {
         Some(OffsetDateTime::from_unix_timestamp(1_752_566_400).unwrap())
     }
 
+    /// The deadline the timer reports below are rendered against.
+    fn sample_wake_at() -> OffsetDateTime {
+        OffsetDateTime::from_unix_timestamp(1_755_162_000).unwrap()
+    }
+
+    /// The refusal a `resume` of a still-sleeping run prints says the two
+    /// things a reader needs, the instant and what is left of the wait, and
+    /// points at the command that drives what is due rather than at a resume
+    /// that would be refused again.
+    #[test]
+    fn the_sleeping_refusal_names_the_instant_and_the_remaining_time() {
+        let report = sleeping_report(
+            UUID,
+            sample_wake_at(),
+            time::Duration::minutes(29),
+            &[PathBuf::from("agents/writer.toml")],
+            None,
+            DEFAULT_REPORT_WIDTH,
+        );
+        let visible = flatten(&report);
+        assert!(
+            visible.contains(&format_ts(sample_wake_at())),
+            "the deadline is named: {report}"
+        );
+        assert!(
+            visible.contains("another 29m"),
+            "and what is left of the wait: {report}"
+        );
+        assert!(
+            report.contains("  salvor wake --agent agents/writer.toml"),
+            "the command drives what is due, on one line: {report}"
+        );
+        assert!(
+            !report.contains("--input"),
+            "a sleeping run takes no input: {report}"
+        );
+    }
+
+    /// Every span in every report reads the same words at any width; this is
+    /// the timer park's share of that rule, which the reports above already
+    /// hold to.
+    fn flatten(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
     /// Every word in `text`, in the order it appears, regardless of which
     /// line it landed on. Comparing this between two widths is how a test
     /// checks that wrapping only ever moves line breaks.
@@ -1077,6 +1202,22 @@ mod tests {
                     observed: 1200.0,
                 },
                 Path::new("agent.toml"),
+                WIDTH,
+            ),
+            parked_report(
+                UUID,
+                &ParkReason::Sleeping {
+                    wake_at: sample_wake_at(),
+                },
+                Path::new("agent.toml"),
+                WIDTH,
+            ),
+            sleeping_report(
+                UUID,
+                sample_wake_at(),
+                time::Duration::minutes(29),
+                &[PathBuf::from("agent.toml")],
+                None,
                 WIDTH,
             ),
         ];

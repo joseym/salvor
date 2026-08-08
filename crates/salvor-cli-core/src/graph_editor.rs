@@ -123,8 +123,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use salvor_graph::{
-    AgentNode, BranchCase, BranchCondition, BranchNode, Edge, FoldBody, FoldJoin, FoldNode,
-    GateNode, Graph, MapBody, MapNode, Node, OnBound, SCHEMA_VERSION, ToolNode,
+    AgentNode, BranchCase, BranchCondition, BranchNode, DelayNode, Edge, FoldBody, FoldJoin,
+    FoldNode, GateNode, Graph, MapBody, MapNode, Node, OnBound, SCHEMA_VERSION, ToolNode,
 };
 use serde_json::Value;
 
@@ -307,7 +307,7 @@ impl HashDraft {
             Node::Branch(node) => node.agent_hash = Some(agent_hash.into()),
             // No other kind carries an agent hash, and the parser builds no
             // other kind into a draft, so there is nothing to fill in.
-            Node::Tool(_) | Node::Gate(_) | Node::Map(_) | Node::Fold(_) => {}
+            Node::Tool(_) | Node::Gate(_) | Node::Map(_) | Node::Fold(_) | Node::Delay(_) => {}
         }
         Command::Add(Box::new(self.node))
     }
@@ -998,6 +998,7 @@ fn node_digest(node: &Node) -> String {
                 facts.push(format!("accumulator_schema {}", schema_word(schema)));
             }
         }
+        Node::Delay(delay) => facts.push(format!("seconds {}", delay.seconds)),
     }
     if let Some(schema) = node.input_schema() {
         facts.push(format!("input_schema {}", schema_word(schema)));
@@ -1063,6 +1064,7 @@ fn node_detail(node: &Node) -> String {
                 field("on_bound:", on_bound_word(on_bound));
             }
         }
+        Node::Delay(delay) => field("seconds:", &delay.seconds.to_string()),
     }
 
     let mut schema = |label: &str, value: &Value| {
@@ -1274,6 +1276,7 @@ fn add_line(node: &Node) -> String {
                 out.push_str(&format!(" --accumulator-schema {}", compact(schema)));
             }
         }
+        Node::Delay(delay) => out.push_str(&format!(" --seconds {}", delay.seconds)),
     }
     if let Some(name) = node.name() {
         out.push_str(&format!(" --name {}", word(name)));
@@ -1359,7 +1362,7 @@ const COMMAND_WORDS: &str =
     "add, case, edge, exit, help, history, quit, read, rm, show, undo, validate, write";
 
 /// Every node kind word.
-const KIND_WORDS: &str = "agent, tool, gate, branch, map, fold";
+const KIND_WORDS: &str = "agent, tool, gate, branch, map, fold, delay";
 
 /// Why a line is not a command.
 ///
@@ -1376,7 +1379,7 @@ pub enum ParseError {
         word: String,
     },
 
-    /// `add` was given a word that is not one of the six node kinds.
+    /// `add` was given a word that is not one of the seven node kinds.
     #[error("unknown node kind `{word}`; the kinds are {KIND_WORDS}")]
     UnknownNodeKind {
         /// The word that was not a node kind.
@@ -1656,6 +1659,19 @@ impl<'a> Scan<'a> {
         })
     }
 
+    /// An option's value, parsed as a whole number of seconds. Wider than
+    /// [`number`](Self::number) because a wait is measured in seconds and a
+    /// document may legitimately hold one longer than a `u32` of them; the
+    /// same [`ParseError::MalformedNumber`] reports a value that is not one.
+    fn seconds(&mut self, option: &str) -> Result<u64, ParseError> {
+        let raw = self.value(option)?;
+        raw.parse().map_err(|_| ParseError::MalformedNumber {
+            command: self.command.clone(),
+            option: option.to_owned(),
+            found: raw,
+        })
+    }
+
     /// An option's value, parsed as an embedded document.
     fn subgraph(&mut self, option: &str) -> Result<Graph, ParseError> {
         let raw = self.value(option)?;
@@ -1766,6 +1782,7 @@ fn parse_add(tokens: &[String]) -> Result<Line, ParseError> {
         "branch" => parse_add_branch(rest),
         "map" => parse_add_map(rest).map(Line::Command),
         "fold" => parse_add_fold(rest).map(Line::Command),
+        "delay" => parse_add_delay(rest).map(Line::Command),
         word => Err(ParseError::UnknownNodeKind {
             word: word.to_owned(),
         }),
@@ -2018,6 +2035,34 @@ fn parse_add_fold(tokens: &[String]) -> Result<Command, ParseError> {
     }))))
 }
 
+/// `add delay <ID> --seconds N [--name TEXT]`.
+///
+/// The wait is a duration and there is no instant to type: the document is the
+/// reusable artifact and the instant belongs to a run, so the engine derives it
+/// from a recorded clock reading when the walk reaches the node. `validate` is
+/// what judges the number, so a zero here reads back as a node-precise error
+/// rather than being refused mid-line.
+fn parse_add_delay(tokens: &[String]) -> Result<Command, ParseError> {
+    let mut scan = Scan::new("add delay", tokens);
+    let id = scan.word("a node id")?;
+    let mut name = None;
+    let mut seconds = None;
+
+    while let Some(token) = scan.take() {
+        match token {
+            "--name" => name = Some(scan.value("--name")?),
+            "--seconds" => seconds = Some(scan.seconds("--seconds")?),
+            found => return Err(scan.stray(found)),
+        }
+    }
+
+    Ok(Command::Add(Box::new(Node::Delay(DelayNode {
+        id,
+        name,
+        seconds: seconds.ok_or_else(|| scan.missing("--seconds"))?,
+    }))))
+}
+
 /// A `--join` value. One token by construction, so `best-by:score` needs no
 /// quoting and the three rules cannot be confused for one another.
 fn parse_join(raw: &str) -> Result<FoldJoin, ParseError> {
@@ -2221,7 +2266,7 @@ struct Topic {
 const TOPICS: &[Topic] = &[
     Topic {
         name: "add",
-        summary: "add a node of one of the six kinds",
+        summary: "add a node of one of the seven kinds",
         forms: &[
             "add agent  <ID> (--hash <sha256:HASH> | --file <PATH>) [--name TEXT] [--input-schema JSON] [--output-schema JSON]",
             "add tool   <ID> <TOOL> [--input FIELD=SOURCE]... [--name TEXT] [--input-schema JSON] [--output-schema JSON]",
@@ -2229,12 +2274,16 @@ const TOPICS: &[Topic] = &[
             "add branch <ID> [--on REF] [--hash <sha256:HASH> | --file <PATH>] [--name TEXT]",
             "add map    <ID> --over REF --concurrency N (--body ID | --body-subgraph JSON) [--output-schema JSON] [--name TEXT]",
             "add fold   <ID> (--body ID | --body-subgraph JSON) --max-iterations N --stop-when EXPR --join (last | all | best-by:REF) [--on-bound (join | fail)] [--accumulator-schema JSON] [--name TEXT]",
+            "add delay  <ID> --seconds N [--name TEXT]",
         ],
         detail: "An agent node names its definition by content hash, never by path, because a \
                  run records only the hash. `--hash` takes one you already have; `--file` asks \
                  the host to compute it from an agent definition, which this editor cannot do \
                  itself. A branch is added with no cases; use `case` to add them one at a time. \
-                 A JSON argument needs no quoting: braces are read until they balance.",
+                 A JSON argument needs no quoting: braces are read until they balance. A delay \
+                 waits for a duration, never a fixed instant: a document is run more than once, \
+                 and the engine resolves the instant from the clock when the run reaches the \
+                 node.",
     },
     Topic {
         name: "edge",
@@ -3116,7 +3165,7 @@ mod tests {
         assert_eq!(summary.terminal_nodes, ["publish"]);
     }
 
-    /// All six node kinds are reachable from a line, and each lands as the
+    /// All seven node kinds are reachable from a line, and each lands as the
     /// right variant with the right payload.
     #[test]
     fn every_node_kind_is_addable_from_a_line() {
@@ -3127,7 +3176,8 @@ mod tests {
              add branch route --on score.value --hash {HASH_B}\n\
              add map fanout --over route.items --concurrency 4 --body research\n\
              add fold refine --body research --max-iterations 3 --stop-when \"score >= 0.85\" \
-             --join best-by:score --accumulator-schema {{\"type\":\"object\"}}\n"
+             --join best-by:score --accumulator-schema {{\"type\":\"object\"}}\n\
+             add delay cooloff --seconds 3600 --name \"Cool off\"\n"
         ));
 
         let kinds: Vec<&str> = editor
@@ -3136,7 +3186,10 @@ mod tests {
             .iter()
             .map(Node::kind_name)
             .collect();
-        assert_eq!(kinds, ["agent", "tool", "gate", "branch", "map", "fold"]);
+        assert_eq!(
+            kinds,
+            ["agent", "tool", "gate", "branch", "map", "fold", "delay"]
+        );
 
         let Node::Agent(agent) = &editor.document().nodes[0] else {
             panic!("first node is an agent");
@@ -3166,6 +3219,12 @@ mod tests {
         assert_eq!(fold.stop_when, "score >= 0.85");
         assert_eq!(fold.join, FoldJoin::BestBy("score".to_owned()));
         assert_eq!(fold.on_bound, None, "an unsaid --on-bound stays unsaid");
+
+        let Node::Delay(delay) = &editor.document().nodes[6] else {
+            panic!("seventh node is a delay");
+        };
+        assert_eq!(delay.seconds, 3600);
+        assert_eq!(delay.name.as_deref(), Some("Cool off"));
     }
 
     /// `--on-bound` lands on the node, prints in the outline and the detail
@@ -3225,6 +3284,49 @@ mod tests {
             !shown.text.contains("on_bound"),
             "an unset on_bound is absent from the outline: {}",
             shown.text
+        );
+    }
+
+    /// A delay's wait lands on the node, prints in both the outline and the
+    /// detail block, and dumps back to the line that produced it. There is no
+    /// instant to type at all: the option is a duration, and `--wake-at` is not
+    /// an option this command has.
+    #[test]
+    fn a_delay_carries_its_wait_as_a_duration() {
+        let editor = run("add delay cooloff --seconds 3600\n");
+        let Node::Delay(delay) = &editor.document().nodes[0] else {
+            panic!("the only node is a delay");
+        };
+        assert_eq!(delay.seconds, 3600);
+
+        let script = editor.script();
+        assert_eq!(script.trim_end(), "add delay cooloff --seconds 3600");
+        assert_eq!(
+            run(&script).document(),
+            editor.document(),
+            "the dumped line replays into the same document"
+        );
+
+        let (editor, shown) = step(editor, "show cooloff");
+        assert!(
+            shown.text.contains("delay node `cooloff`") && shown.text.contains("seconds:"),
+            "the detail block names the wait: {}",
+            shown.text
+        );
+        let (_, outline) = step(editor, "show");
+        assert!(
+            outline.text.contains("seconds 3600"),
+            "the outline names the wait: {}",
+            outline.text
+        );
+
+        assert_eq!(
+            parse("add delay cooloff --wake-at 2026-08-14T09:00:00Z"),
+            Err(ParseError::UnknownOption {
+                command: "add delay".to_owned(),
+                option: "--wake-at".to_owned(),
+            }),
+            "the format has no absolute spelling, and the line says so"
         );
     }
 
@@ -3550,8 +3652,8 @@ mod tests {
     ///
     /// The document exercised here uses every construct that has to survive the
     /// trip: quoted names and prompts, JSON schemas, a tool's input mappings, a
-    /// branch's two kinds of case, a map body, a fold's join rule, a labeled
-    /// edge, a removal, and a whole-document read.
+    /// branch's two kinds of case, a map body, a fold's join rule, a delay's
+    /// wait, a labeled edge, a removal, and a whole-document read.
     #[test]
     fn the_command_history_round_trips() {
         let fold_document = compact_json(include_str!("../../../examples/graphs/fold-refine.json"));
@@ -3569,6 +3671,7 @@ mod tests {
              --join best-by:review.overall_score --on-bound fail\n\
              edge research route\n\
              edge route publish --label high\n\
+             add delay cooloff --seconds 3600 --name \"Cool off before publishing\"\n\
              edge research approve\n\
              rm edge research approve\n"
         ));
@@ -4243,7 +4346,7 @@ mod tests {
         let editor = Editor::new();
         assert_eq!(
             words(&editor, "add "),
-            ["agent", "tool", "gate", "branch", "map", "fold"]
+            ["agent", "tool", "gate", "branch", "map", "fold", "delay"]
         );
         assert_eq!(words(&editor, "add b"), ["branch"]);
         assert_eq!(words(&editor, "rm "), ["node", "edge", "case"]);
@@ -4252,7 +4355,7 @@ mod tests {
 
     /// The kinds and the commands completion offers are exactly the words the
     /// parser's own error messages name. This is the guard on the derivation:
-    /// a seventh node kind or a twelfth command that reached only one of the
+    /// an eighth node kind or a twelfth command that reached only one of the
     /// two lists fails here.
     #[test]
     fn the_derived_words_are_the_words_the_parser_names() {

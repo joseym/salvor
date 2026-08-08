@@ -239,9 +239,11 @@ impl<H: ToolHandler> DynTool for TypedTool<H> {
                 })?;
                 Ok(ToolOutcome::Output(value))
             }
-            // A suspension is identical on both sides of the erasure boundary,
-            // so it crosses unchanged.
+            // Neither park carries the handler's output type, so both are
+            // identical on either side of the erasure boundary and cross
+            // unchanged.
             ToolOutcome::Suspend(suspension) => Ok(ToolOutcome::Suspend(suspension)),
+            ToolOutcome::Sleep(sleep) => Ok(ToolOutcome::Sleep(sleep)),
         }
     }
 }

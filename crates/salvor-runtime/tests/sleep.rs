@@ -25,13 +25,12 @@
 mod common;
 
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
 use async_trait::async_trait;
-use common::{TestTool, ToolBehavior, event_kinds, fixed_random, fixed_run_id};
+use common::{TestClock, TestTool, ToolBehavior, event_kinds, fixed_random, fixed_run_id};
 use salvor_core::{Effect, Event, EventEnvelope, RunId, RunStatus, derive_state};
-use salvor_runtime::{ClockFn, RunCtx, RuntimeError, ToolCallResult, Waking};
+use salvor_runtime::{RunCtx, RuntimeError, ToolCallResult, Waking};
 use salvor_store::{EventStore, RunSummary, SqliteStore, StoreError};
 use salvor_tools::DynTool;
 use serde_json::{Value, json};
@@ -47,36 +46,6 @@ const START: OffsetDateTime = datetime!(2026-07-09 12:00:00 UTC);
 const NAP: Duration = Duration::minutes(30);
 
 const AGENT_HASH: &str = "sha256:nap-flow-v1";
-
-/// A clock the test sets by hand, shared with every [`RunCtx`] a scenario
-/// builds so the whole scenario reads one time.
-#[derive(Clone)]
-struct TestClock {
-    now: Arc<Mutex<OffsetDateTime>>,
-}
-
-impl TestClock {
-    fn new() -> Self {
-        Self {
-            now: Arc::new(Mutex::new(START)),
-        }
-    }
-
-    /// The injected clock function: envelope timestamps and live `now`
-    /// observations both read it.
-    fn injected(&self) -> ClockFn {
-        let now = self.now.clone();
-        Arc::new(move || *now.lock().expect("clock is not poisoned"))
-    }
-
-    fn read(&self) -> OffsetDateTime {
-        *self.now.lock().expect("clock is not poisoned")
-    }
-
-    fn set(&self, instant: OffsetDateTime) {
-        *self.now.lock().expect("clock is not poisoned") = instant;
-    }
-}
 
 /// How one drive of the napping flow ended.
 #[derive(Debug)]
@@ -199,7 +168,7 @@ const COMPLETED_KINDS: [&str; 9] = [
 async fn a_run_sleeps_parks_and_cannot_be_woken_early() {
     let store = store();
     let run_id = fixed_run_id(60);
-    let clock = TestClock::new();
+    let clock = TestClock::new(START);
     let (poll, calls) = poll_tool();
 
     let outcome = drive_once(store.clone(), run_id, &clock, &poll, NAP)
@@ -252,7 +221,7 @@ async fn a_run_sleeps_parks_and_cannot_be_woken_early() {
 async fn a_recorded_wake_continues_the_run_and_replays() {
     let store = store();
     let run_id = fixed_run_id(61);
-    let clock = TestClock::new();
+    let clock = TestClock::new(START);
     let (poll, calls) = poll_tool();
 
     let output = drive_to_completion(store.clone(), run_id, &clock, &poll)
@@ -296,7 +265,7 @@ async fn a_recorded_wake_continues_the_run_and_replays() {
 async fn selection_and_a_re_drive_are_the_whole_of_waking() {
     let store = store();
     let run_id = fixed_run_id(63);
-    let clock = TestClock::new();
+    let clock = TestClock::new(START);
     let (poll, calls) = poll_tool();
 
     // The run parks on its timer.
@@ -359,7 +328,7 @@ async fn selection_and_a_re_drive_are_the_whole_of_waking() {
 async fn sleep_for_derives_its_instant_from_the_recorded_reading() {
     let store = store();
     let run_id = fixed_run_id(62);
-    let clock = TestClock::new();
+    let clock = TestClock::new(START);
     let (poll, _calls) = poll_tool();
 
     drive_to_completion(store.clone(), run_id, &clock, &poll)
@@ -397,7 +366,7 @@ async fn sleep_for_derives_its_instant_from_the_recorded_reading() {
 async fn a_recomputed_wake_instant_diverges() {
     let store = store();
     let run_id = fixed_run_id(63);
-    let clock = TestClock::new();
+    let clock = TestClock::new(START);
     let (poll, _calls) = poll_tool();
 
     drive_once(store.clone(), run_id, &clock, &poll, NAP)
@@ -493,7 +462,7 @@ impl EventStore for KillStore {
 #[tokio::test]
 async fn a_kill_at_every_boundary_recovers_the_same_log() {
     let control_store = store();
-    let control_clock = TestClock::new();
+    let control_clock = TestClock::new(START);
     let (poll, _calls) = poll_tool();
     drive_to_completion(
         control_store.clone(),
@@ -512,7 +481,7 @@ async fn a_kill_at_every_boundary_recovers_the_same_log() {
     for allow in 1..control.len() {
         let store = store();
         let run_id = fixed_run_id(70 + u8::try_from(allow).expect("small"));
-        let clock = TestClock::new();
+        let clock = TestClock::new(START);
         let (poll, _calls) = poll_tool();
 
         let killed: Arc<dyn EventStore> = Arc::new(KillStore {

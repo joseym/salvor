@@ -172,7 +172,7 @@ async fn typed_call_produces_typed_output() {
             assert_eq!(ticket.id, "JIRA-9");
             assert_eq!(ticket.idempotency_key.as_deref(), Some("attempt-1"));
         }
-        ToolOutcome::Suspend(_) => panic!("expected an output, not a suspension"),
+        ToolOutcome::Suspend(_) | ToolOutcome::Sleep(_) => panic!("expected an output, not a park"),
     }
 }
 
@@ -193,7 +193,7 @@ async fn erased_call_roundtrips_through_json() {
                 json!({ "id": "JIRA-9", "idempotency_key": "attempt-7" })
             );
         }
-        ToolOutcome::Suspend(_) => panic!("expected an output, not a suspension"),
+        ToolOutcome::Suspend(_) | ToolOutcome::Sleep(_) => panic!("expected an output, not a park"),
     }
 }
 
@@ -313,7 +313,7 @@ async fn suspension_propagates_as_outcome_not_error() {
                 json!({ "type": "object", "properties": { "approved": { "type": "boolean" } } })
             );
         }
-        ToolOutcome::Output(_) => panic!("expected a suspension"),
+        ToolOutcome::Output(_) | ToolOutcome::Sleep(_) => panic!("expected a suspension"),
     }
 }
 

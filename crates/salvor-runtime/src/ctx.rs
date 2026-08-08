@@ -93,6 +93,13 @@
 //!
 //! Nothing in `RunCtx` can enforce the ordering, because the caller owns it
 //! and this type sees one request at a time. Sleep between completed calls.
+//!
+//! A tool that asks for the sleep itself is not an exception to that rule, it
+//! is the rule mechanized. A tool returning `ToolOutcome::Sleep` has its
+//! request encoded into its own `ToolCallCompleted` (see [`crate::wire`]), so
+//! the call settles, the claim releases, and only then does the driver call
+//! [`sleep_until`](RunCtx::sleep_until). The recorded order is intent,
+//! completion, `SleepStarted`, and a sleeping run therefore holds no claim.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -103,7 +110,7 @@ use salvor_core::{
 };
 use salvor_llm::{Client, MessageAccumulator, MessageRequest, MessageResponse, StreamEvent};
 use salvor_store::{CallClaim, CallClaimant, CallCommitment, EventStore};
-use salvor_tools::{DynTool, RetryPolicy, Suspension, ToolCtx, ToolError, ToolOutcome};
+use salvor_tools::{DynTool, RetryPolicy, Sleep, Suspension, ToolCtx, ToolError, ToolOutcome};
 use serde_json::Value;
 use time::{Duration, OffsetDateTime, PrimitiveDateTime};
 use uuid::Uuid;
@@ -113,7 +120,8 @@ use crate::hash::hash_value;
 use crate::labels::validate_labels;
 use crate::model::{response_value, usage_of};
 use crate::wire::{
-    ToolFailure, decode_failure, decode_suspension, encode_failure, encode_suspension,
+    ToolFailure, decode_failure, decode_sleep, decode_suspension, encode_failure, encode_sleep,
+    encode_suspension,
 };
 
 /// The injected clock: called once per persisted event (for the envelope
@@ -151,6 +159,14 @@ pub enum ToolCallResult {
     /// The tool asked to park the run. Follow with [`RunCtx::suspend`] and
     /// [`RunCtx::await_resume`].
     Suspended(Suspension),
+    /// The tool asked to park the run until an instant. Follow with
+    /// [`RunCtx::sleep_until`] and [`RunCtx::await_wake`].
+    ///
+    /// The call itself is finished when this is returned: its completion is
+    /// recorded and any idempotency claim is settled, so the sleep that
+    /// follows holds nothing. See [`crate::wire`] for why the request travels
+    /// in the completion rather than as an event of its own.
+    Sleeping(Sleep),
 }
 
 /// What [`RunCtx::await_resume`] produced.
@@ -1070,6 +1086,14 @@ impl RunCtx {
                         encode_suspension(&suspension),
                         ToolCallResult::Suspended(suspension),
                     ),
+                    Ok(ToolOutcome::Sleep(sleep)) => {
+                        // The instant is normalized on the way into the
+                        // completion, so what the caller sleeps on is what the
+                        // log holds and what every later drive decodes.
+                        let output = encode_sleep(&sleep);
+                        let recorded = decode_sleep(&output).unwrap_or(sleep);
+                        (output, ToolCallResult::Sleeping(recorded))
+                    }
                     Err(error) => {
                         let failure = ToolFailure::from_error(&error, attempts);
                         (encode_failure(&failure), ToolCallResult::Failed(failure))
@@ -1533,6 +1557,9 @@ async fn persist_settling(
 fn decode_tool_output(output: Value) -> ToolCallResult {
     if let Some(suspension) = decode_suspension(&output) {
         return ToolCallResult::Suspended(suspension);
+    }
+    if let Some(sleep) = decode_sleep(&output) {
+        return ToolCallResult::Sleeping(sleep);
     }
     if let Some(failure) = decode_failure(&output) {
         return ToolCallResult::Failed(failure);

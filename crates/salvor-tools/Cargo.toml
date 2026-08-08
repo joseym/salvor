@@ -46,6 +46,10 @@ mcp = ["dep:rmcp", "dep:tokio", "dep:process-wrap", "dep:libc"]
 # native consumer that wants `RunId::new` still asks for it.
 salvor-core = { path = "../salvor-core", version = "0.9.2", default-features = false }
 salvor-tools-macros.workspace = true
+# Only for `OffsetDateTime`, the wake instant a `Sleep` outcome carries. The
+# type alone: nothing here reads a clock, which is what keeps this crate
+# buildable for wasm32-unknown-unknown, where `now_utc` has no source.
+time.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

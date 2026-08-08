@@ -258,7 +258,9 @@ async fn a_tool_call_round_trips_over_http() {
             value.to_string().contains("echo-me"),
             "the server echoed the input back, got: {value}"
         ),
-        ToolOutcome::Suspend(_) => panic!("an MCP tool never suspends"),
+        ToolOutcome::Suspend(_) | ToolOutcome::Sleep(_) => {
+            panic!("an MCP tool never parks its run: the protocol has no way to ask")
+        }
     }
 
     client.close().await.expect("clean shutdown");

@@ -1,9 +1,10 @@
 //! Holds the two readers of the recorded sentinel contract equal.
 //!
-//! A tool call's completion output carries two reserved shapes: the suspension
-//! sentinel and the structured tool-failure object. Two places read them.
-//! `salvor_runtime::wire` decodes them into this crate's `Suspension` and
-//! `ToolFailure` types, and `salvor_core::event_detail` (defined in the pure
+//! A tool call's completion output carries three reserved shapes: the
+//! suspension sentinel, the sleep sentinel, and the structured tool-failure
+//! object. Two places read them.
+//! `salvor_runtime::wire` decodes them into this crate's `Suspension`, `Sleep`,
+//! and `ToolFailure` types, and `salvor_core::event_detail` (defined in the pure
 //! `salvor-replay` crate) reads the same recorded fields to render a run's
 //! history and its live progress line.
 //!
@@ -26,7 +27,10 @@
 //! see both readers at once.
 
 use salvor_core::{Event, SequenceNumber, event_detail};
-use salvor_runtime::{ERROR_SENTINEL_KEY, SUSPEND_SENTINEL_KEY, decode_failure, decode_suspension};
+use salvor_runtime::{
+    ERROR_SENTINEL_KEY, SLEEP_SENTINEL_KEY, SUSPEND_SENTINEL_KEY, decode_failure, decode_sleep,
+    decode_suspension,
+};
 use serde_json::{Value, json};
 
 /// The cap `event_detail` truncates every payload to. Stated here rather than
@@ -42,6 +46,8 @@ const CAP: usize = 80;
 fn reference_detail(output: &Value) -> String {
     if let Some(suspension) = decode_suspension(output) {
         format!("suspends: {}", suspension.reason)
+    } else if let Some(sleep) = decode_sleep(output) {
+        format!("sleeps until {}", format_ts(sleep.wake_at))
     } else if let Some(failure) = decode_failure(output) {
         format!(
             "error ({}, {} attempt(s)): {}",
@@ -52,6 +58,22 @@ fn reference_detail(output: &Value) -> String {
     } else {
         format!("output {}", truncate(&output.to_string()))
     }
+}
+
+/// The renderer's timestamp format, stated here rather than imported for the
+/// same reason [`CAP`] is: a change to how a recorded instant reads has to be
+/// made deliberately on both sides.
+fn format_ts(ts: time::OffsetDateTime) -> String {
+    let utc = ts.to_offset(time::UtcOffset::UTC);
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}Z",
+        utc.year(),
+        u8::from(utc.month()),
+        utc.day(),
+        utc.hour(),
+        utc.minute(),
+        utc.second(),
+    )
 }
 
 /// Truncates to [`CAP`] characters with an ellipsis, counting characters rather
@@ -101,6 +123,18 @@ fn corpus() -> Vec<Value> {
         json!({ SUSPEND_SENTINEL_KEY: {"reason": "approve", "input_schema": {}}, "other": 1 }),
         json!({ ERROR_SENTINEL_KEY: {"kind": "handler", "message": "m", "attempts": 1}, "x": 0 }),
         json!({ SUSPEND_SENTINEL_KEY: {}, "other": 1 }),
+        // Valid sleep, and every way one can fall through: a deadline that
+        // will not parse, a missing one, one that is not a string, a body that
+        // is not an object, and the reserved key beside another.
+        sentinel(
+            SLEEP_SENTINEL_KEY,
+            json!({"wake_at": "2026-08-14T09:00:00Z"}),
+        ),
+        sentinel(SLEEP_SENTINEL_KEY, json!({"wake_at": "tomorrow"})),
+        sentinel(SLEEP_SENTINEL_KEY, json!({})),
+        sentinel(SLEEP_SENTINEL_KEY, json!({"wake_at": 1_755_162_000})),
+        sentinel(SLEEP_SENTINEL_KEY, json!("not an object")),
+        json!({ SLEEP_SENTINEL_KEY: {"wake_at": "2026-08-14T09:00:00Z"}, "other": 1 }),
         // Valid failures, one per legal kind.
         sentinel(
             ERROR_SENTINEL_KEY,
@@ -177,7 +211,7 @@ fn renderer_matches_runtime_decoders() {
     }
 }
 
-/// The corpus actually exercises all three classifications, so a change that
+/// The corpus actually exercises all four classifications, so a change that
 /// broke decoding outright could not pass by rendering everything as an
 /// ordinary output.
 #[test]
@@ -188,13 +222,17 @@ fn corpus_covers_every_classification() {
         "corpus must contain a decodable suspension"
     );
     assert!(
+        corpus.iter().any(|o| decode_sleep(o).is_some()),
+        "corpus must contain a decodable sleep"
+    );
+    assert!(
         corpus.iter().any(|o| decode_failure(o).is_some()),
         "corpus must contain a decodable failure"
     );
     assert!(
-        corpus
-            .iter()
-            .any(|o| decode_suspension(o).is_none() && decode_failure(o).is_none()),
-        "corpus must contain an output that is neither sentinel"
+        corpus.iter().any(|o| decode_suspension(o).is_none()
+            && decode_sleep(o).is_none()
+            && decode_failure(o).is_none()),
+        "corpus must contain an output that is no sentinel at all"
     );
 }

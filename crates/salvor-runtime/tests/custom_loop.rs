@@ -77,6 +77,10 @@ async fn approval_flow(
             ctx.fail_run(&failure.message).await?;
             Err(RuntimeError::ResumeInputRejected(failure.message))
         }
+        // This flow's one tool only ever suspends; the arm keeps the match
+        // total. A flow that wanted a timer would call `sleep_until` and
+        // `await_wake` here, as the built-in loop does.
+        ToolCallResult::Sleeping(_) => unreachable!("the approval tool does not sleep"),
     }
 }
 

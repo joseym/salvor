@@ -57,6 +57,7 @@ codes:
 | 409 | `run_exists` | Starting a run at an id that already has history |
 | 409 | `wrong_state` | A verb applied to a run in the wrong state (resolving a run with no dangling write) |
 | 409 | `needs_reconciliation` | Resuming a run whose log ends at a write intent with no completion; `details.intent` carries the recorded write |
+| 409 | `still_sleeping` | Resuming a run parked on a durable timer before its instant; `details.wake_at` and `details.remaining_seconds` say when it can be driven. Nothing is recorded |
 | 401 | `missing_drive_token` | A client-driven append with no drive token (see [Client-driven runs](#client-driven-runs)) |
 | 403 | `invalid_drive_token` | A client-driven append whose drive token is not the run's current lease |
 | 409 | `divergence` | A client-driven append that is not the legal next event, or different bytes at an already-recorded position |
@@ -309,6 +310,7 @@ Always `{ "state": "<name>", ... }`:
 |---|---|
 | `not_started`, `running`, `awaiting_model`, `awaiting_tool`, `needs_reconciliation` | none |
 | `suspended` | `reason`, `input_schema` |
+| `sleeping` | `wake_at` (RFC 3339) |
 | `budget_exceeded` | `budget` (`{kind, limit}`), `observed` |
 | `completed` | `output` |
 | `failed` | `error` |
@@ -419,6 +421,9 @@ the same mapping `salvor resume` uses:
   shape before anything is recorded. The run then resumes in the background.
 - **Crashed** (running, or interrupted mid model or tool step): the run
   recovers with no input. An `input` in the body is ignored.
+- **Sleeping**: past its `wake_at`, it re-drives exactly as a crashed run does,
+  which is what waking is. Before its `wake_at`, refused `409 still_sleeping`
+  with the deadline as evidence (see below).
 - **Needs reconciliation**: refused `409`, with the recorded write intent as
   evidence (see below). Use `resolve` to move past it.
 - **Finished** (completed or failed): reported, `200`, left alone.
@@ -473,6 +478,19 @@ the same mapping `salvor resume` uses:
     "kind": "tool", "seq": 4, "tool": "charge", "input": { "amount": 10 },
     "effect": "write", "idempotency_key": null, "recorded_at": "2026-..."
   } }
+} }
+```
+
+- `409 still_sleeping` when the run is parked on a durable timer whose instant
+  has not arrived. Nothing is recorded and no driver is spawned, so the run is
+  exactly as asleep as it was; retry at `wake_at` or later, or leave it to the
+  wake sweeper:
+
+```json
+{ "error": {
+  "code": "still_sleeping",
+  "message": "run ... is sleeping until 2026-08-14T09:00:00Z and cannot be resumed for another 1740s ...",
+  "details": { "wake_at": "2026-08-14T09:00:00Z", "remaining_seconds": 1740 }
 } }
 ```
 
@@ -556,8 +574,8 @@ refuses the abandonment.
 ## Graphs and graph runs
 
 A graph document is a control document: an acyclic set of nodes (`agent`,
-`tool`, `gate`, `branch`, `map`) authored once, submitted, hashed, and frozen
-for a run. Every node payload may carry an optional `name`: a short display
+`tool`, `gate`, `branch`, `map`, `fold`, `delay`) authored once, submitted,
+hashed, and frozen for a run. Every node payload may carry an optional `name`: a short display
 label (at most 64 characters, and, when set, not empty or all whitespace;
 `400 invalid_graph` reports a violation node-precise as `node_name_too_long`
 or `blank_node_name`). Unlike an agent definition's own `name` (excluded from
@@ -1337,5 +1355,22 @@ woken run behaves identically whether a person or the clock woke it.
   loop carries on to the next.
 
 There is no wake endpoint. Waking is a re-drive, and `POST /v1/runs/{id}/resume`
-already is one: sending it to a sleeping run whose deadline has passed wakes it,
-and sending it before the deadline records nothing and leaves it asleep.
+already is one: sending it to a sleeping run whose deadline has passed wakes it.
+Sending it before the deadline is refused `409 still_sleeping` carrying
+`wake_at` and `remaining_seconds`, because the drive would record nothing and a
+`202 driving` for a run that did not move is worse than a refusal that says
+when to come back.
+
+### A tool can start the timer
+
+A tool parks its own run by returning the sleep outcome, which the runtime
+records **inside** that call's `ToolCallCompleted` (as
+`{"__salvor_sleep": {"wake_at": "..."}}`) before appending `SleepStarted`. The
+recorded order is therefore intent, completion, `SleepStarted`.
+
+That order is the point. The completion settles the call, and for a call
+carrying an idempotency key it settles the store's claim in the same atomic
+append, so a run that sleeps for a week holds no claim while it sleeps and a
+second run under the same key is never told `CallInFlight` by a sleeper. It
+also means a process death during the sleep leaves no dangling write intent:
+the write already completed.

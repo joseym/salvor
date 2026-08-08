@@ -17,8 +17,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use salvor_core::{Effect, Event, EventEnvelope, RunId};
 use salvor_llm::Config;
 use salvor_runtime::{Agent, AgentBuilder, ClockFn, RandomFn};
-use salvor_tools::{DynTool, HandlerError, ToolCtx, ToolError, ToolOutcome};
+use salvor_tools::{DynTool, HandlerError, Sleep, ToolCtx, ToolError, ToolOutcome};
 use serde_json::{Value, json};
+use time::OffsetDateTime;
 use time::macros::datetime;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
@@ -42,6 +43,94 @@ pub fn fixed_clock() -> ClockFn {
 /// A constant random source.
 pub fn fixed_random() -> RandomFn {
     Arc::new(|| 7)
+}
+
+/// A clock a test sets by hand, for the durable-timer scenarios: a sleeping
+/// run continues when its deadline arrives, and "arrives" means the test said
+/// so. Nothing sleeps in real time.
+#[derive(Clone)]
+pub struct TestClock {
+    now: Arc<std::sync::Mutex<OffsetDateTime>>,
+}
+
+impl TestClock {
+    /// A clock reading `start` until something moves it.
+    pub fn new(start: OffsetDateTime) -> Self {
+        Self {
+            now: Arc::new(std::sync::Mutex::new(start)),
+        }
+    }
+
+    /// The injected clock function: envelope timestamps and live `now`
+    /// observations both read it.
+    pub fn injected(&self) -> ClockFn {
+        let now = self.now.clone();
+        Arc::new(move || *now.lock().expect("clock is not poisoned"))
+    }
+
+    pub fn read(&self) -> OffsetDateTime {
+        *self.now.lock().expect("clock is not poisoned")
+    }
+
+    pub fn set(&self, instant: OffsetDateTime) {
+        *self.now.lock().expect("clock is not poisoned") = instant;
+    }
+}
+
+/// A tool that parks its run until a fixed instant instead of producing an
+/// output, with the same shared execution counter [`EchoTool`] carries.
+///
+/// The instant is fixed rather than derived from a duration for the reason the
+/// outcome carries an instant at all: it is recorded, and every drive must
+/// present the same one.
+pub struct NappingTool {
+    pub name: String,
+    pub effect: Effect,
+    pub wake_at: OffsetDateTime,
+    pub calls: Arc<AtomicUsize>,
+}
+
+impl NappingTool {
+    pub fn new(name: &str, effect: Effect, wake_at: OffsetDateTime) -> (Self, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        (
+            Self {
+                name: name.to_owned(),
+                effect,
+                wake_at,
+                calls: calls.clone(),
+            },
+            calls,
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl DynTool for NappingTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        "a test tool that parks its run on a timer"
+    }
+
+    fn effect(&self) -> Effect {
+        self.effect
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({"type": "object"})
+    }
+
+    async fn call_json(
+        &self,
+        _ctx: &ToolCtx,
+        _input: Value,
+    ) -> Result<ToolOutcome<Value>, ToolError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolOutcome::Sleep(Sleep::until(self.wake_at)))
+    }
 }
 
 /// The `kind` names of a log's events, in order, for shape assertions.

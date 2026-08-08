@@ -249,6 +249,28 @@ pub async fn resume(store_path: &Path, args: ResumeArgs) -> Result<u8> {
             }
             return Ok(0);
         }
+        // A due run drives on through the recover path below, which is the
+        // whole of waking; `salvor wake` reaches it by calling this very
+        // function for each run its sweep found due. An early one is refused
+        // and told how long is left, because the drive would record nothing
+        // and a silent no-op reads like a bug.
+        Disposition::Sleeping { wake_at } => {
+            let now = OffsetDateTime::now_utc();
+            if now < wake_at {
+                print!(
+                    "{}",
+                    render::sleeping_report(
+                        &uuid,
+                        wake_at,
+                        wake_at - now,
+                        &args.agents,
+                        args.graph.as_deref(),
+                        render::DEFAULT_REPORT_WIDTH,
+                    )
+                );
+                return Ok(1);
+            }
+        }
         Disposition::NotStarted => bail!("run {uuid} has no recorded events"),
         Disposition::Resume(_) | Disposition::Recover => {}
     }
@@ -1720,14 +1742,21 @@ async fn settle_graph_drive(
 /// can never drift into telling an operator two different commands for the same
 /// run.
 fn graph_resume_command(uuid: &str, graph_path: &Path, agents: &[PathBuf]) -> String {
-    let agent_flags: String = agents
+    format!(
+        "salvor resume {uuid} --graph {}{}",
+        graph_path.display(),
+        agent_flags(agents)
+    )
+}
+
+/// Every `--agent` file the caller supplied, in the order they were given, as
+/// command-line flags. Shared by the two commands a parked graph run is told to
+/// type: the `resume` above, and the `wake` a timer park needs instead.
+fn agent_flags(agents: &[PathBuf]) -> String {
+    agents
         .iter()
         .map(|path| format!(" --agent {}", path.display()))
-        .collect();
-    format!(
-        "salvor resume {uuid} --graph {}{agent_flags}",
-        graph_path.display()
-    )
+        .collect()
 }
 
 /// Prints the result of a graph drive: the final output on completion, or a
@@ -1751,6 +1780,20 @@ fn report_graph_outcome(
                 ParkReason::BudgetExceeded { budget, observed } => {
                     println!("  budget crossed: {budget:?} (observed {observed})");
                 }
+                ParkReason::Sleeping { wake_at } => {
+                    println!("  sleeping until: {}", render::format_ts(*wake_at));
+                }
+            }
+            // A timer park takes no input and is not resumed by hand: it is
+            // driven again once its deadline passes, which is what `wake`
+            // does for every run that is due.
+            if let ParkReason::Sleeping { .. } = reason {
+                println!(
+                    "it continues once the deadline passes:\n  salvor wake --graph {}{}",
+                    graph_path.display(),
+                    agent_flags(agents)
+                );
+                return Ok(0);
             }
             println!(
                 "resume it with:\n  {} --input <json>",

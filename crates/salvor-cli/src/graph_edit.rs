@@ -296,7 +296,7 @@ async fn read_with_line_editing(session: &mut Session, mut reader: LineReader) -
 ///   produced and nothing of the conversation around it.
 /// - [`CompletionType::List`] means one candidate is inserted on the first Tab
 ///   and several insert as much as they agree on, with the list printed on a
-///   second Tab. The alternative, `Circular`, would offer the six node kinds one
+///   second Tab. The alternative, `Circular`, would offer the seven node kinds one
 ///   keypress at a time.
 /// - [`BellStyle::None`] because a position with nothing to offer must do
 ///   nothing, and the library's answer to no candidates is otherwise to beep.

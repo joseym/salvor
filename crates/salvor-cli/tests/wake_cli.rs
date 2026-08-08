@@ -13,15 +13,12 @@
 //!
 //! # Why the logs are seeded by hand
 //!
-//! Nothing the CLI drives records a sleep today: neither the built-in agent
-//! loop nor the graph engine calls `sleep_until`, so the only way a sleeping
-//! run reaches a store is a caller's own `RunCtx` flow (which `salvor-runtime`'s
-//! `sleep.rs` drives) or a log written directly, as here. What that costs is
-//! the one case these tests cannot stage: a run whose re-drive genuinely
-//! continues to completion, because the loop replaying a sleep it never issued
-//! is a divergence. Selection, routing, reporting, and the exit codes are all
-//! exercised here; waking a run through to its end is proven at the runtime
-//! tier, over a flow that really does sleep.
+//! A seeded log states its deadline and nothing else, which is exactly what
+//! these tests are about: selection, routing, reporting, and the exit codes.
+//! What it costs is the one case they cannot stage, a run whose re-drive
+//! genuinely continues to completion, since a loop replaying a sleep it never
+//! issued is a divergence. That case is proven at the runtime tier, over flows
+//! that really do sleep (`salvor-runtime`'s `sleep.rs` and `tool_sleep.rs`).
 
 mod common;
 
@@ -261,6 +258,67 @@ async fn one_run_that_will_not_drive_does_not_stop_the_rest() {
     let first_at = out.find(&first).expect("the first run appears");
     let second_at = out.find(&second).expect("the second run appears");
     assert!(first_at < second_at, "the most overdue run is driven first");
+}
+
+/// `resume` refuses a run whose deadline is ahead, naming the instant and what
+/// is left of the wait, and exits 1. The run is untouched, so nothing about
+/// asking early costs it anything.
+///
+/// A run whose deadline has passed is not early, and the refusal must not
+/// reach it: driving one is what waking is, and `wake` gets there by calling
+/// this very command. So the due run below falls through to the drive and
+/// fails for the ordinary reason a run with no `--agent` does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resume_refuses_a_run_that_is_not_due_yet() {
+    let dir = tempdir().expect("tempdir");
+    let store = dir.path().join("salvor.db");
+    let now = OffsetDateTime::now_utc();
+
+    // Two hours and a minute out, so the coarsest unit the shared formatter
+    // reports is a stable `2h` however long the binary takes to start.
+    let early = seed_sleeping(
+        &store,
+        agent_head(),
+        now + Duration::hours(2) + Duration::minutes(1),
+    )
+    .await;
+    let refused = run_salvor(&store, &["resume", &early]).await;
+    let out = common::flatten_wrapped_prose(&String::from_utf8_lossy(&refused.stdout));
+    assert!(
+        out.contains("is sleeping until") && out.contains("will not resume for another 2h"),
+        "the refusal names the instant and the remaining time: {out}"
+    );
+    assert!(
+        out.contains("salvor wake"),
+        "and the command that drives what is due: {out}"
+    );
+    assert_eq!(
+        refused.status.code(),
+        Some(1),
+        "an early resume is a refusal, not a success"
+    );
+    assert_eq!(
+        log_len(&store, &early).await,
+        2,
+        "and it records nothing against the run"
+    );
+
+    // Past its deadline, the same command takes the drive path instead. The
+    // refusal it meets there is an error, so it is on stderr, where this
+    // report is not: the two are told apart by which stream they arrive on as
+    // much as by what they say.
+    let due = seed_sleeping(&store, agent_head(), now - Duration::hours(2)).await;
+    let driven = run_salvor(&store, &["resume", &due]).await;
+    let out = common::flatten_wrapped_prose(&String::from_utf8_lossy(&driven.stdout));
+    let errors = common::flatten_wrapped_prose(&String::from_utf8_lossy(&driven.stderr));
+    assert!(
+        !out.contains("is sleeping until"),
+        "a due run is never refused as sleeping: {out}"
+    );
+    assert!(
+        errors.contains("resuming an agent run needs its definition"),
+        "it reached the drive and failed for the ordinary reason: {errors}"
+    );
 }
 
 /// `wake` is a real verb of the CLI, not a hidden one: it is in the root help

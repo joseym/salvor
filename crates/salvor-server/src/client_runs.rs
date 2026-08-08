@@ -907,6 +907,15 @@ pub async fn tool_step(
                          not support; no completion recorded"
                     )));
                 }
+                // Refused for the same reason a suspension is: a step endpoint
+                // performs one call and answers with its output. Parking the
+                // run belongs to a driver, and the client owns the loop here.
+                ToolOutcome::Sleep(_) => {
+                    return Err(ApiError::ToolExecution(format!(
+                        "tool `{tool_name}` asked to sleep, which a server-performed tool step \
+                         does not support; no completion recorded"
+                    )));
+                }
             };
             append_tool_completion(&state, run_id, seq, &output).await?;
             Ok(tool_output_body(&output))

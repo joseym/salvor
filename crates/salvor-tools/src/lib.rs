@@ -72,6 +72,6 @@ pub use erased::{DynTool, ToolDescriptor, TypedTool};
 pub use error::{HandlerError, ToolError};
 pub use handler::{ToolHandler, ToolMeta};
 pub use idempotency::{IdempotencyPath, IdempotencyPathError};
-pub use outcome::{Suspension, ToolOutcome};
+pub use outcome::{Sleep, Suspension, ToolOutcome};
 pub use registry::{RegistryError, ToolSet};
 pub use retry::RetryPolicy;

@@ -172,7 +172,9 @@ async fn a_tool_call_round_trips_the_result() {
                 "the server's result carried the input back, got: {rendered}"
             );
         }
-        ToolOutcome::Suspend(_) => panic!("an MCP tool never suspends"),
+        ToolOutcome::Suspend(_) | ToolOutcome::Sleep(_) => {
+            panic!("an MCP tool never parks its run: the protocol has no way to ask")
+        }
     }
 
     server.close().await.expect("clean shutdown");

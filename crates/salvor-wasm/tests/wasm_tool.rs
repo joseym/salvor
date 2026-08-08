@@ -81,11 +81,13 @@ async fn call(tool: &dyn DynTool, input: Value) -> Result<ToolOutcome<Value>, To
     tool.call_json(&ToolCtx::default(), input).await
 }
 
-/// Unwraps a successful output value, panicking on suspension or error.
+/// Unwraps a successful output value, panicking on a park or an error.
 async fn call_output(tool: &dyn DynTool, input: Value) -> Value {
     match call(tool, input).await.expect("call succeeds") {
         ToolOutcome::Output(value) => value,
-        ToolOutcome::Suspend(_) => panic!("wasm tools cannot suspend"),
+        ToolOutcome::Suspend(_) | ToolOutcome::Sleep(_) => {
+            panic!("a wasm tool's component interface has no way to ask for a park")
+        }
     }
 }
 

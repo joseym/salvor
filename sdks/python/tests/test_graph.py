@@ -39,6 +39,13 @@ FOLD_FIXTURE = (
     Path(__file__).resolve().parents[3] / "examples" / "graphs" / "fold-refine.json"
 )
 
+DELAY_FIXTURE = (
+    Path(__file__).resolve().parents[3]
+    / "examples"
+    / "graphs"
+    / "delay-then-publish.json"
+)
+
 BRANCH_MODEL_DECISION_FIXTURE = (
     Path(__file__).resolve().parents[3]
     / "examples"
@@ -103,6 +110,18 @@ def build_canonical_flow():
         .edge("research", "review")
         .edge("review", "approve")
         .edge("approve", "publish")
+        .build()
+    )
+
+
+def build_delay_flow():
+    return (
+        GraphBuilder()
+        .tool("assess", "assess")
+        .delay("cooloff", 3600, name="Cool off before publishing")
+        .tool("publish", "http_post")
+        .edge("assess", "cooloff")
+        .edge("cooloff", "publish")
         .build()
     )
 
@@ -175,6 +194,11 @@ class BuildsCanonicalDocument(unittest.TestCase):
         canonical = json.loads(FOLD_FIXTURE.read_text())
         self.assertEqual(built, canonical)
 
+    def test_matches_delay_fixture(self):
+        built = json.loads(json.dumps(build_delay_flow().to_dict()))
+        canonical = json.loads(DELAY_FIXTURE.read_text())
+        self.assertEqual(built, canonical)
+
     def test_matches_branch_model_decision_fixture(self):
         built = json.loads(json.dumps(build_branch_model_decision_flow().to_dict()))
         canonical = json.loads(BRANCH_MODEL_DECISION_FIXTURE.read_text())
@@ -202,6 +226,7 @@ class BuildsCanonicalDocument(unittest.TestCase):
                 map_node("research"),
                 name="Notify each watcher",
             )
+            .delay("cooloff", 3600, name="Cool off before publishing")
             .edge("research", "publish")
             .build()
         )
@@ -214,6 +239,7 @@ class BuildsCanonicalDocument(unittest.TestCase):
                 "Approve the draft",
                 "Route on confidence",
                 "Notify each watcher",
+                "Cool off before publishing",
             ],
         )
 

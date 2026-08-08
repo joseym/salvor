@@ -122,7 +122,7 @@ pub fn pending(pending: Option<&PendingCall>) -> Value {
 
 /// Formats a recorded instant as RFC 3339, the wire form every timestamp this
 /// API returns takes.
-fn rfc3339(timestamp: OffsetDateTime) -> String {
+pub(crate) fn rfc3339(timestamp: OffsetDateTime) -> String {
     timestamp.format(&Rfc3339).unwrap_or_default()
 }
 

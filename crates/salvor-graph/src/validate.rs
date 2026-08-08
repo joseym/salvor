@@ -112,6 +112,23 @@ pub enum GraphError {
         found: u32,
     },
 
+    /// A `delay` node's wait is zero.
+    ///
+    /// Refused rather than accepted as a no-op, on the same reasoning
+    /// [`GraphError::NonPositiveMaxIterations`] rests on: the whole meaning of
+    /// the node is the wait, so a wait of nothing is an authoring mistake and
+    /// not an intent. A zero delay would still park nothing, record a clock
+    /// reading, a `SleepStarted`, and a `SleepCompleted` in every log forever,
+    /// and mean exactly what deleting the node means. Saying so at submit is
+    /// cheaper than leaving it to be noticed in a run log.
+    #[error("delay node `{id}`: seconds must be at least 1, found {found}")]
+    NonPositiveDelay {
+        /// The delay node's id.
+        id: String,
+        /// The declared wait.
+        found: u64,
+    },
+
     /// A `gate` node's approval schema is not a JSON object.
     #[error("gate node `{id}`: approval_schema must be a JSON object")]
     ApprovalSchemaNotObject {
@@ -371,8 +388,9 @@ fn check_referential_integrity(graph: &Graph, errors: &mut Vec<GraphError>) {
 }
 
 /// Per-node required-field checks: an agent hash is well-formed, a map cap is
-/// positive, a gate's approval schema is an object. Each rule is a small,
-/// independent block so a rule can be relaxed on its own.
+/// positive, a gate's approval schema is an object, a delay waits for
+/// something. Each rule is a small, independent block so a rule can be relaxed
+/// on its own.
 fn check_node_fields(graph: &Graph, errors: &mut Vec<GraphError>) {
     for node in &graph.nodes {
         match node {
@@ -407,6 +425,14 @@ fn check_node_fields(graph: &Graph, errors: &mut Vec<GraphError>) {
                     });
                 }
             }
+            Node::Delay(delay) => {
+                if delay.seconds < 1 {
+                    errors.push(GraphError::NonPositiveDelay {
+                        id: delay.id.clone(),
+                        found: delay.seconds,
+                    });
+                }
+            }
             // Tool and branch carry no field rule beyond the strict parse.
             Node::Tool(_) | Node::Branch(_) => {}
         }
@@ -415,7 +441,7 @@ fn check_node_fields(graph: &Graph, errors: &mut Vec<GraphError>) {
 
 /// A node's optional `name`, when set, must not be empty or all whitespace,
 /// and must be at most [`MAX_NODE_NAME_LEN`] characters
-/// (`chars().count()`, not bytes). Applies uniformly across all six node
+/// (`chars().count()`, not bytes). Applies uniformly across all seven node
 /// kinds through [`Node::name`], mirroring the agent definition's own name
 /// rule.
 fn check_node_names(graph: &Graph, errors: &mut Vec<GraphError>) {
@@ -904,8 +930,8 @@ fn levenshtein(a: &str, b: &str) -> usize {
 mod tests {
     use super::*;
     use crate::document::{
-        AgentNode, BranchCase, BranchCondition, BranchNode, Edge, FoldBody, FoldJoin, FoldNode,
-        GateNode, MapBody, MapNode, ToolNode,
+        AgentNode, BranchCase, BranchCondition, BranchNode, DelayNode, Edge, FoldBody, FoldJoin,
+        FoldNode, GateNode, MapBody, MapNode, ToolNode,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -1033,6 +1059,36 @@ mod tests {
             id: "fanout".into(),
             found: 0,
         }));
+    }
+
+    /// A zero wait on a delay names the node, exactly as a zero iteration
+    /// bound on a fold does. A one-second wait is the smallest legal one and
+    /// passes, so the rule is a floor rather than a range.
+    #[test]
+    fn non_positive_delay_is_reported() {
+        let g = graph(
+            vec![Node::Delay(DelayNode {
+                id: "cooloff".into(),
+                name: None,
+                seconds: 0,
+            })],
+            vec![],
+        );
+        let errors = validate(&g).expect_err("invalid");
+        assert!(errors.contains(&GraphError::NonPositiveDelay {
+            id: "cooloff".into(),
+            found: 0,
+        }));
+
+        let g = graph(
+            vec![Node::Delay(DelayNode {
+                id: "cooloff".into(),
+                name: None,
+                seconds: 1,
+            })],
+            vec![],
+        );
+        validate(&g).expect("a one-second wait is a legal wait");
     }
 
     /// A map body that names a missing node is reported.

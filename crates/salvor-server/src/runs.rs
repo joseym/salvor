@@ -431,6 +431,30 @@ pub async fn resume(
             spawn_drive(state, run_id, built, DriveVerb::Resume(input));
             Ok(driving(run_id).into_response())
         }
+        // A due run re-drives here, through the recover path, which is why
+        // there is no wake endpoint. An early one is refused: the drive would
+        // record nothing and leave the run asleep, and answering `202 driving`
+        // to a request that changes nothing would be a lie the caller then has
+        // to discover by polling.
+        Disposition::Sleeping { wake_at } => {
+            let now = state.now();
+            if now < wake_at {
+                let remaining = wake_at - now;
+                return Err(ApiError::StillSleeping {
+                    message: format!(
+                        "run {} is sleeping until {} and cannot be resumed for another {}s. It is \
+                         not waiting on input: it continues when its deadline passes and something \
+                         re-drives it, which the wake sweeper does on its interval",
+                        run_id.as_uuid(),
+                        json::rfc3339(wake_at),
+                        remaining.whole_seconds(),
+                    ),
+                    wake_at: json::rfc3339(wake_at),
+                    remaining_seconds: remaining.whole_seconds(),
+                });
+            }
+            redrive(state, run_id, &log).await
+        }
         Disposition::Recover => {
             if request.input.is_some() {
                 tracing::warn!(

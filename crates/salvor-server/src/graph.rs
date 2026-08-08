@@ -887,6 +887,9 @@ fn graph_error_json(error: &GraphError) -> Value {
         GraphError::NonPositiveMaxIterations { id, found } => json!({
             "code": "non_positive_max_iterations", "message": message, "node": id, "found": found,
         }),
+        GraphError::NonPositiveDelay { id, found } => json!({
+            "code": "non_positive_delay", "message": message, "node": id, "found": found,
+        }),
         GraphError::ApprovalSchemaNotObject { id } => json!({
             "code": "approval_schema_not_object", "message": message, "node": id,
         }),

@@ -218,7 +218,7 @@ Node.
 A graph document composes `agent`, `tool`, `gate`, `branch`, `map`, and `fold`
 nodes into an authored control flow: an acyclic set of steps submitted once,
 hashed, and run by that hash exactly as an agent definition is. `GraphBuilder`
-mirrors the six node kinds as typed methods, so a document gets editor
+mirrors the seven node kinds as typed methods, so a document gets editor
 completion and compile-time typing instead of hand-written JSON; the semantic
 checks (referential integrity, acyclicity) live server-side, on submit or
 `salvor graph validate`.

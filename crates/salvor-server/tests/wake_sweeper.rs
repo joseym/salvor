@@ -10,12 +10,12 @@
 //!
 //! # Why the logs are seeded by hand
 //!
-//! Nothing the server drives records a sleep yet: neither the built-in agent
-//! loop nor the graph engine calls `sleep_until`, so a sleeping run reaches a
-//! store either from a caller's own `RunCtx` flow (`salvor-runtime`'s `sleep.rs`
-//! drives one) or from a log written directly, as here. That is enough for
-//! every question this file asks, all of which are about which runs the sweeper
-//! reaches for and which it leaves alone.
+//! A sleeping run reaches a store three ways: a caller's own `RunCtx` flow, a
+//! tool that returned the sleep outcome (both driven at the runtime tier, in
+//! `sleep.rs` and `tool_sleep.rs`), or a log written directly, as here. The
+//! questions this file asks are all about which runs the server reaches for
+//! and which it leaves alone, and a seeded log answers them without a model
+//! script standing between the deadline and the assertion.
 
 mod common;
 
@@ -322,5 +322,62 @@ async fn a_sleeping_runs_stream_ends_and_reports_its_deadline() {
         frames.len(),
         3,
         "both recorded events, then the end frame: {frames:?}"
+    );
+}
+
+/// The resume endpoint answers a sleeping run by its deadline, not by its
+/// state alone: an early resume is refused with the instant and the wait, and
+/// the very same run past the same instant re-drives. Both go through
+/// `classify`, so the two answers cannot come from two different rules.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_early_resume_is_refused_and_a_due_one_drives() {
+    let store = memory_store();
+    let (state, _builds, _model) = state_with_counter(store.clone()).await;
+    // Off, so the refusal below is answered about a run nothing else touched.
+    let state = state.with_wake_interval(Duration::ZERO);
+    let server = TestServer::spawn(state).await;
+    let client = reqwest::Client::new();
+    let agent = register_agent(&client, &server.base, sample_toml(), None).await;
+
+    let early = seed_sleeping(&store, &agent, NOW + time::Duration::minutes(29)).await;
+    let refusal = client
+        .post(format!(
+            "{}/v1/runs/{}/resume",
+            server.base,
+            early.as_uuid()
+        ))
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("the request is made");
+    assert_eq!(refusal.status(), 409, "a state conflict, not a bad request");
+    let body: serde_json::Value = refusal.json().await.expect("a json body");
+    assert_eq!(body["error"]["code"], "still_sleeping");
+    assert_eq!(
+        body["error"]["details"]["wake_at"], "2026-07-10T12:29:00Z",
+        "the deadline it is waiting for"
+    );
+    assert_eq!(
+        body["error"]["details"]["remaining_seconds"], 1740,
+        "and how long is left of the wait"
+    );
+    assert_eq!(
+        store.read_log(early).await.expect("log reads").len(),
+        2,
+        "a refused resume records nothing"
+    );
+
+    // The same verb, the same state, a deadline that has passed: driven.
+    let due = seed_sleeping(&store, &agent, NOW - time::Duration::minutes(1)).await;
+    let accepted = client
+        .post(format!("{}/v1/runs/{}/resume", server.base, due.as_uuid()))
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("the request is made");
+    assert_eq!(
+        accepted.status(),
+        202,
+        "a due run is re-driven, which is the whole of waking"
     );
 }
