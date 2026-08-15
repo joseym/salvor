@@ -44,6 +44,9 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::macros::datetime;
 
+/// A registry mapping tool names to their implementations.
+type ToolRegistry = HashMap<String, Box<dyn DynTool>>;
+
 /// The instant the run starts at, and the instant a one-hour delay entered at
 /// START wakes on. `WAKE_AT` is START plus [`WAIT_SECONDS`], written out rather
 /// than computed so the test states the arithmetic the engine performs instead
@@ -76,14 +79,10 @@ fn delay_graph() -> Graph {
 
 /// The two Read tools the graph resolves, sharing one execution counter each so
 /// a replay's zero-execution claim is checkable.
-fn tools() -> (
-    HashMap<String, Box<dyn DynTool>>,
-    Arc<AtomicUsize>,
-    Arc<AtomicUsize>,
-) {
+fn tools() -> (ToolRegistry, Arc<AtomicUsize>, Arc<AtomicUsize>) {
     let (assess, assess_calls) = EchoTool::new("assess_tool", Effect::Read);
     let (publish, publish_calls) = EchoTool::new("publish_tool", Effect::Read);
-    let mut registry: HashMap<String, Box<dyn DynTool>> = HashMap::new();
+    let mut registry: ToolRegistry = HashMap::new();
     registry.insert("assess_tool".to_owned(), Box::new(assess));
     registry.insert("publish_tool".to_owned(), Box::new(publish));
     (registry, assess_calls, publish_calls)
