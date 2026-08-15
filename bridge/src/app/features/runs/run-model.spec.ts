@@ -124,6 +124,26 @@ describe('derivedStatus: in-progress + driverless + stale ⟹ stalled (the one d
     expect(isWaiting('stalled')).toBe(true);
     expect(labelOf('stalled')).toBe('stalled');
   });
+
+  // SLEEPING (durable timer): the CLI's exact call (`status_group` in
+  // salvor-cli-core/src/render.rs) is progress, not waiting, because `waiting` means a PERSON is
+  // the only thing that moves the run, and a sleeping run moves itself once its wake_at instant
+  // arrives. It must therefore never land in the Inbox, and it must never be misread as stalled:
+  // a sleeping run holds no driver BY DESIGN, for as long as its nap lasts, so a driverless-and-
+  // stale sleeping run is a normal rest, not a stall.
+  it('sleeping groups with PROGRESS, not waiting: it never queues in the Inbox', () => {
+    expect(groupOf('sleeping')).toBe('progress');
+    expect(isWaiting('sleeping')).toBe(false);
+    expect(labelOf('sleeping')).toBe('sleeping');
+  });
+
+  it('a sleeping run driverless-and-stale is NOT stalled: no driver while asleep is by design', () => {
+    expect(derivedStatus('sleeping', 'none', stale, NOW)).toBe('sleeping');
+  });
+
+  it('a sleeping run with no last event at all (infinitely stale) is still not stalled', () => {
+    expect(derivedStatus('sleeping', 'none', undefined, NOW)).toBe('sleeping');
+  });
 });
 
 describe('toRunRow: bakes the derived status and carries driver evidence', () => {
@@ -164,6 +184,24 @@ describe('toRunRow: bakes the derived status and carries driver evidence', () =>
       NOW,
     );
     expect(r.status).toBe('stalled');
+    expect(r.driver).toBe('none');
+  });
+
+  // THE STATED ACCEPTANCE CASE: a sleeping run reporting driver: "none" (its normal resting
+  // state, parked on a durable timer) and an event past STALL_GRACE_MS must NOT become stalled.
+  it('a sleeping run driverless and stale stays sleeping on the row (no driver while asleep is by design)', () => {
+    const r = toRunRow(
+      {
+        run: 'r1',
+        status: { state: 'sleeping', raw: { wake_at: '2026-08-20T09:00:00Z' } },
+        eventCount: 2,
+        lastRecordedAt: stale,
+        driver: 'none',
+        raw: {},
+      },
+      NOW,
+    );
+    expect(r.status).toBe('sleeping');
     expect(r.driver).toBe('none');
   });
 });

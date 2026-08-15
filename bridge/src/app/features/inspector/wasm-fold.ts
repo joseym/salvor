@@ -33,6 +33,7 @@ export type RunStatusJson =
   | { kind: 'AwaitingModel' }
   | { kind: 'AwaitingTool' }
   | { kind: 'Suspended'; reason: string; input_schema: unknown }
+  | { kind: 'Sleeping'; wake_at: string }
   | { kind: 'BudgetExceeded'; budget: Budget; observed: number }
   | { kind: 'NeedsReconciliation' }
   | { kind: 'Completed'; output: unknown }

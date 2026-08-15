@@ -184,6 +184,17 @@
 .band.is-abandoned .mono {
   color: var(--fg-2);
 }
+/* SLEEPING band: parked on a durable timer, PROGRESS not waiting (see run-model.ts GROUP). Muted
+   and neutral, the same treatment as .is-abandoned: nothing here is an error or a to-do, so it
+   never takes the amber attention wash or the fail band's danger red. */
+.band.is-sleeping {
+  border-color: color-mix(in oklab, var(--muted), var(--fg) 12%);
+  background: var(--surface);
+  color: var(--fg-2);
+}
+.band.is-sleeping .mono {
+  color: var(--fg-2);
+}
 
 /* ── log toolbar + head ── */
 .lbar {

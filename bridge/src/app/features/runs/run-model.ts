@@ -24,6 +24,15 @@ export const GROUP: Readonly<Record<string, Group>> = {
   awaiting_model: 'progress',
   awaiting_tool: 'progress',
   not_started: 'progress',
+  /**
+   * PROGRESS, not waiting: mirrors the CLI's own call exactly (`status_group` in
+   * `crates/salvor-cli-core/src/render.rs`). `waiting` means a PERSON is the only thing that will
+   * move this run; a `sleeping` run is parked on a durable timer and continues on its OWN once its
+   * `wake_at` instant arrives, whether anyone reads the list or not. Grouping it with the approval
+   * queue would put a run nobody can act on into the one group that exists to be a to-do list, so
+   * it must never sit in the Inbox.
+   */
+  sleeping: 'progress',
   suspended: 'waiting',
   budget_exceeded: 'waiting',
   needs_reconciliation: 'waiting',
@@ -42,6 +51,7 @@ export const LABEL: Readonly<Record<string, string>> = {
   running: 'running',
   awaiting_model: 'awaiting model',
   awaiting_tool: 'awaiting tool',
+  sleeping: 'sleeping',
   suspended: 'suspended',
   budget_exceeded: 'budget exceeded',
   needs_reconciliation: 'needs reconciliation',
@@ -80,6 +90,13 @@ export const STALL_GRACE_MS = 10_000;
  *      derived as one: honesty over a guess, and
  *   3. its last event is older than {@link STALL_GRACE_MS}.
  *
+ * `sleeping` is carved out BEFORE any of the three checks run, even though it groups with
+ * `progress` (see {@link GROUP}): a run parked on a durable timer holds no driver BY DESIGN, for
+ * as long as its nap lasts, so `driver: "none"` on a sleeping run is the honest resting state, not
+ * evidence of anything gone quiet. Without this carve-out every sleeping run older than
+ * {@link STALL_GRACE_MS} would misread as stalled the instant its own design (no driver while
+ * asleep) is mistaken for a driver that dropped.
+ *
  * Returns the effective status: `stalled` when the rule fires, otherwise the
  * server's own `state` unchanged. This is the client's verdict over the
  * server's evidence, the same division of labor `status` itself has.
@@ -90,6 +107,7 @@ export function derivedStatus(
   last: string | undefined,
   now: number = Date.now(),
 ): string {
+  if (state === 'sleeping') return state;
   if (groupOf(state) !== 'progress' || driver !== 'none') return state;
   const lastMs = last ? Date.parse(last) : Number.NaN;
   const ageMs = Number.isNaN(lastMs) ? Number.POSITIVE_INFINITY : now - lastMs;

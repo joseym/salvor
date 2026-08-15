@@ -50,6 +50,9 @@ const WARN_ICO = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" str
 const FAIL_ICO = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="8" cy="8" r="6.4"/><path d="M5.6 5.6l4.8 4.8M10.4 5.6l-4.8 4.8"/></svg>`;
 // A hollow-slash mark (matching the muted `⊘` on the abandoned pill): a terminal, non-error close.
 const ABANDON_ICO = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="8" cy="8" r="6.4"/><path d="M3.6 3.6l8.8 8.8"/></svg>`;
+// A clock face: sleeping is a wait on an INSTANT, not on a person, so the icon names time, never
+// alarm (this is not an attention band).
+const SLEEP_ICO = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="8" cy="8" r="6.4"/><path d="M8 4.6v3.6l2.6 1.6"/></svg>`;
 
 function info(why: string): string {
   return `<button class="info" type="button" title="${esc(why)}" aria-label="${esc(why)}">i</button>`;
@@ -543,6 +546,15 @@ export class Inspector implements AfterViewInit {
       return `<div class="band is-stalled">${WARN_ICO}
         <span><b>Stalled.</b> <span class="mono">${esc(labelOf(state))}</span>: last event ${esc(this.lastEventAge())} ago, no driver attached. No task is driving this run and no client lease is current; restart the driver that owns it, or resolve/abandon.</span>
         <button class="link-btn" type="button" data-goto="inbox">See in inbox</button></div>`;
+    }
+    // SLEEPING: a run parked on a durable timer, PROGRESS not waiting (see
+    // `run-model.ts` GROUP, mirroring the CLI's `status_group`): nothing here asks the operator
+    // for anything, so this reads neutral like `is-abandoned`, never the amber attention family
+    // or a fail band, and renders no action button. It moves on its own once its instant passes.
+    if (state === 'sleeping') {
+      const wakeAt = st.status.kind === 'Sleeping' ? st.status.wake_at : undefined;
+      return `<div class="band is-sleeping">${SLEEP_ICO}
+        <span><b>Sleeping.</b> Wakes at <span class="mono">${wakeAt ? esc(clock(wakeAt)) : '-'}</span>; nothing to do until then. The run continues on its own once the instant passes.</span></div>`;
     }
     if (!isWaitingState(state)) return '';
     const action: Record<string, [string, string]> = {

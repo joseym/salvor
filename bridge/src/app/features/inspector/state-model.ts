@@ -28,6 +28,8 @@ export function statusStateOf(status: RunStatusJson): string {
       return 'awaiting_tool';
     case 'Suspended':
       return 'suspended';
+    case 'Sleeping':
+      return 'sleeping';
     case 'BudgetExceeded':
       return 'budget_exceeded';
     case 'NeedsReconciliation':
