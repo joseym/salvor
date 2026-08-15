@@ -522,6 +522,14 @@
             <p class="wf-why">Each pass runs through a node of this same document, named by id.</p>
           </div>
         }
+        @if (n.kind === 'delay') {
+          <div class="wf-field"><label for="wf-f-seconds">seconds</label>
+            <input id="wf-f-seconds" type="number" min="1" step="1" [value]="n.seconds ?? 0" [readOnly]="readOnly()" (input)="editSeconds($event)" />
+            <p class="wf-why">A durable wait, in whole seconds, before the walk continues. A duration,
+              never an absolute instant: the engine resolves the wake instant when the walk reaches
+              this node, so the same document replays identically no matter how many times it runs.</p>
+          </div>
+        }
         <!-- THE EDGES this node is an end of, both directions, addressed by their position in the
              document's edge list, which is what a validator error names an edge by. A case select
              appears exactly where the format allows a case: on an edge out of a branch. -->

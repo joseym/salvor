@@ -290,6 +290,9 @@
 .wf-node[data-kind='fold'] {
   --wf-rail: color-mix(in oklab, var(--accent), var(--success));
 }
+.wf-node[data-kind='delay'] {
+  --wf-rail: color-mix(in oklab, var(--accent), var(--muted));
+}
 .wf-node:hover {
   border-color: var(--fg-2);
 }

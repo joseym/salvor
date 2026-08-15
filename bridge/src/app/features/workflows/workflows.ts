@@ -1504,6 +1504,10 @@ export class Workflows implements AfterViewInit {
     const v = (event.target as HTMLInputElement).value;
     this.editSelected((n) => withDocFields({ ...n, stopWhen: v }, { stop_when: v }));
   }
+  editSeconds(event: Event): void {
+    const v = Number((event.target as HTMLInputElement).value);
+    this.editSelected((n) => withDocFields({ ...n, seconds: v }, { seconds: v }));
+  }
   /** The node a map maps each element through, or a fold runs each pass. A body names a node in this
    * same document, so this is a choice among the ids the document has, never free text. */
   editBody(event: Event): void {
@@ -1826,6 +1830,8 @@ function nodeFields(n: WfNode): string[] {
       return [String(n.over ?? '').replace(/[${}]/g, '')];
     case 'fold':
       return [String(n.stopWhen ?? '').replace(/[${}]/g, '')];
+    case 'delay':
+      return [`${n.seconds ?? 0}s`];
     default:
       return [];
   }

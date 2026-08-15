@@ -133,6 +133,30 @@ describe('validateGraph', () => {
     expect(fixedBlank.nodes.find((n) => n.id === 'a')?.name).toBe('a'); // reverts to the id
     expect(validateGraph(fixedBlank).some((e) => e.code === 'name_empty')).toBe(false);
   });
+
+  // Aligned to the server's own rule (`salvor_graph::validate::NonPositiveDelay`): a zero-second
+  // wait is refused the same way a zero-worker fan-out is, one-click fixable to the same floor (1).
+  it('a delay of zero (or unset) seconds is reported, with a one-click fix to 1', () => {
+    const g: WfGraph = {
+      ...CLEAN,
+      nodes: [...CLEAN.nodes, { id: 'd', kind: 'delay', name: 'd', seconds: 0 }],
+    };
+    const err = validateGraph(g).find((e) => e.code === 'bad_seconds');
+    expect(err?.node).toBe('d');
+    expect(err?.fix).toMatchObject({ kind: 'set_seconds', id: 'd' });
+
+    const fixed = applyFix(g, err!.fix!);
+    expect(fixed.nodes.find((n) => n.id === 'd')?.seconds).toBe(1);
+    expect(validateGraph(fixed).some((e) => e.code === 'bad_seconds')).toBe(false);
+  });
+
+  it('a positive delay is unreported', () => {
+    const g: WfGraph = {
+      ...CLEAN,
+      nodes: [...CLEAN.nodes, { id: 'd', kind: 'delay', name: 'd', seconds: 60 }],
+    };
+    expect(validateGraph(g).some((e) => e.code === 'bad_seconds')).toBe(false);
+  });
 });
 
 describe('applyFix: every one-click offer, applied through the same pure path', () => {

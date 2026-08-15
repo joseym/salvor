@@ -28,6 +28,7 @@ export interface WfFix {
   readonly kind:
     | 'rename_dupe'
     | 'set_concurrency'
+    | 'set_seconds'
     | 'repoint'
     | 'repoint_body'
     | 'drop_label'
@@ -50,6 +51,7 @@ export interface WfError {
     | 'duplicate_id'
     | 'bad_agent_hash'
     | 'bad_concurrency'
+    | 'bad_seconds'
     | 'bad_effect'
     | 'unrealized_case'
     | 'model_decision_without_agent'
@@ -144,6 +146,17 @@ export function validateGraph(g: WfGraph): WfError[] {
         node: n.id,
         msg: `${n.id} has concurrency ${n.concurrency}. A fan-out over a list needs at least one worker.`,
         fix: { label: 'Set concurrency to 1', kind: 'set_concurrency', id: n.id },
+      });
+    }
+    // Aligned to the server's own rule (`salvor_graph::validate::NonPositiveDelay`): a zero (or
+    // negative) wait would still park nothing and record a clock reading nobody asked for, so the
+    // floor is the same "at least 1" the map worker count and fold iteration bound already hold.
+    if (n.kind === 'delay' && !((n.seconds ?? 0) > 0)) {
+      errs.push({
+        code: 'bad_seconds',
+        node: n.id,
+        msg: `${n.id} waits ${n.seconds} seconds. A durable wait needs at least one second.`,
+        fix: { label: 'Set seconds to 1', kind: 'set_seconds', id: n.id },
       });
     }
     // A map's or fold's body names a node in THIS document (the format's other form, an embedded
@@ -326,6 +339,11 @@ export function applyFix(g: WfGraph, fix: WfFix): WfGraph {
         nodes: g.nodes.map((n) =>
           n.id === fix.id ? withDocFields({ ...n, concurrency: 1 }, { concurrency: 1 }) : n,
         ),
+      };
+    case 'set_seconds':
+      return {
+        ...g,
+        nodes: g.nodes.map((n) => (n.id === fix.id ? withDocFields({ ...n, seconds: 1 }, { seconds: 1 }) : n)),
       };
     case 'repoint':
       return {
