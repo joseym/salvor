@@ -1,0 +1,381 @@
+#!/usr/bin/env python3
+"""The accounts-desk MCP server: the four tools this example's graph runs on.
+
+Pure Python standard library. An MCP server over stdio is a program that reads
+newline-delimited JSON-RPC 2.0 requests on stdin and writes responses on stdout,
+so the four methods a Salvor run needs (initialize, tools/list, tools/call, and
+ping) are handled by hand below. No `mcp` package, no venv, no Salvor code, and
+no model anywhere in this example: the graph walks tool nodes only.
+
+Four tools, one per step of a follow-up:
+
+- `send_reminder` (Write): appends ONE line to the reminders ledger, keyed on
+  the invoice id, so a second call for an invoice already reminded records
+  nothing and says so. It carries no annotation, so Salvor's conservative
+  default already reads it as a Write, and `agents/accounts-desk.toml` pins it
+  besides. This is the step the timer proof cares about: it happens BEFORE the
+  cool-off, and it must still have happened exactly once after the wake.
+- `check_payment` (Read, `readOnlyHint: true`): reads the payments file and
+  answers whether this invoice has been paid. Re-reading changes nothing, so an
+  interrupted call is freely retried. This is the tool that reads the world, and
+  the whole point of the example is WHEN it reads it: after the wake, not before
+  the nap.
+- `close_invoice` (Write): appends one line to the closed ledger. The paid arm.
+- `escalate` (Write): appends one line to the escalations ledger. The unpaid
+  arm.
+
+Every tool answers with `structuredContent` as well as text. Salvor records the
+WHOLE tool result as the node's output, so `structuredContent` is what the
+graph's branch expression reads (`structuredContent.paid == true`) and what the
+next node sees as its input. Text alone would leave a branch with nothing typed
+to route on.
+
+A graph's `tool` node hands the node's input straight through as the tool call's
+arguments, so every tool here reads its invoice from either the bare arguments
+(the graph input, at the first node) or from a `structuredContent` object (the
+previous tool's whole result, at every node after it). `_record` is that one
+rule, written once.
+
+Configuration comes from the environment, set by `run.sh` and inherited by this
+process through the agent definition that spawns it:
+
+- SALVOR_FOLLOWUP_PAYMENTS: the payments file `check_payment` reads. A JSON
+  object keyed by invoice id. An absent file means nothing has been paid, which
+  is what an accounts desk with no receipts on file actually knows.
+- SALVOR_FOLLOWUP_REMINDERS: the reminders ledger `send_reminder` appends to.
+- SALVOR_FOLLOWUP_CLOSED: the closed ledger `close_invoice` appends to.
+- SALVOR_FOLLOWUP_ESCALATIONS: the escalations ledger `escalate` appends to.
+
+All four default to plain names under the working directory, so the server runs
+with no configuration at all; the example points every one of them at a scratch
+path it owns, and nothing runtime ever lands in the repository.
+"""
+
+import json
+import os
+import sys
+
+PAYMENTS_PATH = os.environ.get("SALVOR_FOLLOWUP_PAYMENTS", "payments.json")
+REMINDERS_PATH = os.environ.get("SALVOR_FOLLOWUP_REMINDERS", "reminders.txt")
+CLOSED_PATH = os.environ.get("SALVOR_FOLLOWUP_CLOSED", "closed-invoices.txt")
+ESCALATIONS_PATH = os.environ.get("SALVOR_FOLLOWUP_ESCALATIONS", "escalations.txt")
+
+INVOICE_ARG = {
+    "type": "object",
+    "properties": {
+        "invoice_id": {"type": "string", "description": "The invoice id, e.g. `INV-2031`."},
+        "customer": {"type": "string"},
+        "amount_cents": {"type": "integer"},
+    },
+    "required": [],
+}
+
+TOOLS = [
+    {
+        "name": "send_reminder",
+        "description": (
+            "Send the customer the payment reminder for one invoice, by "
+            "appending one durable line to the reminders ledger. Keyed on the "
+            "invoice id: an invoice already reminded is not reminded twice."
+        ),
+        "inputSchema": INVOICE_ARG,
+        # Deliberately no annotation. An unannotated tool is a Write under
+        # Salvor's conservative default, which is the correct reading of a
+        # notice going out to a customer.
+    },
+    {
+        "name": "check_payment",
+        "description": (
+            "Read the payments file and report whether this invoice has been "
+            "paid, and for how much."
+        ),
+        "inputSchema": INVOICE_ARG,
+        # Reading the payments file changes nothing, so the hint is true and
+        # Salvor classifies this Read with no operator override needed.
+        "annotations": {"readOnlyHint": True},
+    },
+    {
+        "name": "close_invoice",
+        "description": (
+            "Close a paid invoice by appending one line to the closed ledger."
+        ),
+        "inputSchema": INVOICE_ARG,
+    },
+    {
+        "name": "escalate",
+        "description": (
+            "Escalate an unpaid invoice to collections by appending one line "
+            "to the escalations ledger."
+        ),
+        "inputSchema": INVOICE_ARG,
+    },
+]
+
+
+def send(message):
+    """Write one JSON-RPC message as a single line, then flush."""
+    sys.stdout.write(json.dumps(message) + "\n")
+    sys.stdout.flush()
+
+
+def ok(payload, text):
+    """A successful tool result: the text a reader reads, plus the structured
+    object a graph branch or a downstream node reads."""
+    return {
+        "content": [{"type": "text", "text": text}],
+        "structuredContent": payload,
+        "isError": False,
+    }
+
+
+def failed(text):
+    """A tool-reported failure. Salvor surfaces `isError` as a handler error."""
+    return {"content": [{"type": "text", "text": text}], "isError": True}
+
+
+def _record(arguments):
+    """The object carrying this call's invoice fields.
+
+    A `tool` node's input is whatever the node before it produced, and for a
+    tool node that is the previous tool's WHOLE result, so the fields sit one
+    level down under `structuredContent`. At the first node the input is the
+    graph input itself and the fields are right there. Prefer the nested object
+    when it names an invoice, fall back to the bare arguments otherwise, so
+    every tool here is fed the same way wherever it sits in the walk.
+    """
+    structured = arguments.get("structuredContent")
+    if isinstance(structured, dict) and structured.get("invoice_id"):
+        return structured
+    return arguments
+
+
+def _append(path, row):
+    """Append one JSON line and force it to disk. Once this returns, the line
+    is durable: nothing here retries and nothing here is undone."""
+    line = json.dumps(row, sort_keys=True)
+    with open(path, "a", encoding="utf-8") as ledger:
+        ledger.write(line + "\n")
+        ledger.flush()
+        os.fsync(ledger.fileno())
+
+
+def _holds(path, invoice_id):
+    """Whether `path` already carries a line for this invoice. A missing file
+    holds nothing, and an unparseable line is skipped rather than fatal."""
+    if not os.path.exists(path):
+        return False
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if row.get("invoice_id") == invoice_id:
+                return True
+    return False
+
+
+def load_payments():
+    """The payments on file. An absent or empty file means none."""
+    if not os.path.exists(PAYMENTS_PATH):
+        return {}
+    with open(PAYMENTS_PATH, encoding="utf-8") as handle:
+        text = handle.read()
+    if not text.strip():
+        return {}
+    try:
+        loaded = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def send_reminder(arguments):
+    record = _record(arguments)
+    invoice_id = record.get("invoice_id", "")
+    if not invoice_id:
+        return failed("no invoice_id in the arguments")
+    if _holds(REMINDERS_PATH, invoice_id):
+        # Keyed, so a re-drive that somehow reached this tool a second time
+        # cannot send a second reminder. The recorded log already prevents
+        # that; this is the tool refusing on its own account as well.
+        return ok(
+            {
+                "invoice_id": invoice_id,
+                "customer": record.get("customer", ""),
+                "amount_cents": record.get("amount_cents", 0),
+                "reminder_sent": False,
+                "already_reminded": True,
+                "ledger_path": REMINDERS_PATH,
+            },
+            f"{invoice_id} was already reminded; nothing sent",
+        )
+    _append(
+        REMINDERS_PATH,
+        {
+            "invoice_id": invoice_id,
+            "customer": record.get("customer", ""),
+            "amount_cents": record.get("amount_cents", 0),
+        },
+    )
+    return ok(
+        {
+            "invoice_id": invoice_id,
+            "customer": record.get("customer", ""),
+            "amount_cents": record.get("amount_cents", 0),
+            "reminder_sent": True,
+            "already_reminded": False,
+            "ledger_path": REMINDERS_PATH,
+        },
+        f"reminder sent to {record.get('customer', 'the customer')} on {invoice_id}",
+    )
+
+
+def check_payment(arguments):
+    record = _record(arguments)
+    invoice_id = record.get("invoice_id", "")
+    if not invoice_id:
+        return failed("no invoice_id in the arguments")
+    payment = load_payments().get(invoice_id)
+    paid = isinstance(payment, dict) and bool(payment.get("paid"))
+    payload = {
+        "invoice_id": invoice_id,
+        "customer": record.get("customer", ""),
+        "amount_cents": record.get("amount_cents", 0),
+        "paid": paid,
+        "paid_cents": payment.get("paid_cents", 0) if isinstance(payment, dict) else 0,
+        "payments_path": PAYMENTS_PATH,
+    }
+    verdict = "paid" if paid else "still unpaid"
+    return ok(payload, f"{invoice_id} is {verdict} as of this reading")
+
+
+def close_invoice(arguments):
+    record = _record(arguments)
+    invoice_id = record.get("invoice_id", "")
+    if not invoice_id:
+        return failed("no invoice_id in the arguments")
+    if not _holds(CLOSED_PATH, invoice_id):
+        _append(
+            CLOSED_PATH,
+            {
+                "invoice_id": invoice_id,
+                "customer": record.get("customer", ""),
+                "paid_cents": record.get("paid_cents", 0),
+                "outcome": "closed",
+            },
+        )
+    return ok(
+        {"invoice_id": invoice_id, "outcome": "closed", "ledger_path": CLOSED_PATH},
+        f"{invoice_id} closed: payment received",
+    )
+
+
+def escalate(arguments):
+    record = _record(arguments)
+    invoice_id = record.get("invoice_id", "")
+    if not invoice_id:
+        return failed("no invoice_id in the arguments")
+    if not _holds(ESCALATIONS_PATH, invoice_id):
+        _append(
+            ESCALATIONS_PATH,
+            {
+                "invoice_id": invoice_id,
+                "customer": record.get("customer", ""),
+                "amount_cents": record.get("amount_cents", 0),
+                "outcome": "escalated",
+            },
+        )
+    return ok(
+        {
+            "invoice_id": invoice_id,
+            "outcome": "escalated",
+            "ledger_path": ESCALATIONS_PATH,
+        },
+        f"{invoice_id} escalated to collections: no payment after the cool-off",
+    )
+
+
+HANDLERS = {
+    "send_reminder": send_reminder,
+    "check_payment": check_payment,
+    "close_invoice": close_invoice,
+    "escalate": escalate,
+}
+
+
+def handle(request):
+    """Answer one request. Returns a response dict, or None for a notification."""
+    method = request.get("method")
+    request_id = request.get("id")
+
+    if method == "initialize":
+        # Echo the client's protocol version back so the two always agree.
+        protocol_version = request.get("params", {}).get(
+            "protocolVersion", "2025-06-18"
+        )
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {
+                "protocolVersion": protocol_version,
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "salvor-accounts-desk", "version": "0.1.0"},
+            },
+        }
+
+    # A notification (no id): the handshake's completion. No response.
+    if method in ("notifications/initialized", "initialized"):
+        return None
+
+    if method == "ping":
+        return {"jsonrpc": "2.0", "id": request_id, "result": {}}
+
+    if method == "tools/list":
+        return {"jsonrpc": "2.0", "id": request_id, "result": {"tools": TOOLS}}
+
+    if method == "tools/call":
+        params = request.get("params", {})
+        name = params.get("name")
+        arguments = params.get("arguments", {})
+        handler = HANDLERS.get(name)
+        if handler is None:
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {"code": -32602, "message": f"unknown tool: {name}"},
+            }
+        return {"jsonrpc": "2.0", "id": request_id, "result": handler(arguments)}
+
+    # Unknown method: an error for a request, silence for a notification.
+    if request_id is not None:
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {"code": -32601, "message": f"method not found: {method}"},
+        }
+    return None
+
+
+def main():
+    # Reading to EOF is also the shutdown path: when the salvor process that
+    # spawned this one exits, stdin closes and this loop ends, so no server
+    # outlives the run that owns it. That is why a sleeping run holds no
+    # process: the CLI returns at the park and takes this child with it.
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            request = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        response = handle(request)
+        if response is not None:
+            send(response)
+
+
+if __name__ == "__main__":
+    main()
