@@ -234,6 +234,53 @@ them are worth a retry: treat it as an integrity incident and go back
 to a backup that reads clean. Restoring a store whose chain does not
 verify puts a log into service that `read_log` will keep refusing.
 
+## Waking sleeping runs
+
+A run parked on a durable timer (`sleeping`, with a `wake_at`) does not wake
+itself. `salvor serve` sweeps for due timers every 60 seconds by default;
+`--wake-interval SECS` changes that cadence, and `--wake-interval 0` turns
+the sweep off, no task spawned.
+
+For a store no running server is watching, cron does the sweeping instead.
+`salvor wake` finds every run whose `wake_at` has passed, drives each one,
+and exits, so it drops straight into a crontab line:
+
+```
+* * * * * salvor wake --store /var/lib/salvor/salvor.db --agent /etc/salvor/agents/reminder.toml
+```
+
+A store gets one waker, not both: the server's sweep, or cron running
+`salvor wake` with the server started at `--wake-interval 0`, because the
+sweep only skips runs it is already driving itself and has no way to know
+about a second drive cron started on the same run.
+
+`wake` takes the same `--agent` (repeatable) and `--graph` a `resume` would
+need, and for the same reason: the log records an agent run by its agent's
+content hash and a graph run by the document's hash, never the definition
+itself, so waking a run rebuilds it from the same files its author last ran
+it with. `--dry-run` prints which runs are due and what waking each would
+need, without driving anything.
+
+A sleeping run holds no lock, no idempotency claim, and no process.
+`SleepStarted` is recorded only after whatever came before it has already
+settled, whether that is a tool's completion and its idempotency claim or a
+graph node's own entry, so a sleeping run has nothing outstanding for a
+restart or a backup to catch mid-flight. Restarting the server or backing up
+the store while a run sleeps is exactly as safe as doing either while a run
+sits idle between steps.
+
+Sweeps select on the recorded deadline, not on when they happen to run: a
+sweep only ever picks up a run whose `wake_at` has already passed, so firing
+one early, from a short `--wake-interval` or an off-cadence cron line, finds
+nothing and drives nothing. A run that has woken is no longer `sleeping`, so
+an overlapping sweep, whether a second cron line or an overlapping server
+sweep, does not see it as due either. A sweep can run early or run twice
+without waking anything early or twice. The one path that can arrive before
+the deadline is a person: `salvor resume` and `POST /v1/runs/{id}/resume`
+both reach the run directly, and both are refused rather than silently
+ignored, with the time remaining on the CLI and `409 still_sleeping` over
+HTTP.
+
 ## Retention
 
 Salvor has no retention. There is no pruning, rotation, expiry, or
