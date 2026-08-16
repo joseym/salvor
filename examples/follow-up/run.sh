@@ -178,11 +178,11 @@ count_lines() {
   printf '%s' "$count"
 }
 
-# The 1-based line number of the first line of <log> holding <text>, or the
-# empty string. Fixed-string matching, so a node id is a node id and not a
-# pattern.
-line_of() {
-  grep -nF -- "$2" <<<"$1" | head -1 | cut -d: -f1
+# The recorded seq number of the first line of <log> holding <text>, the
+# same number `salvor history` prints in its own first column, or the empty
+# string. Fixed-string matching, so a node id is a node id and not a pattern.
+seq_of() {
+  grep -F -- "$2" <<<"$1" | head -1 | awk '{print $1}'
 }
 
 # Multi-line CLI prose flattened to one line, so a `grep` for a sentence cannot
@@ -396,15 +396,15 @@ printf '%s\n' "$A_HIST"
 
 # --- The proof, assertion by assertion. ---
 echo
-A_EXIT_REMINDER=$(line_of "$A_HIST" 'exit send_reminder')
-A_SLEEP_START=$(line_of "$A_HIST" 'SleepStarted')
-A_SLEEP_DONE=$(line_of "$A_HIST" 'SleepCompleted')
+A_EXIT_REMINDER=$(seq_of "$A_HIST" 'exit send_reminder')
+A_SLEEP_START=$(seq_of "$A_HIST" 'SleepStarted')
+A_SLEEP_DONE=$(seq_of "$A_HIST" 'SleepCompleted')
 if [[ -n "$A_EXIT_REMINDER" && -n "$A_SLEEP_START" && -n "$A_SLEEP_DONE" ]] \
    && (( A_EXIT_REMINDER < A_SLEEP_START )) && (( A_SLEEP_START < A_SLEEP_DONE )); then
-  echo "PROOF: the recorded order is send_reminder exited (line $A_EXIT_REMINDER), then SleepStarted (line $A_SLEEP_START), then SleepCompleted (line $A_SLEEP_DONE): the reminder went out before the nap and the nap really ended."
+  echo "PROOF: the recorded order is send_reminder exited (seq $A_EXIT_REMINDER), then SleepStarted (seq $A_SLEEP_START), then SleepCompleted (seq $A_SLEEP_DONE): the reminder went out before the nap and the nap really ended."
 else
   fail "the log to hold \`exit send_reminder\`, then SleepStarted, then SleepCompleted, in that order" \
-       "exit send_reminder at ${A_EXIT_REMINDER:-nowhere}, SleepStarted at ${A_SLEEP_START:-nowhere}, SleepCompleted at ${A_SLEEP_DONE:-nowhere}"
+       "exit send_reminder at seq ${A_EXIT_REMINDER:-nowhere}, SleepStarted at seq ${A_SLEEP_START:-nowhere}, SleepCompleted at seq ${A_SLEEP_DONE:-nowhere}"
 fi
 
 A_SLEEPS=$(grep -c 'SleepStarted' <<<"$A_HIST") || A_SLEEPS=0

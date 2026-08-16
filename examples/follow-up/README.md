@@ -116,6 +116,14 @@ refusal as its first step.
 
 ## What a park looks like, and what holds it
 
+Run verbatim from the repo root, this command inherits none of `run.sh`'s
+`SALVOR_FOLLOWUP_*` exports, so the four ledgers `server.py` writes
+(`SALVOR_FOLLOWUP_REMINDERS`, `SALVOR_FOLLOWUP_CLOSED`,
+`SALVOR_FOLLOWUP_ESCALATIONS`, `SALVOR_FOLLOWUP_PAYMENTS`) fall back to their
+defaults, plain filenames under the working directory, and land in the repo
+root. Export those four first, pointed at a scratch directory, to keep them
+out of it.
+
 ```
 $ salvor --store /tmp/salvor-follow-up-unpaid.db graph run \
     examples/follow-up/invoice-follow-up.json \
@@ -294,8 +302,11 @@ Paths are overridable, so it runs on a busy machine and in CI:
 overrides the binary path outright, which is how an already-installed CLI drives
 this instead of a checkout's build. No port is bound anywhere: there is no model
 server and no control plane here, because `salvor graph run` and `salvor wake`
-drive the store directly. Every ledger, store, and payments file lives under the
-scratch directory; nothing runtime is written into the repository.
+drive the store directly. Every ledger, store, and payments file `run.sh`
+produces lives under the scratch directory; running `run.sh` itself, nothing
+runtime is written into the repository. The commands earlier in this README,
+run by hand rather than through the script, do not carry that guarantee; see
+[above](#what-a-park-looks-like-and-what-holds-it).
 
 ## What an operator uses instead of the script's `sleep`
 
