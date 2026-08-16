@@ -636,6 +636,56 @@ mod tests {
         );
     }
 
+    /// The two rules together, in one log: a run waits ten minutes on a
+    /// human gate, then sleeps for three hours before waking. Only the sleep
+    /// span is excluded; the gate wait counts in full, so elapsed wall time
+    /// is the whole span minus just the sleep.
+    #[test]
+    fn a_gate_wait_and_a_sleep_in_the_same_log_are_treated_differently() {
+        const GATE_MINUTES: i64 = 10 * 60;
+        const SLEEP_HOURS: i64 = 3 * 60 * 60;
+
+        let mixed = budget_observations(&log(vec![
+            (0, started()),
+            (0, Event::NowObserved { now: base() }),
+            (
+                0,
+                Event::Suspended {
+                    reason: "awaiting approval".into(),
+                    input_schema: json!({"type": "object"}),
+                    kind: None,
+                },
+            ),
+            (
+                GATE_MINUTES,
+                Event::Resumed {
+                    input: json!({"approved": true}),
+                },
+            ),
+            (
+                GATE_MINUTES,
+                Event::SleepStarted {
+                    wake_at: base() + time::Duration::seconds(GATE_MINUTES + SLEEP_HOURS),
+                },
+            ),
+            (GATE_MINUTES + SLEEP_HOURS, Event::SleepCompleted {}),
+            (
+                GATE_MINUTES + SLEEP_HOURS,
+                Event::NowObserved {
+                    now: base() + time::Duration::seconds(GATE_MINUTES + SLEEP_HOURS),
+                },
+            ),
+        ]));
+        assert!(
+            (mixed.elapsed_seconds - seconds(GATE_MINUTES)).abs() < 1e-9,
+            "the total span minus the sleep is just the gate wait"
+        );
+        assert!(
+            crosses_wall_time(&mixed),
+            "the ten-minute gate wait alone crosses a one-minute budget"
+        );
+    }
+
     /// Checks fire on reaching the limit and honor absorbed extensions.
     #[test]
     fn crossing_fires_at_limit_and_extensions_raise_it() {
