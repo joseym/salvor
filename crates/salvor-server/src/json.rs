@@ -122,8 +122,19 @@ pub fn pending(pending: Option<&PendingCall>) -> Value {
 
 /// Formats a recorded instant as RFC 3339, the wire form every timestamp this
 /// API returns takes.
+///
+/// Infallible in practice, and deliberately: normalizing to UTC rules out an
+/// offset with seconds, and without the `time` crate's `large-dates` feature
+/// an `OffsetDateTime` cannot hold a year outside 0000..=9999. Those are the
+/// only two ways RFC 3339 formatting fails, and a recorded instant on this
+/// server can hit neither, so `unwrap_or_default` would only ever hide a bug
+/// behind a silently empty `"wake_at": ""` on the wire rather than surface
+/// it; matches `salvor_runtime::wire`'s private `rfc3339`.
 pub(crate) fn rfc3339(timestamp: OffsetDateTime) -> String {
-    timestamp.format(&Rfc3339).unwrap_or_default()
+    timestamp
+        .to_offset(time::UtcOffset::UTC)
+        .format(&Rfc3339)
+        .expect("an instant a run can hold formats as RFC 3339 in UTC")
 }
 
 /// The full derived-state object: the dry-run replay projection a client gets
