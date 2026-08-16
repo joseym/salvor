@@ -34,6 +34,15 @@
 //! reports sleeping only for a log that stopped), so the check is a guard
 //! against a stale read, not the normal case.
 //!
+//! # Nor fighting a client
+//!
+//! A run opened through `/v1/client-runs` is driven by its caller under a
+//! single-writer drive token, not by a task in this process, so
+//! [`AppState::is_run_active`] never sees it; a separate check
+//! ([`AppState::is_client_run`]) is what keeps the sweeper off it. Timers and
+//! signals are out of scope for client-driven runs for now, so a due one is
+//! left asleep here regardless of how overdue it is.
+//!
 //! # One bad run does not stop the sweep
 //!
 //! Every failure is per-run: an agent this server has never had registered, a
@@ -112,6 +121,23 @@ pub async fn sweep(state: &AppState) -> Vec<RunId> {
 
     let mut driven = Vec::new();
     for run in due {
+        // A client-driven run (opened through `/v1/client-runs`) holds a
+        // single-writer drive token that a caller presents on every append;
+        // `runs::redrive` spawning a server task against the same log would
+        // be a second writer racing the client for the same sequence
+        // numbers. Timers and signals are out of scope for client-driven
+        // runs for exactly that reason (design decision, 2026-08-05), so the
+        // sweeper leaves any run with a lease alone, current or lapsed: a
+        // lapsed lease still means a client opened this run and may resume
+        // driving it, not that this server may. It stays due; the client's
+        // own resume path (or a fresh open) is what wakes it.
+        if state.is_client_run(run.run_id) {
+            tracing::debug!(
+                run_id = %run.run_id.as_uuid(),
+                "skipping a due run that is client-driven"
+            );
+            continue;
+        }
         if state.is_run_active(run.run_id) {
             tracing::debug!(
                 run_id = %run.run_id.as_uuid(),
@@ -140,10 +166,14 @@ pub async fn sweep(state: &AppState) -> Vec<RunId> {
                 driven.push(run.run_id);
             }
             // Not an error of the sweeper's: this server cannot wake a run
-            // whose agent or graph it does not hold, and saying so at info
-            // level is honest rather than alarming. The run stays asleep and
-            // still due, so registering the definition is all it takes.
-            Err(error) => tracing::info!(
+            // whose agent or graph it does not hold. Still `warn!`, not
+            // `info!`: this fires every sweep interval for as long as the
+            // definition stays unregistered, which is exactly the kind of
+            // ongoing, actionable condition an operator should be able to
+            // find without turning on info-level noise. The run stays
+            // asleep and still due, so registering the definition is all it
+            // takes; no rate limiting here, a warn per sweep is honest.
+            Err(error) => tracing::warn!(
                 run_id = %run.run_id.as_uuid(),
                 ?error,
                 "cannot wake this run here; leaving it asleep"

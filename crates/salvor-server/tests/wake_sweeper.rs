@@ -198,6 +198,45 @@ async fn a_run_already_being_driven_here_is_skipped() {
     );
 }
 
+/// A client-driven run's due timer is left alone, before the sweeper even
+/// looks at whether it could rebuild the run: the client holds the
+/// single-writer drive token for it (the `/v1/client-runs` surface), so a
+/// server-spawned driver would be a second writer racing the client for the
+/// same sequence numbers. No agent is registered here, which is the point:
+/// the skip must happen ahead of anything redrive would need, not merely
+/// alongside it. The lease is registered the same way `/v1/client-runs` open
+/// records one, directly on the state, with no HTTP call and no server-side
+/// driver ever spawned for the run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_client_driven_runs_due_timer_is_left_alone() {
+    let store = memory_store();
+    let (state, builds, _model) = state_with_counter(store.clone()).await;
+
+    let run_id = seed_sleeping(&store, "sha256:any", NOW - time::Duration::hours(1)).await;
+    state.lease_client_run(run_id, false);
+
+    let before = builds.load(Ordering::SeqCst);
+    assert!(
+        salvor_server::sweep(&state).await.is_empty(),
+        "a client-driven run's due timer is not driven from here"
+    );
+    assert_eq!(
+        builds.load(Ordering::SeqCst),
+        before,
+        "and nothing was rebuilt to try"
+    );
+    assert_eq!(
+        store.read_log(run_id).await.expect("log reads").len(),
+        2,
+        "the log is untouched"
+    );
+    assert_eq!(
+        due_runs(store.as_ref(), NOW).await.expect("reads").len(),
+        1,
+        "still due, waiting on the client"
+    );
+}
+
 /// A run whose agent this server has never held cannot be woken here. That is
 /// reported and skipped, not raised: the run keeps its log, stays sleeping, and
 /// stays due, so registering the definition is all it takes for a later pass to
