@@ -135,7 +135,7 @@
             "required": false,
             "repeatable": false,
             "global": false,
-            "help": "Print which runs are due and what waking each would need, then exit without driving anything",
+            "help": "Print which runs are due, what each one recorded, and whether the files given would wake it, then exit without driving anything. Exits 1 when a due run could not be woken with these files, so a crontab line can be checked before it is saved",
             "possible_values": null
           }
         ],

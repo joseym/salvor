@@ -19,17 +19,73 @@
 //! genuinely continues to completion, since a loop replaying a sleep it never
 //! issued is a divergence. That case is proven at the runtime tier, over flows
 //! that really do sleep (`salvor-runtime`'s `sleep.rs` and `tool_sleep.rs`).
+//!
+//! # The one test here that runs no binary
+//!
+//! What a sweep says about a drive that came back with an error (a genuine
+//! failure of this invocation, or a run another driver got to first) turns on
+//! a decision that cannot be staged from out here: it takes two wakers racing
+//! at one run, down to the millisecond. The decision is a pure function of the
+//! error and of what the run looked like before and after, so it is tested as
+//! one, against the error a losing writer gets and the states a winning driver
+//! leaves behind.
 
 mod common;
 
 use std::path::Path;
 
 use common::run_salvor;
-use salvor_core::{Event, EventEnvelope, RunId, SequenceNumber};
-use salvor_store::{EventStore, SqliteStore};
+use salvor_cli::commands::{FailedWake, classify_failed_wake};
+use salvor_core::{Event, EventEnvelope, RunId, RunStatus, SequenceNumber};
+use salvor_engine::EngineError;
+use salvor_graph::Graph;
+use salvor_runtime::RuntimeError;
+use salvor_store::{EventStore, SqliteStore, StoreError};
 use serde_json::json;
 use tempfile::tempdir;
 use time::{Duration, OffsetDateTime};
+
+/// A single-gate graph document: it needs neither a model nor a tool, so a run
+/// seeded against it can be checked against the real file entirely offline.
+const GATE_GRAPH: &str = r#"{
+  "schema_version": 1,
+  "nodes": [
+    { "kind": "gate", "payload": { "id": "approve", "approval_schema": {
+      "type": "object",
+      "properties": { "approved": { "type": "boolean" } }
+    } } }
+  ],
+  "edges": []
+}"#;
+
+/// A different valid graph, so a `--graph` pointing at it is a real document
+/// that hashes to something else: the mismatch under test is the hash, not a
+/// parse failure.
+const OTHER_GRAPH: &str = r#"{
+  "schema_version": 1,
+  "nodes": [
+    { "kind": "gate", "payload": { "id": "sign-off", "approval_schema": {
+      "type": "object",
+      "properties": { "approved": { "type": "boolean" } }
+    } } }
+  ],
+  "edges": []
+}"#;
+
+/// The hash a run records for a graph document, computed with the engine's own
+/// function so a seeded log and a real file on disk agree the way the binary
+/// makes them agree.
+fn hash_of(document: &str) -> String {
+    let graph: Graph = serde_json::from_str(document).expect("a valid graph document");
+    salvor_engine::graph_hash(&graph).expect("the graph hashes")
+}
+
+/// Writes `document` into `dir` under `name` and returns the path.
+fn write_graph(dir: &Path, name: &str, document: &str) -> std::path::PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, document).expect("write");
+    path
+}
 
 /// Writes a run whose log ends at a started sleep, so it folds to `sleeping`
 /// with exactly this deadline. `head` opens the log: an agent run's
@@ -62,12 +118,65 @@ fn agent_head() -> Event {
 /// A graph run's head. The hash is opaque here: what makes this a graph run
 /// for every surface, `wake` included, is that the log opens with this event.
 fn graph_head() -> Event {
+    graph_head_recording("sha256:not-supplied-anywhere")
+}
+
+/// A graph run's head recording a particular document hash, for the cases that
+/// hand `wake` a real file and ask whether it is the one the run started with.
+fn graph_head_recording(graph_hash: &str) -> Event {
     Event::GraphRunStarted {
-        graph_hash: "sha256:not-supplied-anywhere".to_owned(),
+        graph_hash: graph_hash.to_owned(),
         input: json!("go"),
         labels: None,
         forked_from: None,
     }
+}
+
+/// Runs the `salvor` binary with a chosen `RUST_LOG`, so a test can read the
+/// progress log it writes to stderr. Otherwise exactly `common::run_salvor`,
+/// which quiets that log to keep it out of the way.
+async fn run_salvor_logging(store: &Path, level: &str, args: &[&str]) -> std::process::Output {
+    let store = store.to_owned();
+    let level = level.to_owned();
+    let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+    tokio::task::spawn_blocking(move || {
+        let mut command = common::salvor(&store);
+        command.env("RUST_LOG", level);
+        command.args(&args);
+        command.output().expect("salvor runs")
+    })
+    .await
+    .expect("blocking task joins")
+}
+
+/// An ordinary drive failure: nothing about it says a second writer is
+/// involved, so the run's own state has to answer for it.
+fn drive_error() -> anyhow::Error {
+    anyhow::anyhow!("the model call failed after the client's own retries")
+}
+
+/// The store refusing this drive's append because the position was already
+/// taken, wearing the two coats a real one arrives in: the runtime's
+/// `Store` variant (which carries the store error by value, not as a source)
+/// under a layer of anyhow context.
+fn position_conflict() -> anyhow::Error {
+    anyhow::Error::new(RuntimeError::Store(StoreError::Conflict {
+        run_id: RunId::new(),
+        seq: SequenceNumber::new(3),
+    }))
+    .context("re-driving the run")
+}
+
+/// The same refusal as a GRAPH drive hands it up: one more coat, the engine's
+/// `Runtime` variant, which is `#[error(transparent)]` and therefore hides
+/// both itself and the runtime error from a plain walk of the `source` chain.
+fn graph_position_conflict() -> anyhow::Error {
+    anyhow::Error::from(EngineError::Runtime(RuntimeError::Store(
+        StoreError::Conflict {
+            run_id: RunId::new(),
+            seq: SequenceNumber::new(8),
+        },
+    )))
 }
 
 /// How many events a run's log holds, for proving a dry run drove nothing.
@@ -131,10 +240,15 @@ async fn nothing_due_is_reported_and_succeeds() {
     );
 }
 
-/// `--dry-run` names every due run and how overdue it is, then exits 0 having
-/// appended nothing, exactly as `salvor fork --dry-run` previews a fork it does
-/// not create. Both an agent run and a graph run appear: what is due is a
-/// question about the log's deadline, not about what kind of run it is.
+/// `--dry-run` names every due run, how overdue it is, what the log says it is,
+/// and whether the files given would wake it, then appends nothing, exactly as
+/// `salvor fork --dry-run` previews a fork it does not create. Both an agent
+/// run and a graph run appear: what is due is a question about the log's
+/// deadline, not about what kind of run it is.
+///
+/// No `--agent` and no `--graph` are passed here, so neither run could be
+/// woken and the dry run exits 1: the whole point of previewing a crontab line
+/// is that running it says whether the line works.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_dry_run_lists_what_is_due_and_drives_nothing() {
     let dir = tempdir().expect("tempdir");
@@ -147,7 +261,7 @@ async fn a_dry_run_lists_what_is_due_and_drives_nothing() {
 
     let dry = run_salvor(&store, &["wake", "--dry-run"]).await;
     let out = String::from_utf8_lossy(&dry.stdout);
-    assert!(dry.status.success(), "a dry run succeeds: {dry:?}");
+    let flat = common::flatten_wrapped_prose(&out);
     assert!(out.contains("2 run(s) due to wake"), "the count: {out}");
     assert!(out.contains(&agent_run), "the agent run is listed: {out}");
     assert!(out.contains(&graph_run), "the graph run is listed: {out}");
@@ -157,8 +271,31 @@ async fn a_dry_run_lists_what_is_due_and_drives_nothing() {
         "each run says how far past its deadline it is: {out}"
     );
     assert!(
+        flat.contains("agent run, recorded definition sha256:not-registered-anywhere"),
+        "an agent run says what it is and what it recorded: {out}"
+    );
+    assert!(
+        flat.contains("graph run, recorded document sha256:not-supplied-anywhere"),
+        "and so does a graph run: {out}"
+    );
+    assert!(
+        flat.contains(
+            "cannot be woken with these files: resuming an agent run needs its definition"
+        ),
+        "with no --agent, the agent run reports the refusal a real wake gives: {out}"
+    );
+    assert!(
+        flat.contains("cannot be woken with these files: this is a graph run; pass --graph"),
+        "and with no --graph, so does the graph run: {out}"
+    );
+    assert!(
         out.contains("nothing was driven"),
         "and the report says so plainly: {out}"
+    );
+    assert_eq!(
+        dry.status.code(),
+        Some(1),
+        "neither due run could be woken with the files given: {out}"
     );
 
     for uuid in [&agent_run, &graph_run, &not_due] {
@@ -168,6 +305,275 @@ async fn a_dry_run_lists_what_is_due_and_drives_nothing() {
             "a dry run appends nothing to {uuid}"
         );
     }
+}
+
+/// The point of `--dry-run` is that it answers the question a real wake asks,
+/// against the files an operator is about to put in a crontab, without driving
+/// anything. So a due graph run is checked against the `--graph` given, and the
+/// three answers are the three a real wake would give, in a real wake's words:
+/// no document at all, the wrong document, and the one the run recorded.
+///
+/// The exit code carries the same answer, so `salvor wake --dry-run ...` is a
+/// smoke test for the line: 1 while a due run could not be woken with these
+/// files, 0 once every one of them could.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dry_run_checks_a_due_graph_run_against_the_document_given() {
+    let dir = tempdir().expect("tempdir");
+    let store = dir.path().join("salvor.db");
+    let now = OffsetDateTime::now_utc();
+
+    let recorded = hash_of(GATE_GRAPH);
+    let graph = write_graph(dir.path(), "gate.json", GATE_GRAPH);
+    let other = write_graph(dir.path(), "other.json", OTHER_GRAPH);
+    let uuid = seed_sleeping(
+        &store,
+        graph_head_recording(&recorded),
+        now - Duration::hours(1),
+    )
+    .await;
+
+    // No --graph: the run needs one, and says so in resume's own words.
+    let bare = run_salvor(&store, &["wake", "--dry-run"]).await;
+    let out = common::flatten_wrapped_prose(&String::from_utf8_lossy(&bare.stdout));
+    assert!(
+        out.contains(&format!("graph run, recorded document {recorded}")),
+        "the preview names the kind and the hash the log recorded: {out}"
+    );
+    assert!(
+        out.contains("cannot be woken with these files: this is a graph run; pass --graph"),
+        "and the refusal is the one a real wake gives: {out}"
+    );
+    assert_eq!(bare.status.code(), Some(1), "which is a failed preview");
+
+    // The wrong document: a valid graph, but not the one this run started
+    // with. The refusal is the hash mismatch, both hashes named.
+    let wrong = run_salvor(
+        &store,
+        &[
+            "wake",
+            "--dry-run",
+            "--graph",
+            other.to_str().expect("a utf-8 path"),
+        ],
+    )
+    .await;
+    let out = common::flatten_wrapped_prose(&String::from_utf8_lossy(&wrong.stdout));
+    assert!(
+        out.contains(&format!("hashes to {}", hash_of(OTHER_GRAPH)))
+            && out.contains(&format!("recorded {recorded}")),
+        "the mismatch names what was supplied and what the run recorded: {out}"
+    );
+    assert_eq!(wrong.status.code(), Some(1), "a wrong document cannot wake");
+
+    // The document the run recorded: it would wake, and the preview names the
+    // file it would be re-driven from.
+    let right = run_salvor(
+        &store,
+        &[
+            "wake",
+            "--dry-run",
+            "--graph",
+            graph.to_str().expect("a utf-8 path"),
+        ],
+    )
+    .await;
+    let out = common::flatten_wrapped_prose(&String::from_utf8_lossy(&right.stdout));
+    assert!(
+        out.contains(&format!("would wake with {}", graph.display())),
+        "the preview names the file that satisfies the run: {out}"
+    );
+    assert!(
+        right.status.success(),
+        "every due run can be woken with these files: {out}"
+    );
+
+    assert_eq!(
+        log_len(&store, &uuid).await,
+        2,
+        "and none of the three previews drove anything"
+    );
+}
+
+/// The reporting decision a sweep makes when a drive comes back with an error,
+/// tested at the seam where it is made rather than by staging a race.
+///
+/// Two `salvor wake` processes at one due run is ordinary operation: the store
+/// refuses the loser while the winner takes the run. What the loser must never
+/// do is print its own error as the run's news and tell an operator to re-drive
+/// a run another driver is finishing. Nothing here reads the error's text; two
+/// typed signals decide it. A store conflict on an append names the race
+/// outright, whatever the run reads as at that instant, because only a second
+/// writer can produce one. Failing that, the run's own state answers, on the
+/// rule that a drive which parked or finished a run returns success: a run
+/// found parked, completed, abandoned, or asleep on a NEW deadline was driven
+/// there by something else, while every other state is one this failing drive
+/// could have left itself.
+#[test]
+fn a_failed_drive_tells_a_lost_race_apart_from_a_drive_that_failed() {
+    let due_at = OffsetDateTime::now_utc() - Duration::hours(1);
+
+    // Untouched: this invocation genuinely could not drive the run, which is
+    // the failure a cron entry should hear about.
+    assert_eq!(
+        classify_failed_wake(
+            &drive_error(),
+            due_at,
+            2,
+            &RunStatus::Sleeping { wake_at: due_at },
+            2
+        ),
+        FailedWake::NotWoken
+    );
+
+    // The loser of a race, caught mid-flight: it opened the store while the
+    // winner was still driving, so the run reads `running` and only the
+    // store's own refusal says whose work that was.
+    assert_eq!(
+        classify_failed_wake(&position_conflict(), due_at, 2, &RunStatus::Running, 4),
+        FailedWake::TakenByAnotherDriver
+    );
+
+    // The same race lost by a GRAPH run, whose drive wraps the refusal one
+    // layer deeper. The run reads `awaiting-tool` here, which the status rule
+    // alone would call this sweep's own half-driven mess, so this case fails
+    // unless the conflict is recognized through both coats.
+    assert_eq!(
+        classify_failed_wake(
+            &graph_position_conflict(),
+            due_at,
+            2,
+            &RunStatus::AwaitingTool,
+            9
+        ),
+        FailedWake::TakenByAnotherDriver
+    );
+
+    // The loser of a race, arriving late: no append of its own to conflict
+    // with, but the winner drove the run to completion, which no failing drive
+    // of ours could have done.
+    assert_eq!(
+        classify_failed_wake(
+            &drive_error(),
+            due_at,
+            2,
+            &RunStatus::Completed {
+                output: json!("done")
+            },
+            6
+        ),
+        FailedWake::TakenByAnotherDriver
+    );
+
+    // The winner woke it and it parked at a gate: again a state only a drive
+    // that succeeded leaves behind.
+    assert_eq!(
+        classify_failed_wake(
+            &drive_error(),
+            due_at,
+            2,
+            &RunStatus::Suspended {
+                reason: "approve the payout".to_owned(),
+                input_schema: json!({ "type": "object" })
+            },
+            5
+        ),
+        FailedWake::TakenByAnotherDriver
+    );
+
+    // The winner woke it and it went back to sleep on a later timer: the new
+    // deadline is the proof that a drive got past this one.
+    assert_eq!(
+        classify_failed_wake(
+            &drive_error(),
+            due_at,
+            2,
+            &RunStatus::Sleeping {
+                wake_at: due_at + Duration::days(1)
+            },
+            4
+        ),
+        FailedWake::TakenByAnotherDriver
+    );
+
+    // A drive that broke partway is NOT a lost race, however much the run
+    // moved: this sweep may well be what left it half-driven, so it stays a
+    // failure and keeps the triage that says the run is resumable.
+    assert_eq!(
+        classify_failed_wake(&drive_error(), due_at, 2, &RunStatus::AwaitingTool, 5),
+        FailedWake::NotWoken
+    );
+    assert_eq!(
+        classify_failed_wake(
+            &drive_error(),
+            due_at,
+            2,
+            &RunStatus::Failed {
+                error: "the graph refuses on every drive".to_owned()
+            },
+            4
+        ),
+        FailedWake::NotWoken
+    );
+}
+
+/// A run woken on schedule has not crashed, and the log must not say it has.
+/// Every timer wake takes the recover path, because continuing a sleeping run
+/// and continuing a crashed one are the same act; only the wording separates
+/// them, and an operator reading "recovering crashed run" out of a nightly
+/// cron entry goes looking for a fault that never happened.
+///
+/// Both kinds of run are woken here, so both wordings are pinned in one pass.
+/// Neither drive gets far (a seeded log replays against a definition and a
+/// document it never really ran), which is beside the point: the line under
+/// test is written before the drive, and WHY the run is being driven is
+/// settled before then too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_scheduled_wake_says_it_is_waking_a_sleeping_run() {
+    let dir = tempdir().expect("tempdir");
+    let store = dir.path().join("salvor.db");
+    let now = OffsetDateTime::now_utc();
+
+    let agent = dir.path().join("agent.toml");
+    std::fs::write(&agent, "model = \"claude-test-model\"\n").expect("write agent toml");
+    let graph = write_graph(dir.path(), "gate.json", GATE_GRAPH);
+    let agent_run = seed_sleeping(&store, agent_head(), now - Duration::hours(2)).await;
+    seed_sleeping(
+        &store,
+        graph_head_recording(&hash_of(GATE_GRAPH)),
+        now - Duration::hours(1),
+    )
+    .await;
+
+    let woke = run_salvor_logging(
+        &store,
+        "info",
+        &[
+            "wake",
+            "--agent",
+            agent.to_str().expect("a utf-8 path"),
+            "--graph",
+            graph.to_str().expect("a utf-8 path"),
+        ],
+    )
+    .await;
+    let errors = String::from_utf8_lossy(&woke.stderr);
+    assert!(
+        errors.contains("waking sleeping run"),
+        "a due agent run is woken, not recovered: {errors}"
+    );
+    assert!(
+        errors.contains("waking sleeping graph run"),
+        "and so is a due graph run: {errors}"
+    );
+    assert!(
+        !errors.contains("recovering crashed"),
+        "nothing in the log calls a scheduled wake a crash: {errors}"
+    );
+    assert_eq!(
+        log_len(&store, &agent_run).await,
+        2,
+        "the agent run's drive appended nothing, so it is still due"
+    );
 }
 
 /// A due agent run is routed straight into `resume`'s own path, so it inherits

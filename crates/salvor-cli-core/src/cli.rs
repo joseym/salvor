@@ -348,8 +348,10 @@ pub struct WakeArgs {
     /// recorded. Omit when no due run is a graph run.
     #[arg(long, value_name = "FILE")]
     pub graph: Option<PathBuf>,
-    /// Print which runs are due and what waking each would need, then exit
-    /// without driving anything.
+    /// Print which runs are due, what each one recorded, and whether the files
+    /// given would wake it, then exit without driving anything. Exits 1 when a
+    /// due run could not be woken with these files, so a crontab line can be
+    /// checked before it is saved.
     #[arg(long)]
     pub dry_run: bool,
 }
