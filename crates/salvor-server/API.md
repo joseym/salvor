@@ -484,12 +484,13 @@ the same mapping `salvor resume` uses:
 - `409 still_sleeping` when the run is parked on a durable timer whose instant
   has not arrived. Nothing is recorded and no driver is spawned, so the run is
   exactly as asleep as it was; retry at `wake_at` or later, or leave it to the
-  wake sweeper:
+  wake sweeper if this server holds the agent or graph the run recorded, or run
+  `salvor wake` with the run's files if it does not:
 
 ```json
 { "error": {
   "code": "still_sleeping",
-  "message": "run ... is sleeping until 2026-08-14T09:00:00Z and cannot be resumed for another 1740s ...",
+  "message": "run ... is sleeping until 2026-08-14T09:00:00Z and cannot be resumed for another 1740s. It is not waiting on input: it continues when its deadline passes and something re-drives it: this server's wake sweeper, when it holds the agent or graph the run recorded, or salvor wake with the run's files",
   "details": { "wake_at": "2026-08-14T09:00:00Z", "remaining_seconds": 1740 }
 } }
 ```

@@ -444,7 +444,8 @@ pub async fn resume(
                     message: format!(
                         "run {} is sleeping until {} and cannot be resumed for another {}s. It is \
                          not waiting on input: it continues when its deadline passes and something \
-                         re-drives it, which the wake sweeper does on its interval",
+                         re-drives it: this server's wake sweeper, when it holds the agent or graph \
+                         the run recorded, or salvor wake with the run's files",
                         run_id.as_uuid(),
                         json::rfc3339(wake_at),
                         remaining.whole_seconds(),
@@ -627,11 +628,37 @@ fn spawn_drive(state: AppState, run_id: RunId, built: BuiltAgent, verb: DriveVer
         };
         close_servers(servers).await;
         if let Err(error) = result {
-            tracing::error!(run_id = %run_id.as_uuid(), %error, "run drive ended with an error");
+            if is_position_conflict(&error) {
+                // Not a failure of this drive: another driver (a second server
+                // on this store, or a CLI `salvor wake`) won the race to the
+                // next position first. Exactly-once still held; this drive
+                // simply recorded nothing past the conflict, so `error!` would
+                // page an operator over something that self-healed.
+                tracing::info!(
+                    run_id = %run_id.as_uuid(),
+                    %error,
+                    "another driver took this run; this drive recorded nothing past the conflict"
+                );
+            } else {
+                tracing::error!(run_id = %run_id.as_uuid(), %error, "run drive ended with an error");
+            }
         }
         task_state.end_run(run_id);
     });
     state.set_handle(run_id, handle);
+}
+
+/// Whether a drive error is a lost position race rather than a real failure:
+/// the store rejected an append because another driver already recorded an
+/// event at that `(run_id, seq)`. Matched by TYPE, not by string, since the
+/// same `StoreError::Conflict` wording can arrive wrapped in unrelated ways.
+/// Mirrors `salvor-cli`'s `is_position_conflict` (read, not imported: the CLI
+/// crate is not a server dependency).
+fn is_position_conflict(error: &RuntimeError) -> bool {
+    matches!(
+        error,
+        RuntimeError::Store(salvor_store::StoreError::Conflict { .. })
+    )
 }
 
 /// Rebuilds the agent a run started under, from the definition registered

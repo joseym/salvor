@@ -176,7 +176,8 @@ pub async fn sweep(state: &AppState) -> Vec<RunId> {
             Err(error) => tracing::warn!(
                 run_id = %run.run_id.as_uuid(),
                 ?error,
-                "cannot wake this run here; leaving it asleep"
+                "cannot wake this run here; leaving it asleep; wake it with salvor wake, \
+                 passing the --agent/--graph files it was started with"
             ),
         }
     }

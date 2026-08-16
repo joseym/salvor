@@ -659,11 +659,42 @@ fn spawn_graph_drive(
         let result = drive_graph(&task_state, run_id, &graph, &agents, &registry, verb).await;
         close_servers(servers).await;
         if let Err(error) = result {
-            tracing::error!(run_id = %run_id.as_uuid(), %error, "graph run drive ended with an error");
+            if is_position_conflict(&error) {
+                // Not a failure of this drive: another driver (a second server
+                // on this store, or a CLI `salvor wake`) won the race to the
+                // next position first. Exactly-once still held; this drive
+                // simply recorded nothing past the conflict, so `error!` would
+                // page an operator over something that self-healed.
+                tracing::info!(
+                    run_id = %run_id.as_uuid(),
+                    %error,
+                    "another driver took this run; this drive recorded nothing past the conflict"
+                );
+            } else {
+                tracing::error!(run_id = %run_id.as_uuid(), %error, "graph run drive ended with an error");
+            }
         }
         task_state.end_run(run_id);
     });
     state.set_handle(run_id, handle);
+}
+
+/// Whether a graph drive error is a lost position race rather than a real
+/// failure: the store rejected an append because another driver already
+/// recorded an event at that `(run_id, seq)`. Matched by TYPE, not by string:
+/// `EngineError::Runtime` is `#[error(transparent)]`, so it forwards
+/// `source()` to the wrapped `RuntimeError`, which itself carries its
+/// `StoreError` with no `#[source]`; downcasting the chain would never reach
+/// the `Conflict` this checks, so the match walks the concrete variants
+/// directly instead. Mirrors `salvor-cli`'s `is_position_conflict` (read, not
+/// imported: the CLI crate is not a server dependency).
+fn is_position_conflict(error: &salvor_engine::EngineError) -> bool {
+    matches!(
+        error,
+        salvor_engine::EngineError::Runtime(salvor_runtime::RuntimeError::Store(
+            salvor_store::StoreError::Conflict { .. }
+        ))
+    )
 }
 
 /// Builds the run's [`RunCtx`] and drives the engine over it. A resume seeds the
