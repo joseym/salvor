@@ -27,7 +27,7 @@ pub enum StoreError {
     /// first. This is load-bearing: on resume, a re-attempted append lands
     /// here, which is how a duplicate write is caught instead of silently
     /// doubling history. Match this variant to handle the collision.
-    #[error("event already recorded at run {run_id:?}, seq {seq:?}")]
+    #[error("event already recorded at run {}, seq {}", .run_id.as_uuid(), .seq.get())]
     Conflict {
         /// The run whose log the collision happened in.
         run_id: RunId,
