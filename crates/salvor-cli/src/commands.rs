@@ -439,24 +439,7 @@ pub async fn wake(store_path: &Path, args: WakeArgs) -> Result<u8> {
                             %error,
                             "another driver moved this run while this drive was failing"
                         );
-                        let label = render::status_label(&status);
-                        // A run still in motion is a different sentence from a
-                        // run already finished: "is now running" on its own
-                        // reads as this sweep's doing, when the truth is that
-                        // the other driver is still at work on it.
-                        if matches!(
-                            status,
-                            RunStatus::Completed { .. }
-                                | RunStatus::Failed { .. }
-                                | RunStatus::Abandoned { .. }
-                        ) {
-                            println!("  {uuid} was picked up by another driver and is now {label}");
-                        } else {
-                            println!(
-                                "  {uuid} was picked up by another driver while this one was \
-                                 starting; it is now {label}"
-                            );
-                        }
+                        println!("  {uuid} {}", describe_taken(&status));
                     }
                     FailedWake::NotWoken => {
                         failures += 1;
@@ -522,6 +505,41 @@ pub enum FailedWake {
     /// Another driver moved the run while this drive was failing. The run's
     /// own state is the news; the error describes this process, not the run.
     TakenByAnotherDriver,
+}
+
+/// What a sweep says about a run [`FailedWake::TakenByAnotherDriver`] was
+/// classified for, once the status folded from its log is in hand.
+///
+/// A folded status is only trustworthy news here when it is one a FINISHED or
+/// PARKED drive leaves behind: [`RunStatus::Completed`], [`RunStatus::Failed`],
+/// [`RunStatus::Abandoned`], [`RunStatus::Suspended`],
+/// [`RunStatus::BudgetExceeded`], or [`RunStatus::Sleeping`]. Naming the
+/// status is safe there because nothing but a driver that got all the way
+/// through could have left the run in one of those. Every other status this
+/// sweep might read (`Running`, `AwaitingModel`, `AwaitingTool`,
+/// `NeedsReconciliation`, `NotStarted`) is one the *other* driver's still-open
+/// write could leave behind while it is mid-drive, so naming it would read as
+/// a diagnosis (`needs-reconciliation`, say) of a run that is merely being
+/// worked on by someone else. That case gets a status-free sentence instead.
+#[must_use]
+pub fn describe_taken(status: &RunStatus) -> String {
+    if matches!(
+        status,
+        RunStatus::Completed { .. }
+            | RunStatus::Failed { .. }
+            | RunStatus::Abandoned { .. }
+            | RunStatus::Suspended { .. }
+            | RunStatus::BudgetExceeded { .. }
+            | RunStatus::Sleeping { .. }
+    ) {
+        format!(
+            "was picked up by another driver and is now {}",
+            render::status_label(status)
+        )
+    } else {
+        "was picked up by another driver, which is still driving it; this sweep recorded nothing"
+            .to_owned()
+    }
 }
 
 /// Decides which of the two a failed drive was, from the error it returned,

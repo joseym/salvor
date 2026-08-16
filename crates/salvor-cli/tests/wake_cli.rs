@@ -20,7 +20,7 @@
 //! issued is a divergence. That case is proven at the runtime tier, over flows
 //! that really do sleep (`salvor-runtime`'s `sleep.rs` and `tool_sleep.rs`).
 //!
-//! # The one test here that runs no binary
+//! # The tests here that run no binary
 //!
 //! What a sweep says about a drive that came back with an error (a genuine
 //! failure of this invocation, or a run another driver got to first) turns on
@@ -28,14 +28,15 @@
 //! at one run, down to the millisecond. The decision is a pure function of the
 //! error and of what the run looked like before and after, so it is tested as
 //! one, against the error a losing writer gets and the states a winning driver
-//! leaves behind.
+//! leaves behind. What that decision then gets PRINTED as is its own pure
+//! function of the folded status alone, tested the same way.
 
 mod common;
 
 use std::path::Path;
 
 use common::run_salvor;
-use salvor_cli::commands::{FailedWake, classify_failed_wake};
+use salvor_cli::commands::{FailedWake, classify_failed_wake, describe_taken};
 use salvor_core::{Event, EventEnvelope, RunId, RunStatus, SequenceNumber};
 use salvor_engine::EngineError;
 use salvor_graph::Graph;
@@ -514,6 +515,80 @@ fn a_failed_drive_tells_a_lost_race_apart_from_a_drive_that_failed() {
         ),
         FailedWake::NotWoken
     );
+}
+
+/// What a sweep prints for a run [`FailedWake::TakenByAnotherDriver`] was
+/// classified for, tested at the same seam as `classify_failed_wake` itself.
+///
+/// A folded status only earns a place in the sentence when it is one a
+/// FINISHED or PARKED drive leaves behind (a race the winner has already
+/// settled). Every other status could just as well be the other driver's
+/// still-open write, caught mid-flight by this sweep's re-fold, so naming it
+/// (`needs-reconciliation`, `running`, ...) would read as a diagnosis of a run
+/// that is merely being worked on by someone else, not this sweep's business
+/// to report.
+#[test]
+fn a_taken_run_names_its_status_only_when_a_finished_drive_could_have_left_it() {
+    // Finished or parked: the status is real news, so it is named.
+    assert_eq!(
+        describe_taken(&RunStatus::Completed {
+            output: json!("done")
+        }),
+        "was picked up by another driver and is now completed"
+    );
+    assert_eq!(
+        describe_taken(&RunStatus::Failed {
+            error: "the graph refuses on every drive".to_owned()
+        }),
+        "was picked up by another driver and is now failed"
+    );
+    assert_eq!(
+        describe_taken(&RunStatus::Abandoned {
+            reason: None,
+            unresolved_write: None
+        }),
+        "was picked up by another driver and is now abandoned"
+    );
+    assert_eq!(
+        describe_taken(&RunStatus::Suspended {
+            reason: "approve the payout".to_owned(),
+            input_schema: json!({ "type": "object" })
+        }),
+        "was picked up by another driver and is now suspended"
+    );
+    assert_eq!(
+        describe_taken(&RunStatus::BudgetExceeded {
+            budget: salvor_core::Budget {
+                kind: salvor_core::BudgetKind::CostUsd,
+                limit: 1.0
+            },
+            observed: 2.0
+        }),
+        "was picked up by another driver and is now budget-exceeded"
+    );
+    assert_eq!(
+        describe_taken(&RunStatus::Sleeping {
+            wake_at: OffsetDateTime::now_utc() + Duration::days(1)
+        }),
+        "was picked up by another driver and is now sleeping"
+    );
+
+    // Still in motion: the other driver's own dangling write, not this
+    // sweep's news to report, so the status stays out of the sentence.
+    for status in [
+        RunStatus::Running,
+        RunStatus::AwaitingModel,
+        RunStatus::AwaitingTool,
+        RunStatus::NeedsReconciliation,
+        RunStatus::NotStarted,
+    ] {
+        assert_eq!(
+            describe_taken(&status),
+            "was picked up by another driver, which is still driving it; \
+             this sweep recorded nothing",
+            "status {status:?} must not be named"
+        );
+    }
 }
 
 /// A run woken on schedule has not crashed, and the log must not say it has.
