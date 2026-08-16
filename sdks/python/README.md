@@ -195,13 +195,13 @@ browser page, and `example/client_run_loop.py` drives it from Python.
 
 ## Graphs
 
-A graph document composes `agent`, `tool`, `gate`, `branch`, `map`, and `fold`
-nodes into an authored control flow: an acyclic set of steps submitted once,
-hashed, and run by that hash exactly as an agent definition is. `GraphBuilder`
-mirrors the seven node kinds as typed constructors, so a document gets editor
-typing and completion instead of hand-written JSON; the semantic checks
-(referential integrity, acyclicity) live server-side, on submit or `salvor
-graph validate`.
+A graph document composes `agent`, `tool`, `gate`, `branch`, `map`, `fold`, and
+`delay` nodes into an authored control flow: an acyclic set of steps submitted
+once, hashed, and run by that hash exactly as an agent definition is.
+`GraphBuilder` mirrors the seven node kinds as typed constructors, so a
+document gets editor typing and completion instead of hand-written JSON; the
+semantic checks (referential integrity, acyclicity) live server-side, on
+submit or `salvor graph validate`.
 
 An `agent` node references an agent by its content hash, never by path. Get
 one from `register_agent`, which accepts a TOML string and returns the hash,

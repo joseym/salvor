@@ -896,6 +896,12 @@ append-guard to confirm the incoming event is the one legal next event. The two
 modes never collide: a client-driven run and a server-driven run cannot share an
 id, and each surface serves only its own runs.
 
+Timers and signals are out of scope for a client-driven run, for now (design
+decision). A client-driven run that records a sleep is the client's to wake:
+the server's wake sweep leaves every client-driven run alone, current lease
+or lapsed, because re-driving one from this process would be a second writer
+racing the client's own drive token for the same sequence numbers.
+
 The generic append carries only the control and deterministic-context events the
 client's cursor emits itself, which hold no secret and no side effect:
 `RunStarted`, `NowObserved`, `RandomObserved`, `Suspended`, `Resumed`,
@@ -1347,10 +1353,20 @@ woken run behaves identically whether a person or the clock woke it.
 - **It never fights a driver already running.** A run a task in this process is
   still driving is skipped, and the sweep drives sequentially, so no run is
   driven twice at once.
-- **A run this server cannot rebuild is left asleep.** An agent that is not
-  registered here, or a graph this process does not hold, is logged and skipped;
-  the run stays due, so registering the definition is enough to make the next
-  sweep wake it.
+- **What this server holds decides it, not what started the run.** By the
+  hash a run recorded: an agent run wakes once that agent is registered with
+  `POST /v1/agents`, MCP tools and all, because the server rebuilds the agent
+  from that same definition; a graph run wakes once its document is
+  submitted with `POST /v1/graphs` and every `tool` node it carries names a
+  tool this server's own registry holds (empty by default). Over HTTP a
+  `tool` node resolves only against that registry, never against tools an
+  agent's own MCP declarations reach, so a graph run built that way cannot be
+  woken here regardless of what is registered. Two things leave a run
+  asleep: its recorded hash is not registered here at all (typically a run
+  started from the CLI against a store this server never saw), or it is a
+  graph run with an unmet `tool` node. Each case is logged and skipped, once
+  per sweep; the run stays due, so an operator wakes it instead with `salvor
+  wake`, passing the same `--agent`/`--graph` files the run needs.
 - **One bad run does not stop the sweep.** Every failure is per-run, and the
   loop carries on to the next.
 

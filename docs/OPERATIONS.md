@@ -241,6 +241,25 @@ itself. `salvor serve` sweeps for due timers every 60 seconds by default;
 `--wake-interval SECS` changes that cadence, and `--wake-interval 0` turns
 the sweep off, no task spawned.
 
+The sweeper only wakes what it can rebuild from what this server already
+holds, by the hash the run recorded, regardless of what process started it:
+an agent run wakes once the agent under that hash is registered with
+`POST /v1/agents`, MCP tools and all, because the server rebuilds the agent
+from that same definition. A graph run wakes once its document is submitted
+with `POST /v1/graphs`, and, if it carries `tool` nodes, only once every one
+of them names a tool this server's own registry holds (empty by default;
+`--demo-tools` populates it with a fixed demo set, and an embedding host can
+wire its own): over HTTP a `tool` node resolves only against that registry,
+never against an agent's own MCP servers, submitted graph or not
+(pre-existing; see
+[`examples/graph-clients/README.md`](../examples/graph-clients/README.md#why-there-are-no-tool-nodes)).
+So two things leave a run asleep: its agent or graph hash is not registered
+here at all (typically a run started from the CLI against a store this
+server never saw), or a graph run has a `tool` node this registry does not
+hold. The sweeper logs why, once per sweep, until an operator wakes it the
+other way: `salvor wake` with the same `--agent`/`--graph` files the run was
+started with.
+
 For a store no running server is watching, cron does the sweeping instead.
 `salvor wake` finds every run whose `wake_at` has passed, drives each one,
 and exits, so it drops straight into a crontab line:
@@ -252,7 +271,12 @@ and exits, so it drops straight into a crontab line:
 A store gets one waker, not both: the server's sweep, or cron running
 `salvor wake` with the server started at `--wake-interval 0`, because the
 sweep only skips runs it is already driving itself and has no way to know
-about a second drive cron started on the same run.
+about a second drive cron started on the same run. Running both against the
+same due run still records it once: exactly-once holds, one write completes
+the run, and the loser's drive fails on the store lock and reports the run
+as taken by another driver; nothing is recorded twice. A client-driven run
+that records a sleep is the client's to wake; the server's sweeper leaves
+client-driven runs alone.
 
 `wake` takes the same `--agent` (repeatable) and `--graph` a `resume` would
 need, and for the same reason: the log records an agent run by its agent's
