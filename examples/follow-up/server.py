@@ -24,6 +24,20 @@ Four tools, one per step of a follow-up:
 - `escalate` (Write): appends one line to the escalations ledger. The unpaid
   arm.
 
+A fifth tool, `await_payment_webhook`, is listed but is NOT in the graph and is
+never called by `run.sh`. It is here to show the other half of the same idea: a
+tool that parks the run it was called from on an EXTERNAL SIGNAL rather than on
+a clock. MCP has no field for "park my caller", so the request rides in `_meta`,
+the extension point the specification reserves on every result for metadata one
+particular client understands; a host that is not Salvor sees an ordinary result
+with an unfamiliar metadata key. Salvor reads `_meta.salvor.suspend`, records the
+suspension with `kind: "signal"` (a wait nobody can answer by hand, so no
+approval inbox lists it), and parks. The payment processor's webhook later
+resumes the run with `{"paid": true}`, validated against the `input_schema` the
+tool named. Swapping the graph's `cool_off` delay for this tool would trade "look
+again in five days" for "continue the moment the money lands"; the example ships
+the timer because a timer proves itself with no webhook to fire.
+
 Every tool answers with `structuredContent` as well as text. Salvor records the
 WHOLE tool result as the node's output, so `structuredContent` is what the
 graph's branch expression reads (`structuredContent.paid == true`) and what the
@@ -126,7 +140,33 @@ TOOLS = [
         ),
         "inputSchema": INVOICE_ARG,
     },
+    {
+        "name": "await_payment_webhook",
+        "description": (
+            "Park the calling run until the payment processor's webhook "
+            "reports on this invoice. Waits on a system, not a person."
+        ),
+        "inputSchema": INVOICE_ARG,
+        # Nothing happens to the world here: the tool registers a wait and
+        # returns. `readOnlyHint` is the honest annotation, and it also means a
+        # call interrupted before its result was recorded is freely re-driven.
+        "annotations": {"readOnlyHint": True},
+    },
 ]
+
+# What the webhook must send to resume a run parked by `await_payment_webhook`.
+# Salvor records this schema in the log and validates the resume input against
+# it, so a webhook that posts something else is refused rather than believed.
+WEBHOOK_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "paid": {
+            "type": "boolean",
+            "description": "Whether the processor settled this invoice.",
+        },
+    },
+    "required": ["paid"],
+}
 
 
 def send(message):
@@ -314,11 +354,48 @@ def escalate(arguments):
     )
 
 
+def await_payment_webhook(arguments):
+    """Park the calling run until the payment processor reports back.
+
+    The tool does no work and changes nothing. What it returns is a request:
+    an ordinary result, plus `_meta.salvor.suspend` saying why the run should
+    park, what input will resume it, and that a SYSTEM rather than a person
+    owes that input (`kind: "signal"`). Salvor records the tool call's
+    completion first and the suspension second, so the call is settled and its
+    idempotency claim released before the wait begins; a run parked here for a
+    week blocks nothing and holds no process.
+
+    Not in `invoice-follow-up.json` and not called by `run.sh`. It is here to
+    be read, and to be swapped in by anyone who has a webhook to fire.
+    """
+    invoice_id = _invoice_id(arguments)
+    if not invoice_id:
+        return failed("no invoice_id in the arguments")
+    result = ok(
+        {"invoice_id": invoice_id, "awaiting": "payment_webhook"},
+        f"{invoice_id}: waiting on the payment processor to report back",
+    )
+    result["_meta"] = {
+        "salvor": {
+            "suspend": {
+                "reason": f"waiting on the payment webhook for {invoice_id}",
+                "input_schema": WEBHOOK_SCHEMA,
+                # Omit this key and the park is a human gate, which is what an
+                # unnamed kind has always meant. Naming it is what keeps a wait
+                # nobody can answer out of an approval inbox.
+                "kind": "signal",
+            }
+        }
+    }
+    return result
+
+
 HANDLERS = {
     "send_reminder": send_reminder,
     "check_payment": check_payment,
     "close_invoice": close_invoice,
     "escalate": escalate,
+    "await_payment_webhook": await_payment_webhook,
 }
 
 
