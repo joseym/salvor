@@ -233,6 +233,10 @@ pub async fn start(
 pub async fn list(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
     let store = state.store();
     let summaries = store.list_runs().await.map_err(store_error)?;
+    // Read once and reuse for every entry, so a listing with many sleeping
+    // runs judges "overdue" against one consistent instant rather than a
+    // clock that ticks partway through the loop.
+    let now = state.now();
     let mut runs = Vec::with_capacity(summaries.len());
     for summary in summaries {
         let mut entry = json!({
@@ -249,7 +253,7 @@ pub async fn list(State(state): State<AppState>) -> Result<impl IntoResponse, Ap
                     .filter(|envelope| matches!(envelope.event, Event::ModelCallRequested { .. }))
                     .count();
                 let map = entry.as_object_mut().expect("entry is a JSON object");
-                map.insert("status".to_owned(), json::status(&derived.status));
+                map.insert("status".to_owned(), json::status(&derived.status, now));
                 map.insert(
                     "usage".to_owned(),
                     json!({
@@ -311,7 +315,7 @@ pub async fn get(
     let derived = derive_state(&log);
     let mut body = json!({
         "run": run_id.as_uuid().to_string(),
-        "status": json::status(&derived.status),
+        "status": json::status(&derived.status, state.now()),
         "event_count": log.len(),
         "usage": {
             "input_tokens": derived.usage.input_tokens,
@@ -339,7 +343,7 @@ pub async fn replay(
     if log.is_empty() {
         return Err(unknown_run(run_id));
     }
-    Ok(Json(json::run_state(&derive_state(&log))))
+    Ok(Json(json::run_state(&derive_state(&log), state.now())))
 }
 
 /// `POST /v1/runs/{id}/resume`: continue a run, dispatching on its state.
@@ -376,7 +380,7 @@ pub async fn resume(
             // The status object is the canonical `json::status` shape (state,
             // reason, and any unresolved-write honesty), re-derived here so the
             // report matches every other surface that renders an abandoned run.
-            "status": json::status(&derived.status),
+            "status": json::status(&derived.status, state.now()),
         }))
         .into_response()),
         Disposition::NotStarted => Err(unknown_run(run_id)),
@@ -525,7 +529,7 @@ pub async fn resolve(
             Ok(Json(json!({
                 "run": run_id.as_uuid().to_string(),
                 "resolved": true,
-                "status": json::status(&derived.status),
+                "status": json::status(&derived.status, state.now()),
             })))
         }
         Err(RuntimeError::NotReconcilable { status, .. }) => Err(ApiError::WrongState(format!(
@@ -584,7 +588,7 @@ pub async fn abandon(
                 "run": run_id.as_uuid().to_string(),
                 "abandoned": true,
                 "appended_seq": appended_seq,
-                "status": json::status(&derived.status),
+                "status": json::status(&derived.status, state.now()),
             })))
         }
         Err(RuntimeError::UnknownRun { .. }) => Err(unknown_run(run_id)),

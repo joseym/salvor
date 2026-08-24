@@ -265,6 +265,84 @@ async fn an_unregistered_agent_leaves_the_run_asleep() {
     );
 }
 
+/// An unwakeable run is warned about once, not every pass. This crate's test
+/// suite has no tracing-capture harness, so this asserts on the record
+/// `AppState` keeps rather than on log output: [`AppState::mark_unwakeable_warned`]
+/// is exactly what `wake::sweep` consults to choose between `warn!` and
+/// `debug!`, so the record standing after a second pass is the same fact a
+/// captured log would show (one warn-level line, then a quiet debug-level
+/// repeat carrying the same fields).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unwakeable_run_is_warned_about_once_not_every_pass() {
+    let store = memory_store();
+    let (state, _builds, _model) = state_with_counter(store.clone()).await;
+    let run_id = seed_sleeping(
+        &store,
+        "sha256:never-registered-here",
+        NOW - time::Duration::hours(1),
+    )
+    .await;
+
+    assert!(
+        !state.unwakeable_warned(run_id),
+        "nothing has swept yet, so there is no record"
+    );
+
+    assert!(salvor_server::sweep(&state).await.is_empty());
+    assert!(
+        state.unwakeable_warned(run_id),
+        "the first pass that cannot wake it records the sighting"
+    );
+
+    // A second pass over the same still-unregistered run finds nothing
+    // changed; the record simply stands, which is what tells `sweep` to log
+    // this pass at debug rather than warn.
+    assert!(salvor_server::sweep(&state).await.is_empty());
+    assert!(
+        state.unwakeable_warned(run_id),
+        "the record still stands after a second pass"
+    );
+}
+
+/// The warned record clears the moment the run actually wakes: a fix that
+/// lands later (the missing definition gets registered) does not inherit a
+/// stale warning from before the fix.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_warned_record_clears_once_the_run_wakes() {
+    let store = memory_store();
+    let (state, _builds, _model) = state_with_counter(store.clone()).await;
+    let hash = "sha256:not-registered-yet".to_owned();
+    let run_id = seed_sleeping(&store, &hash, NOW - time::Duration::hours(1)).await;
+
+    assert!(salvor_server::sweep(&state).await.is_empty());
+    assert!(
+        state.unwakeable_warned(run_id),
+        "the first pass records the sighting, hash unregistered"
+    );
+
+    // The operator's fix: register the definition the run's log already
+    // names, directly on the state, exactly as a restart re-registering it
+    // would. Nothing about the run's log changes.
+    state.register_agent(salvor_server::RegisteredAgent {
+        definition: salvor_server::AgentDefinition {
+            format: salvor_server::DefFormat::Toml,
+            body: sample_toml().as_bytes().to_vec(),
+        },
+        agent_hash: hash,
+        name: None,
+    });
+
+    assert_eq!(
+        salvor_server::sweep(&state).await,
+        vec![run_id],
+        "now buildable, the same due run wakes"
+    );
+    assert!(
+        !state.unwakeable_warned(run_id),
+        "a woken run's record does not carry forward"
+    );
+}
+
 /// One run the pass cannot do anything with does not end the pass. The due runs
 /// after it still get their turn, which is what keeps a single stale agent hash
 /// from freezing every timer in the store.
@@ -418,5 +496,52 @@ async fn an_early_resume_is_refused_and_a_due_one_drives() {
         accepted.status(),
         202,
         "a due run is re-driven, which is the whole of waking"
+    );
+}
+
+/// `GET /v1/runs/{id}` names a sleeping run's overdue-ness by the server's own
+/// clock: before `wake_at`, the status carries only the deadline; past it,
+/// `overdue` and `overdue_seconds` join it. No agent needs to be registered
+/// for either run: a status read folds the log, it never rebuilds anything.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_reports_a_sleeping_run_as_overdue_past_its_deadline() {
+    let store = memory_store();
+    let (state, _builds, _model) = state_with_counter(store.clone()).await;
+    // Off, so nothing re-drives the overdue run out from under the read below.
+    let state = state.with_wake_interval(Duration::ZERO);
+    let server = TestServer::spawn(state).await;
+    let client = reqwest::Client::new();
+
+    let not_due = seed_sleeping(&store, "sha256:any", NOW + time::Duration::minutes(5)).await;
+    let overdue = seed_sleeping(&store, "sha256:any", NOW - time::Duration::minutes(2)).await;
+
+    let not_due_body: serde_json::Value = client
+        .get(format!("{}/v1/runs/{}", server.base, not_due.as_uuid()))
+        .send()
+        .await
+        .expect("the request is made")
+        .json()
+        .await
+        .expect("a json body");
+    assert_eq!(not_due_body["status"]["state"], "sleeping");
+    assert!(
+        not_due_body["status"].get("overdue").is_none(),
+        "not due yet, so no overdue key at all: {not_due_body}"
+    );
+    assert!(not_due_body["status"].get("overdue_seconds").is_none());
+
+    let overdue_body: serde_json::Value = client
+        .get(format!("{}/v1/runs/{}", server.base, overdue.as_uuid()))
+        .send()
+        .await
+        .expect("the request is made")
+        .json()
+        .await
+        .expect("a json body");
+    assert_eq!(overdue_body["status"]["state"], "sleeping");
+    assert_eq!(overdue_body["status"]["overdue"], true);
+    assert_eq!(
+        overdue_body["status"]["overdue_seconds"], 120,
+        "whole seconds since the deadline passed"
     );
 }

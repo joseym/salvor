@@ -51,6 +51,16 @@
 //! untouched, still due, so registering the missing definition is enough to
 //! make the next pass wake it. Only the store listing itself failing ends a
 //! pass, and even that only ends the pass: the next one tries again.
+//!
+//! An unwakeable run logs the same fields every pass, but only the first
+//! sighting is loud: [`AppState::mark_unwakeable_warned`] names the first pass
+//! `WARN` and every later one `DEBUG`, so an operator learns about the gap
+//! once instead of every sweep interval for as long as it stays unregistered,
+//! while the fields to find and fix it stay available to anyone watching at
+//! debug level. The record clears the moment the run wakes or drops out of
+//! the due set, so it never mutes a genuinely new nap.
+
+use std::collections::HashSet;
 
 use salvor_core::RunId;
 use tokio::task::JoinHandle;
@@ -119,6 +129,12 @@ pub async fn sweep(state: &AppState) -> Vec<RunId> {
         }
     };
 
+    // A run that warned on an earlier pass but is not due this pass has
+    // nothing left to warn about here; drop its record rather than let it
+    // linger and mute a warning about some unrelated later nap.
+    let due_ids: HashSet<RunId> = due.iter().map(|run| run.run_id).collect();
+    state.prune_unwakeable_warned(&due_ids);
+
     let mut driven = Vec::new();
     for run in due {
         // A client-driven run (opened through `/v1/client-runs`) holds a
@@ -158,6 +174,7 @@ pub async fn sweep(state: &AppState) -> Vec<RunId> {
         };
         match crate::runs::redrive(state.clone(), run.run_id, &log).await {
             Ok(_) => {
+                state.clear_unwakeable_warned(run.run_id);
                 tracing::info!(
                     run_id = %run.run_id.as_uuid(),
                     wake_at = %run.wake_at,
@@ -166,19 +183,31 @@ pub async fn sweep(state: &AppState) -> Vec<RunId> {
                 driven.push(run.run_id);
             }
             // Not an error of the sweeper's: this server cannot wake a run
-            // whose agent or graph it does not hold. Still `warn!`, not
-            // `info!`: this fires every sweep interval for as long as the
-            // definition stays unregistered, which is exactly the kind of
-            // ongoing, actionable condition an operator should be able to
-            // find without turning on info-level noise. The run stays
-            // asleep and still due, so registering the definition is all it
-            // takes; no rate limiting here, a warn per sweep is honest.
-            Err(error) => tracing::warn!(
-                run_id = %run.run_id.as_uuid(),
-                ?error,
-                "cannot wake this run here; leaving it asleep; wake it with salvor wake, \
-                 passing the --agent/--graph files it was started with"
-            ),
+            // whose agent or graph it does not hold. The run stays asleep and
+            // still due, so registering the definition is all it takes; no
+            // rate limiting on whether this is logged, only on how loud: the
+            // first sighting is `warn!`, an ongoing, actionable condition an
+            // operator should find without turning on debug-level noise;
+            // every later pass while the record stands repeats the same
+            // fields at `debug!` instead, so a definition left unregistered
+            // for a week does not page the same warning every sweep interval.
+            Err(error) => {
+                if state.mark_unwakeable_warned(run.run_id) {
+                    tracing::warn!(
+                        run_id = %run.run_id.as_uuid(),
+                        ?error,
+                        "cannot wake this run here; leaving it asleep; wake it with salvor wake, \
+                         passing the --agent/--graph files it was started with"
+                    );
+                } else {
+                    tracing::debug!(
+                        run_id = %run.run_id.as_uuid(),
+                        ?error,
+                        "cannot wake this run here; leaving it asleep; wake it with salvor wake, \
+                         passing the --agent/--graph files it was started with"
+                    );
+                }
+            }
         }
     }
     driven

@@ -310,7 +310,7 @@ Always `{ "state": "<name>", ... }`:
 |---|---|
 | `not_started`, `running`, `awaiting_model`, `awaiting_tool`, `needs_reconciliation` | none |
 | `suspended` | `reason`, `input_schema`, `kind` (only `"signal"`, and only when present) |
-| `sleeping` | `wake_at` (RFC 3339) |
+| `sleeping` | `wake_at` (RFC 3339); once the server's clock is past it, also `overdue` (`true`) and `overdue_seconds` (whole seconds since `wake_at`) |
 | `budget_exceeded` | `budget` (`{kind, limit}`), `observed` |
 | `completed` | `output` |
 | `failed` | `error` |

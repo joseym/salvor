@@ -23,7 +23,11 @@
 //! - `{ "state": "sleeping", "wake_at": "<RFC 3339>" }`: the run is parked on
 //!   a durable timer until that instant, which is a different thing from
 //!   `suspended` and never reported as one, because nothing is waiting on a
-//!   human.
+//!   human. Once the server's clock is past `wake_at`, the object also
+//!   carries `"overdue": true` and `"overdue_seconds": n` (whole seconds
+//!   since `wake_at`), naming a nap nobody has re-driven yet rather than
+//!   leaving a caller to work it out against `wake_at` itself; before the
+//!   deadline neither key appears.
 //! - `{ "state": "budget_exceeded", "budget": { "kind": "...", "limit": n },
 //!    "observed": n }`
 //! - `{ "state": "completed", "output": <json> }`
@@ -47,8 +51,13 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 /// The status object for a derived status. See the module docs for the shapes.
+///
+/// `now` is the server's clock, read once by the caller and passed in rather
+/// than read here, so this stays a pure fold: a `sleeping` status compares it
+/// against the recorded `wake_at` to decide whether `overdue` and
+/// `overdue_seconds` belong in the object. Every other arm ignores it.
 #[must_use]
-pub fn status(status: &RunStatus) -> Value {
+pub fn status(status: &RunStatus, now: OffsetDateTime) -> Value {
     match status {
         RunStatus::NotStarted => json!({ "state": "not_started" }),
         RunStatus::Running => json!({ "state": "running" }),
@@ -74,10 +83,25 @@ pub fn status(status: &RunStatus) -> Value {
             }
             obj
         }
-        RunStatus::Sleeping { wake_at } => json!({
-            "state": "sleeping",
-            "wake_at": rfc3339(*wake_at),
-        }),
+        RunStatus::Sleeping { wake_at } => {
+            let mut obj = json!({
+                "state": "sleeping",
+                "wake_at": rfc3339(*wake_at),
+            });
+            // Omitted rather than sent as false/zero when the deadline is
+            // still ahead: the same absent-is-absent rule `kind` follows on
+            // `suspended` above, so a client that has never heard of these
+            // keys reads a not-yet-due nap exactly as it always has.
+            if now > *wake_at {
+                let map = obj.as_object_mut().expect("status object");
+                map.insert("overdue".to_owned(), json!(true));
+                map.insert(
+                    "overdue_seconds".to_owned(),
+                    json!((now - *wake_at).whole_seconds()),
+                );
+            }
+            obj
+        }
         RunStatus::BudgetExceeded { budget, observed } => json!({
             "state": "budget_exceeded",
             "budget": budget,
@@ -156,11 +180,12 @@ pub(crate) fn rfc3339(timestamp: OffsetDateTime) -> String {
 
 /// The full derived-state object: the dry-run replay projection a client gets
 /// from the run and replay endpoints (status, usage, next position, pending
-/// intent). Nothing here executes; it is a pure fold of the recorded log.
+/// intent). Nothing here executes; it is a pure fold of the recorded log,
+/// except for the clock `now` carries in for [`status`]'s overdue check.
 #[must_use]
-pub fn run_state(state: &RunState) -> Value {
+pub fn run_state(state: &RunState, now: OffsetDateTime) -> Value {
     json!({
-        "status": status(&state.status),
+        "status": status(&state.status, now),
         "usage": {
             "input_tokens": state.usage.input_tokens,
             "output_tokens": state.usage.output_tokens,
@@ -174,9 +199,15 @@ pub fn run_state(state: &RunState) -> Value {
 mod tests {
     use salvor_core::SuspensionKind;
     use serde_json::json;
+    use time::macros::datetime;
 
     use super::status;
     use salvor_core::RunStatus;
+
+    /// A fixed instant for tests that do not care what "now" is, only that
+    /// `status` needs one to fold a `sleeping` status; every other arm ignores
+    /// it entirely.
+    const ANY_NOW: time::OffsetDateTime = datetime!(2026-01-01 00:00:00 UTC);
 
     /// A suspension says what it waits on only when there is something to
     /// say. A signal wait carries `"kind": "signal"` so a client can keep it
@@ -187,11 +218,14 @@ mod tests {
     fn a_suspended_status_names_a_signal_and_stays_silent_about_a_gate() {
         let schema = json!({"type": "object", "required": ["approved"]});
 
-        let signal = status(&RunStatus::Suspended {
-            reason: "awaiting the payment webhook".to_owned(),
-            input_schema: schema.clone(),
-            kind: Some(SuspensionKind::Signal),
-        });
+        let signal = status(
+            &RunStatus::Suspended {
+                reason: "awaiting the payment webhook".to_owned(),
+                input_schema: schema.clone(),
+                kind: Some(SuspensionKind::Signal),
+            },
+            ANY_NOW,
+        );
         assert_eq!(
             signal,
             json!({
@@ -202,11 +236,14 @@ mod tests {
             })
         );
 
-        let gate = status(&RunStatus::Suspended {
-            reason: "awaiting operator approval".to_owned(),
-            input_schema: schema.clone(),
-            kind: None,
-        });
+        let gate = status(
+            &RunStatus::Suspended {
+                reason: "awaiting operator approval".to_owned(),
+                input_schema: schema.clone(),
+                kind: None,
+            },
+            ANY_NOW,
+        );
         assert_eq!(
             gate,
             json!({
@@ -219,5 +256,59 @@ mod tests {
             gate.get("kind").is_none(),
             "a gate carries no discriminator, not even a null one: {gate}"
         );
+    }
+
+    /// Before its deadline, a sleeping run's status carries only `wake_at`:
+    /// no `overdue` key, not even `false`, the same absent-is-absent rule the
+    /// suspended `kind` follows above.
+    #[test]
+    fn a_sleeping_run_not_yet_due_carries_no_overdue_keys() {
+        let wake_at = datetime!(2026-01-01 12:00:00 UTC);
+        let now = wake_at - time::Duration::minutes(5);
+
+        let value = status(&RunStatus::Sleeping { wake_at }, now);
+        assert_eq!(
+            value,
+            json!({
+                "state": "sleeping",
+                "wake_at": "2026-01-01T12:00:00Z",
+            })
+        );
+        assert!(
+            value.get("overdue").is_none(),
+            "not due yet, so no overdue key at all: {value}"
+        );
+        assert!(value.get("overdue_seconds").is_none());
+    }
+
+    /// Once the server's clock is past `wake_at`, the status names it: a caller
+    /// reads `overdue` and how long, rather than computing it against
+    /// `wake_at` itself.
+    #[test]
+    fn a_sleeping_run_past_its_deadline_reports_overdue() {
+        let wake_at = datetime!(2026-01-01 12:00:00 UTC);
+        let now = wake_at + time::Duration::seconds(90);
+
+        let value = status(&RunStatus::Sleeping { wake_at }, now);
+        assert_eq!(
+            value,
+            json!({
+                "state": "sleeping",
+                "wake_at": "2026-01-01T12:00:00Z",
+                "overdue": true,
+                "overdue_seconds": 90,
+            })
+        );
+    }
+
+    /// The instant of the deadline itself is not yet "passed": a caller whose
+    /// clock reads exactly `wake_at` sees the same not-due shape a moment
+    /// earlier did.
+    #[test]
+    fn the_deadline_instant_itself_is_not_overdue() {
+        let wake_at = datetime!(2026-01-01 12:00:00 UTC);
+
+        let value = status(&RunStatus::Sleeping { wake_at }, wake_at);
+        assert!(value.get("overdue").is_none());
     }
 }

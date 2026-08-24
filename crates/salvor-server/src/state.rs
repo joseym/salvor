@@ -182,6 +182,16 @@ struct Inner {
     // long model call between drive operations never reads as a false stall; a
     // test shortens it (see `with_client_lease_ttl`) to prove the lapse.
     client_lease_ttl: Duration,
+    // Runs the wake sweeper has already warned about being unwakeable here (its
+    // agent or graph is not registered in this process). Only the first sighting
+    // per run logs at WARN; every later pass while a run's id stays in this set
+    // logs the same fields at DEBUG, so an operator who has not fixed the
+    // registration gap yet is not paged again every sweep interval, but the
+    // fields to find and fix it are still there for anyone who turns on
+    // debug-level logging. Cleared when the run wakes or drops out of the due
+    // set, so a run that becomes unwakeable again later (a fresh nap, a
+    // different recorded agent hash) warns again.
+    unwakeable_warned: Mutex<HashSet<RunId>>,
 }
 
 /// The per-run lease state for a client-driven run.
@@ -227,6 +237,7 @@ impl AppState {
                 handles: Mutex::new(HashMap::new()),
                 client_runs: Mutex::new(HashMap::new()),
                 client_lease_ttl: Duration::from_secs(60),
+                unwakeable_warned: Mutex::new(HashSet::new()),
             }),
         }
     }
@@ -635,6 +646,54 @@ impl AppState {
             .lock()
             .expect("client runs lock")
             .contains_key(&run_id)
+    }
+
+    /// Records that the wake sweeper has warned about this run being
+    /// unwakeable here. Returns `true` the first time (the caller logs at
+    /// WARN) and `false` on every later call for the same run while the
+    /// record stands (the caller logs the same fields at DEBUG instead).
+    pub fn mark_unwakeable_warned(&self, run_id: RunId) -> bool {
+        self.inner
+            .unwakeable_warned
+            .lock()
+            .expect("unwakeable warned lock")
+            .insert(run_id)
+    }
+
+    /// Whether the sweeper has already warned about this run. Read-only,
+    /// unlike [`mark_unwakeable_warned`](Self::mark_unwakeable_warned), which
+    /// always records a sighting; a test uses this to check the record
+    /// without flipping it.
+    #[must_use]
+    pub fn unwakeable_warned(&self, run_id: RunId) -> bool {
+        self.inner
+            .unwakeable_warned
+            .lock()
+            .expect("unwakeable warned lock")
+            .contains(&run_id)
+    }
+
+    /// Clears a run's unwakeable-warned record: it woke, so the next time it
+    /// naps and cannot be rebuilt here is a fresh first sighting.
+    pub fn clear_unwakeable_warned(&self, run_id: RunId) {
+        self.inner
+            .unwakeable_warned
+            .lock()
+            .expect("unwakeable warned lock")
+            .remove(&run_id);
+    }
+
+    /// Drops every unwakeable-warned record for a run not in `still_due`.
+    /// Called once per sweep pass before processing, so a run that leaves the
+    /// due set some other way than being driven (the only other way its
+    /// record could go stale) does not carry a warning into a future nap that
+    /// has nothing to do with this one.
+    pub fn prune_unwakeable_warned(&self, still_due: &HashSet<RunId>) {
+        self.inner
+            .unwakeable_warned
+            .lock()
+            .expect("unwakeable warned lock")
+            .retain(|run_id| still_due.contains(run_id));
     }
 
     /// Aborts every in-flight driver task. Durability is unaffected: each event

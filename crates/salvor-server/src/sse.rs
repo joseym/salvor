@@ -161,7 +161,7 @@ async fn produce(
         if is_resting(&status) {
             let frame = Event::default()
                 .event("end")
-                .data(json!({ "status": json::status(&status) }).to_string());
+                .data(json!({ "status": json::status(&status, state.now()) }).to_string());
             let _ = tx.send(Ok(frame)).await;
             return;
         }
@@ -171,9 +171,10 @@ async fn produce(
         // End the stream so the client does not wait forever; recovering the run
         // opens a fresh stream that tails the continuation.
         if !log.is_empty() && !state.is_run_active(run_id) {
-            let frame = Event::default()
-                .event("end")
-                .data(json!({ "status": json::status(&status), "detached": true }).to_string());
+            let frame = Event::default().event("end").data(
+                json!({ "status": json::status(&status, state.now()), "detached": true })
+                    .to_string(),
+            );
             let _ = tx.send(Ok(frame)).await;
             return;
         }
