@@ -274,10 +274,10 @@ if grep -q "parked at node \`cool_off\`" "$OUT-a-run.out" && [[ -n "$A_WAKE_AT" 
 else
   fail "a park at node \`cool_off\` with a \`sleeping until:\` instant" "$(cat "$OUT-a-run.out")"
 fi
-if grep -qF "salvor wake --graph $GRAPH --agent $AGENT" "$OUT-a-run.out"; then
-  echo "PROOF: the park printed the exact command that continues it: salvor wake --graph ... --agent ..."
+if grep -qF "salvor wake --store $UNPAID_STORE --graph $GRAPH --agent $AGENT" "$OUT-a-run.out"; then
+  echo "PROOF: the park printed the exact command that continues it: salvor wake --store ... --graph ... --agent ..."
 else
-  fail "the park to print \`salvor wake --graph $GRAPH --agent $AGENT\`" "$(cat "$OUT-a-run.out")"
+  fail "the park to print \`salvor wake --store $UNPAID_STORE --graph $GRAPH --agent $AGENT\`" "$(cat "$OUT-a-run.out")"
 fi
 
 # NOTHING HOLDS THE RUN. `graph run` has returned, so its process is gone, and

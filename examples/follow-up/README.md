@@ -29,7 +29,12 @@ data kept out of that log has to be kept out of what gets passed into it in
 the first place. The customer name and the invoice amount live in
 [`server.py`](server.py)'s `LEDGER`, this desk's stand-in for a real billing
 system, keyed by invoice id; every tool handler resolves them there instead of
-trusting them from the caller.
+trusting them from the caller. The ledgers those handlers write to,
+`reminders.txt`, `closed-invoices.txt`, and `escalations.txt`, are that billing
+system's own records, not salvor's: the tool server writes the customer name
+and the amount to them in plain text, on its side of the reference, deliberately
+outside the log salvor keeps. A real deployment keeps those files under that
+system's own access control and retention, not salvor's.
 
 ## The document, node by node
 
@@ -147,7 +152,7 @@ run c407d5ef-b20b-4ac0-b5e9-5e10af9945f8
 graph run c407d5ef-b20b-4ac0-b5e9-5e10af9945f8 parked at node `cool_off`.
   sleeping until: 2026-08-15 19:42:50Z
 it continues once the deadline passes:
-  salvor wake --graph examples/follow-up/invoice-follow-up.json --agent examples/follow-up/agents/accounts-desk.toml
+  salvor wake --store /tmp/salvor-follow-up-unpaid.db --graph examples/follow-up/invoice-follow-up.json --agent examples/follow-up/agents/accounts-desk.toml
 ```
 
 The command has returned. There is no daemon, no held connection, and no timer
@@ -180,7 +185,7 @@ Run c407d5ef-b20b-4ac0-b5e9-5e10af9945f8 is sleeping until 2026-08-15 19:42:50Z
 and will not resume for another 19s. It is not parked on you: a sleeping run
 takes no input, and driving it early records nothing.
 Wait for the deadline, then drive whatever is due:
-  salvor wake --graph examples/follow-up/invoice-follow-up.json --agent examples/follow-up/agents/accounts-desk.toml
+  salvor wake --store /tmp/salvor-follow-up-unpaid.db --graph examples/follow-up/invoice-follow-up.json --agent examples/follow-up/agents/accounts-desk.toml
 $ echo $?
 1
 ```
@@ -196,7 +201,7 @@ finds nothing:
 $ salvor --store /tmp/salvor-follow-up-unpaid.db wake --dry-run \
     --graph examples/follow-up/invoice-follow-up.json \
     --agent examples/follow-up/agents/accounts-desk.toml
-nothing to wake: no run in /tmp/salvor-follow-up-unpaid.db is sleeping past its deadline
+nothing to wake: the next run in /tmp/salvor-follow-up-unpaid.db is due at 2026-08-15 19:42:50Z (in 18s)
 ```
 
 Sweeps select on the recorded deadline, not on when they happen to run, so a
@@ -207,7 +212,7 @@ and costs nothing. Once the deadline passes, the same command lists it:
 $ salvor --store /tmp/salvor-follow-up-unpaid.db wake --dry-run \
     --graph examples/follow-up/invoice-follow-up.json \
     --agent examples/follow-up/agents/accounts-desk.toml
-1 run(s) due to wake at 2026-08-15 19:42:51Z (dry run):
+1 run(s) due as of 2026-08-15 19:42:51Z (dry run):
   c407d5ef-b20b-4ac0-b5e9-5e10af9945f8 due 2026-08-15 19:42:50Z, overdue by 1s
 nothing was driven. Drop --dry-run to wake these, passing the --agent (and --graph) files they need.
 ```
