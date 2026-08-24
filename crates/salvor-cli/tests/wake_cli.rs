@@ -540,7 +540,10 @@ async fn a_dry_run_also_checks_the_graph_file_even_when_only_an_agent_run_is_due
 /// reporting the run "ready" and letting the real wake discover the same gap
 /// a moment later. With a suitable `--agent` supplied, the preview goes back
 /// to reporting ready: it only rules out having no agent at all, the rest of
-/// tool resolution is still the drive's own job.
+/// tool resolution is still the drive's own job. A real wake with that same
+/// `--agent` proves it: the file was given, so the preview clears it, but the
+/// file carries no tools at all, so the drive itself refuses and names the
+/// fix.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_dry_run_blocks_a_graph_with_tool_nodes_when_no_agent_is_given() {
     let dir = tempdir().expect("tempdir");
@@ -602,6 +605,36 @@ async fn a_dry_run_blocks_a_graph_with_tool_nodes_when_no_agent_is_given() {
     );
     assert!(ready.status.success(), "the preview now passes: {out}");
     assert_eq!(log_len(&store, &uuid).await, 2, "still nothing driven");
+
+    // A real wake with that same agent file: the preview's block is cleared,
+    // but the agent still carries no tools, so the drive itself refuses, and
+    // this time the refusal points at the fix rather than leaving an operator
+    // to guess it.
+    let woke = run_salvor(
+        &store,
+        &[
+            "wake",
+            "--graph",
+            graph.to_str().expect("a utf-8 path"),
+            "--agent",
+            agent.to_str().expect("a utf-8 path"),
+        ],
+    )
+    .await;
+    let out = common::flatten_wrapped_prose(&String::from_utf8_lossy(&woke.stdout));
+    assert!(
+        out.contains(
+            "tool node `step` names tool `missing`, which none of the provided agents \
+                       carry; pass --agent with an agent file whose tools include it"
+        ),
+        "a real wake refuses the same gap and names the fix: {out}"
+    );
+    assert_eq!(woke.status.code(), Some(1), "a failed drive exits non-zero");
+    assert_eq!(
+        log_len(&store, &uuid).await,
+        2,
+        "the refusal drives nothing"
+    );
 }
 
 /// The reporting decision a sweep makes when a drive comes back with an error,
@@ -985,8 +1018,11 @@ async fn one_run_that_will_not_drive_does_not_stop_the_rest() {
     assert!(out.contains(&first), "the first run is reported: {out}");
     assert!(out.contains(&second), "and so is the second: {out}");
     assert!(
-        out.contains("2 of 2 due run(s) could not be driven"),
-        "the tally is reported: {out}"
+        common::flatten_wrapped_prose(&out).contains(
+            "2 of 2 due run(s) could not be driven; every due run was tried, and each line \
+             above says what it needs"
+        ),
+        "the tally is reported, pointing back at the per-run lines: {out}"
     );
     assert!(!woke.status.success(), "a failed drive exits non-zero");
 

@@ -501,7 +501,8 @@ pub async fn wake(store_path: &Path, args: WakeArgs) -> Result<u8> {
     }
     if failures > 0 {
         println!(
-            "\n{failures} of {} due run(s) could not be driven; every due run was tried",
+            "\n{failures} of {} due run(s) could not be driven; every due run was tried, \
+             and each line above says what it needs",
             due.len()
         );
         return Ok(1);
@@ -2109,7 +2110,8 @@ fn check_graph_resolvable(graph: &Graph, agents: &HashMap<String, Agent>) -> Res
                 .any(|agent| agent.tools().get(&tool.tool).is_some())
         {
             bail!(
-                "tool node `{}` names tool `{}`, which none of the provided agents carry",
+                "tool node `{}` names tool `{}`, which none of the provided agents carry; pass \
+                 --agent with an agent file whose tools include it",
                 tool.id,
                 tool.tool
             );
