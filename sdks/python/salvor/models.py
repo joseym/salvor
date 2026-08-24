@@ -81,6 +81,16 @@ class RunStatus:
         """The JSON Schema a suspended run's resume input must satisfy."""
         return self.raw.get("input_schema")
 
+    @property
+    def wake_at(self) -> Optional[str]:
+        """When a sleeping run's durable timer comes due, or ``None``.
+
+        A sleeping run is not waiting on anybody: it continues when this
+        instant passes and something drives it again, which for a client-driven
+        run is its own driver (see :meth:`salvor.ClientRunDriver.await_wake`).
+        """
+        return self.raw.get("wake_at")
+
 
 @dataclass
 class PendingCall:

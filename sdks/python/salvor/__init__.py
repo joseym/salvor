@@ -79,6 +79,7 @@ __all__ = [
     "ModelStepStream",
     "ClientToolDecl",
     "ClientToolIntentResult",
+    "Waking",
     "SalvorError",
     "SalvorAPIError",
     "NeedsReconciliationError",
@@ -161,17 +162,25 @@ def __getattr__(name: str):
         globals()["Client"] = Client
         globals()["EventStream"] = EventStream
         return globals()[name]
-    if name in ("ClientRunDriver", "ModelStepResult", "ModelStepStream", "ClientToolIntentResult"):
+    if name in (
+        "ClientRunDriver",
+        "ModelStepResult",
+        "ModelStepStream",
+        "ClientToolIntentResult",
+        "Waking",
+    ):
         from .client_runs import (
             ClientRunDriver,
             ClientToolIntentResult,
             ModelStepResult,
             ModelStepStream,
+            Waking,
         )
 
         globals()["ClientRunDriver"] = ClientRunDriver
         globals()["ModelStepResult"] = ModelStepResult
         globals()["ModelStepStream"] = ModelStepStream
         globals()["ClientToolIntentResult"] = ClientToolIntentResult
+        globals()["Waking"] = Waking
         return globals()[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

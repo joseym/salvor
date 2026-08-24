@@ -27,6 +27,11 @@ export interface RunStatus {
   error?: string;
   reason?: string;
   inputSchema?: unknown;
+  /** When a `sleeping` run's durable timer comes due. Absent in every other
+   * state. A sleeping run is not waiting on anybody: it continues when this
+   * instant passes and something drives it again, which for a client-driven
+   * run is its own driver (see `ClientRunDriver.awaitWake`). */
+  wakeAt?: string;
   /** Present only on an `abandoned` run that was parked at a dangling write:
    * the outstanding intent (`seq`, `tool`) the abandonment recorded rather than
    * claiming settled. Absent for every other abandonment and every other state. */
@@ -396,6 +401,7 @@ export function parseStatus(obj: unknown): RunStatus {
     error: o.error as string | undefined,
     reason: o.reason as string | undefined,
     inputSchema: o.input_schema,
+    wakeAt: o.wake_at as string | undefined,
     unresolvedWrite:
       uw && typeof uw === "object"
         ? { seq: Number(uw.seq ?? 0), tool: String(uw.tool ?? "") }
