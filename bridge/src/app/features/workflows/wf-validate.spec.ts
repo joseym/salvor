@@ -64,6 +64,49 @@ describe('validateGraph', () => {
     expect(codes).toContain('unrealized_case');
   });
 
+  // Aligned to the server's own rule (`salvor_graph::validate::BranchCaseWithoutEdge`): a case
+  // with no matching edge label is node/case-precise, exactly like the server's error, and offers
+  // a one-click route to a terminal node (one with no outbound edge of its own) when the graph
+  // has one, the same node the server's message points an author at for a case meant to end the
+  // run. This is exactly the misspelled-label mistake (`lst` for `lost`) the rule exists to catch.
+  it('an unrealized branch case is case-precise and offers to route it to a terminal node', () => {
+    const g: WfGraph = {
+      ...CLEAN,
+      nodes: [...CLEAN.nodes, { id: 'br', kind: 'branch', name: 'br', cases: ['won', 'lost'] }],
+      edges: [
+        { from: 'a', to: 'br' },
+        { from: 'br', to: 'b', label: 'won' },
+        { from: 'br', to: 'b', label: 'lst' }, // meant to realize "lost"
+      ],
+    };
+    const err = validateGraph(g).find((e) => e.code === 'unrealized_case');
+    expect(err?.node).toBe('br');
+    expect(err?.case).toBe('lost');
+    // 'b' is the graph's only terminal node: no edge leaves it
+    expect(err?.fix).toMatchObject({ kind: 'realize_case', id: 'br', case: 'lost', to: 'b' });
+
+    const fixed = applyFix(g, err!.fix!);
+    expect(fixed.edges).toContainEqual({ from: 'br', to: 'b', label: 'lost' });
+    expect(validateGraph(fixed).some((e) => e.code === 'unrealized_case')).toBe(false);
+  });
+
+  it('an unrealized case offers no fix when the graph has no terminal node to route it to', () => {
+    // Every node here already has an outbound edge, including a cycle back to "br" itself:
+    // there is nowhere unambiguous to point a new edge.
+    const g: WfGraph = {
+      ...CLEAN,
+      nodes: [...CLEAN.nodes, { id: 'br', kind: 'branch', name: 'br', cases: ['x'] }],
+      edges: [
+        { from: 'a', to: 'b' },
+        { from: 'b', to: 'br' },
+        { from: 'br', to: 'a', label: 'zzz' },
+      ],
+    };
+    const err = validateGraph(g).find((e) => e.code === 'unrealized_case');
+    expect(err?.case).toBe('x');
+    expect(err?.fix).toBeUndefined();
+  });
+
   // sync-ledger item 4: the server's rule is the full 64-hex form, not this app's own old 16-hex
   // short form: a hash that used to pass must now fail, node/edge-precise as ever.
   it('a well-formed-but-short hash (the old 16-hex tolerance) is now malformed', () => {

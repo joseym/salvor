@@ -35,6 +35,7 @@ export interface WfFix {
     | 'drop_edge'
     | 'complete_hash'
     | 'attach_agent'
+    | 'realize_case'
     | 'truncate_name'
     | 'clear_name';
   readonly id?: string;
@@ -44,6 +45,9 @@ export interface WfFix {
   /** The donor agent hash an `attach_agent` fix reuses: always a hash already present on some
    * other node in the same document, never invented. */
   readonly hash?: string;
+  /** The case name a `realize_case` fix draws its new edge's label from: the same case the
+   * `unrealized_case` error names. */
+  readonly case?: string;
 }
 
 export interface WfError {
@@ -185,13 +189,25 @@ export function validateGraph(g: WfGraph): WfError[] {
     }
     if (n.kind === 'branch') {
       const realized = new Set(g.edges.filter((e) => e.from === n.id).map((e) => e.label));
+      // Aligned to the server's own rule (`salvor_graph::validate::BranchCaseWithoutEdge`): the
+      // engine picks a branch's live edge by matching the fired case's name against an edge
+      // label, so a case with none can still fire, find nowhere to go, and skip every node past
+      // it while the run finishes looking healthy. A terminal node (one with no outbound edge of
+      // its own) is the one-click target when the graph has one: the same node the server's own
+      // message points an author at when the case is meant to end the run, and pointing a new
+      // edge at it can never create a cycle.
+      const terminal = ids.find((id) => id !== n.id && !g.edges.some((e) => e.from === id));
       (n.cases ?? [])
         .filter((c) => !realized.has(c))
         .forEach((c) =>
           errs.push({
             code: 'unrealized_case',
             node: n.id,
-            msg: `${n.id} declares the case "${c}" but no edge realizes it.`,
+            case: c,
+            msg: `${n.id} declares the case "${c}" but no edge realizes it. Point it at a node, or at a terminal node if the case should end the run.`,
+            ...(terminal
+              ? { fix: { label: `Route "${c}" to ${terminal}`, kind: 'realize_case', id: n.id, case: c, to: terminal } }
+              : {}),
           }),
         );
 
@@ -396,6 +412,12 @@ export function applyFix(g: WfGraph, fix: WfFix): WfGraph {
             : n,
         ),
       };
+    case 'realize_case':
+      // The one fix in this file that draws a brand new edge rather than editing an existing
+      // field: there is nothing to repoint when the case never had an edge at all.
+      return fix.id !== undefined && fix.to !== undefined && fix.case !== undefined
+        ? { ...g, edges: [...g.edges, { from: fix.id, to: fix.to, label: fix.case }] }
+        : g;
     case 'truncate_name':
       return {
         ...g,
