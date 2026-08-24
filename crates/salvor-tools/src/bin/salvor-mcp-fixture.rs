@@ -27,6 +27,24 @@
 //!   publishes an `outputSchema` for it; this is what the
 //!   `output_schema`-surfacing test connects to.
 //!
+//! # The parking tools
+//!
+//! Four more tools exist to drive the `_meta.salvor` park contract. They are
+//! real servers' behavior in miniature: a tool that cannot finish yet says
+//! when to come back, and a tool waiting on somebody else says what it waits
+//! for.
+//!
+//! - `nap` returns ordinary content plus `_meta.salvor.sleep_until`, computed
+//!   as its own clock plus the `seconds` argument. Negative seconds are
+//!   allowed and are how a test stages an already-due deadline without
+//!   waiting on wall time.
+//! - `await_signal` returns content plus `_meta.salvor.suspend` carrying
+//!   `kind: "signal"`, the webhook wait.
+//! - `await_person` returns the same shape with no `kind`, the human gate.
+//! - `bad_park` returns whatever malformed `_meta.salvor` value its `shape`
+//!   argument names, so the refusals can be driven over a real wire rather
+//!   than only in the decoder's own unit tests.
+//!
 //! # Environment knobs
 //!
 //! Three environment variables, all unset by default, let the child-lifecycle
@@ -54,11 +72,33 @@
 use rmcp::ServiceExt;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerInfo};
+use rmcp::model::{CallToolResult, ContentBlock, Meta, ServerCapabilities, ServerInfo};
 use rmcp::transport::stdio;
 use rmcp::{ErrorData, Json, ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use time::format_description::well_known::Rfc3339;
+use time::{Duration, OffsetDateTime};
+
+/// The resume input every suspending tool here asks for. One boolean, which is
+/// enough to prove the recorded schema is the one a resume validates against.
+fn signal_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {"paid": {"type": "boolean"}},
+        "required": ["paid"],
+    })
+}
+
+/// Wraps a park request in the `_meta` namespace the client reads it from.
+/// Everything a server says to salvor lives under one key, so the rest of
+/// `_meta` stays available to whoever else is listening.
+fn salvor_meta(request: Value) -> Meta {
+    let mut meta = Meta::new();
+    meta.insert("salvor".to_owned(), request);
+    meta
+}
 
 /// The single argument `append_note` takes. Deriving `JsonSchema` lets the
 /// `#[tool]` macro publish an input schema for it; deriving `Deserialize` lets
@@ -68,6 +108,23 @@ struct AppendArgs {
     /// The line to append. Echoed back in the result so the round-trip test can
     /// see its own input come through the server.
     line: String,
+}
+
+/// The single argument `nap` takes: how far ahead of the server's own clock
+/// the wake instant should be. Signed, because a test that wants a deadline
+/// already in the past should not have to wait for one.
+#[derive(Debug, Deserialize, JsonSchema)]
+struct NapArgs {
+    /// Seconds from now until the run may continue.
+    seconds: i64,
+}
+
+/// The single argument `bad_park` takes: which malformed request to return.
+#[derive(Debug, Deserialize, JsonSchema)]
+struct BadParkArgs {
+    /// One of `not_an_object`, `both`, `unknown_key`, `bad_timestamp`,
+    /// `no_reason`, or `error_and_park`.
+    shape: String,
 }
 
 /// The structured result `stamp_receipt` returns. Deriving `JsonSchema` is
@@ -132,6 +189,100 @@ impl Fixture {
         Ok(CallToolResult::error(vec![ContentBlock::text(
             "boom: the explode tool always fails",
         )]))
+    }
+
+    /// A tool that cannot finish yet and says when to come back. The wake
+    /// instant is this server's own clock plus `seconds`, formatted RFC 3339,
+    /// which is the arithmetic a real server does with a retry-after header or
+    /// a settlement window.
+    #[tool(
+        description = "Park the calling run until the given number of seconds from now.",
+        annotations(read_only_hint = true)
+    )]
+    async fn nap(
+        &self,
+        Parameters(NapArgs { seconds }): Parameters<NapArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let wake_at = OffsetDateTime::now_utc() + Duration::seconds(seconds);
+        let wake_at = wake_at
+            .format(&Rfc3339)
+            .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
+        Ok(
+            CallToolResult::success(vec![ContentBlock::text(format!("napping until {wake_at}"))])
+                .with_meta(Some(salvor_meta(json!({"sleep_until": wake_at})))),
+        )
+    }
+
+    /// A tool waiting on an external system: the run parks and a webhook
+    /// resumes it with a payload the schema below accepts.
+    #[tool(
+        description = "Park the calling run until an external system reports back.",
+        annotations(read_only_hint = true)
+    )]
+    async fn await_signal(&self) -> Result<CallToolResult, ErrorData> {
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            "waiting on the settlement webhook",
+        )])
+        .with_meta(Some(salvor_meta(json!({"suspend": {
+            "reason": "waiting on the settlement webhook",
+            "input_schema": signal_schema(),
+            "kind": "signal",
+        }})))))
+    }
+
+    /// The same park with no `kind`: the human gate, which is what an unnamed
+    /// kind has always meant.
+    #[tool(
+        description = "Park the calling run until a person answers.",
+        annotations(read_only_hint = true)
+    )]
+    async fn await_person(&self) -> Result<CallToolResult, ErrorData> {
+        Ok(
+            CallToolResult::success(vec![ContentBlock::text("a person must confirm this")])
+                .with_meta(Some(salvor_meta(json!({"suspend": {
+                    "reason": "a person must confirm this",
+                    "input_schema": signal_schema(),
+                }})))),
+        )
+    }
+
+    /// A tool that asks for a park it has spelled wrong. Each `shape` is one
+    /// of the mistakes a server author actually makes.
+    #[tool(description = "Return a malformed park request of the named shape.")]
+    async fn bad_park(
+        &self,
+        Parameters(BadParkArgs { shape }): Parameters<BadParkArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let namespace = match shape.as_str() {
+            "not_an_object" => json!("suspend please"),
+            "both" => json!({
+                "suspend": {"reason": "either way", "input_schema": signal_schema()},
+                "sleep_until": "2026-08-14T09:00:00Z",
+            }),
+            // The camelCase spelling of the key, which is the mistake the
+            // strict decode exists to catch.
+            "unknown_key" => json!({"sleepUntil": "2026-08-14T09:00:00Z"}),
+            "bad_timestamp" => json!({"sleep_until": "in about an hour"}),
+            "no_reason" => json!({"suspend": {"input_schema": signal_schema()}}),
+            "error_and_park" => {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(
+                    "the settlement service refused",
+                )])
+                .with_meta(Some(salvor_meta(
+                    json!({"sleep_until": "2026-08-14T09:00:00Z"}),
+                ))));
+            }
+            other => {
+                return Err(ErrorData::invalid_params(
+                    format!("unknown bad_park shape `{other}`"),
+                    None,
+                ));
+            }
+        };
+        Ok(
+            CallToolResult::success(vec![ContentBlock::text("asking for a park")])
+                .with_meta(Some(salvor_meta(namespace))),
+        )
     }
 
     /// A tool that returns structured output: the SDK derives its
