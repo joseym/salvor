@@ -78,6 +78,7 @@ use salvor_cli_core::render;
 use salvor_replay::{EventEnvelope, RunSummary};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use time::OffsetDateTime;
 use wasm_bindgen::prelude::*;
 
 /// The error a call into this crate can return: bad input from the caller,
@@ -467,16 +468,20 @@ impl From<&GraphCommand> for GraphCommandDto {
 }
 
 /// One row of the `list` table: a store summary plus the status folded from
-/// that run's log.
+/// that run's log, and, for a sleeping run, the instant its timer wakes it.
 ///
 /// Flattened on the wire, so a row is the JSON `RunSummary` the store and the
 /// control plane already serialize with one extra `status` key, rather than a
-/// nested shape a caller would have to build by hand.
+/// nested shape a caller would have to build by hand. `wake_at` is absent (or
+/// `null`) on every row but a sleeping one, the same way the STARTED and LAST
+/// ACTIVITY timestamps are RFC 3339 strings.
 #[derive(Deserialize)]
 struct ListRow {
     #[serde(flatten)]
     summary: RunSummary,
     status: String,
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    wake_at: Option<OffsetDateTime>,
 }
 
 /// Parses an argv into the command it names, returned as canonical JSON.
@@ -576,13 +581,19 @@ pub fn render_help_to_ansi_string(path: &str) -> Result<String, CliError> {
 /// This is the render core, callable from any target, and it is what `salvor
 /// list` itself writes: [`salvor_cli_core::render::list_table`] styles the
 /// STATUS column unconditionally. Each row is a `RunSummary` with an added
-/// `status` key, the label folded from that run's log:
+/// `status` key, the label folded from that run's log, and, for a sleeping
+/// run, a `wake_at` key naming when its timer wakes it:
 ///
 /// ```json
 /// [{"run_id":"...","event_count":7,
 ///   "first_recorded_at":"2025-07-15T08:00:00Z",
 ///   "last_recorded_at":"2025-07-15T08:05:00Z",
-///   "status":"completed"}]
+///   "status":"completed"},
+///  {"run_id":"...","event_count":3,
+///   "first_recorded_at":"2025-07-15T08:00:00Z",
+///   "last_recorded_at":"2025-07-15T08:01:00Z",
+///   "status":"sleeping",
+///   "wake_at":"2025-07-16T08:00:00Z"}]
 /// ```
 ///
 /// Rows are rendered in the order given; ordering and filtering are the
@@ -593,9 +604,9 @@ pub fn render_help_to_ansi_string(path: &str) -> Result<String, CliError> {
 /// Returns [`CliError::Rows`] if `rows_json` is not a JSON array of rows.
 pub fn render_list_to_string(rows_json: &str) -> Result<String, CliError> {
     let rows: Vec<ListRow> = serde_json::from_str(rows_json).map_err(CliError::Rows)?;
-    let rows: Vec<(RunSummary, String)> = rows
+    let rows: Vec<(RunSummary, String, Option<OffsetDateTime>)> = rows
         .into_iter()
-        .map(|row| (row.summary, row.status))
+        .map(|row| (row.summary, row.status, row.wake_at))
         .collect();
     Ok(render::list_table(&rows))
 }
@@ -1026,8 +1037,8 @@ mod tests {
         let table = render_list_to_plain_string(ONE_ROW).unwrap();
         assert_eq!(
             table,
-            "RUN ID                                STATUS                EVENTS  STARTED               LAST ACTIVITY       \n\
-             00000000-0000-4000-8000-0000000000aa  completed                  7  2025-07-15 08:00:00Z  2025-07-15 08:05:00Z\n"
+            "RUN ID                                STATUS                EVENTS  STARTED               LAST ACTIVITY         WAKES AT            \n\
+             00000000-0000-4000-8000-0000000000aa  completed                  7  2025-07-15 08:00:00Z  2025-07-15 08:05:00Z                      \n"
         );
     }
 

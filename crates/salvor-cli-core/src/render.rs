@@ -158,9 +158,19 @@ pub fn parked_report(
             out.push('\n');
             out.push_str(&indent(&pretty_json(input_schema), 4));
             out.push('\n');
-            out.push_str(&wrap("Resume once you have the input:", width, "", ""));
+            out.push_str(&wrap(
+                if awaits_a_person {
+                    "Resume once you have the input:"
+                } else {
+                    "Nothing is waiting on you: whatever the run is waiting on delivers that \
+                     payload and the run continues. Resume by hand only to stand in for it:"
+                },
+                width,
+                "",
+                "",
+            ));
             out.push_str(&format!(
-                "\n  salvor resume {run_uuid} --agent {agent} --input @resume.json\n"
+                "\n  salvor resume {run_uuid}{store} --agent {agent} --input @resume.json\n"
             ));
             out
         }
@@ -180,7 +190,7 @@ pub fn parked_report(
             ));
             out.push_str(&wrap("Raise the limit and resume:", width, "", ""));
             out.push_str(&format!(
-                "\n  salvor resume {run_uuid} --agent {agent} --input '{{\"extend\": {{\"{extend_key}\": <more>}}}}'\n"
+                "\n  salvor resume {run_uuid}{store} --agent {agent} --input '{{\"extend\": {{\"{extend_key}\": <more>}}}}'\n"
             ));
             out
         }
@@ -206,7 +216,7 @@ pub fn parked_report(
                 "",
                 "",
             ));
-            out.push_str(&format!("\n  salvor wake --agent {agent}\n"));
+            out.push_str(&format!("\n  salvor wake{store} --agent {agent}\n"));
             out
         }
     }
@@ -222,9 +232,11 @@ pub fn parked_report(
 /// reads one way across the CLI. `agents` and `graph` are the values `resume`
 /// itself was given, printed into the `wake` command so it is the real one to
 /// type, with a placeholder standing in for anything the operator did not
-/// supply (the same rule [`resolved_report`] follows). Printed before a
-/// non-zero exit. `width` is the column count its prose wraps to; the command
-/// line never wraps, see [`wrap`].
+/// supply (the same rule [`resolved_report`] follows). `store` is the
+/// resolved store path to print right after the verb (or `None` for the
+/// `<STORE>` placeholder, see [`store_flag`]). Printed before a non-zero
+/// exit. `width` is the column count its prose wraps to; the command line
+/// never wraps, see [`wrap`].
 #[must_use]
 pub fn sleeping_report(
     run_uuid: &str,
@@ -232,6 +244,7 @@ pub fn sleeping_report(
     remaining: time::Duration,
     agents: &[PathBuf],
     graph: Option<&Path>,
+    store: Option<&Path>,
     width: usize,
 ) -> String {
     let mut out = wrap(
@@ -252,7 +265,7 @@ pub fn sleeping_report(
         "",
         "",
     ));
-    let mut command = "salvor wake".to_owned();
+    let mut command = format!("salvor wake{}", store_flag(store));
     if let Some(graph) = graph {
         command.push_str(&format!(" --graph {}", graph.display()));
     }
@@ -370,13 +383,16 @@ pub fn reconciliation_report(
 /// is what lets the printed command still hint at a `--graph <FILE>`
 /// placeholder in that case instead of silently dropping the flag. Likewise a
 /// missing agent falls back to an `--agent <FILE>` placeholder, since there is
-/// nothing real to print.
+/// nothing real to print. `store` is the resolved store path to print right
+/// after the verb (or `None` for the `<STORE>` placeholder, see
+/// [`store_flag`]).
 #[must_use]
 pub fn resolved_report(
     run_uuid: &str,
     agents: &[PathBuf],
     graph: Option<&Path>,
     graph_run: bool,
+    store: Option<&Path>,
     width: usize,
 ) -> String {
     let mut out = wrap(
@@ -388,7 +404,7 @@ pub fn resolved_report(
         "",
         "",
     );
-    let mut command = format!("salvor resume {run_uuid}");
+    let mut command = format!("salvor resume {run_uuid}{}", store_flag(store));
     match graph {
         Some(graph) => command.push_str(&format!(" --graph {}", graph.display())),
         None if graph_run => command.push_str(" --graph <FILE>"),
@@ -535,35 +551,41 @@ fn status_style(status: &str) -> anstyle::Style {
 
 /// The `list` table: a header plus one row per run. `rows` pairs each summary
 /// with its derived status label (the store does not carry status; it is a
-/// replay-time projection, so the caller folds each log first).
+/// replay-time projection, so the caller folds each log first) and, for a
+/// sleeping run, the instant its timer wakes it; every other status carries
+/// `None` there and the WAKES AT cell prints blank, since the column answers
+/// a question only a sleeping run has an answer to.
 ///
 /// The status cell carries ANSI styling unconditionally. Stripping it is the writer's job, not
 /// this function's: the caller prints through an `anstream` stream, which removes the codes when
 /// stdout is not a terminal and honours `NO_COLOR`. That keeps `salvor list | grep completed`
 /// working and keeps this function's output a pure function of its input.
 #[must_use]
-pub fn list_table(rows: &[(RunSummary, String)]) -> String {
+pub fn list_table(rows: &[(RunSummary, String, Option<OffsetDateTime>)]) -> String {
     let header = anstyle::Style::new().bold();
     let mut out = format!(
-        "{header}{:<36}  {:<20}  {:>6}  {:<20}  {:<20}{header:#}\n",
+        "{header}{:<36}  {:<20}  {:>6}  {:<20}  {:<20}  {:<20}{header:#}\n",
         "RUN ID",
         "STATUS",
         "EVENTS",
         "STARTED",
         "LAST ACTIVITY",
+        "WAKES AT",
         header = header,
     );
-    for (summary, status) in rows {
+    for (summary, status, wake_at) in rows {
         // Pad BEFORE styling: escape codes are zero-width on screen but count as characters to
         // `{:<20}`, so a styled-then-padded cell would shear the columns to the right of it.
         let style = status_style(status);
         let padded = format!("{status:<20}");
+        let wakes_at = wake_at.map_or_else(String::new, format_ts);
         out.push_str(&format!(
-            "{:<36}  {style}{padded}{style:#}  {:>6}  {:<20}  {:<20}\n",
+            "{:<36}  {style}{padded}{style:#}  {:>6}  {:<20}  {:<20}  {:<20}\n",
             summary.run_id.as_uuid(),
             summary.event_count,
             format_ts(summary.first_recorded_at),
             format_ts(summary.last_recorded_at),
+            wakes_at,
             style = style,
             padded = padded,
         ));
@@ -719,23 +741,43 @@ pub fn format_ts(ts: OffsetDateTime) -> String {
     )
 }
 
-/// Formats a span as the coarsest unit that still reads as a number, for
-/// "overdue by" in a wake report.
+/// Formats a span as its two coarsest units, for "overdue by" in a wake
+/// report and for how much of a sleeping run's wait is left.
 ///
-/// One unit, not a breakdown: an operator reading how far past its deadline a
-/// timer is wants the magnitude, and `2d` answers that where `2d 3h 14m 7s`
-/// makes them do the reading. A negative span (a deadline in the future,
-/// which a due-run listing never holds but a caller may still hand over)
-/// formats as `0s` rather than a minus sign, since "overdue by minus an hour"
-/// is not a sentence.
+/// Two units, not one and not a full breakdown: `2d 3h` answers "how far past
+/// its deadline is this timer" the way a bare `2d` cannot (a day and 23 hours
+/// reads as `1d 23h`, not as the `1d` a single unit would truncate it to),
+/// while `2d 3h 14m 7s` makes the reader do work the second unit already
+/// finished. The finer unit is dropped, not rounded, and omitted entirely
+/// when it is zero, so a round number still reads as one (`2m`, not `2m 0s`).
+/// A negative span (a deadline in the future, which a due-run listing never
+/// holds but a caller may still hand over) formats as `0s` rather than a
+/// minus sign, since "overdue by minus an hour" is not a sentence.
 #[must_use]
 pub fn format_duration(span: time::Duration) -> String {
     let seconds = span.whole_seconds().max(0);
     match seconds {
         0..=59 => format!("{seconds}s"),
-        60..=3599 => format!("{}m", seconds / 60),
-        3600..=86_399 => format!("{}h", seconds / 3600),
-        _ => format!("{}d", seconds / 86_400),
+        60..=3599 => {
+            let (m, s) = (seconds / 60, seconds % 60);
+            if s == 0 {
+                format!("{m}m")
+            } else {
+                format!("{m}m {s}s")
+            }
+        }
+        3600..=86_399 => {
+            let (h, m) = (seconds / 3600, (seconds % 3600) / 60);
+            if m == 0 {
+                format!("{h}h")
+            } else {
+                format!("{h}h {m}m")
+            }
+        }
+        _ => {
+            let (d, h) = (seconds / 86_400, (seconds % 86_400) / 3600);
+            format!("{d}d {h}h")
+        }
     }
 }
 
@@ -932,6 +974,13 @@ mod tests {
         OffsetDateTime::from_unix_timestamp(1_755_162_000).unwrap()
     }
 
+    /// The store path threaded through the report tests below that are not
+    /// themselves about the `--store` flag, standing in for whatever
+    /// `cli.store` resolved to on the run that produced the report.
+    fn sample_store() -> &'static Path {
+        Path::new("salvor.db")
+    }
+
     /// The refusal a `resume` of a still-sleeping run prints says the two
     /// things a reader needs, the instant and what is left of the wait, and
     /// points at the command that drives what is due rather than at a resume
@@ -944,6 +993,7 @@ mod tests {
             time::Duration::minutes(29),
             &[PathBuf::from("agents/writer.toml")],
             None,
+            Some(sample_store()),
             DEFAULT_REPORT_WIDTH,
         );
         let visible = flatten(&report);
@@ -956,7 +1006,7 @@ mod tests {
             "and what is left of the wait: {report}"
         );
         assert!(
-            report.contains("  salvor wake --agent agents/writer.toml"),
+            report.contains("  salvor wake --store salvor.db --agent agents/writer.toml"),
             "the command drives what is due, on one line: {report}"
         );
         assert!(
@@ -1121,6 +1171,7 @@ mod tests {
                 &[PathBuf::from("agent.toml")],
                 None,
                 false,
+                Some(sample_store()),
                 40
             )),
             words(&resolved_report(
@@ -1128,6 +1179,7 @@ mod tests {
                 &[PathBuf::from("agent.toml")],
                 None,
                 false,
+                Some(sample_store()),
                 100
             ))
         );
@@ -1153,23 +1205,24 @@ mod tests {
             &[PathBuf::from("agents/writer.toml")],
             None,
             false,
+            Some(sample_store()),
             40,
         );
         assert!(
-            report
-                .lines()
-                .any(|line| line == format!("  salvor resume {UUID} --agent agents/writer.toml")),
+            report.lines().any(|line| line
+                == format!("  salvor resume {UUID} --store salvor.db --agent agents/writer.toml")),
             "the resume command must survive on one line:\n{report}"
         );
 
         // A `resolve` that was given no `--agent`/`--graph` still prints a
         // parseable command, with a bracketed placeholder standing in for the
         // one thing it does not know.
-        let unfilled = resolved_report(UUID, &[], None, false, 40);
+        let unfilled = resolved_report(UUID, &[], None, false, Some(sample_store()), 40);
         assert!(
             unfilled
                 .lines()
-                .any(|line| line == format!("  salvor resume {UUID} --agent <FILE>")),
+                .any(|line| line
+                    == format!("  salvor resume {UUID} --store salvor.db --agent <FILE>")),
             "the fallback resume command must survive on one line:\n{unfilled}"
         );
 
@@ -1178,11 +1231,12 @@ mod tests {
         // caller still knows from the run's own log that this is a graph run,
         // so the printed command hints at both placeholders rather than
         // silently dropping `--graph`.
-        let unfilled_graph = resolved_report(UUID, &[], None, true, 40);
+        let unfilled_graph = resolved_report(UUID, &[], None, true, Some(sample_store()), 40);
         assert!(
-            unfilled_graph
-                .lines()
-                .any(|line| line == format!("  salvor resume {UUID} --graph <FILE> --agent <FILE>")),
+            unfilled_graph.lines().any(|line| line
+                == format!(
+                    "  salvor resume {UUID} --store salvor.db --graph <FILE> --agent <FILE>"
+                )),
             "the graph fallback resume command must survive on one line:\n{unfilled_graph}"
         );
 
@@ -1226,6 +1280,7 @@ mod tests {
             &[PathBuf::from("agents/writer.toml")],
             Some(Path::new("flow.json")),
             true,
+            Some(sample_store()),
             80,
         );
         let line = report
@@ -1288,7 +1343,14 @@ mod tests {
         let reports = [
             reconciliation_report(UUID, Some(&sample_pending()), sample_recorded_at(), WIDTH),
             reconciliation_report(UUID, None, None, WIDTH),
-            resolved_report(UUID, &[PathBuf::from("agent.toml")], None, false, WIDTH),
+            resolved_report(
+                UUID,
+                &[PathBuf::from("agent.toml")],
+                None,
+                false,
+                Some(sample_store()),
+                WIDTH,
+            ),
             abandoned_report(UUID, 12, Some((3, "send_email")), WIDTH),
             abandoned_report(UUID, 12, None, WIDTH),
             parked_report(
@@ -1312,6 +1374,7 @@ mod tests {
                     observed: 1200.0,
                 },
                 Path::new("agent.toml"),
+                Some(sample_store()),
                 WIDTH,
             ),
             parked_report(
@@ -1320,6 +1383,7 @@ mod tests {
                     wake_at: sample_wake_at(),
                 },
                 Path::new("agent.toml"),
+                Some(sample_store()),
                 WIDTH,
             ),
             sleeping_report(
@@ -1328,6 +1392,7 @@ mod tests {
                 time::Duration::minutes(29),
                 &[PathBuf::from("agent.toml")],
                 None,
+                Some(sample_store()),
                 WIDTH,
             ),
         ];
@@ -1343,5 +1408,60 @@ mod tests {
                 );
             }
         }
+    }
+
+    // --- the `--store` flag on a resume/wake hint --------------------------
+
+    /// A `resume`/`wake` hint names the exact store path the command that
+    /// printed it resolved, so the operator can copy the line and run it
+    /// against the same store without adding `--store` by hand.
+    #[test]
+    fn the_hint_command_carries_the_resolved_store_path() {
+        let report = sleeping_report(
+            UUID,
+            sample_wake_at(),
+            time::Duration::minutes(29),
+            &[PathBuf::from("agents/writer.toml")],
+            None,
+            Some(Path::new("/var/lib/salvor/salvor.db")),
+            DEFAULT_REPORT_WIDTH,
+        );
+        assert!(
+            report.contains("--store /var/lib/salvor/salvor.db"),
+            "the hint names the resolved store path: {report}"
+        );
+    }
+
+    /// A caller with no resolved store path to hand over, such as the wasm
+    /// build with no SQLite file open, still gets a copy-pasteable-looking
+    /// command: a `<STORE>` placeholder stands in, the same way `<FILE>`
+    /// already stands in for a missing agent path.
+    #[test]
+    fn a_missing_store_path_prints_a_placeholder() {
+        let report = resolved_report(
+            UUID,
+            &[PathBuf::from("agent.toml")],
+            None,
+            false,
+            None,
+            DEFAULT_REPORT_WIDTH,
+        );
+        assert!(
+            report.contains("--store <STORE>"),
+            "a missing store path falls back to a placeholder: {report}"
+        );
+    }
+
+    // --- `format_duration` --------------------------------------------------
+
+    /// `format_duration` prints its two coarsest units, dropping the finer one
+    /// entirely when it is zero rather than printing a `0` for it.
+    #[test]
+    fn format_duration_prints_two_units() {
+        assert_eq!(format_duration(time::Duration::seconds(76)), "1m 16s");
+        assert_eq!(format_duration(time::Duration::seconds(120)), "2m");
+        assert_eq!(format_duration(time::Duration::seconds(3661)), "1h 1m");
+        assert_eq!(format_duration(time::Duration::seconds(90_000)), "1d 1h");
+        assert_eq!(format_duration(time::Duration::seconds(-1)), "0s");
     }
 }

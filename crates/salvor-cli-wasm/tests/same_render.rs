@@ -87,10 +87,21 @@ fn summary(tag: u8, event_count: u64, first: i64, last: i64) -> RunSummary {
     }
 }
 
+/// One row of a reference list table: the summary, its folded status, and,
+/// for a sleeping row, its wake instant. A named alias rather than repeating
+/// the triple at every site `reference_tables` and `rows_json` pass it
+/// through, which is also what keeps clippy's `type_complexity` lint quiet.
+type ReferenceRow = (RunSummary, String, Option<OffsetDateTime>);
+
+/// One named reference table: its fixture name and its rows.
+type ReferenceTable = (&'static str, Vec<ReferenceRow>);
+
 /// The named reference tables. Each becomes one `rows/<name>.json` input and a
-/// plain and an ANSI `expected/list/<name>.*.txt` pair.
-fn reference_tables() -> Vec<(&'static str, Vec<(RunSummary, String)>)> {
-    let mut tables: Vec<(&'static str, Vec<(RunSummary, String)>)> = Vec::new();
+/// plain and an ANSI `expected/list/<name>.*.txt` pair. The third element of
+/// each row is the wake instant a sleeping row carries, or `None` for every
+/// other status.
+fn reference_tables() -> Vec<ReferenceTable> {
+    let mut tables: Vec<ReferenceTable> = Vec::new();
 
     // A table with no rows is still a header, and the header carries its own
     // styling, so the empty case is not a trivial one.
@@ -99,15 +110,18 @@ fn reference_tables() -> Vec<(&'static str, Vec<(RunSummary, String)>)> {
     // Every label the STATUS column can print, in the order the flag offers
     // them. Each group takes a different colour branch and the two terminal
     // outcomes take one each, so this single table walks every arm of the
-    // renderer's style match.
-    let every_status: Vec<(RunSummary, String)> = render::STATUS_LABELS
+    // renderer's style match. The sleeping row alone carries a wake instant,
+    // which is what exercises the WAKES AT column's one non-blank cell.
+    let every_status: Vec<ReferenceRow> = render::STATUS_LABELS
         .iter()
         .enumerate()
         .map(|(i, status)| {
             let tag = u8::try_from(i).unwrap();
+            let wake_at = (*status == "sleeping").then(|| ts(60 * 24));
             (
                 summary(tag, (i as u64 + 1) * 3, i as i64, i as i64 + 5),
                 (*status).to_owned(),
+                wake_at,
             )
         })
         .collect();
@@ -117,7 +131,11 @@ fn reference_tables() -> Vec<(&'static str, Vec<(RunSummary, String)>)> {
     // miscoloured, and still has to sit in its column.
     tables.push((
         "unknown_status",
-        vec![(summary(0xa0, 1, 0, 0), "something-added-later".to_owned())],
+        vec![(
+            summary(0xa0, 1, 0, 0),
+            "something-added-later".to_owned(),
+            None,
+        )],
     ));
 
     // A count wide enough to test the right-aligned EVENTS column and a status
@@ -128,8 +146,9 @@ fn reference_tables() -> Vec<(&'static str, Vec<(RunSummary, String)>)> {
             (
                 summary(0xb0, 1_234_567, 0, 60 * 24 * 365),
                 "needs-reconciliation".to_owned(),
+                None,
             ),
-            (summary(0xb1, 0, 1, 1), "not-started".to_owned()),
+            (summary(0xb1, 0, 1, 1), "not-started".to_owned(), None),
         ],
     ));
 
@@ -138,10 +157,10 @@ fn reference_tables() -> Vec<(&'static str, Vec<(RunSummary, String)>)> {
     tables.push((
         "mixed",
         vec![
-            (summary(0xc1, 12, 0, 4), "completed".to_owned()),
-            (summary(0xc2, 3, 2, 2), "awaiting-model".to_owned()),
-            (summary(0xc3, 41, 3, 90), "suspended".to_owned()),
-            (summary(0xc4, 7, 5, 6), "failed".to_owned()),
+            (summary(0xc1, 12, 0, 4), "completed".to_owned(), None),
+            (summary(0xc2, 3, 2, 2), "awaiting-model".to_owned(), None),
+            (summary(0xc3, 41, 3, 90), "suspended".to_owned(), None),
+            (summary(0xc4, 7, 5, 6), "failed".to_owned(), None),
         ],
     ));
 
@@ -149,16 +168,24 @@ fn reference_tables() -> Vec<(&'static str, Vec<(RunSummary, String)>)> {
 }
 
 /// A reference table as the JSON a caller hands across the boundary: the
-/// `RunSummary` the store already serializes, with the folded status added.
-fn rows_json(rows: &[(RunSummary, String)]) -> String {
+/// `RunSummary` the store already serializes, with the folded status added,
+/// and, for a sleeping row, its wake instant.
+fn rows_json(rows: &[ReferenceRow]) -> String {
     let values: Vec<Value> = rows
         .iter()
-        .map(|(summary, status)| {
+        .map(|(summary, status, wake_at)| {
             let mut value = serde_json::to_value(summary).unwrap();
-            value
-                .as_object_mut()
-                .unwrap()
-                .insert("status".to_owned(), json!(status));
+            let object = value.as_object_mut().unwrap();
+            object.insert("status".to_owned(), json!(status));
+            if let Some(wake_at) = wake_at {
+                // The same `time::serde::rfc3339` codec `RunSummary`'s own
+                // timestamps go through, so a wake instant is spelled exactly
+                // the way STARTED and LAST ACTIVITY already are.
+                let formatted =
+                    time::serde::rfc3339::serialize(wake_at, serde_json::value::Serializer)
+                        .unwrap();
+                object.insert("wake_at".to_owned(), formatted);
+            }
             value
         })
         .collect();

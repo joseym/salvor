@@ -149,6 +149,7 @@ pub async fn run(store_path: &Path, args: RunArgs) -> Result<u8> {
         outcome.map_err(|error| contextualize_auth_error(error, &config))?,
         &uuid,
         &agent_path,
+        store_path,
     )
 }
 
@@ -266,6 +267,7 @@ pub async fn resume(store_path: &Path, args: ResumeArgs) -> Result<u8> {
                         wake_at - now,
                         &args.agents,
                         args.graph.as_deref(),
+                        Some(store_path),
                         render::DEFAULT_REPORT_WIDTH,
                     )
                 );
@@ -281,7 +283,7 @@ pub async fn resume(store_path: &Path, args: ResumeArgs) -> Result<u8> {
     // only the re-drive differs, because the log records the graph's hash, not
     // the document. See `resume_graph`.
     if is_graph_run(&log) {
-        return resume_graph(store, run_id, &uuid, &log, &args, disposition).await;
+        return resume_graph(store, run_id, &uuid, &log, &args, disposition, store_path).await;
     }
 
     // An agent run rebuilds its one agent. Exactly one `--agent` is expected.
@@ -337,6 +339,7 @@ pub async fn resume(store_path: &Path, args: ResumeArgs) -> Result<u8> {
         outcome.map_err(|error| contextualize_auth_error(error, &config))?,
         &uuid,
         agent_path,
+        store_path,
     )
 }
 
@@ -891,10 +894,17 @@ pub async fn fork(store_path: &Path, args: ForkArgs) -> Result<u8> {
     let child_log = store.read_log(child_id).await?;
     let mut ctx = RunCtx::new(store, child_id, child_log)?;
     let outcome = run_graph(&mut ctx, &graph, &Value::Null, &agents, &tools).await;
-    let outcome =
-        settle_graph_drive(&mut ctx, &child_uuid, &args.graph, &args.agents, outcome).await;
+    let outcome = settle_graph_drive(
+        &mut ctx,
+        &child_uuid,
+        &args.graph,
+        &args.agents,
+        outcome,
+        store_path,
+    )
+    .await;
     close_servers(servers).await;
-    report_graph_outcome(outcome?, &child_uuid, &args.graph, &args.agents)
+    report_graph_outcome(outcome?, &child_uuid, &args.graph, &args.agents, store_path)
 }
 
 /// `salvor resolve`: record the completion of a dangling write by hand.
@@ -933,6 +943,7 @@ pub async fn resolve(store_path: &Path, args: ResolveArgs) -> Result<u8> {
                     &args.agents,
                     args.graph.as_deref(),
                     graph_run,
+                    Some(store_path),
                     render::DEFAULT_REPORT_WIDTH
                 )
             );
@@ -1042,6 +1053,12 @@ pub async fn list(store_path: &Path, args: ListArgs) -> Result<u8> {
         let log = store.read_log(summary.run_id).await?;
         let state = derive_state(&log);
         let status = render::status_label(&state.status).to_owned();
+        // Only a sleeping run has a wake instant; every other status leaves
+        // the WAKES AT column blank.
+        let wake_at = match &state.status {
+            RunStatus::Sleeping { wake_at } => Some(*wake_at),
+            _ => None,
+        };
 
         if !args.status.is_empty() && !args.status.iter().any(|s| s == &status) {
             continue;
@@ -1058,7 +1075,7 @@ pub async fn list(store_path: &Path, args: ListArgs) -> Result<u8> {
                 continue;
             }
         }
-        rows.push((summary, status));
+        rows.push((summary, status, wake_at));
     }
 
     // The tail, not the head: a limit exists to show the runs that matter now, and the newest sit
@@ -1621,9 +1638,17 @@ pub async fn graph_run(store_path: &Path, args: GraphRunArgs) -> Result<u8> {
         ctx = ctx.with_labels(labels);
     }
     let outcome = run_graph(&mut ctx, &graph, &input, &agents, &tools).await;
-    let outcome = settle_graph_drive(&mut ctx, &uuid, &args.graph, &args.agents, outcome).await;
+    let outcome = settle_graph_drive(
+        &mut ctx,
+        &uuid,
+        &args.graph,
+        &args.agents,
+        outcome,
+        store_path,
+    )
+    .await;
     close_servers(servers).await;
-    report_graph_outcome(outcome?, &uuid, &args.graph, &args.agents)
+    report_graph_outcome(outcome?, &uuid, &args.graph, &args.agents, store_path)
 }
 
 /// Re-drives a parked or crashed GRAPH run, for [`resume`]'s graph branch.
@@ -1641,6 +1666,7 @@ async fn resume_graph(
     log: &[EventEnvelope],
     args: &ResumeArgs,
     disposition: Disposition,
+    store_path: &Path,
 ) -> Result<u8> {
     let (graph_path, graph) = resolve_graph_document(args.graph.as_deref(), log, uuid)?;
     // See the agent branch of `resume`: waking a due run and recovering a
@@ -1697,9 +1723,17 @@ async fn resume_graph(
     }
     // The recorded input wins on replay, so a bare null is fine here.
     let outcome = run_graph(&mut ctx, &graph, &Value::Null, &agents, &tools).await;
-    let outcome = settle_graph_drive(&mut ctx, uuid, graph_path, &args.agents, outcome).await;
+    let outcome = settle_graph_drive(
+        &mut ctx,
+        uuid,
+        graph_path,
+        &args.agents,
+        outcome,
+        store_path,
+    )
+    .await;
     close_servers(servers).await;
-    report_graph_outcome(outcome?, uuid, graph_path, &args.agents)
+    report_graph_outcome(outcome?, uuid, graph_path, &args.agents, store_path)
 }
 
 /// Refuses a `--input` that does not satisfy the `approval_schema` of the gate
@@ -2079,6 +2113,7 @@ async fn settle_graph_drive(
     graph_path: &Path,
     agents: &[PathBuf],
     outcome: Result<GraphOutcome, EngineError>,
+    store_path: &Path,
 ) -> Result<GraphOutcome> {
     let error = match outcome {
         Ok(outcome) => return Ok(outcome),
@@ -2104,7 +2139,7 @@ async fn settle_graph_drive(
         Ok(false) if has_head => Err(anyhow::anyhow!(
             "{error}\n\nrun {uuid} is recorded and resumable: every step it completed is durable, \
              and nothing was recorded past this failure. Re-drive it with:\n  {}",
-            graph_resume_command(uuid, graph_path, agents)
+            graph_resume_command(uuid, graph_path, agents, store_path)
         )),
         Ok(false) => Err(error.into()),
         Err(recording) => {
@@ -2119,13 +2154,21 @@ async fn settle_graph_drive(
 }
 
 /// The `salvor resume` command line that re-drives one graph run: the id, the
-/// document, and every `--agent` file the caller supplied, in the order they
-/// were given. One place, so the parked report and the transient-failure triage
-/// can never drift into telling an operator two different commands for the same
-/// run.
-fn graph_resume_command(uuid: &str, graph_path: &Path, agents: &[PathBuf]) -> String {
+/// store it lives in, the document, and every `--agent` file the caller
+/// supplied, in the order they were given. One place, so the parked report and
+/// the transient-failure triage can never drift into telling an operator two
+/// different commands for the same run. `--store` sits right after the id,
+/// matching the form [`render::parked_report`] and its siblings already print
+/// for an agent run, so the two verbs read as one convention rather than two.
+fn graph_resume_command(
+    uuid: &str,
+    graph_path: &Path,
+    agents: &[PathBuf],
+    store_path: &Path,
+) -> String {
     format!(
-        "salvor resume {uuid} --graph {}{}",
+        "salvor resume {uuid} --store {} --graph {}{}",
+        store_path.display(),
         graph_path.display(),
         agent_flags(agents)
     )
@@ -2149,6 +2192,7 @@ fn report_graph_outcome(
     uuid: &str,
     graph_path: &Path,
     agents: &[PathBuf],
+    store_path: &Path,
 ) -> Result<u8> {
     match outcome {
         GraphOutcome::Completed { output } => {
@@ -2168,10 +2212,13 @@ fn report_graph_outcome(
             }
             // A timer park takes no input and is not resumed by hand: it is
             // driven again once its deadline passes, which is what `wake`
-            // does for every run that is due.
+            // does for every run that is due. `--store` sits right after the
+            // verb here, matching how `render::parked_report`'s own sleeping
+            // hint places it after `salvor wake`.
             if let ParkReason::Sleeping { .. } = reason {
                 println!(
-                    "it continues once the deadline passes:\n  salvor wake --graph {}{}",
+                    "it continues once the deadline passes:\n  salvor wake --store {} --graph {}{}",
+                    store_path.display(),
                     graph_path.display(),
                     agent_flags(agents)
                 );
@@ -2179,7 +2226,7 @@ fn report_graph_outcome(
             }
             println!(
                 "resume it with:\n  {} --input <json>",
-                graph_resume_command(uuid, graph_path, agents)
+                graph_resume_command(uuid, graph_path, agents, store_path)
             );
             Ok(0)
         }
@@ -2208,8 +2255,16 @@ async fn build_from_definition(definition: AgentDefinition) -> Result<BuiltAgent
 }
 
 /// Prints the final result of a completed run, or the parked report of a
-/// suspended one. Both are exit code 0.
-fn report_outcome(outcome: RunOutcome, uuid: &str, agent_path: &Path) -> Result<u8> {
+/// suspended one. Both are exit code 0. `store_path` is the store this
+/// command resolved (flag, then `SALVOR_STORE`, then the default), printed
+/// into the parked report's resume/wake hint so it is the real command to
+/// type.
+fn report_outcome(
+    outcome: RunOutcome,
+    uuid: &str,
+    agent_path: &Path,
+    store_path: &Path,
+) -> Result<u8> {
     match outcome {
         RunOutcome::Completed { output, .. } => {
             println!("{}", render::pretty_json(&output));
@@ -2218,7 +2273,13 @@ fn report_outcome(outcome: RunOutcome, uuid: &str, agent_path: &Path) -> Result<
         RunOutcome::Parked { reason, .. } => {
             print!(
                 "{}",
-                render::parked_report(uuid, &reason, agent_path, render::DEFAULT_REPORT_WIDTH)
+                render::parked_report(
+                    uuid,
+                    &reason,
+                    agent_path,
+                    Some(store_path),
+                    render::DEFAULT_REPORT_WIDTH
+                )
             );
             Ok(0)
         }

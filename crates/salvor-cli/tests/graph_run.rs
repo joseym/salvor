@@ -118,6 +118,53 @@ fn graph_run_parks_at_a_gate_then_resume_with_the_document_completes() {
     );
 }
 
+/// A graph run that parks on a `delay` node is not resumed by hand; it names
+/// the `salvor wake` command that continues it once the deadline passes, and
+/// that command carries `--store` so it is the real command to paste into a
+/// crontab, not one missing the piece that names which store to open.
+#[test]
+fn a_timer_park_names_the_wake_command_with_its_store() {
+    let dir = tempdir().expect("tempdir");
+    let store = dir.path().join("salvor.db");
+    let graph = write(
+        dir.path(),
+        "delay.json",
+        r#"{
+  "schema_version": 1,
+  "nodes": [
+    { "kind": "delay", "payload": { "id": "cooloff", "seconds": 3600 } }
+  ],
+  "edges": []
+}"#,
+    );
+
+    let output = salvor(&store)
+        .args(["graph", "run"])
+        .arg(&graph)
+        .args(["--input", "null"])
+        .output()
+        .expect("runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "a timer park is a success, not a failure: {output:?}"
+    );
+    assert!(
+        stdout.contains("sleeping until"),
+        "the park reason is named: {stdout}"
+    );
+
+    let expected = format!(
+        "salvor wake --store {} --graph {}",
+        store.display(),
+        graph.display()
+    );
+    assert!(
+        stdout.contains(&expected),
+        "the wake hint is the exact command, --store included ({expected}): {stdout}"
+    );
+}
+
 #[test]
 fn resume_with_a_mismatched_graph_document_refuses() {
     let dir = tempdir().expect("tempdir");
@@ -441,7 +488,8 @@ fn a_transient_graph_failure_names_the_run_as_resumable() {
     );
     // The literal command, so it can be pasted rather than reconstructed.
     let expected = format!(
-        "salvor resume {run} --graph {} --agent {}",
+        "salvor resume {run} --store {} --graph {} --agent {}",
+        store.display(),
         graph.display(),
         agent.display()
     );

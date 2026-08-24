@@ -39,7 +39,8 @@
     "first_recorded_at": "2025-07-15T08:05:00Z",
     "last_recorded_at": "2025-07-15T08:10:00Z",
     "run_id": "00000000-0000-4000-8000-000000000005",
-    "status": "sleeping"
+    "status": "sleeping",
+    "wake_at": "2025-07-16T08:00:00Z"
   },
   {
     "event_count": 21,
