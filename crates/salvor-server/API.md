@@ -917,11 +917,24 @@ append-guard to confirm the incoming event is the one legal next event. The two
 modes never collide: a client-driven run and a server-driven run cannot share an
 id, and each surface serves only its own runs.
 
-Timers and signals are out of scope for a client-driven run, for now (design
-decision). A client-driven run that records a sleep is the client's to wake:
-the server's wake sweep leaves every client-driven run alone, current lease
-or lapsed, because re-driving one from this process would be a second writer
-racing the client's own drive token for the same sequence numbers.
+A client-driven run may park on a durable timer, and its client is what wakes
+it. The generic append accepts the pair (`SleepStarted { wake_at }` and
+`SleepCompleted`) for the same reason it accepts `Suspended` and `Resumed`:
+both halves are recorded facts the client's own cursor produces, neither
+holds a secret, and neither has an effect outside the log. Nothing on the
+server waits for the deadline. The wake sweep leaves every client-driven run
+alone, current lease or lapsed, because re-driving one from this process
+would be a second writer racing the client's drive token for the same
+sequence numbers. So the client wakes its own run: on a later drive it
+replays its log, finds a `SleepStarted` with no `SleepCompleted` after it,
+compares the recorded `wake_at` against a clock reading it records as a
+`NowObserved`, and either stops (still asleep, nothing appended) or appends
+the `SleepCompleted` and carries on. The server enforces the order of the
+pair, refusing a `SleepCompleted` that would close a sleep the log never
+started with `409 divergence`; it does not judge the deadline, because
+`wake_at` is the client's own recorded instant and the clock that decides it
+has arrived is the client's. `GET /v1/runs/{id}` reports such a run as
+`{ "state": "sleeping", "wake_at": "<RFC 3339>" }` like any other.
 
 The generic append carries only the control and deterministic-context events the
 client's cursor emits itself, which hold no secret and no side effect:
@@ -1407,9 +1420,28 @@ recorded order is therefore intent, completion, `SleepStarted`.
 
 That `{"__salvor_sleep": ...}` shape is what the runtime writes into the log
 from a native tool's `ToolOutcome::Sleep`; it is not a value a tool server
-sends, and an MCP tool cannot park a run this way no matter what its output
-contains, because MCP has no concept of sleeping a call. From an MCP-only
-setup, the graph `delay` node is how a run sleeps instead.
+sends.
+
+An MCP server can park the run that called it by putting the request under
+`_meta` on its tool result, in the `salvor` namespace:
+`{"_meta": {"salvor": {"suspend": {"reason": "...", "input_schema": {...}, "kind": "signal"}}}}`
+to wait for an input, or
+`{"_meta": {"salvor": {"sleep_until": "2026-08-14T09:00:00Z"}}}` to wait
+until an instant. `_meta` is the extension point the MCP specification
+reserves on every result, so a host that is not salvor reads an ordinary
+result with an unfamiliar metadata key. `kind` is optional and its only
+value is `"signal"`, meaning an external system owes the run a payload; omit
+it and the run waits on a person. `reason` and `input_schema` are both
+required. `sleep_until` is an RFC 3339 instant, never a duration: the
+runtime records the instant and replay reproduces it. The recorded order is
+intent, then the tool call's completion, then `SleepStarted` or `Suspended`;
+the completion settles the call and releases its idempotency claim before
+the wait begins, so a run parked for a week blocks no other run and holds no
+MCP process. A request that is malformed, names both keys, sits on a result
+flagged `isError`, or uses a key salvor does not know fails the tool call
+with a message naming `_meta.salvor` and the problem; it is never passed
+through as ordinary output. A result with no `_meta.salvor` records exactly
+as it always has.
 
 That order is the point. The completion settles the call, and for a call
 carrying an idempotency key it settles the store's claim in the same atomic

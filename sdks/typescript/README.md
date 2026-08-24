@@ -181,10 +181,20 @@ await run.clientToolCompletion(4, receipt);
 await run.append([run.envelope(5, "RunCompleted", { output: answer })]);
 ```
 
+The driver can also park the run on a durable timer: `sleepUntil(seq, wakeAt)`
+records the park at a chosen instant, `sleepFor(seq, durationMs)` records a
+clock reading first and derives `wakeAt` from it so the same instant replays
+later, and `awaitWake(seq)` is what a later drive calls to find out whether
+the deadline has passed. Nothing on the server watches the clock for you, so
+the client wakes its own run: it replays its log, calls `awaitWake`, and
+either learns the run is still asleep (nothing appended) or gets the
+`SleepCompleted` appended and carries on.
+
 The driver's full surface: `openClientRun` (also re-opens, i.e. resumes, an
 existing run), `log(fromSeq)`, `append(events)`, `modelStep`, `modelStepStream`
 (an `AsyncIterable` of ticker deltas with a `completion` after), `toolStep`,
-`clientToolIntent`, `clientToolCompletion`, and `resolve(output)`. Re-opening a
+`clientToolIntent`, `clientToolCompletion`, `sleepUntil`, `sleepFor`,
+`awaitWake`, and `resolve(output)`. Re-opening a
 run returns its recorded log on `run.logEnvelopes` and mints a fresh drive
 token (the single-writer lease every append presents), so a refreshed client
 rebuilds its cursor and re-drives from the log, paying nothing for a step the

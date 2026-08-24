@@ -241,11 +241,17 @@ itself. `salvor serve` sweeps for due timers every 60 seconds by default;
 `--wake-interval SECS` changes that cadence, and `--wake-interval 0` turns
 the sweep off, no task spawned.
 
-Only a graph's `delay` node or a native Rust tool returning `ToolOutcome::Sleep`
-can put a run to sleep in the first place; MCP has no concept of sleeping (or
-suspending) a call, so from behind an MCP tool server the `delay` node is the
-only parking available today, and a gate or a signal wait needs a native tool
-too.
+A graph's `delay` node, a native Rust tool, or an MCP tool result carrying
+`_meta.salvor.suspend` or `_meta.salvor.sleep_until` can each put a run to
+sleep or suspend it; the runtime turns any of the three into the same
+recorded pair, so an MCP-only setup is no longer limited to the `delay` node
+for parking.
+
+A sleeping run whose `wake_at` has passed and that nothing has woken reports
+`overdue: true` and `overdue_seconds` alongside `sleeping` on
+`GET /v1/runs/{id}`; the state word stays `sleeping`. The sweeper warns once
+per unwakeable run and logs later passes at debug, so a quiet log does not
+mean the run woke.
 
 The sweeper only wakes what it can rebuild from what this server already
 holds, by the hash the run recorded, regardless of what process started it:
@@ -262,8 +268,9 @@ never against an agent's own MCP servers, submitted graph or not
 So two things leave a run asleep: its agent or graph hash is not registered
 here at all (typically a run started from the CLI against a store this
 server never saw), or a graph run has a `tool` node this registry does not
-hold. The sweeper logs why, once per sweep, until an operator wakes it the
-other way: `salvor wake` with the same `--agent`/`--graph` files the run was
+hold. The sweeper warns why once per run, then logs the same fields at debug
+on every later pass, until an operator wakes it the other way: `salvor wake`
+with the same `--agent`/`--graph` files the run was
 started with. A sleeping graph run outlives the server's memory of its
 document (see [`README.md#graphs`](../README.md#graphs) on the in-memory
 registry a restart drops), so keep the submitted document on disk; after a

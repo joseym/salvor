@@ -75,6 +75,14 @@ close_invoice (tool, Write)  escalate (tool, Write)
   ledger each, so which arm ran is a fact on disk and not an inference from
   prose.
 
+`server.py` also serves a fifth tool, `await_payment_webhook`, not wired into
+this document. Its result asks salvor to park the run for a signal through
+`_meta.salvor.suspend`, `kind: "signal"`, with a schema requiring
+`{"paid": bool}`; a resume carrying `{"paid": true}` is what the payment
+processor's own webhook would post. It shows the shape a Python tool server
+returns to wait on an external event rather than a clock, alongside the
+`delay` node this graph actually uses.
+
 This document references no agent by content hash, because it has no `agent`
 node to reference one from. It still needs `--agent` at every drive:
 `salvor graph run` has no standalone tool inventory, so a `tool` node's name

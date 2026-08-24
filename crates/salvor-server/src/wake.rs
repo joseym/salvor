@@ -39,8 +39,9 @@
 //! A run opened through `/v1/client-runs` is driven by its caller under a
 //! single-writer drive token, not by a task in this process, so
 //! [`AppState::is_run_active`] never sees it; a separate check
-//! ([`AppState::is_client_run`]) is what keeps the sweeper off it. Timers and
-//! signals are out of scope for client-driven runs for now, so a due one is
+//! ([`AppState::is_client_run`]) is what keeps the sweeper off it. A
+//! client-driven run's timer is the client's to wake, since re-driving one
+//! here would be a second writer racing its drive token, so a due one is
 //! left asleep here regardless of how overdue it is.
 //!
 //! # One bad run does not stop the sweep
@@ -141,9 +142,9 @@ pub async fn sweep(state: &AppState) -> Vec<RunId> {
         // single-writer drive token that a caller presents on every append;
         // `runs::redrive` spawning a server task against the same log would
         // be a second writer racing the client for the same sequence
-        // numbers. Timers and signals are out of scope for client-driven
-        // runs for exactly that reason (design decision, 2026-08-05), so the
-        // sweeper leaves any run with a lease alone, current or lapsed: a
+        // numbers. A client-driven run's timer is the client's to wake for
+        // exactly that reason, so the sweeper leaves any run with a lease
+        // alone, current or lapsed: a
         // lapsed lease still means a client opened this run and may resume
         // driving it, not that this server may. It stays due; the client's
         // own resume path (or a fresh open) is what wakes it.

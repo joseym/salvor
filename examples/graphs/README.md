@@ -216,6 +216,10 @@ All checks run and every failure is reported (never just the first):
 - **Referential integrity.** Every edge endpoint, and every `map` or `fold`
   body that names a node, must be a real node id. A near miss gets a
   suggestion.
+- **Every `branch` case names an outbound edge.** A case with no labeled edge
+  out of that node is refused, naming the node and the case; a case that
+  should end the run points at a terminal node instead of being left
+  unrouted.
 - **Per-node required fields.** An `agent` hash is a well-formed
   `sha256:<64 hex>` string; a `map` concurrency cap is at least 1; a `gate`
   approval schema is a JSON object; a `delay` waits at least 1 second.

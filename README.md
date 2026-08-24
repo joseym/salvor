@@ -114,7 +114,7 @@ salvor run --fixture examples/hero
 
 The hero agent's one tool, `salvor-hero-tools`, is a prebuilt Rust binary, but an agent's tools are MCP servers, not Rust code, and a tool written in Python or TypeScript works identically for everything a tool returns, with the one limit the next paragraph names. [`examples/python-tools/`](examples/python-tools/) and [`examples/typescript-tools/`](examples/typescript-tools/) build one in each language: an MCP server of a few lines of Python or Node, wired into an agent the same way.
 
-MCP has no concept of suspending or sleeping a call, so an MCP tool can only return an output or an error, never park the run. A gate or a signal wait needs a native Rust tool returning `ToolOutcome::Suspend` (adding `.on_signal()` for the signal case), and a tool-returned sleep needs one returning `ToolOutcome::Sleep`; from behind an MCP tool server, the graph `delay` node is the only parking available today.
+An MCP server can park the run that called it too, with no native Rust code involved: a tool result carrying `{"_meta": {"salvor": {"suspend": {"reason": "...", "input_schema": {...}, "kind": "signal"}}}}` waits for an input, and one carrying `{"_meta": {"salvor": {"sleep_until": "2026-08-14T09:00:00Z"}}}` waits until an instant. `_meta` is the extension point the MCP specification reserves on every result, so a host that is not salvor reads an ordinary result with an unfamiliar key. A native Rust tool reaches the same two outcomes through `ToolOutcome::Suspend` (adding `.on_signal()` for the signal case) and `ToolOutcome::Sleep`, and a graph's `delay` node is a third way to park a run that needs no tool call at all.
 
 ## Shell completion
 
@@ -189,6 +189,8 @@ salvor graph validate examples/graphs/invalid-dangling-edge.json
 ```
 
 names the dangling edge: ``edge `research` -> `aprove` references unknown node id `aprove` (did you mean `approve`?)``
+
+Every `branch` case must label at least one outbound edge out of that node; a case that should end the run points at a terminal node rather than being left unrouted. Validation refuses the graph otherwise, naming the node and the case.
 
 `salvor graph run` drives a document over the store exactly as `salvor run` drives an agent run: each walked node is recorded, a branch records `BranchTaken` while the losing arm records `NodeSkipped`, a gate parks the run durably until a human answers, a `delay` node parks the run durably for a declared number of seconds and holds nothing while it sleeps, and a `fold` runs its body up to a declared bound, each pass folding over the last, until its stop condition holds and its join rule picks the winner, all of it recorded pass by pass. The kill-and-resume guarantee is the one from the top of this file, unchanged. Typed builders exist in Rust, TypeScript and Python, each reducing to the same document, and `salvor graph schema` emits the JSON Schema checked in at [`docs/graph-schema.json`](docs/graph-schema.json) for editor completion.
 

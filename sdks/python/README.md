@@ -166,9 +166,19 @@ with Client("http://127.0.0.1:8080") as client:
     run.append([run.envelope(5, "RunCompleted", output=answer)])
 ```
 
+The driver can also park the run on a durable timer: `sleep_until(seq, wake_at)`
+records the park at a chosen instant, `sleep_for(seq, duration)` records a
+clock reading first and derives `wake_at` from it so the same instant
+replays later, and `await_wake(seq)` is what a later drive calls to find out
+whether the deadline has passed. Nothing on the server watches the clock for
+you, so the client wakes its own run: it replays its log, calls
+`await_wake`, and either learns the run is still asleep (nothing appended) or
+gets the `SleepCompleted` appended and carries on.
+
 The driver's full surface: `open` (also re-opens, i.e. resumes, an existing
 run), `log(from_seq=0)`, `append(events)`, `model_step`, `model_step_stream`,
-`tool_step`, `client_tool_intent`, `client_tool_completion`, and
+`tool_step`, `client_tool_intent`, `client_tool_completion`, `sleep_until`,
+`sleep_for`, `await_wake`, and
 `resolve(output)`. Re-opening a run returns its recorded log on
 `run.log_envelopes` and mints a fresh drive token (the single-writer lease every
 append presents), so a refreshed client rebuilds its cursor and re-drives from
