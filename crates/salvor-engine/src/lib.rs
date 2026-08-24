@@ -444,8 +444,15 @@ pub async fn run_graph(
                         });
                     }
                     ToolCallResult::Suspended(suspension) => {
-                        ctx.suspend(&suspension.reason, &suspension.input_schema)
-                            .await?;
+                        // Whatever the tool said it waits on is recorded and
+                        // reported. A node parked on a webhook is not a gate
+                        // and must not read as one.
+                        ctx.suspend_with_kind(
+                            &suspension.reason,
+                            &suspension.input_schema,
+                            suspension.kind,
+                        )
+                        .await?;
                         match ctx.await_resume().await? {
                             Resumption::Parked => {
                                 return Ok(GraphOutcome::Parked {
@@ -453,6 +460,7 @@ pub async fn run_graph(
                                     reason: ParkReason::Suspended {
                                         reason: suspension.reason,
                                         input_schema: suspension.input_schema,
+                                        kind: suspension.kind,
                                     },
                                 });
                             }
@@ -534,6 +542,9 @@ pub async fn run_graph(
                             reason: ParkReason::Suspended {
                                 reason,
                                 input_schema: gate.approval_schema.clone(),
+                                // A gate is the human park by definition, so
+                                // it names no discriminator.
+                                kind: None,
                             },
                         });
                     }
@@ -988,12 +999,17 @@ async fn run_body(
                     message: failure.message,
                 }),
                 ToolCallResult::Suspended(suspension) => {
-                    ctx.suspend(&suspension.reason, &suspension.input_schema)
-                        .await?;
+                    ctx.suspend_with_kind(
+                        &suspension.reason,
+                        &suspension.input_schema,
+                        suspension.kind,
+                    )
+                    .await?;
                     match ctx.await_resume().await? {
                         Resumption::Parked => Ok(IterationOutcome::Parked(ParkReason::Suspended {
                             reason: suspension.reason,
                             input_schema: suspension.input_schema,
+                            kind: suspension.kind,
                         })),
                         Resumption::Resumed(resume_input) => {
                             Ok(IterationOutcome::Output(resume_input))

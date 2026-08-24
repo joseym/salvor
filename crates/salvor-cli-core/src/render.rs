@@ -84,29 +84,73 @@ pub(crate) fn wrap(text: &str, width: usize, first_prefix: &str, rest_prefix: &s
     lines.join("\n")
 }
 
+/// The `--store <path>` flag for a `resume` or `wake` hint, right after the
+/// verb it drives, the way the printed command already carries `--agent`
+/// after it names the file.
+///
+/// `store` is `None` when the caller has no resolved store path to print,
+/// which the native CLI always does (it hands over `cli.store`, already
+/// resolved from the flag, `SALVOR_STORE`, or the default) but a caller with
+/// no store of its own, such as a browser terminal rendering this text with
+/// no SQLite file open, cannot supply. `<STORE>` stands in then, the same way
+/// `<FILE>` stands in for an agent path nobody gave.
+fn store_flag(store: Option<&Path>) -> String {
+    match store {
+        Some(path) => format!(" --store {}", path.display()),
+        None => " --store <STORE>".to_owned(),
+    }
+}
+
 /// The parked report a `run` (or a parking `resume`) prints: why the run
 /// parked and the exact command to type to continue it. Non-error output: a
-/// parked run is a success, not a failure. `width` is the column count its
-/// prose wraps to; the command line never wraps, see [`wrap`].
+/// parked run is a success, not a failure. `store` is the resolved store path
+/// to print in the `resume`/`wake` hint (or `None` for the `<STORE>`
+/// placeholder, see [`store_flag`]). `width` is the column count its prose
+/// wraps to; the command line never wraps, see [`wrap`].
+///
+/// A suspension's recorded kind decides who the report addresses. A gate
+/// tells the reader to resume once they have the input, because they are the
+/// one who supplies it. A signal says the run is waiting on something else
+/// and the reader owes it nothing, while still printing the resume command,
+/// which is how an operator stands in for a webhook that never arrived.
 #[must_use]
 pub fn parked_report(
     run_uuid: &str,
     reason: &ParkReason,
     agent_path: &Path,
+    store: Option<&Path>,
     width: usize,
 ) -> String {
     let agent = agent_path.display();
+    let store = store_flag(store);
     match reason {
+        // Both suspensions park the same way and resume through the same
+        // command, so the schema block and the hint are shared. What the
+        // recorded kind changes is who the report is addressed to: a gate is
+        // the reader's to answer, and a signal is an external system's. Saying
+        // "suspended, resume once you have the input" about a webhook wait
+        // hands the reader a job that is not theirs.
         ParkReason::Suspended {
             reason,
             input_schema,
+            kind,
         } => {
-            let mut out = wrap(&format!("Run {run_uuid} parked: suspended."), width, "", "");
+            let awaits_a_person = kind.is_none();
+            let headline = if awaits_a_person {
+                format!("Run {run_uuid} parked: suspended.")
+            } else {
+                format!("Run {run_uuid} parked: awaiting a signal.")
+            };
+            let mut out = wrap(&headline, width, "", "");
             out.push_str("\n  reason: ");
             out.push_str(reason);
             out.push('\n');
             out.push_str(&wrap(
-                "the resume input must satisfy this schema:",
+                if awaits_a_person {
+                    "the resume input must satisfy this schema:"
+                } else {
+                    "the payload that resumes it must satisfy this schema:"
+                },
                 width,
                 "  ",
                 "  ",
@@ -865,7 +909,7 @@ mod tests {
 
     // --- report wrapping ---------------------------------------------------
 
-    use salvor_replay::{Budget, Effect, SequenceNumber};
+    use salvor_replay::{Budget, Effect, SequenceNumber, SuspensionKind};
 
     const UUID: &str = "00000000-0000-4000-8000-000000000000";
 
@@ -981,6 +1025,64 @@ mod tests {
         }
     }
 
+    /// A signal suspension is not addressed to the reader. The report says the
+    /// run is awaiting a signal rather than calling it suspended, drops the
+    /// instruction to go and supply the input, and still prints the resume
+    /// command, which is the only way an operator can stand in for a webhook
+    /// that never arrived. The gate report is unchanged beside it.
+    #[test]
+    fn a_signal_suspension_asks_the_reader_for_nothing() {
+        let signal = parked_report(
+            UUID,
+            &ParkReason::Suspended {
+                reason: "awaiting the payment webhook".to_owned(),
+                input_schema: serde_json::json!({"type": "object"}),
+                kind: Some(SuspensionKind::Signal),
+            },
+            Path::new("agent.toml"),
+            Some(sample_store()),
+            100,
+        );
+        assert!(
+            signal.contains("awaiting a signal"),
+            "a signal wait names itself:\n{signal}"
+        );
+        assert!(
+            !signal.contains("parked: suspended"),
+            "a signal wait does not read as a human gate:\n{signal}"
+        );
+        assert!(
+            signal.contains("Nothing is waiting on you"),
+            "a signal wait tells the reader they owe it nothing:\n{signal}"
+        );
+        assert!(
+            signal.lines().any(|line| line
+                .trim_start()
+                .starts_with(&format!("salvor resume {UUID}"))),
+            "the resume hint survives, for standing in by hand:\n{signal}"
+        );
+
+        let gate = parked_report(
+            UUID,
+            &ParkReason::Suspended {
+                reason: "awaiting operator approval".to_owned(),
+                input_schema: serde_json::json!({"type": "object"}),
+                kind: None,
+            },
+            Path::new("agent.toml"),
+            Some(sample_store()),
+            100,
+        );
+        assert!(
+            gate.contains("parked: suspended"),
+            "a gate still reads as a suspension:\n{gate}"
+        );
+        assert!(
+            gate.contains("Resume once you have the input"),
+            "a gate is still addressed to the reader:\n{gate}"
+        );
+    }
+
     /// The same report, wrapped at a narrow and a wide column count, says the
     /// same thing: only line breaks may move, never words.
     #[test]
@@ -994,8 +1096,10 @@ mod tests {
             &ParkReason::Suspended {
                 reason: "awaiting operator approval".to_owned(),
                 input_schema: serde_json::json!({"type": "object"}),
+                kind: None,
             },
             Path::new("agent.toml"),
+            Some(sample_store()),
             40,
         );
         let wide = parked_report(
@@ -1003,8 +1107,10 @@ mod tests {
             &ParkReason::Suspended {
                 reason: "awaiting operator approval".to_owned(),
                 input_schema: serde_json::json!({"type": "object"}),
+                kind: None,
             },
             Path::new("agent.toml"),
+            Some(sample_store()),
             100,
         );
         assert_eq!(words(&narrow), words(&wide));
@@ -1085,14 +1191,16 @@ mod tests {
             &ParkReason::Suspended {
                 reason: "short".to_owned(),
                 input_schema: serde_json::json!({}),
+                kind: None,
             },
             Path::new("agents/writer.toml"),
+            Some(sample_store()),
             40,
         );
         assert!(
             report.lines().any(|line| line
                 == format!(
-                    "  salvor resume {UUID} --agent agents/writer.toml --input @resume.json"
+                    "  salvor resume {UUID} --store salvor.db --agent agents/writer.toml --input @resume.json"
                 )),
             "the resume command must survive on one line:\n{report}"
         );
@@ -1188,8 +1296,10 @@ mod tests {
                 &ParkReason::Suspended {
                     reason: "short".to_owned(),
                     input_schema: serde_json::json!({}),
+                    kind: None,
                 },
                 Path::new("agent.toml"),
+                Some(sample_store()),
                 WIDTH,
             ),
             parked_report(

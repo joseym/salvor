@@ -21,6 +21,13 @@
 //!   completion replays through the cursor, decodes back into a suspension,
 //!   and the orchestration takes the identical path.
 //!
+//!   A tool that parks on a webhook rather than a person adds one key,
+//!   `"kind": "signal"`, which the runtime carries onto the `Suspended` event.
+//!   It is written only when the tool named it, so a gate's completion is the
+//!   two-key object above and nothing else, and it must round-trip: the
+//!   replayed suspension has to ask the cursor for the same discriminator the
+//!   log recorded, or the cursor reports a divergence.
+//!
 //! - **Sleep.** A live tool that returns `ToolOutcome::Sleep` gets a
 //!   completion too; its output is
 //!
@@ -171,14 +178,23 @@ pub fn error_chain(error: &dyn std::error::Error) -> String {
 }
 
 /// Encodes a suspension as the sentinel completion output.
+///
+/// `kind` is written only when the tool named one. The absent discriminator is
+/// the human gate, and omitting the key is what keeps a gate's recorded
+/// completion byte-identical to the one this function produced before
+/// suspensions could name what they wait on.
 #[must_use]
 pub fn encode_suspension(suspension: &Suspension) -> Value {
-    json!({
-        SUSPEND_SENTINEL_KEY: {
-            "reason": suspension.reason,
-            "input_schema": suspension.input_schema,
-        }
-    })
+    let mut body = json!({
+        "reason": suspension.reason,
+        "input_schema": suspension.input_schema,
+    });
+    if let Some(kind) = suspension.kind {
+        body.as_object_mut()
+            .expect("the sentinel body is an object")
+            .insert("kind".to_owned(), json!(kind));
+    }
+    json!({ SUSPEND_SENTINEL_KEY: body })
 }
 
 /// Encodes a sleep request as the sentinel completion output.
@@ -208,12 +224,24 @@ pub fn encode_failure(failure: &ToolFailure) -> Value {
 }
 
 /// Decodes a completion output that is the suspension sentinel, if it is one.
+///
+/// The discriminator round-trips because replay depends on it. A later drive
+/// reads the tool's outcome back out of this recorded completion and asks the
+/// cursor to suspend again; a decode that dropped `kind` would ask for a gate
+/// where the log holds a signal, and the cursor calls that a divergence.
+/// A body with no `kind` decodes to `None`, the gate every completion written
+/// before this key meant.
 #[must_use]
 pub fn decode_suspension(output: &Value) -> Option<Suspension> {
     let body = sentinel_body(output, SUSPEND_SENTINEL_KEY)?;
+    let kind = match body.get("kind") {
+        None | Some(Value::Null) => None,
+        Some(kind) => Some(serde_json::from_value(kind.clone()).ok()?),
+    };
     Some(Suspension {
         reason: body.get("reason")?.as_str()?.to_owned(),
         input_schema: body.get("input_schema")?.clone(),
+        kind,
     })
 }
 
@@ -296,14 +324,21 @@ mod tests {
     /// Every sentinel survives an encode/decode round trip.
     #[test]
     fn sentinels_round_trip() {
-        let suspension = Suspension {
-            reason: "needs approval".to_owned(),
-            input_schema: json!({"type": "object", "required": ["approved"]}),
-        };
+        let suspension = Suspension::new(
+            "needs approval",
+            json!({"type": "object", "required": ["approved"]}),
+        );
         assert_eq!(
             decode_suspension(&encode_suspension(&suspension)),
-            Some(suspension)
+            Some(suspension.clone())
         );
+
+        // The signal discriminator survives the same round trip, and the gate
+        // above proves the key is absent when there is nothing to say.
+        let signal = suspension.on_signal();
+        let encoded = encode_suspension(&signal);
+        assert_eq!(encoded[SUSPEND_SENTINEL_KEY]["kind"], json!("signal"));
+        assert_eq!(decode_suspension(&encoded), Some(signal));
 
         let sleep = Sleep::until(time::macros::datetime!(2026-08-14 09:00:00 UTC));
         assert_eq!(decode_sleep(&encode_sleep(&sleep)), Some(sleep));

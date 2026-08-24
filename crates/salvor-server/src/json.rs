@@ -14,7 +14,12 @@
 //! - `{ "state": "running" }`, `{ "state": "awaiting_model" }`,
 //!   `{ "state": "awaiting_tool" }`, `{ "state": "not_started" }`,
 //!   `{ "state": "needs_reconciliation" }` carry nothing more.
-//! - `{ "state": "suspended", "reason": "...", "input_schema": { ... } }`
+//! - `{ "state": "suspended", "reason": "...", "input_schema": { ... } }`,
+//!   with `"kind": "signal"` added when the run is waiting on an external
+//!   system rather than a person. The key is omitted for a human gate, which
+//!   is what a suspension recorded before the discriminator existed meant, so
+//!   a client that has never heard of it reads every old and new gate exactly
+//!   as it did before.
 //! - `{ "state": "sleeping", "wake_at": "<RFC 3339>" }`: the run is parked on
 //!   a durable timer until that instant, which is a different thing from
 //!   `suspended` and never reported as one, because nothing is waiting on a
@@ -52,11 +57,23 @@ pub fn status(status: &RunStatus) -> Value {
         RunStatus::Suspended {
             reason,
             input_schema,
-        } => json!({
-            "state": "suspended",
-            "reason": reason,
-            "input_schema": input_schema,
-        }),
+            kind,
+        } => {
+            let mut obj = json!({
+                "state": "suspended",
+                "reason": reason,
+                "input_schema": input_schema,
+            });
+            // Omitted rather than sent as null, the same absent-is-absent rule
+            // `abandoned` follows below: a gate says nothing about what it
+            // waits on, because a person is the assumption.
+            if let Some(kind) = kind {
+                obj.as_object_mut()
+                    .expect("status object")
+                    .insert("kind".to_owned(), json!(kind));
+            }
+            obj
+        }
         RunStatus::Sleeping { wake_at } => json!({
             "state": "sleeping",
             "wake_at": rfc3339(*wake_at),
@@ -151,4 +168,56 @@ pub fn run_state(state: &RunState) -> Value {
         "next_seq": state.next_seq.get(),
         "pending": pending(state.pending_call.as_ref()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use salvor_core::SuspensionKind;
+    use serde_json::json;
+
+    use super::status;
+    use salvor_core::RunStatus;
+
+    /// A suspension says what it waits on only when there is something to
+    /// say. A signal wait carries `"kind": "signal"` so a client can keep it
+    /// out of an approval inbox; a human gate carries no `kind` key at all,
+    /// which is the shape every client already reads and the shape every log
+    /// written before the discriminator existed derives to.
+    #[test]
+    fn a_suspended_status_names_a_signal_and_stays_silent_about_a_gate() {
+        let schema = json!({"type": "object", "required": ["approved"]});
+
+        let signal = status(&RunStatus::Suspended {
+            reason: "awaiting the payment webhook".to_owned(),
+            input_schema: schema.clone(),
+            kind: Some(SuspensionKind::Signal),
+        });
+        assert_eq!(
+            signal,
+            json!({
+                "state": "suspended",
+                "reason": "awaiting the payment webhook",
+                "input_schema": schema,
+                "kind": "signal",
+            })
+        );
+
+        let gate = status(&RunStatus::Suspended {
+            reason: "awaiting operator approval".to_owned(),
+            input_schema: schema.clone(),
+            kind: None,
+        });
+        assert_eq!(
+            gate,
+            json!({
+                "state": "suspended",
+                "reason": "awaiting operator approval",
+                "input_schema": schema,
+            })
+        );
+        assert!(
+            gate.get("kind").is_none(),
+            "a gate carries no discriminator, not even a null one: {gate}"
+        );
+    }
 }

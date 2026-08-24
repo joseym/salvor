@@ -135,10 +135,10 @@ impl DynTool for CountingTool {
                 tool: self.name.clone(),
                 source: HandlerError::message(message.clone()),
             }),
-            CountBehavior::Suspend(schema) => Ok(ToolOutcome::Suspend(Suspension {
-                reason: "awaiting approval".to_owned(),
-                input_schema: schema.clone(),
-            })),
+            CountBehavior::Suspend(schema) => Ok(ToolOutcome::Suspend(Suspension::new(
+                "awaiting approval",
+                schema.clone(),
+            ))),
             CountBehavior::Hang => std::future::pending().await,
         }
     }

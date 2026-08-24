@@ -428,13 +428,23 @@ async fn drive_loop_inner(
                     result_blocks.push(ContentBlock::tool_error(tool_use_id, content));
                 }
                 ToolCallResult::Suspended(suspension) => {
-                    ctx.suspend(&suspension.reason, &suspension.input_schema)
-                        .await?;
+                    // The tool's discriminator is recorded and then carried
+                    // out to the caller unchanged. A tool that parked the run
+                    // on a webhook has said so, and a park report that turned
+                    // that back into a human gate would send an operator
+                    // looking for an approval nobody is asking them for.
+                    ctx.suspend_with_kind(
+                        &suspension.reason,
+                        &suspension.input_schema,
+                        suspension.kind,
+                    )
+                    .await?;
                     match ctx.await_resume().await? {
                         Resumption::Parked => {
                             return Ok(LoopOutcome::Parked(ParkReason::Suspended {
                                 reason: suspension.reason,
                                 input_schema: suspension.input_schema,
+                                kind: suspension.kind,
                             }));
                         }
                         Resumption::Resumed(resume_input) => {

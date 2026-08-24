@@ -30,10 +30,7 @@ async fn suspension_parks_validates_resume_input_and_replays_cleanly() {
     let (tool, calls) = TestTool::new(
         "approve",
         Effect::Read,
-        ToolBehavior::Suspend(Suspension {
-            reason: "awaiting human approval".to_owned(),
-            input_schema: schema.clone(),
-        }),
+        ToolBehavior::Suspend(Suspension::new("awaiting human approval", schema.clone())),
     );
     let agent = agent_builder(&server.uri())
         .tool_dyn(Box::new(tool))
@@ -55,11 +52,15 @@ async fn suspension_parks_validates_resume_input_and_replays_cleanly() {
                 ParkReason::Suspended {
                     reason,
                     input_schema,
+                    kind,
                 },
             ..
         } => {
             assert_eq!(reason, "awaiting human approval");
             assert_eq!(input_schema, &schema);
+            // A tool that named nothing parks a human gate, and the park
+            // report says so by saying nothing.
+            assert_eq!(*kind, None);
         }
         other => panic!("expected a suspension park, got {other:?}"),
     }

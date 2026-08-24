@@ -94,7 +94,18 @@ export type RunStatusJson =
   | { kind: "Running" }
   | { kind: "AwaitingModel" }
   | { kind: "AwaitingTool" }
-  | { kind: "Suspended"; reason: string; input_schema: unknown }
+  /** Parked awaiting input the `input_schema` accepts. `waiting_on` names who
+   *  owes that input when it is not a person: `"signal"` means an external
+   *  system (a webhook, a callback) will resume the run, so it is nobody's
+   *  task. Absent means a human gate, which is what every suspension recorded
+   *  before the discriminator existed means. The key is `waiting_on` and not
+   *  `kind` because `kind` is this union's own tag. */
+  | {
+      kind: "Suspended";
+      reason: string;
+      input_schema: unknown;
+      waiting_on?: "signal";
+    }
   /** Parked on a durable timer until `wake_at` (RFC 3339). Distinct from
    *  `Suspended`: nothing is waiting on a human. */
   | { kind: "Sleeping"; wake_at: string }

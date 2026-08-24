@@ -11,8 +11,10 @@
 //! it, or the instant the run may continue at.
 //!
 //! The three differ in what ends the park, and a caller has to know which:
-//! two of them wait for a person to supply something, and the third waits for
-//! an instant and takes no input at all.
+//! two of them wait for input, and the third waits for an instant and takes no
+//! input at all. Who owes that input is a further split inside the suspension,
+//! which is what its `kind` carries: a gate waits for a person, a signal waits
+//! for a webhook or a callback, and only the first is anyone's task.
 //!
 //! # Purity
 //!
@@ -24,7 +26,7 @@
 use serde_json::Value;
 use time::OffsetDateTime;
 
-use crate::event::Budget;
+use crate::event::{Budget, SuspensionKind};
 
 /// Why a run parked instead of completing.
 #[derive(Debug, Clone)]
@@ -35,6 +37,14 @@ pub enum ParkReason {
         reason: String,
         /// The JSON Schema the resume input must satisfy.
         input_schema: Value,
+        /// What the run is waiting on, carried from the recorded event.
+        ///
+        /// `None` is a person: someone reads the reason, decides, and supplies
+        /// the input. A [`SuspensionKind`] names a wait an external system
+        /// answers instead, which a report about the park has to say out loud,
+        /// because telling an operator to go and approve something no operator
+        /// can approve is worse than saying nothing.
+        kind: Option<SuspensionKind>,
     },
     /// A declared budget was crossed. Resume may carry an extension.
     BudgetExceeded {

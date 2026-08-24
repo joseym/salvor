@@ -24,7 +24,7 @@ use serde_json::Value;
 use time::OffsetDateTime;
 
 use crate::effect::Effect;
-use crate::event::{Budget, Event, EventEnvelope, UnresolvedWrite};
+use crate::event::{Budget, Event, EventEnvelope, SuspensionKind, UnresolvedWrite};
 use crate::id::SequenceNumber;
 
 /// Token usage accumulated across every completed model call in a log.
@@ -86,12 +86,21 @@ pub enum RunStatus {
     /// recorded key).
     AwaitingTool,
     /// The run parked awaiting input. Carries what a resume needs: why it
-    /// parked and the schema the input must satisfy.
+    /// parked, the schema the input must satisfy, and who owes the answer.
     Suspended {
         /// The recorded suspension reason.
         reason: String,
         /// The JSON Schema the resume input is validated against.
         input_schema: Value,
+        /// What the run is waiting on, read straight off the recorded
+        /// [`Event::Suspended`].
+        ///
+        /// `None` is the human gate, which is what every suspension recorded
+        /// before the discriminator existed meant, so an old log folds to the
+        /// status it always folded to. A [`SuspensionKind`] narrows it to a
+        /// wait no operator can answer, which is the difference an inbox has
+        /// to see.
+        kind: Option<SuspensionKind>,
     },
     /// The run parked on a durable timer and may continue at `wake_at`.
     ///
@@ -233,20 +242,24 @@ pub fn derive_state(log: &[EventEnvelope]) -> RunState {
             // Deterministic-context observations change no run status; they
             // only exist so replay can hand the same values back.
             Event::NowObserved { .. } | Event::RandomObserved { .. } => {}
-            // The recorded `kind` is deliberately not folded into a status. A
-            // run waiting on a signal is suspended in every sense this fold
-            // reports: parked, not running, resumable only by input the
-            // recorded schema accepts. What differs is who supplies that
-            // input, which is a routing question for a surface reading the
-            // event, not a state the run is in.
+            // The recorded `kind` is carried onto the status rather than
+            // dropped. It does not change what state the run is in: a run
+            // waiting on a signal is parked, not running, and resumable only
+            // by input the recorded schema accepts, exactly as a gate is. It
+            // changes who owes the answer, and every surface that lists work
+            // reads the run through this fold and nowhere else, so a
+            // discriminator the fold drops is a discriminator no listing can
+            // act on. Absent stays absent: an old log has no `kind` and folds
+            // to `None`, which is the human gate it always meant.
             Event::Suspended {
                 reason,
                 input_schema,
-                kind: _,
+                kind,
             } => {
                 state.status = RunStatus::Suspended {
                     reason: reason.clone(),
                     input_schema: input_schema.clone(),
+                    kind: *kind,
                 };
             }
             Event::Resumed { .. } => {
@@ -513,6 +526,50 @@ mod tests {
             RunStatus::Suspended {
                 reason: "awaiting approval".into(),
                 input_schema: schema,
+                kind: None,
+            }
+        );
+    }
+
+    /// The discriminator survives the fold. A gate suspension (no recorded
+    /// `kind`, which is also every suspension written before the field
+    /// existed) derives to `None`, and a signal suspension derives to
+    /// `Some(Signal)`, so a surface reading the status can route a webhook
+    /// wait away from an approval inbox without going back to the log.
+    #[test]
+    fn a_suspension_carries_what_it_waits_on() {
+        let schema = serde_json::json!({"type": "object"});
+        let gate = derive_state(&log(vec![
+            started(),
+            Event::Suspended {
+                reason: "awaiting approval".into(),
+                input_schema: schema.clone(),
+                kind: None,
+            },
+        ]));
+        assert_eq!(
+            gate.status,
+            RunStatus::Suspended {
+                reason: "awaiting approval".into(),
+                input_schema: schema.clone(),
+                kind: None,
+            }
+        );
+
+        let signal = derive_state(&log(vec![
+            started(),
+            Event::Suspended {
+                reason: "awaiting the payment webhook".into(),
+                input_schema: schema.clone(),
+                kind: Some(SuspensionKind::Signal),
+            },
+        ]));
+        assert_eq!(
+            signal.status,
+            RunStatus::Suspended {
+                reason: "awaiting the payment webhook".into(),
+                input_schema: schema,
+                kind: Some(SuspensionKind::Signal),
             }
         );
     }

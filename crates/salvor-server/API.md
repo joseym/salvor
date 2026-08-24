@@ -309,12 +309,17 @@ Always `{ "state": "<name>", ... }`:
 | `state` | Extra keys |
 |---|---|
 | `not_started`, `running`, `awaiting_model`, `awaiting_tool`, `needs_reconciliation` | none |
-| `suspended` | `reason`, `input_schema` |
+| `suspended` | `reason`, `input_schema`, `kind` (only `"signal"`, and only when present) |
 | `sleeping` | `wake_at` (RFC 3339) |
 | `budget_exceeded` | `budget` (`{kind, limit}`), `observed` |
 | `completed` | `output` |
 | `failed` | `error` |
 | `abandoned` | `reason` (when given), `unresolved_write` (`{seq, tool}`, only when a needs-reconciliation run was abandoned) |
+
+On `suspended`, `kind` says what the run is waiting on when it is not a person:
+`"signal"` means an external system (a webhook, a callback) will resume it, so
+it is nobody's task and belongs nowhere near an approval inbox. The key is
+absent for a human gate, which is what every suspension without it means.
 
 #### The pending object
 

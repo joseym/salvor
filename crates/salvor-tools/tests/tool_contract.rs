@@ -116,10 +116,10 @@ impl ToolHandler for RequestApproval {
         _ctx: &ToolCtx,
         _input: TicketRequest,
     ) -> Result<ToolOutcome<TicketRef>, HandlerError> {
-        Ok(ToolOutcome::Suspend(Suspension {
-            reason: "manager approval required".to_owned(),
-            input_schema: json!({ "type": "object", "properties": { "approved": { "type": "boolean" } } }),
-        }))
+        Ok(ToolOutcome::Suspend(Suspension::new(
+            "manager approval required",
+            json!({ "type": "object", "properties": { "approved": { "type": "boolean" } } }),
+        )))
     }
 }
 
@@ -306,6 +306,7 @@ async fn suspension_propagates_as_outcome_not_error() {
         ToolOutcome::Suspend(Suspension {
             reason,
             input_schema,
+            ..
         }) => {
             assert_eq!(reason, "manager approval required");
             assert_eq!(

@@ -106,7 +106,7 @@ use std::sync::Arc;
 
 use salvor_core::{
     Budget, DedupOrigin, Effect, Emitted, Event, EventEnvelope, ModelReply, Outcome, PendingCall,
-    ReplayCursor, RunId, SequenceNumber, TokenUsage,
+    ReplayCursor, RunId, SequenceNumber, SuspensionKind, TokenUsage,
 };
 use salvor_llm::{Client, MessageAccumulator, MessageRequest, MessageResponse, StreamEvent};
 use salvor_store::{CallClaim, CallClaimant, CallCommitment, EventStore};
@@ -1208,12 +1208,7 @@ impl RunCtx {
         reason: &str,
         input_schema: &Value,
     ) -> Result<(), RuntimeError> {
-        match self.cursor.suspend(reason, input_schema)? {
-            Outcome::Replayed(()) => Ok(()),
-            Outcome::Live(emitted) => {
-                persist(self.store.as_ref(), self.run_id, &self.clock, &emitted).await
-            }
-        }
+        self.suspend_with_kind(reason, input_schema, None).await
     }
 
     /// Parks the run on an external signal: records `Suspended` with
@@ -1236,7 +1231,37 @@ impl RunCtx {
         reason: &str,
         input_schema: &Value,
     ) -> Result<(), RuntimeError> {
-        match self.cursor.suspend_for_signal(reason, input_schema)? {
+        self.suspend_with_kind(reason, input_schema, Some(SuspensionKind::Signal))
+            .await
+    }
+
+    /// Parks the run on a suspension whose discriminator is already a value:
+    /// records `Suspended { reason, input_schema, kind }`. Follow with
+    /// [`await_resume`](Self::await_resume).
+    ///
+    /// This exists for the drivers, which read the kind off a
+    /// [`Suspension`](salvor_tools::Suspension) a tool returned and cannot
+    /// choose between the two named methods without matching on it. Hand-written
+    /// orchestration should say [`suspend`](Self::suspend) or
+    /// [`suspend_for_signal`](Self::suspend_for_signal) instead, so the call
+    /// site reads as what it is.
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeError::Replay`] on divergence (a replayed suspension whose
+    /// discriminator differs included); [`RuntimeError::Store`] when
+    /// persistence fails.
+    pub async fn suspend_with_kind(
+        &mut self,
+        reason: &str,
+        input_schema: &Value,
+        kind: Option<SuspensionKind>,
+    ) -> Result<(), RuntimeError> {
+        let requested = match kind {
+            None => self.cursor.suspend(reason, input_schema)?,
+            Some(SuspensionKind::Signal) => self.cursor.suspend_for_signal(reason, input_schema)?,
+        };
+        match requested {
             Outcome::Replayed(()) => Ok(()),
             Outcome::Live(emitted) => {
                 persist(self.store.as_ref(), self.run_id, &self.clock, &emitted).await

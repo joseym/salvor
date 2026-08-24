@@ -247,10 +247,10 @@ fn reference_agent(server_uri: &str) -> (Agent, Counters) {
     let (approval, approval_calls) = TestTool::new(
         "approval",
         Effect::Read,
-        ToolBehavior::Suspend(Suspension {
-            reason: "awaiting reviewer approval".to_owned(),
-            input_schema: approval_schema(),
-        }),
+        ToolBehavior::Suspend(Suspension::new(
+            "awaiting reviewer approval",
+            approval_schema(),
+        )),
     );
     let agent = agent_builder(server_uri)
         .tool_dyn(Box::new(search))

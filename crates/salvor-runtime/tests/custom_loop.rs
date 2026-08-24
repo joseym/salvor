@@ -58,8 +58,9 @@ async fn approval_flow(
         ToolCallResult::Suspended(Suspension {
             reason,
             input_schema,
+            kind,
         }) => {
-            ctx.suspend(&reason, &input_schema).await?;
+            ctx.suspend_with_kind(&reason, &input_schema, kind).await?;
             match ctx.await_resume().await? {
                 Resumption::Parked => Ok(FlowOutcome::Parked),
                 Resumption::Resumed(approval) => {
@@ -98,10 +99,10 @@ async fn a_user_written_loop_runs_parks_and_resumes_on_the_public_api() {
     let (approve, calls) = TestTool::new(
         "approve",
         Effect::Read,
-        ToolBehavior::Suspend(Suspension {
-            reason: "plan needs sign-off".to_owned(),
-            input_schema: json!({"type": "object", "required": ["approved"]}),
-        }),
+        ToolBehavior::Suspend(Suspension::new(
+            "plan needs sign-off",
+            json!({"type": "object", "required": ["approved"]}),
+        )),
     );
 
     let store: Arc<dyn EventStore> = Arc::new(SqliteStore::in_memory().expect("store opens"));

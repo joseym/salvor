@@ -38,7 +38,8 @@ use std::time::Duration;
 
 use salvor_replay::{
     Budget, BudgetExtensions, BudgetObservations, Budgets, Effect, EventEnvelope, PendingCall,
-    Pricing, RunState, RunStatus, budget_extensions, budget_observations, derive_state,
+    Pricing, RunState, RunStatus, SuspensionKind, budget_extensions, budget_observations,
+    derive_state,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -71,6 +72,15 @@ enum RunStatusDto {
     Suspended {
         reason: String,
         input_schema: Value,
+        // `waiting_on` and not `kind`, which is the one name this DTO cannot
+        // use: the enum is internally tagged on `kind`, so a field by that
+        // name would put two `kind` keys in one object and a JSON parser would
+        // keep the wrong one, silently breaking the discriminated union every
+        // consumer switches on. Skipped when absent, the same rule
+        // `Abandoned`'s optional fields follow, so a human gate serializes as
+        // the object the dashboard has always read.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        waiting_on: Option<SuspensionKind>,
     },
     Sleeping {
         #[serde(with = "time::serde::rfc3339")]
@@ -153,9 +163,11 @@ impl From<&RunStatus> for RunStatusDto {
             RunStatus::Suspended {
                 reason,
                 input_schema,
+                kind,
             } => RunStatusDto::Suspended {
                 reason: reason.clone(),
                 input_schema: input_schema.clone(),
+                waiting_on: *kind,
             },
             RunStatus::Sleeping { wake_at } => RunStatusDto::Sleeping { wake_at: *wake_at },
             RunStatus::BudgetExceeded { budget, observed } => RunStatusDto::BudgetExceeded {
@@ -597,6 +609,46 @@ mod tests {
         assert_eq!(
             out,
             r#"{"status":{"kind":"Sleeping","wake_at":"2025-07-22T08:00:00.123456789Z"},"next_seq":2,"usage":{"input_tokens":0,"output_tokens":0}}"#
+        );
+    }
+
+    /// A human gate pins the suspended status as it has always been: reason,
+    /// schema, and no `kind` key, so a consumer that never heard of the
+    /// discriminator reads an old log and a new gate identically.
+    #[test]
+    fn surface_pin_suspended_gate() {
+        let log = wire_log(&[
+            started(0),
+            env(
+                1,
+                r#"{"kind":"Suspended","payload":{"reason":"approve the refund","input_schema":{"type":"object"}}}"#,
+            ),
+        ]);
+        let out = fold_prefix_to_json(&log, 2).unwrap();
+        assert_eq!(
+            out,
+            r#"{"status":{"kind":"Suspended","reason":"approve the refund","input_schema":{"type":"object"}},"next_seq":2,"usage":{"input_tokens":0,"output_tokens":0}}"#
+        );
+    }
+
+    /// A signal wait pins the one extra key. It is `waiting_on` rather than
+    /// `kind`, because `kind` is this union's own tag, and the value is the
+    /// lowercase wire form the event recorded. This is what lets the dashboard
+    /// keep a webhook wait out of an inbox: same status kind, different party
+    /// owing the answer.
+    #[test]
+    fn surface_pin_suspended_signal() {
+        let log = wire_log(&[
+            started(0),
+            env(
+                1,
+                r#"{"kind":"Suspended","payload":{"reason":"awaiting the payment webhook","input_schema":{"type":"object"},"kind":"signal"}}"#,
+            ),
+        ]);
+        let out = fold_prefix_to_json(&log, 2).unwrap();
+        assert_eq!(
+            out,
+            r#"{"status":{"kind":"Suspended","reason":"awaiting the payment webhook","input_schema":{"type":"object"},"waiting_on":"signal"},"next_seq":2,"usage":{"input_tokens":0,"output_tokens":0}}"#
         );
     }
 

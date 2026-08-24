@@ -348,14 +348,17 @@ fn expected_status(prefix: &[EventEnvelope]) -> RunStatus {
             Effect::Read | Effect::Idempotent => RunStatus::AwaitingTool,
         },
         // Whatever the suspension waits on, the status it implies is the
-        // same: parked, awaiting input the recorded schema accepts.
+        // same shape: parked, awaiting input the recorded schema accepts,
+        // carrying the discriminator through so a surface can tell who owes
+        // that input.
         Event::Suspended {
             reason,
             input_schema,
-            kind: _,
+            kind,
         } => RunStatus::Suspended {
             reason: reason.clone(),
             input_schema: input_schema.clone(),
+            kind: *kind,
         },
         Event::BudgetExceeded { budget, observed } => RunStatus::BudgetExceeded {
             budget: *budget,

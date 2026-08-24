@@ -600,10 +600,10 @@ impl DynTool for SuspendingTool {
         _input: Value,
     ) -> Result<ToolOutcome<Value>, ToolError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(ToolOutcome::Suspend(salvor_tools::Suspension {
-            reason: self.reason.clone(),
-            input_schema: self.input_schema.clone(),
-        }))
+        Ok(ToolOutcome::Suspend(salvor_tools::Suspension::new(
+            self.reason.clone(),
+            self.input_schema.clone(),
+        )))
     }
 }
 
