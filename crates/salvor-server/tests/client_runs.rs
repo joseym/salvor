@@ -744,3 +744,198 @@ async fn client_run_driver_is_attached_while_leased_and_none_once_it_lapses() {
         "list agrees with the single-run read"
     );
 }
+
+/// The deadline the sleep tests park on: an hour BEFORE the server's fixed
+/// clock, so the run is genuinely overdue while the sweeper looks at it. A
+/// deadline the sweeper would skip anyway proves nothing about the skip.
+fn due_wake_at() -> time::OffsetDateTime {
+    datetime!(2026-07-10 11:00:00 UTC)
+}
+
+/// A client-driven run parks on a durable timer and wakes itself: both halves
+/// of the pair go through the generic append, the run reads as `sleeping` with
+/// its recorded `wake_at` in between, and the server never touches it.
+///
+/// The sweep in the middle is the load-bearing part. This run is overdue by an
+/// hour against the server's own clock, so a sweeper that treated it like any
+/// other sleeping run would spawn a driver against a log the client holds the
+/// single-writer lease on. It leaves it alone, and the client's own next
+/// append is what ends the sleep.
+#[tokio::test]
+async fn a_client_driven_run_sleeps_and_the_client_wakes_it() {
+    let server = client_server().await;
+    let client = reqwest::Client::new();
+    let (run, token) = open_run(&client, &server.base).await;
+
+    // The client's own drive: a recorded clock reading, then the sleep derived
+    // from it. `wake_at` is the client's fact, exactly as it is in the runtime.
+    let (status, body) = append(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        vec![
+            env_value(&run, 0, run_started()),
+            env_value(&run, 1, Event::NowObserved { now: ts() }),
+            env_value(
+                &run,
+                2,
+                Event::SleepStarted {
+                    wake_at: due_wake_at(),
+                },
+            ),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the sleep pair's first half: {body}"
+    );
+    assert_eq!(body["appended"], json!([0, 1, 2]));
+
+    let (status, body) = get_json(&client, &format!("{}/v1/runs/{run}", server.base), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["status"]["state"], "sleeping",
+        "the fold reports the park: {body}"
+    );
+    assert_eq!(
+        body["status"]["wake_at"], "2026-07-10T11:00:00Z",
+        "carrying the instant the client recorded"
+    );
+
+    // The sweeper's pass: this run is overdue and still left alone.
+    assert!(
+        salvor_server::sweep(&server.state).await.is_empty(),
+        "an overdue client-driven run is not driven from the server"
+    );
+    assert_eq!(
+        server
+            .state
+            .store()
+            .read_log(RunId::from_uuid(Uuid::parse_str(&run).expect("run id")))
+            .await
+            .expect("log reads")
+            .len(),
+        3,
+        "and its log is untouched by the pass"
+    );
+
+    // The client compares the recorded deadline against a fresh reading of its
+    // own clock, finds it passed, and closes the pair itself.
+    let (status, body) = append(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        vec![
+            env_value(
+                &run,
+                3,
+                Event::NowObserved {
+                    now: datetime!(2026-07-10 11:30:00 UTC),
+                },
+            ),
+            env_value(&run, 4, Event::SleepCompleted {}),
+            env_value(
+                &run,
+                5,
+                Event::RunCompleted {
+                    output: json!({ "done": true }),
+                },
+            ),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the woken run continues: {body}");
+    assert_eq!(body["appended"], json!([3, 4, 5]));
+
+    let (_, body) = get_json(&client, &format!("{}/v1/runs/{run}", server.base), None).await;
+    assert_eq!(
+        body["status"]["state"], "completed",
+        "the sleep ended and the run finished: {body}"
+    );
+}
+
+/// A `SleepCompleted` may close only a sleep the log has open. The shared
+/// append-guard is lenient about the pair (a run still asleep has recorded only
+/// the start, so nothing may demand the completion), which is exactly why this
+/// surface, where the client hand-appends both halves, checks the order itself.
+#[tokio::test]
+async fn a_sleep_completion_with_no_sleep_started_is_refused() {
+    let server = client_server().await;
+    let client = reqwest::Client::new();
+    let (run, token) = open_run(&client, &server.base).await;
+
+    let (status, _) = append(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        vec![env_value(&run, 0, run_started())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = append(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        vec![env_value(&run, 1, Event::SleepCompleted {})],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "unopened sleep: {body}");
+    assert_eq!(body["error"]["code"], "divergence");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("has not started"),
+        "the refusal names what is wrong: {body}"
+    );
+
+    // Nothing was written, so the run carries on from where it was: the same
+    // position is still the one the log is ready for.
+    let (status, body) = append(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        vec![env_value(
+            &run,
+            1,
+            Event::SleepStarted {
+                wake_at: due_wake_at(),
+            },
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the refusal wrote nothing: {body}");
+    assert_eq!(body["appended"], json!([1]));
+
+    // And once a sleep is open, the completion that was refused is accepted.
+    let (status, body) = append(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        vec![env_value(&run, 2, Event::SleepCompleted {})],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the pair in order: {body}");
+    assert_eq!(body["appended"], json!([2]));
+
+    // A second completion has nothing left to close.
+    let (status, body) = append(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        vec![env_value(&run, 3, Event::SleepCompleted {})],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "already awake: {body}");
+    assert_eq!(body["error"]["code"], "divergence");
+}

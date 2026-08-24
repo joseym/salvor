@@ -926,9 +926,9 @@ racing the client's own drive token for the same sequence numbers.
 The generic append carries only the control and deterministic-context events the
 client's cursor emits itself, which hold no secret and no side effect:
 `RunStarted`, `NowObserved`, `RandomObserved`, `Suspended`, `Resumed`,
-`BudgetExceeded`, `RunCompleted`, `RunFailed`. The side-effecting steps, which
-the server must perform because it holds the key or the binary, have their own
-endpoints: the model call is the model-step endpoint and the tool call is the
+`SleepStarted`, `SleepCompleted`, `BudgetExceeded`, `RunCompleted`,
+`RunFailed`. The side-effecting steps, which the server must perform because it
+holds the key or the binary, have their own endpoints: the model call is the model-step endpoint and the tool call is the
 tool-step endpoint below, and a model or tool event is still refused on the
 generic append.
 
