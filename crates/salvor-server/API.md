@@ -321,6 +321,17 @@ On `suspended`, `kind` says what the run is waiting on when it is not a person:
 it is nobody's task and belongs nowhere near an approval inbox. The key is
 absent for a human gate, which is what every suspension without it means.
 
+It resumes exactly the way anything resumes a run: whatever holds the bearer
+token calls `POST /v1/runs/{id}/resume` (the CLI equivalent is `salvor resume`)
+with a payload the recorded `input_schema` accepts. There is no separate
+webhook endpoint and no per-run secret, so nothing stops a resume that arrives
+before the real signal; the token is the whole boundary (see the README's
+"Operating it" section and `SECURITY.md`'s single shared secret). A signal
+wait carries no deadline of its own and waits until something resumes it; an
+operator can stand in for a signal that never comes with `salvor resume` or
+the Bridge Inspector's "Awaiting a signal" band, the only place the Bridge
+offers that action, since a signal wait never appears in the Inbox.
+
 #### The pending object
 
 `null`, or one of:
@@ -368,6 +379,10 @@ data: {"run_id":"6f...","seq":4,"schema_version":1,"recorded_at":"...","event":{
 - `id` is the event's sequence number.
 - Envelope frames carry no `event:` field, so a browser `EventSource` receives
   them through `onmessage`.
+- A `Suspended` event's payload carries the same optional `kind` the status
+  object does: `"signal"` with the same meaning and absence rule described
+  under [the status object](#the-status-object), so an SSE consumer can build
+  the same filter the Bridge does.
 - When the run reaches a resting point (completed, failed, abandoned,
   suspended, sleeping, budget-exceeded, or needs-reconciliation) the stream
   sends one final frame with `event: end` carrying the status it rested at,
@@ -1389,6 +1404,12 @@ A tool parks its own run by returning the sleep outcome, which the runtime
 records **inside** that call's `ToolCallCompleted` (as
 `{"__salvor_sleep": {"wake_at": "..."}}`) before appending `SleepStarted`. The
 recorded order is therefore intent, completion, `SleepStarted`.
+
+That `{"__salvor_sleep": ...}` shape is what the runtime writes into the log
+from a native tool's `ToolOutcome::Sleep`; it is not a value a tool server
+sends, and an MCP tool cannot park a run this way no matter what its output
+contains, because MCP has no concept of sleeping a call. From an MCP-only
+setup, the graph `delay` node is how a run sleeps instead.
 
 That order is the point. The completion settles the call, and for a call
 carrying an idempotency key it settles the store's claim in the same atomic

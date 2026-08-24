@@ -241,6 +241,12 @@ itself. `salvor serve` sweeps for due timers every 60 seconds by default;
 `--wake-interval SECS` changes that cadence, and `--wake-interval 0` turns
 the sweep off, no task spawned.
 
+Only a graph's `delay` node or a native Rust tool returning `ToolOutcome::Sleep`
+can put a run to sleep in the first place; MCP has no concept of sleeping (or
+suspending) a call, so from behind an MCP tool server the `delay` node is the
+only parking available today, and a gate or a signal wait needs a native tool
+too.
+
 The sweeper only wakes what it can rebuild from what this server already
 holds, by the hash the run recorded, regardless of what process started it:
 an agent run wakes once the agent under that hash is registered with
@@ -258,7 +264,11 @@ here at all (typically a run started from the CLI against a store this
 server never saw), or a graph run has a `tool` node this registry does not
 hold. The sweeper logs why, once per sweep, until an operator wakes it the
 other way: `salvor wake` with the same `--agent`/`--graph` files the run was
-started with.
+started with. A sleeping graph run outlives the server's memory of its
+document (see [`README.md#graphs`](../README.md#graphs) on the in-memory
+registry a restart drops), so keep the submitted document on disk; after a
+restart either resubmit it with `POST /v1/graphs` or wake the run with
+`salvor wake --graph <file>` directly.
 
 For a store no running server is watching, cron does the sweeping instead.
 `salvor wake` finds every run whose `wake_at` has passed, drives each one,

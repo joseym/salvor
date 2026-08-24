@@ -114,6 +114,8 @@ salvor run --fixture examples/hero
 
 The hero agent's one tool, `salvor-hero-tools`, is a prebuilt Rust binary, but an agent's tools are MCP servers, not Rust code, and a tool written in Python or TypeScript works identically. [`examples/python-tools/`](examples/python-tools/) and [`examples/typescript-tools/`](examples/typescript-tools/) build one in each language: an MCP server of a few lines of Python or Node, wired into an agent the same way.
 
+MCP has no concept of suspending or sleeping a call, so an MCP tool can only return an output or an error, never park the run. A gate or a signal wait needs a native Rust tool returning `ToolOutcome::Suspend` (adding `.on_signal()` for the signal case), and a tool-returned sleep needs one returning `ToolOutcome::Sleep`; from behind an MCP tool server, the graph `delay` node is the only parking available today.
+
 ## Shell completion
 
 There are two kinds, and they compose. The static one prints a script that knows
