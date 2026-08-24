@@ -1,4 +1,4 @@
-import type { RunSummary } from '@salvor-run/client';
+import type { RunStatus, RunSummary } from '@salvor-run/client';
 
 /**
  * The Runs view-model: the fold's three-way GROUP split and per-state labels, plus a thin
@@ -18,6 +18,15 @@ export type Group = 'progress' | 'waiting' | 'terminal';
  * A stalled run is waiting on a PERSON (someone must restart its driver or
  * resolve/abandon it), so it groups with `waiting`, not `progress`: it is not
  * motion, and the health strip must not count it as such.
+ *
+ * `suspended` below is the HUMAN-GATE default: a run parked awaiting input from a person, which is
+ * what every suspension recorded before the server's `kind` discriminator existed means, and what
+ * an absent discriminator still means today. A suspension parked on an external SIGNAL instead
+ * (`kind: "signal"` on the wire, `waiting_on: "signal"` on the wasm fold) reads as `progress`
+ * instead, the same call `sleeping` makes below and for the same reason: nobody OWES it action, so
+ * it must never sit in the Inbox. This table alone cannot make that call (it is keyed on `state`
+ * alone, and both waits share the one `suspended` state), so {@link groupOf} overrides its answer
+ * for that one case; see its own doc comment for how.
  */
 export const GROUP: Readonly<Record<string, Group>> = {
   running: 'progress',
@@ -97,6 +106,10 @@ export const STALL_GRACE_MS = 10_000;
  * {@link STALL_GRACE_MS} would misread as stalled the instant its own design (no driver while
  * asleep) is mistaken for a driver that dropped.
  *
+ * A `suspended` run parked on an external SIGNAL (`waitingOn === 'signal'`) gets the identical
+ * carve-out, for the identical reason: once {@link groupOf} answers `progress` for it, the driver
+ * check below would otherwise fire, and nobody holds a driver for a run parked on a webhook either.
+ *
  * Returns the effective status: `stalled` when the rule fires, otherwise the
  * server's own `state` unchanged. This is the client's verdict over the
  * server's evidence, the same division of labor `status` itself has.
@@ -106,23 +119,48 @@ export function derivedStatus(
   driver: string | undefined,
   last: string | undefined,
   now: number = Date.now(),
+  waitingOn?: 'signal',
 ): string {
   if (state === 'sleeping') return state;
-  if (groupOf(state) !== 'progress' || driver !== 'none') return state;
+  if (state === 'suspended' && waitingOn === 'signal') return state;
+  if (groupOf(state, waitingOn) !== 'progress' || driver !== 'none') return state;
   const lastMs = last ? Date.parse(last) : Number.NaN;
   const ageMs = Number.isNaN(lastMs) ? Number.POSITIVE_INFINITY : now - lastMs;
   return ageMs >= STALL_GRACE_MS ? 'stalled' : state;
 }
 
-/** The group a state belongs to, defaulting unknown states to `progress` (never silently dropped). */
-export function groupOf(state: string): Group {
+/**
+ * The group a state belongs to, defaulting unknown states to `progress` (never silently dropped).
+ *
+ * `waitingOn` is the one override {@link GROUP} cannot itself express, because the table is keyed
+ * on `state` alone and a human gate and a signal wait share the one `suspended` state: pass it
+ * `'signal'` (the discriminator the server's `kind` / the wasm fold's `waiting_on` carries, absent
+ * for a human gate) and a `suspended` state reads `progress` instead of the table's `waiting`
+ * default, the same as `sleeping`. THE LEAST INVASIVE EXTENSION: an optional trailing parameter
+ * that defaults to `undefined`, so every existing single-argument call site (the Runs ledger's
+ * badge counts, sort, row classes, and the filter vocabulary among them) keeps reading a gate's
+ * `state` exactly as before, unchanged, without being taught about the discriminator at all.
+ */
+export function groupOf(state: string, waitingOn?: 'signal'): Group {
+  if (state === 'suspended' && waitingOn === 'signal') return 'progress';
   return GROUP[state] ?? 'progress';
 }
 export function labelOf(state: string): string {
   return LABEL[state] ?? state.replace(/_/g, ' ');
 }
-export function isWaiting(state: string): boolean {
-  return groupOf(state) === 'waiting';
+export function isWaiting(state: string, waitingOn?: 'signal'): boolean {
+  return groupOf(state, waitingOn) === 'waiting';
+}
+
+/**
+ * The `waiting_on` discriminator read straight off a `RunStatus`'s raw JSON (`status.raw.kind`;
+ * see `crates/salvor-server/src/json.rs`): the SDK's typed {@link RunStatus} does not surface it
+ * as its own field, only on `raw`, so this is the one place that unpacks it. `'signal'` means an
+ * external system, not a person, will resume the run; `undefined` for every other state and for a
+ * `suspended` run recorded before the discriminator existed, which is a human gate.
+ */
+export function waitingOnOf(status: RunStatus): 'signal' | undefined {
+  return status.state === 'suspended' && status.raw['kind'] === 'signal' ? 'signal' : undefined;
 }
 
 /** Token usage, flattened. */
@@ -156,13 +194,19 @@ export interface RunRow {
   readonly stepCount?: number;
   readonly agentDefHash?: string;
   readonly labels?: Readonly<Record<string, string>>;
+  /** The `waiting_on` discriminator (see {@link waitingOnOf}), carried onto the row so a
+   * `suspended` row's group/waiting classification can be re-derived correctly wherever the row
+   * travels, without every reader re-reading `raw` by hand. Absent for every state but a signal
+   * wait's `suspended`. */
+  readonly waitingOn?: 'signal';
 }
 
 export function toRunRow(s: RunSummary, now: number = Date.now()): RunRow {
   const driver = s.driver === 'attached' || s.driver === 'none' ? s.driver : undefined;
+  const waitingOn = waitingOnOf(s.status);
   return {
     id: s.run,
-    status: derivedStatus(s.status.state, driver, s.lastRecordedAt, now),
+    status: derivedStatus(s.status.state, driver, s.lastRecordedAt, now, waitingOn),
     eventCount: s.eventCount,
     first: s.firstRecordedAt,
     last: s.lastRecordedAt,
@@ -171,6 +215,7 @@ export function toRunRow(s: RunSummary, now: number = Date.now()): RunRow {
     stepCount: s.stepCount,
     agentDefHash: s.agentDefHash,
     labels: s.labels,
+    waitingOn,
   };
 }
 

@@ -1,6 +1,6 @@
 import type { SalvorEvent } from '@salvor-run/client';
 
-import { GROUP, LABEL, groupOf, labelOf } from '../runs/run-model';
+import { GROUP, LABEL, type Group, groupOf, labelOf } from '../runs/run-model';
 import { esc } from '../../shared/json-hi';
 import { type CompletedCall, type CostTotal, costOf, int } from './pricing';
 import type { RunStateJson, RunStatusJson } from './wasm-fold';
@@ -55,6 +55,32 @@ export function isWaitingState(state: string): boolean {
 }
 export function isTerminalState(state: string): boolean {
   return groupOf(state) === 'terminal';
+}
+
+/**
+ * The `waiting_on` discriminator when a wasm status is `Suspended`, else `undefined`: the one
+ * place Inspector code unpacks the tag, so every `groupOf`/`derivedStatus` call downstream reads
+ * it without repeating the `kind === 'Suspended'` check by hand. `'signal'` means an external
+ * system, not a person, is expected to resume the run; absent means a human gate (what every
+ * suspension folded before the discriminator existed means). Mirrors `run-model.ts#waitingOnOf`,
+ * which reads the same fact off the server's raw JSON instead of the wasm's tagged union.
+ */
+export function waitingOnOfStatus(status: RunStatusJson): 'signal' | undefined {
+  return status.kind === 'Suspended' ? status.waiting_on : undefined;
+}
+
+/** Whether a wasm status is parked on an external signal rather than a person. */
+export function isSignalWait(status: RunStatusJson): boolean {
+  return waitingOnOfStatus(status) === 'signal';
+}
+
+/**
+ * The group a wasm status belongs to: `groupOf` (run-model.ts) extended to see the status's own
+ * `waiting_on` discriminator, so a signal wait folds to `progress` here exactly as it does for the
+ * server-driven Runs ledger, without the caller unpacking the tag itself.
+ */
+export function groupOfStatus(status: RunStatusJson): Group {
+  return groupOf(statusStateOf(status), waitingOnOfStatus(status));
 }
 
 /** Extract the completed model calls from a log prefix, for {@link costOf}. */

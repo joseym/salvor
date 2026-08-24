@@ -195,6 +195,45 @@
 .band.is-sleeping .mono {
   color: var(--fg-2);
 }
+/* SIGNAL WAIT band: a suspension parked on an external system, PROGRESS not waiting (see
+   run-model.ts GROUP), the same neutral treatment as .is-sleeping/.is-abandoned: nothing here is
+   an error or a to-do a person owes. `align-items: flex-start` overrides the base .band's vertical
+   centering because this band's body stacks the statement over the resume-by-hand form. */
+.band.is-signal {
+  align-items: flex-start;
+  border-color: color-mix(in oklab, var(--muted), var(--fg) 12%);
+  background: var(--surface);
+  color: var(--fg-2);
+}
+.signal-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  flex: 1;
+}
+.signal-form {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+.signal-form textarea {
+  width: 100%;
+  min-width: 240px;
+  resize: vertical;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--fg);
+}
+.signal-err {
+  margin: 0;
+  color: color-mix(in oklab, var(--danger), var(--fg) 25%);
+  font-size: var(--text-xs);
+}
 
 /* ── log toolbar + head ── */
 .lbar {

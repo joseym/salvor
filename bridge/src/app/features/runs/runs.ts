@@ -207,7 +207,7 @@ export class Runs {
 
   readonly counts = computed(() => {
     const n = { waiting: 0, progress: 0, terminal: 0 } as Record<Group, number>;
-    for (const r of this.rows()) n[groupOf(r.status)]++;
+    for (const r of this.rows()) n[groupOf(r.status, r.waitingOn)]++;
     return n;
   });
   readonly runningCount = computed(() => this.rows().filter((r) => r.status === 'running').length);
@@ -261,7 +261,7 @@ export class Runs {
       const top =
         this.groupMode() === 'grouped'
           ? this.groups()[0]?.runs[0]
-          : this.visible().find((r) => isWaiting(r.status));
+          : this.visible().find((r) => isWaiting(r.status, r.waitingOn));
       this.seeded = true;
       if (top) {
         this.runSel.set(top.id);
@@ -644,15 +644,15 @@ export class Runs {
     }
   }
   private statusRank(r: RunRow): number {
-    return isWaiting(r.status) ? 2 : r.status === 'failed' ? 1 : 0;
+    return isWaiting(r.status, r.waitingOn) ? 2 : r.status === 'failed' ? 1 : 0;
   }
 
   // ── row classes / cells ──
   rowClasses(r: RunRow, i: number): Record<string, boolean> {
     return {
       z: i % 2 === 1,
-      [`g-${groupOf(r.status)}`]: true,
-      attention: isWaiting(r.status),
+      [`g-${groupOf(r.status, r.waitingOn)}`]: true,
+      attention: isWaiting(r.status, r.waitingOn),
       'is-failed': r.status === 'failed',
       'is-done': r.status === 'completed',
       'is-sel': this.runSel() === r.id,
@@ -796,7 +796,7 @@ export class Runs {
 
   /** Whether this run is waiting on a human: the panel shows the inbox signpost only for these. */
   waiting(r: RunRow): boolean {
-    return isWaiting(r.status);
+    return isWaiting(r.status, r.waitingOn);
   }
   /** The signpost's label, matching the Inspector amber-banner precedent per waiting state. The
    * Inbox stays the single action surface; this button only routes to the run's card there. */

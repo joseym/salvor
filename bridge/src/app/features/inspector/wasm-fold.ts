@@ -32,7 +32,10 @@ export type RunStatusJson =
   | { kind: 'Running' }
   | { kind: 'AwaitingModel' }
   | { kind: 'AwaitingTool' }
-  | { kind: 'Suspended'; reason: string; input_schema: unknown }
+  /** `waiting_on: 'signal'` means an external system (a webhook, a callback), not a person, is
+   *  expected to resume the run. Absent means a human gate: what every suspension folded before
+   *  the discriminator existed means. Mirrors `crates/salvor-replay-wasm/types/index.d.ts`. */
+  | { kind: 'Suspended'; reason: string; input_schema: unknown; waiting_on?: 'signal' }
   | { kind: 'Sleeping'; wake_at: string }
   | { kind: 'BudgetExceeded'; budget: Budget; observed: number }
   | { kind: 'NeedsReconciliation' }

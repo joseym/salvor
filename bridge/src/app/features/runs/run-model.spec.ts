@@ -9,9 +9,10 @@ import {
   isWaiting,
   labelOf,
   toRunRow,
+  waitingOnOf,
   type RunRow,
 } from './run-model';
-import type { RunSummary } from '@salvor-run/client';
+import type { RunStatus, RunSummary } from '@salvor-run/client';
 
 function row(agentDefHash: string | undefined): RunRow {
   return { id: 'r1', status: 'completed', eventCount: 1, agentDefHash };
@@ -144,6 +145,51 @@ describe('derivedStatus: in-progress + driverless + stale ⟹ stalled (the one d
   it('a sleeping run with no last event at all (infinitely stale) is still not stalled', () => {
     expect(derivedStatus('sleeping', 'none', undefined, NOW)).toBe('sleeping');
   });
+
+  // SIGNAL WAIT (durable timers item): a `suspended` run parked on an external signal rather than
+  // a person makes the identical call `sleeping` makes, via the SAME functions, extended to see the
+  // discriminator through one optional trailing parameter (the least invasive extension: every
+  // existing single-argument call keeps its old behavior unchanged). A GATE (no discriminator) must
+  // keep grouping and deriving exactly as before.
+  it('a signal wait groups with PROGRESS, not waiting: it never queues in the Inbox', () => {
+    expect(groupOf('suspended', 'signal')).toBe('progress');
+    expect(isWaiting('suspended', 'signal')).toBe(false);
+  });
+
+  it('a human gate (no discriminator) still groups as waiting, unchanged', () => {
+    expect(groupOf('suspended')).toBe('waiting');
+    expect(isWaiting('suspended')).toBe(true);
+  });
+
+  it('a signal wait driverless and stale is NOT stalled: nobody holds a driver for a webhook wait either', () => {
+    expect(derivedStatus('suspended', 'none', stale, NOW, 'signal')).toBe('suspended');
+  });
+
+  it('a signal wait with no last event at all (infinitely stale) is still not stalled', () => {
+    expect(derivedStatus('suspended', 'none', undefined, NOW, 'signal')).toBe('suspended');
+  });
+
+  it('a human gate, driverless and stale, was never stalled either, before or after this extension', () => {
+    expect(derivedStatus('suspended', 'none', stale, NOW)).toBe('suspended');
+  });
+});
+
+describe('waitingOnOf: the signal discriminator read off a RunStatus.raw', () => {
+  function status(over: Partial<RunStatus> & { raw?: Record<string, unknown> }): RunStatus {
+    return { state: 'suspended', raw: {}, ...over };
+  }
+
+  it('a suspended status carrying kind: "signal" on its raw JSON reads as a signal wait', () => {
+    expect(waitingOnOf(status({ raw: { state: 'suspended', kind: 'signal' } }))).toBe('signal');
+  });
+
+  it('a suspended status with no kind on raw JSON reads as a human gate (undefined)', () => {
+    expect(waitingOnOf(status({ raw: { state: 'suspended' } }))).toBeUndefined();
+  });
+
+  it('a non-suspended status never reads as a signal wait, even if raw carried the key somehow', () => {
+    expect(waitingOnOf(status({ state: 'running', raw: { kind: 'signal' } }))).toBeUndefined();
+  });
 });
 
 describe('toRunRow: bakes the derived status and carries driver evidence', () => {
@@ -203,6 +249,43 @@ describe('toRunRow: bakes the derived status and carries driver evidence', () =>
     );
     expect(r.status).toBe('sleeping');
     expect(r.driver).toBe('none');
+  });
+
+  // THE STATED ACCEPTANCE CASE for signal waits: a suspended run reporting driver: "none" (its
+  // normal resting state, parked on an external system, not a person) and an event past
+  // STALL_GRACE_MS must NOT become stalled, and the row must carry `waitingOn` forward so every
+  // downstream reader of the flat row (the ledger's group counts, sort, filter) can make the same
+  // call without re-reading `raw` by hand.
+  it('a suspended run waiting on a signal, driverless and stale, stays suspended on the row and carries waitingOn', () => {
+    const r = toRunRow(
+      {
+        run: 'r1',
+        status: { state: 'suspended', raw: { state: 'suspended', kind: 'signal' } },
+        eventCount: 2,
+        lastRecordedAt: stale,
+        driver: 'none',
+        raw: {},
+      },
+      NOW,
+    );
+    expect(r.status).toBe('suspended');
+    expect(r.waitingOn).toBe('signal');
+  });
+
+  it('a suspended run with no discriminator (a human gate) carries no waitingOn', () => {
+    const r = toRunRow(
+      {
+        run: 'r1',
+        status: { state: 'suspended', raw: { state: 'suspended' } },
+        eventCount: 2,
+        lastRecordedAt: stale,
+        driver: 'none',
+        raw: {},
+      },
+      NOW,
+    );
+    expect(r.status).toBe('suspended');
+    expect(r.waitingOn).toBeUndefined();
   });
 });
 
