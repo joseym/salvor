@@ -624,8 +624,9 @@ async fn a_dry_run_blocks_a_graph_with_tool_nodes_when_no_agent_is_given() {
     let out = common::flatten_wrapped_prose(&String::from_utf8_lossy(&woke.stdout));
     assert!(
         out.contains(
-            "tool node `step` names tool `missing`, which none of the provided agents \
-                       carry; pass --agent with an agent file whose tools include it"
+            "the document names tool `missing` in node `step`, which none of the provided agents \
+                       carry; every tool node must resolve before a graph run drives, so pass \
+                       --agent with an agent file whose tools include it"
         ),
         "a real wake refuses the same gap and names the fix: {out}"
     );

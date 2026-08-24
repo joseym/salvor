@@ -2110,10 +2110,11 @@ fn check_graph_resolvable(graph: &Graph, agents: &HashMap<String, Agent>) -> Res
                 .any(|agent| agent.tools().get(&tool.tool).is_some())
         {
             bail!(
-                "tool node `{}` names tool `{}`, which none of the provided agents carry; pass \
-                 --agent with an agent file whose tools include it",
-                tool.id,
-                tool.tool
+                "the document names tool `{}` in node `{}`, which none of the provided agents carry; \
+                 every tool node must resolve before a graph run drives, so pass --agent with an \
+                 agent file whose tools include it",
+                tool.tool,
+                tool.id
             );
         }
     }
