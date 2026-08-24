@@ -36,7 +36,9 @@ mod common;
 use std::path::Path;
 
 use common::run_salvor;
-use salvor_cli::commands::{FailedWake, classify_failed_wake, describe_taken};
+use salvor_cli::commands::{
+    FailedWake, ReadTiming, classify_failed_wake, describe_taken, describe_unreadable,
+};
 use salvor_core::{Event, EventEnvelope, RunId, RunStatus, SequenceNumber};
 use salvor_engine::EngineError;
 use salvor_graph::Graph;
@@ -395,6 +397,108 @@ async fn a_dry_run_checks_a_due_graph_run_against_the_document_given() {
     );
 }
 
+/// A dry run checks every `--agent` file it was given, not only the ones a
+/// due run's own kind happens to use. A due GRAPH run's readiness never looks
+/// at `--agent` at all, so a typo in an agent path an operator also put on
+/// the same crontab line would otherwise preview clean and only surface once
+/// some agent run needed it. The bad file is reported once, on its own line,
+/// not repeated against the due run that never needed it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dry_run_also_checks_every_agent_file_even_when_only_a_graph_run_is_due() {
+    let dir = tempdir().expect("tempdir");
+    let store = dir.path().join("salvor.db");
+    let now = OffsetDateTime::now_utc();
+
+    let recorded = hash_of(GATE_GRAPH);
+    let graph = write_graph(dir.path(), "gate.json", GATE_GRAPH);
+    let uuid = seed_sleeping(
+        &store,
+        graph_head_recording(&recorded),
+        now - Duration::hours(1),
+    )
+    .await;
+    let missing_agent = dir.path().join("nope.toml");
+
+    let dry = run_salvor(
+        &store,
+        &[
+            "wake",
+            "--dry-run",
+            "--graph",
+            graph.to_str().expect("a utf-8 path"),
+            "--agent",
+            missing_agent.to_str().expect("a utf-8 path"),
+        ],
+    )
+    .await;
+    let out = common::flatten_wrapped_prose(&String::from_utf8_lossy(&dry.stdout));
+    assert!(
+        out.contains(&format!("--agent {}", missing_agent.display())),
+        "the bad agent file is named: {out}"
+    );
+    assert!(
+        out.contains("reading agent file"),
+        "and the load error that stopped it: {out}"
+    );
+    assert!(
+        out.contains(&format!("would wake with {}", graph.display())),
+        "the due graph run is still reported ready: it never needed --agent: {out}"
+    );
+    assert_eq!(
+        dry.status.code(),
+        Some(1),
+        "a bad file given fails the preview even though the due run itself is ready: {out}"
+    );
+    assert_eq!(log_len(&store, &uuid).await, 2, "a dry run drives nothing");
+}
+
+/// The mirror of the test above: a due AGENT run's readiness never looks at
+/// `--graph`, so an unparsable graph document given alongside it would
+/// otherwise preview clean.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dry_run_also_checks_the_graph_file_even_when_only_an_agent_run_is_due() {
+    let dir = tempdir().expect("tempdir");
+    let store = dir.path().join("salvor.db");
+    let now = OffsetDateTime::now_utc();
+
+    let agent = dir.path().join("agent.toml");
+    std::fs::write(&agent, "model = \"claude-test-model\"\n").expect("write agent toml");
+    let uuid = seed_sleeping(&store, agent_head(), now - Duration::hours(1)).await;
+    let bad_graph = write_graph(dir.path(), "bad.json", "{ not json");
+
+    let dry = run_salvor(
+        &store,
+        &[
+            "wake",
+            "--dry-run",
+            "--agent",
+            agent.to_str().expect("a utf-8 path"),
+            "--graph",
+            bad_graph.to_str().expect("a utf-8 path"),
+        ],
+    )
+    .await;
+    let out = common::flatten_wrapped_prose(&String::from_utf8_lossy(&dry.stdout));
+    assert!(
+        out.contains(&format!("--graph {}", bad_graph.display())),
+        "the bad graph file is named: {out}"
+    );
+    assert!(
+        out.contains("not a valid graph document"),
+        "and the parse error that stopped it: {out}"
+    );
+    assert!(
+        out.contains(&format!("would wake with {}", agent.display())),
+        "the due agent run is still reported ready: it never needed --graph: {out}"
+    );
+    assert_eq!(
+        dry.status.code(),
+        Some(1),
+        "a bad file given fails the preview even though the due run itself is ready: {out}"
+    );
+    assert_eq!(log_len(&store, &uuid).await, 2, "a dry run drives nothing");
+}
+
 /// The reporting decision a sweep makes when a drive comes back with an error,
 /// tested at the seam where it is made rather than by staging a race.
 ///
@@ -474,7 +578,8 @@ fn a_failed_drive_tells_a_lost_race_apart_from_a_drive_that_failed() {
             2,
             &RunStatus::Suspended {
                 reason: "approve the payout".to_owned(),
-                input_schema: json!({ "type": "object" })
+                input_schema: json!({ "type": "object" }),
+                kind: None
             },
             5
         ),
@@ -552,7 +657,8 @@ fn a_taken_run_names_its_status_only_when_a_finished_drive_could_have_left_it() 
     assert_eq!(
         describe_taken(&RunStatus::Suspended {
             reason: "approve the payout".to_owned(),
-            input_schema: json!({ "type": "object" })
+            input_schema: json!({ "type": "object" }),
+            kind: None
         }),
         "was picked up by another driver and is now suspended"
     );
@@ -589,6 +695,51 @@ fn a_taken_run_names_its_status_only_when_a_finished_drive_could_have_left_it() 
             "status {status:?} must not be named"
         );
     }
+}
+
+/// A run whose log this sweep could not read at all, before or after the
+/// drive, is reported as not woken, naming the run and the error the store
+/// gave, and never inventing a status the read never produced. Unlike
+/// `classify_failed_wake`, there is no decision to make here: a read that
+/// fails leaves nothing to classify against, so it is always `NotWoken`, and
+/// the only thing left to get right is which of the two moments it names.
+///
+/// This pins the wording at the seam where it is produced, the same way
+/// `a_failed_drive_tells_a_lost_race_apart_from_a_drive_that_failed` pins the
+/// classification: proving the sweep actually moves on to the NEXT due run
+/// after a read like this fails needs a store that fails one read mid-sweep,
+/// which is the same distance from a hermetic test as staging two real
+/// wakers racing at one run is for that other test (see this module's docs).
+/// This crate's own fix keeps the run's whole line inside a `match` that
+/// `continue`s past a read error rather than propagating it with `?`, the
+/// identical shape the neighbouring `NotWoken` branch (proven not to stop a
+/// sweep by `one_run_that_will_not_drive_does_not_stop_the_rest`) already
+/// uses.
+#[test]
+fn an_unreadable_log_names_the_run_and_which_read_failed() {
+    let error = StoreError::Backend("disk I/O error".to_owned());
+    let uuid = "11111111-1111-1111-1111-111111111111";
+
+    let before = describe_unreadable(uuid, ReadTiming::BeforeTheDrive, &error);
+    assert!(before.contains(uuid), "the run is named: {before}");
+    assert!(
+        before.contains("was not woken") && before.contains("before driving it"),
+        "the moment is named: {before}"
+    );
+    assert!(
+        before.contains("disk I/O error"),
+        "the store's own error rides along: {before}"
+    );
+
+    let after = describe_unreadable(uuid, ReadTiming::AfterTheDrive, &error);
+    assert!(
+        after.contains("could not re-read") && after.contains("after the drive"),
+        "the other moment reads distinctly: {after}"
+    );
+    assert!(
+        after.contains("disk I/O error"),
+        "and its error too: {after}"
+    );
 }
 
 /// A run woken on schedule has not crashed, and the log must not say it has.
@@ -756,7 +907,10 @@ async fn resume_refuses_a_run_that_is_not_due_yet() {
     let now = OffsetDateTime::now_utc();
 
     // Two hours and a minute out, so the coarsest unit the shared formatter
-    // reports is a stable `2h` however long the binary takes to start.
+    // reports is a stable `2h`, however long the binary takes to start; the
+    // formatter's own finer unit (minutes) may drift by however many seconds
+    // that start-up eats into the one minute of slack, so the assertion below
+    // only pins the `2h` prefix, not the whole `2h Nm` span.
     let early = seed_sleeping(
         &store,
         agent_head(),

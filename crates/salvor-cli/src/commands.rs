@@ -373,8 +373,10 @@ pub async fn resume(store_path: &Path, args: ResumeArgs) -> Result<u8> {
 /// sweep.
 ///
 /// A `--dry-run` follows the same rule against the same question asked without
-/// driving: `1` when a due run could not be woken with the files given, so the
-/// crontab line an operator is about to save can be smoke-tested by running it.
+/// driving: `1` when a due run could not be woken with the files given, or when
+/// a file the operator gave could not itself be loaded even if no due run
+/// currently needs it (see [`check_wake_files`]), so the crontab line an
+/// operator is about to save can be smoke-tested by running it.
 pub async fn wake(store_path: &Path, args: WakeArgs) -> Result<u8> {
     let store = open_store(store_path)?;
     // The real clock, read once, so every run in this sweep is measured
@@ -392,13 +394,14 @@ pub async fn wake(store_path: &Path, args: WakeArgs) -> Result<u8> {
     }
 
     if args.dry_run {
+        let file_failures = check_wake_files(&args);
         let previews = preview_due_runs(store.as_ref(), &due, &args).await?;
-        print!("{}", render_wake_preview(&previews, now));
+        print!("{}", render_wake_preview(&file_failures, &previews, now));
         let unwakeable = previews
             .iter()
             .filter(|preview| preview.readiness.is_blocked())
             .count();
-        return Ok(u8::from(unwakeable > 0));
+        return Ok(u8::from(unwakeable > 0 || !file_failures.is_empty()));
     }
 
     println!(
@@ -414,8 +417,21 @@ pub async fn wake(store_path: &Path, args: WakeArgs) -> Result<u8> {
         // The log as this sweep found it. A drive that fails reads the same
         // whether nothing could drive the run or another driver had already
         // driven it; what the run looked like before and what it reads as
-        // after is what tells those apart (see `classify_failed_wake`).
-        let events_before = store.read_log(run.run_id).await?.len();
+        // after is what tells those apart (see `classify_failed_wake`). A read
+        // that fails here is this run's own failure, not the whole sweep's: it
+        // is reported on this run's line and the sweep still moves on to the
+        // next due run, exactly as a drive failure does below.
+        let events_before = match store.read_log(run.run_id).await {
+            Ok(log) => log.len(),
+            Err(error) => {
+                failures += 1;
+                println!(
+                    "  {}",
+                    describe_unreadable(&uuid, ReadTiming::BeforeTheDrive, &error)
+                );
+                continue;
+            }
+        };
         let outcome = resume(
             store_path,
             ResumeArgs {
@@ -428,8 +444,23 @@ pub async fn wake(store_path: &Path, args: WakeArgs) -> Result<u8> {
         .await;
         // What the re-drive actually left behind, folded from the log it just
         // wrote, so the report states the run's state rather than assuming the
-        // drive's own report covered it.
-        let log = store.read_log(run.run_id).await?;
+        // drive's own report covered it. This read can fail on its own, apart
+        // from whatever the drive itself did (a store hiccup between the drive
+        // and this read, the torn-read failure mode `salvor-store` is fixed
+        // against separately); when it does, this run's outcome cannot be
+        // told, so it is reported as unreadable rather than aborting every run
+        // still waiting for its turn.
+        let log = match store.read_log(run.run_id).await {
+            Ok(log) => log,
+            Err(error) => {
+                failures += 1;
+                println!(
+                    "  {}",
+                    describe_unreadable(&uuid, ReadTiming::AfterTheDrive, &error)
+                );
+                continue;
+            }
+        };
         let status = derive_state(&log).status;
         match outcome {
             Ok(_) => println!("  {uuid} is now {}", render::status_label(&status)),
@@ -508,6 +539,46 @@ pub enum FailedWake {
     /// Another driver moved the run while this drive was failing. The run's
     /// own state is the news; the error describes this process, not the run.
     TakenByAnotherDriver,
+}
+
+/// Which of the sweep's two reads of one due run's log failed to read at all:
+/// see [`describe_unreadable`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadTiming {
+    /// The read the sweep takes before driving the run, to learn how many
+    /// events it starts with (see `classify_failed_wake`'s `events_before`).
+    BeforeTheDrive,
+    /// The read the sweep takes after driving the run, to fold its resulting
+    /// status and report it.
+    AfterTheDrive,
+}
+
+/// What a sweep prints for one due run whose log this invocation could not
+/// read at all, before or after the drive.
+///
+/// A run in this state is not classified against [`classify_failed_wake`]:
+/// that decision needs the log this read failed to produce (a folded status,
+/// an event count), so there is nothing to classify against. It is reported
+/// plainly as not woken instead, the same as any other run this sweep failed
+/// to do its job for, and the sweep still moves on to the one after it.
+///
+/// Split out from the loop so the wording is a unit test rather than a rerun
+/// of the whole binary. Proving the sweep truly continues past a run in this
+/// state, rather than aborting, needs a store that fails one read mid-sweep;
+/// that is the same distance from a hermetic test as staging the real race
+/// [`classify_failed_wake`] is proven against, which this module's docs
+/// explain is left to a test that injects the failure directly rather than
+/// racing two real drivers.
+#[must_use]
+pub fn describe_unreadable(uuid: &str, when: ReadTiming, error: &StoreError) -> String {
+    match when {
+        ReadTiming::BeforeTheDrive => {
+            format!("{uuid} was not woken: could not read its log before driving it: {error}")
+        }
+        ReadTiming::AfterTheDrive => {
+            format!("{uuid} was not woken: could not re-read {uuid} after the drive: {error}")
+        }
+    }
 }
 
 /// What a sweep says about a run [`FailedWake::TakenByAnotherDriver`] was
@@ -664,6 +735,49 @@ impl WakeReadiness {
     }
 }
 
+/// One `--agent` or `--graph` file the operator gave `wake --dry-run` that
+/// could not itself be loaded, checked independently of which run kind
+/// actually happens to be due today. See [`check_wake_files`].
+struct FileCheckFailure {
+    /// The flag and file, e.g. `--agent agents/writer.toml`.
+    what: String,
+    /// The load or parse error, already formatted with its context chain.
+    error: String,
+}
+
+/// Opens and parses every file the operator gave `wake --dry-run`, regardless
+/// of whether any due run actually needs it: every `--agent` file (through
+/// [`AgentConfig::load`], the same parse a real drive performs) and, when
+/// `--graph` is given, the graph document (through [`load_and_validate_graph`],
+/// the same strict parse `graph validate` runs).
+///
+/// This is what catches a typo in a flag no run *currently* due happens to
+/// need: [`preview_due_runs`]'s per-run readiness check only exercises the
+/// files a given run's kind actually asks for (an agent run never looks at
+/// `--graph`, a graph run never looks at `--agent`), so a crontab line with a
+/// bad path on the side it is not using today would otherwise preview clean
+/// and only fail once some other, currently-sleeping run needed it.
+fn check_wake_files(args: &WakeArgs) -> Vec<FileCheckFailure> {
+    let mut failures = Vec::new();
+    for path in &args.agents {
+        if let Err(error) = AgentConfig::load(path) {
+            failures.push(FileCheckFailure {
+                what: format!("--agent {}", path.display()),
+                error: format!("{error:#}"),
+            });
+        }
+    }
+    if let Some(graph_path) = &args.graph
+        && let Err(error) = load_and_validate_graph(graph_path)
+    {
+        failures.push(FileCheckFailure {
+            what: format!("--graph {}", graph_path.display()),
+            error: format!("{error:#}"),
+        });
+    }
+    failures
+}
+
 /// Asks of every due run what a real wake would ask of it, without driving
 /// anything: what kind of run it is, what it recorded, and whether the
 /// `--agent`/`--graph` files given satisfy it.
@@ -732,16 +846,28 @@ async fn preview_due_runs(
     Ok(previews)
 }
 
-/// The `--dry-run` listing: which runs are due, how overdue each is, what each
-/// one is, and whether the files given would wake it. Prints and drives
-/// nothing, mirroring how `salvor fork --dry-run` previews a fork it does not
-/// create.
-fn render_wake_preview(previews: &[WakePreview], now: OffsetDateTime) -> String {
+/// The `--dry-run` listing: which files given could not even be loaded, which
+/// runs are due, how overdue each is, what each one is, and whether the files
+/// given would wake it. Prints and drives nothing, mirroring how `salvor fork
+/// --dry-run` previews a fork it does not create.
+///
+/// `file_failures` (see [`check_wake_files`]) is reported once, right under
+/// the header and ahead of the per-run listing, rather than against any one
+/// run: it is not any particular run's news, since it holds regardless of
+/// which run kind is actually due.
+fn render_wake_preview(
+    file_failures: &[FileCheckFailure],
+    previews: &[WakePreview],
+    now: OffsetDateTime,
+) -> String {
     let mut out = format!(
         "{} run(s) due to wake at {} (dry run):\n",
         previews.len(),
         render::format_ts(now)
     );
+    for failure in file_failures {
+        out.push_str(&format!("  {}: {}\n", failure.what, failure.error));
+    }
     let mut unwakeable = 0_usize;
     for preview in previews {
         out.push_str(&format!(
@@ -763,14 +889,24 @@ fn render_wake_preview(previews: &[WakePreview], now: OffsetDateTime) -> String 
             }
         }
     }
-    if unwakeable == 0 {
+    if unwakeable == 0 && file_failures.is_empty() {
         out.push_str("nothing was driven. Drop --dry-run to wake these.\n");
     } else {
-        out.push_str(&format!(
-            "nothing was driven. {unwakeable} of {} due run(s) could not be woken with the files \
-             given; pass what each one names above.\n",
-            previews.len()
-        ));
+        out.push_str("nothing was driven.");
+        if unwakeable > 0 {
+            out.push_str(&format!(
+                " {unwakeable} of {} due run(s) could not be woken with the files given; pass \
+                 what each one names above.",
+                previews.len()
+            ));
+        }
+        if !file_failures.is_empty() {
+            out.push_str(&format!(
+                " {} file(s) given could not be loaded; see above.",
+                file_failures.len()
+            ));
+        }
+        out.push('\n');
     }
     out
 }
