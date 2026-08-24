@@ -109,6 +109,49 @@ fn validate_reports_a_cycle() {
     );
 }
 
+/// A branch case with a misspelled edge label (`lst` for the case `lost`) is
+/// exactly the mistake this check exists to catch: the edge that was meant to
+/// realize `lost` never does, and the run would silently skip past it.
+#[test]
+fn validate_rejects_a_branch_case_with_no_matching_edge() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("unrouted_case.json");
+    let doc = r#"{
+      "schema_version": 1,
+      "nodes": [
+        { "kind": "tool", "payload": { "id": "assess", "tool": "assess" } },
+        { "kind": "branch", "payload": { "id": "route", "on": "assess.outcome", "cases": [
+            { "name": "won", "when": { "kind": "expression", "value": "outcome == \"won\"" } },
+            { "name": "lost", "when": { "kind": "expression", "value": "outcome == \"lost\"" } }
+          ] } },
+        { "kind": "tool", "payload": { "id": "celebrate", "tool": "notify" } }
+      ],
+      "edges": [
+        { "from": "assess", "to": "route" },
+        { "from": "route", "to": "celebrate", "label": "won" },
+        { "from": "route", "to": "celebrate", "label": "lst" }
+      ]
+    }"#;
+    fs::write(&path, doc).expect("write");
+
+    let output = salvor()
+        .args(["graph", "validate"])
+        .arg(&path)
+        .output()
+        .expect("runs");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(1), "invalid exits 1: {output:?}");
+    assert!(
+        stderr.contains("branch node `route`") && stderr.contains("case `lost`"),
+        "names the branch and the unrouted case: {stderr}"
+    );
+    assert!(
+        stderr.contains("terminal node"),
+        "says what to do about a route meant to end the run: {stderr}"
+    );
+}
+
 #[test]
 fn validate_rejects_an_unknown_field() {
     let dir = tempdir().expect("tempdir");

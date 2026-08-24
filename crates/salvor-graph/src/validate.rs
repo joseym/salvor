@@ -181,6 +181,21 @@ pub enum GraphError {
         case: String,
     },
 
+    /// A `branch` node case names no outbound edge from that node: no edge's
+    /// `label` matches the case name. Caught at submit, because otherwise the
+    /// engine fires the case at run time, finds no live edge, skips every node
+    /// downstream of it, and the run completes as if that were the intended
+    /// path. See [`check_branch_case_edges`].
+    #[error(
+        "branch node `{node}`: case `{case}` has no outbound edge; point the case at a node, and point a route meant to end the run at a terminal node instead"
+    )]
+    BranchCaseWithoutEdge {
+        /// The branch node's id.
+        node: String,
+        /// The name of the case with no matching edge.
+        case: String,
+    },
+
     /// A `fold` node's `stop_when` predicate does not parse in the
     /// [`crate::expr`] condition language. Caught at submit so a bad predicate is
     /// never a run-time failure, exactly like a branch case's expression.
@@ -301,6 +316,7 @@ pub fn validate(graph: &Graph) -> Result<GraphSummary, Vec<GraphError>> {
     check_node_fields(graph, &mut errors);
     check_node_names(graph, &mut errors);
     check_branch_expressions(graph, &mut errors);
+    check_branch_case_edges(graph, &mut errors);
     check_fold_expressions(graph, &mut errors);
     check_fold_reference_shapes(graph, &mut errors);
     check_acyclic(graph, &mut errors);
@@ -513,6 +529,43 @@ fn check_branch_expressions(graph: &Graph, errors: &mut Vec<GraphError>) {
                         });
                     }
                 }
+            }
+        }
+    }
+}
+
+/// Every `branch` case must label at least one outbound edge from that node.
+///
+/// The engine picks a branch's live outbound edge by matching the fired case's
+/// name against each edge's `label` (see `salvor_engine::is_live_inbound`). A
+/// case with no matching label can still fire: the branch evaluates its
+/// condition, records which case won, and only then discovers there is nowhere
+/// to route it. Every node downstream of that edge is then skipped, and the run
+/// completes having silently taken no path at all, exactly as if the missing
+/// edge had been the intended one. Caught here instead, node- and
+/// case-precise, so a misspelled or forgotten edge label is an authoring
+/// mistake seen at submit, not a run that finishes looking healthy.
+///
+/// The inverse (an edge labeled with a name no case declares) is not checked
+/// here: that edge is simply dead and never fires, which is a different, less
+/// silent mistake than the one this check exists to catch.
+fn check_branch_case_edges(graph: &Graph, errors: &mut Vec<GraphError>) {
+    for node in &graph.nodes {
+        let Node::Branch(branch) = node else {
+            continue;
+        };
+        let labels: HashSet<&str> = graph
+            .edges
+            .iter()
+            .filter(|edge| edge.from == branch.id)
+            .filter_map(|edge| edge.label.as_deref())
+            .collect();
+        for case in &branch.cases {
+            if !labels.contains(case.name.as_str()) {
+                errors.push(GraphError::BranchCaseWithoutEdge {
+                    node: branch.id.clone(),
+                    case: case.name.clone(),
+                });
             }
         }
     }
@@ -967,6 +1020,16 @@ mod tests {
         }
     }
 
+    /// A branch's labeled outbound edge, the shape a case needs to route
+    /// anywhere at all.
+    fn labeled_edge(from: &str, to: &str, label: &str) -> Edge {
+        Edge {
+            from: from.into(),
+            to: to.into(),
+            label: Some(label.into()),
+        }
+    }
+
     fn graph(nodes: Vec<Node>, edges: Vec<Edge>) -> Graph {
         Graph {
             schema_version: SCHEMA_VERSION,
@@ -1245,12 +1308,26 @@ mod tests {
                 },
             ],
         });
-        let g = graph(vec![agent("score"), branch], vec![edge("score", "route")]);
-        assert!(validate(&g).is_ok());
+        let g = graph(
+            vec![
+                agent("score"),
+                branch,
+                agent("high_target"),
+                agent("review_target"),
+            ],
+            vec![
+                edge("score", "route"),
+                labeled_edge("route", "high_target", "high"),
+                labeled_edge("route", "review_target", "review"),
+            ],
+        );
+        assert!(validate(&g).is_ok(), "{:?}", validate(&g));
     }
 
     /// A branch case whose expression does not parse is a node-precise error
     /// naming the node and the case; a sibling `model_decision` case is skipped.
+    /// Both cases carry an edge, so the new case-without-edge check stays quiet
+    /// and this test isolates the expression check alone.
     #[test]
     fn invalid_branch_expression_is_reported() {
         let branch = Node::Branch(BranchNode {
@@ -1269,7 +1346,13 @@ mod tests {
                 },
             ],
         });
-        let g = graph(vec![branch], vec![]);
+        let g = graph(
+            vec![branch, agent("broken_target"), agent("fallback_target")],
+            vec![
+                labeled_edge("route", "broken_target", "broken"),
+                labeled_edge("route", "fallback_target", "fallback"),
+            ],
+        );
         let errors = validate(&g).expect_err("invalid");
         assert!(
             matches!(
@@ -1278,6 +1361,58 @@ mod tests {
                     if node == "route" && case == "broken"
             ),
             "one node/case-precise expression error: {errors:?}"
+        );
+    }
+
+    /// A branch case with no outbound edge realizing it is a node/case-precise
+    /// error, distinct from and reported alongside a sibling case that does
+    /// have one: the mistake this catches is exactly a misspelled edge label
+    /// (the case name and the label must match character for character), and
+    /// the message says what to do about it.
+    #[test]
+    fn branch_case_without_edge_is_reported() {
+        let branch = Node::Branch(BranchNode {
+            name: None,
+            id: "route".into(),
+            on: None,
+            agent_hash: None,
+            cases: vec![
+                BranchCase {
+                    name: "won".into(),
+                    when: BranchCondition::Expression("outcome == \"won\"".into()),
+                },
+                BranchCase {
+                    name: "lost".into(),
+                    when: BranchCondition::Expression("outcome == \"lost\"".into()),
+                },
+            ],
+        });
+        let g = graph(
+            vec![branch, agent("celebrate")],
+            // The edge realizing `lost` is misspelled `lst`, exactly the
+            // mistake this check exists to catch.
+            vec![
+                labeled_edge("route", "celebrate", "won"),
+                labeled_edge("route", "celebrate", "lst"),
+            ],
+        );
+        let errors = validate(&g).expect_err("invalid");
+        assert_eq!(
+            errors,
+            vec![GraphError::BranchCaseWithoutEdge {
+                node: "route".into(),
+                case: "lost".into(),
+            }],
+            "names the node and the unrouted case, and only that one: {errors:?}"
+        );
+        let message = errors[0].to_string();
+        assert!(
+            message.contains("route") && message.contains("lost"),
+            "{message}"
+        );
+        assert!(
+            message.contains("terminal node"),
+            "says what to do about a route meant to end the run: {message}"
         );
     }
 

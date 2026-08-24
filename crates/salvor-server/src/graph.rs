@@ -937,6 +937,9 @@ fn graph_error_json(error: &GraphError) -> Value {
         GraphError::ModelDecisionWithoutAgent { node, case } => json!({
             "code": "model_decision_without_agent", "message": message, "node": node, "case": case,
         }),
+        GraphError::BranchCaseWithoutEdge { node, case } => json!({
+            "code": "branch_case_without_edge", "message": message, "node": node, "case": case,
+        }),
         GraphError::InvalidFoldStopExpression { node, error } => json!({
             "code": "invalid_fold_stop_expression", "message": message, "node": node, "error": error,
         }),

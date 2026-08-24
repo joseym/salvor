@@ -992,6 +992,7 @@ mod tests {
                     .name("Notify each watcher"),
             )
             .edge("research", "publish")
+            .labeled_edge("route", "fanout", "high")
             .build();
 
         let summary = crate::validate(&graph).expect("named nodes still validate");
