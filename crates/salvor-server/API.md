@@ -382,7 +382,7 @@ data: {"run_id":"6f...","seq":4,"schema_version":1,"recorded_at":"...","event":{
 - A `Suspended` event's payload carries the same optional `kind` the status
   object does: `"signal"` with the same meaning and absence rule described
   under [the status object](#the-status-object), so an SSE consumer can build
-  the same filter the Bridge does.
+  the same filter the Bridge does. The full payload is `{"reason": "...", "input_schema": {...}}` for a human gate and `{"reason": "...", "input_schema": {...}, "kind": "signal"}` for a signal wait.
 - When the run reaches a resting point (completed, failed, abandoned,
   suspended, sleeping, budget-exceeded, or needs-reconciliation) the stream
   sends one final frame with `event: end` carrying the status it rested at,
