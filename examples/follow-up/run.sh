@@ -460,7 +460,7 @@ check "$(count_lines "$B_REMINDERS")" "1" \
 # run is not watching the payments file, it is not subscribed to anything, and it
 # holds no process that could be notified. It has an instant in its log.
 cat >"$PAYMENTS" <<JSON
-{"$INVOICE": {"paid": true, "paid_cents": 128400, "received": "2026-08-15"}}
+{"$INVOICE": {"paid": true, "received": "2026-08-15"}}
 JSON
 echo "== the payments file, rewritten while run $B_ID sleeps =="
 cat "$PAYMENTS"

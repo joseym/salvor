@@ -31,10 +31,20 @@ next node sees as its input. Text alone would leave a branch with nothing typed
 to route on.
 
 A graph's `tool` node hands the node's input straight through as the tool call's
-arguments, so every tool here reads its invoice from either the bare arguments
-(the graph input, at the first node) or from a `structuredContent` object (the
-previous tool's whole result, at every node after it). `_record` is that one
-rule, written once.
+arguments, so every tool here reads its invoice id from either the bare
+arguments (the graph input, at the first node) or from a `structuredContent`
+object (the previous tool's whole result, at every node after it). `_invoice_id`
+is that one rule, written once.
+
+The run's input and every tool argument carry only that reference,
+`invoice_id`. The customer name and the amount never travel through either:
+they live in `LEDGER` below, this server's own record keyed by invoice id, and
+every handler resolves them there instead of trusting them from the caller.
+That is the practice ../../SECURITY.md asks for under "Pass references rather
+than contents": everything a run records lands in a durable log that cannot be
+edited or deleted, so personal data has to stay out of what gets recorded in
+the first place, not be scrubbed from it afterward. `LEDGER` stands in for the
+billing system a real accounts desk would look this up in.
 
 Configuration comes from the environment, set by `run.sh` and inherited by this
 process through the agent definition that spawns it:
@@ -64,10 +74,17 @@ INVOICE_ARG = {
     "type": "object",
     "properties": {
         "invoice_id": {"type": "string", "description": "The invoice id, e.g. `INV-2031`."},
-        "customer": {"type": "string"},
-        "amount_cents": {"type": "integer"},
     },
     "required": [],
+}
+
+# The accounts desk's own customer records, keyed by invoice id. A tool
+# argument and the run's input carry only `invoice_id`; every handler below
+# resolves the customer name and the amount here instead of trusting them from
+# the caller, so neither ever has to cross into a tool argument or the run's
+# input, and neither lands in Salvor's durable, unerasable log because of it.
+LEDGER = {
+    "INV-2031": {"customer": "Alder and Finch Joinery", "amount_cents": 128400},
 }
 
 TOOLS = [
@@ -87,7 +104,7 @@ TOOLS = [
         "name": "check_payment",
         "description": (
             "Read the payments file and report whether this invoice has been "
-            "paid, and for how much."
+            "paid."
         ),
         "inputSchema": INVOICE_ARG,
         # Reading the payments file changes nothing, so the hint is true and
@@ -133,20 +150,22 @@ def failed(text):
     return {"content": [{"type": "text", "text": text}], "isError": True}
 
 
-def _record(arguments):
-    """The object carrying this call's invoice fields.
+def _invoice_id(arguments):
+    """The invoice id this call concerns, and nothing else.
 
     A `tool` node's input is whatever the node before it produced, and for a
-    tool node that is the previous tool's WHOLE result, so the fields sit one
-    level down under `structuredContent`. At the first node the input is the
-    graph input itself and the fields are right there. Prefer the nested object
-    when it names an invoice, fall back to the bare arguments otherwise, so
-    every tool here is fed the same way wherever it sits in the walk.
+    tool node that is the previous tool's WHOLE result, so `invoice_id` sits
+    one level down under `structuredContent`. At the first node the input is
+    the graph input itself and `invoice_id` is right there. Prefer the nested
+    object when it names an invoice, fall back to the bare arguments
+    otherwise, so every tool here is fed the same way wherever it sits in the
+    walk. This is the only field ever read off a call; look up `LEDGER` for
+    everything else a handler needs.
     """
     structured = arguments.get("structuredContent")
     if isinstance(structured, dict) and structured.get("invoice_id"):
-        return structured
-    return arguments
+        return structured["invoice_id"]
+    return arguments.get("invoice_id", "")
 
 
 def _append(path, row):
@@ -193,10 +212,10 @@ def load_payments():
 
 
 def send_reminder(arguments):
-    record = _record(arguments)
-    invoice_id = record.get("invoice_id", "")
+    invoice_id = _invoice_id(arguments)
     if not invoice_id:
         return failed("no invoice_id in the arguments")
+    info = LEDGER.get(invoice_id, {})
     if _holds(REMINDERS_PATH, invoice_id):
         # Keyed, so a re-drive that somehow reached this tool a second time
         # cannot send a second reminder. The recorded log already prevents
@@ -204,48 +223,45 @@ def send_reminder(arguments):
         return ok(
             {
                 "invoice_id": invoice_id,
-                "customer": record.get("customer", ""),
-                "amount_cents": record.get("amount_cents", 0),
                 "reminder_sent": False,
                 "already_reminded": True,
                 "ledger_path": REMINDERS_PATH,
             },
             f"{invoice_id} was already reminded; nothing sent",
         )
+    # The reminders ledger is this desk's own record of what it sent, not
+    # Salvor's log, so it carries what a human reading it needs: the name and
+    # the amount, resolved from LEDGER rather than from the call.
     _append(
         REMINDERS_PATH,
         {
             "invoice_id": invoice_id,
-            "customer": record.get("customer", ""),
-            "amount_cents": record.get("amount_cents", 0),
+            "customer": info.get("customer", ""),
+            "amount_cents": info.get("amount_cents", 0),
         },
     )
+    # The RETURNED result is what Salvor records, so it carries the reference
+    # and a status only, never the name: see LEDGER's comment above.
     return ok(
         {
             "invoice_id": invoice_id,
-            "customer": record.get("customer", ""),
-            "amount_cents": record.get("amount_cents", 0),
             "reminder_sent": True,
             "already_reminded": False,
             "ledger_path": REMINDERS_PATH,
         },
-        f"reminder sent to {record.get('customer', 'the customer')} on {invoice_id}",
+        f"reminder sent on {invoice_id}",
     )
 
 
 def check_payment(arguments):
-    record = _record(arguments)
-    invoice_id = record.get("invoice_id", "")
+    invoice_id = _invoice_id(arguments)
     if not invoice_id:
         return failed("no invoice_id in the arguments")
     payment = load_payments().get(invoice_id)
     paid = isinstance(payment, dict) and bool(payment.get("paid"))
     payload = {
         "invoice_id": invoice_id,
-        "customer": record.get("customer", ""),
-        "amount_cents": record.get("amount_cents", 0),
         "paid": paid,
-        "paid_cents": payment.get("paid_cents", 0) if isinstance(payment, dict) else 0,
         "payments_path": PAYMENTS_PATH,
     }
     verdict = "paid" if paid else "still unpaid"
@@ -253,17 +269,17 @@ def check_payment(arguments):
 
 
 def close_invoice(arguments):
-    record = _record(arguments)
-    invoice_id = record.get("invoice_id", "")
+    invoice_id = _invoice_id(arguments)
     if not invoice_id:
         return failed("no invoice_id in the arguments")
+    info = LEDGER.get(invoice_id, {})
     if not _holds(CLOSED_PATH, invoice_id):
         _append(
             CLOSED_PATH,
             {
                 "invoice_id": invoice_id,
-                "customer": record.get("customer", ""),
-                "paid_cents": record.get("paid_cents", 0),
+                "customer": info.get("customer", ""),
+                "amount_cents": info.get("amount_cents", 0),
                 "outcome": "closed",
             },
         )
@@ -274,17 +290,17 @@ def close_invoice(arguments):
 
 
 def escalate(arguments):
-    record = _record(arguments)
-    invoice_id = record.get("invoice_id", "")
+    invoice_id = _invoice_id(arguments)
     if not invoice_id:
         return failed("no invoice_id in the arguments")
+    info = LEDGER.get(invoice_id, {})
     if not _holds(ESCALATIONS_PATH, invoice_id):
         _append(
             ESCALATIONS_PATH,
             {
                 "invoice_id": invoice_id,
-                "customer": record.get("customer", ""),
-                "amount_cents": record.get("amount_cents", 0),
+                "customer": info.get("customer", ""),
+                "amount_cents": info.get("amount_cents", 0),
                 "outcome": "escalated",
             },
         )

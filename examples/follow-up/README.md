@@ -17,6 +17,20 @@ is four tool nodes, a durable wait, and a branch, so no API key, no network, and
 no scripted model server are involved. The one thing it does spend is wall time,
 about a minute, because the deadline it waits out is a real one on a real clock.
 
+## Why the input is one id, and not a customer record
+
+[`input.json`](input.json) is `{"invoice_id": "INV-2031"}` and nothing else: no
+customer name, no amount. Every tool argument in the recorded walk below
+carries the same one field. That is not an accident of this example being
+small; it follows [`SECURITY.md`](../../SECURITY.md)'s "Pass references rather
+than contents": the run's input and every tool call's arguments and result
+land verbatim in a durable log that cannot be edited or deleted, so personal
+data kept out of that log has to be kept out of what gets passed into it in
+the first place. The customer name and the invoice amount live in
+[`server.py`](server.py)'s `LEDGER`, this desk's stand-in for a real billing
+system, keyed by invoice id; every tool handler resolves them there instead of
+trusting them from the caller.
+
 ## The document, node by node
 
 ```
@@ -206,10 +220,10 @@ The whole of leg A's log, reminder to escalation, across the nap:
 
 ```
 $ salvor --store /tmp/salvor-follow-up-unpaid.db history c407d5ef-b20b-4ac0-b5e9-5e10af9945f8
-   0  2026-08-15 19:42:30Z  GraphRunStarted      graph sha256:ce67487… input {"amount_cents":128400,"customer":"Alder and Finch Joinery","due_date":"2026-07-…
+   0  2026-08-15 19:42:30Z  GraphRunStarted      graph sha256:ce67487… input {"invoice_id":"INV-2031"}
    1  2026-08-15 19:42:30Z  NodeEntered          enter send_reminder
-   2  2026-08-15 19:42:30Z  ToolCallRequested    send_reminder [Write] input {"amount_cents":128400,"customer":"Alder and Finch Joinery","due_date":"2026-07-…
-   3  2026-08-15 19:42:30Z  ToolCallCompleted    output {"content":[{"text":"reminder sent to Alder and Finch Joinery on INV-2031","type…
+   2  2026-08-15 19:42:30Z  ToolCallRequested    send_reminder [Write] input {"invoice_id":"INV-2031"}
+   3  2026-08-15 19:42:30Z  ToolCallCompleted    output {"content":[{"text":"reminder sent on INV-2031","type…
    4  2026-08-15 19:42:30Z  NodeExited           exit send_reminder
    5  2026-08-15 19:42:30Z  NodeEntered          enter cool_off
    6  2026-08-15 19:42:30Z  NowObserved          2026-08-15 19:42:30Z
@@ -217,7 +231,7 @@ $ salvor --store /tmp/salvor-follow-up-unpaid.db history c407d5ef-b20b-4ac0-b5e9
    8  2026-08-15 19:42:51Z  SleepCompleted       woke
    9  2026-08-15 19:42:51Z  NodeExited           exit cool_off
   10  2026-08-15 19:42:51Z  NodeEntered          enter check_payment
-  11  2026-08-15 19:42:51Z  ToolCallRequested    check_payment [Read] input {"content":[{"text":"reminder sent to Alder and Finch Joinery on INV-2031","type…
+  11  2026-08-15 19:42:51Z  ToolCallRequested    check_payment [Read] input {"content":[{"text":"reminder sent on INV-2031","type…
   12  2026-08-15 19:42:51Z  ToolCallCompleted    output {"content":[{"text":"INV-2031 is still unpaid as of this reading","type":"text"}…
   13  2026-08-15 19:42:51Z  NodeExited           exit check_payment
   14  2026-08-15 19:42:51Z  NodeEntered          enter route
