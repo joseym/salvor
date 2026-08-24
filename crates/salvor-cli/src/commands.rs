@@ -38,7 +38,7 @@ use salvor_engine::{
     EngineError, ForkError, GraphOutcome, ToolResolver, WriteHazard, graph_hash, plan_fork,
     run_graph,
 };
-use salvor_graph::{Graph, Node};
+use salvor_graph::{Graph, Node, ToolNode};
 use salvor_runtime::{
     Agent, ParkReason, RunCtx, RunOutcome, Runtime, RuntimeError, validate_labels,
 };
@@ -386,10 +386,18 @@ pub async fn wake(store_path: &Path, args: WakeArgs) -> Result<u8> {
     let due = salvor_runtime::due_runs(store.as_ref(), now).await?;
 
     if due.is_empty() {
-        println!(
-            "nothing to wake: no run in {} is sleeping past its deadline",
-            store_path.display()
-        );
+        match next_sleeping_deadline(store.as_ref()).await? {
+            Some(wake_at) => println!(
+                "nothing to wake: the next run in {} is due at {} (in {})",
+                store_path.display(),
+                render::format_ts(wake_at),
+                render::format_duration(wake_at - now)
+            ),
+            None => println!(
+                "nothing to wake: no run in {} is sleeping",
+                store_path.display()
+            ),
+        }
         return Ok(0);
     }
 
@@ -405,7 +413,7 @@ pub async fn wake(store_path: &Path, args: WakeArgs) -> Result<u8> {
     }
 
     println!(
-        "{} run(s) due to wake at {now}:",
+        "{} run(s) due as of {now}:",
         due.len(),
         now = render::format_ts(now)
     );
@@ -499,6 +507,31 @@ pub async fn wake(store_path: &Path, args: WakeArgs) -> Result<u8> {
         return Ok(1);
     }
     Ok(0)
+}
+
+/// The earliest wake instant among every run this store holds that folds to
+/// [`RunStatus::Sleeping`], or `None` when not one of its runs is sleeping at
+/// all.
+///
+/// Called only once a sweep already knows nothing is DUE, to answer the
+/// question that "nothing to wake" alone cannot: whether there are no timers
+/// in this store to begin with, or whether the nearest one simply has not
+/// come due yet. That distinction is exactly what `salvor list` already folds
+/// per run (see its handler above), so this walks every run's log the same
+/// way `list` does rather than inventing a second way to derive a status.
+async fn next_sleeping_deadline(store: &dyn EventStore) -> Result<Option<OffsetDateTime>> {
+    let summaries = store.list_runs().await?;
+    let mut earliest: Option<OffsetDateTime> = None;
+    for summary in summaries {
+        let log = store.read_log(summary.run_id).await?;
+        if let RunStatus::Sleeping { wake_at } = derive_state(&log).status {
+            earliest = Some(match earliest {
+                Some(current) if current <= wake_at => current,
+                _ => wake_at,
+            });
+        }
+    }
+    Ok(earliest)
 }
 
 /// What a sweep should say about one due run whose drive returned an error.
@@ -790,10 +823,18 @@ fn check_wake_files(args: &WakeArgs) -> Vec<FileCheckFailure> {
 /// What a preview deliberately does not do is build anything: no MCP server is
 /// spawned and no agent is constructed. So the definition-level checks that
 /// need a built agent (an agent run's recorded `agent_def_hash`, which covers
-/// the MCP tool schemas, and a graph's `agent` nodes resolving to the files
-/// supplied) still happen at the drive, and a preview says only that the files
-/// are the right shape for the run, not that the run will find every tool it
-/// needs inside them.
+/// the MCP tool schemas, and a graph's `agent` or `tool` nodes resolving to a
+/// tool some given agent actually carries) still happen at the drive, and a
+/// preview says only that the files are the right shape for the run, not that
+/// the run will find every tool it needs inside them.
+///
+/// One shape of that gap needs no built agent to see, though: a graph whose
+/// document has a `tool` node at all, with no `--agent` file given for the
+/// drive to ever check that tool name against. That is not a question of
+/// whether the right agent was supplied, only of whether any agent was, so
+/// this walks the resolved document's nodes and blocks on it directly,
+/// naming the tool node, rather than reporting the run "ready" and letting a
+/// real wake discover the same gap a step later.
 async fn preview_due_runs(
     store: &dyn EventStore,
     due: &[salvor_runtime::DueRun],
@@ -807,9 +848,20 @@ async fn preview_due_runs(
             let recorded = recorded_graph_hash(&log)
                 .unwrap_or_else(|| "no document (its log has no GraphRunStarted event)".to_owned());
             let readiness = match resolve_graph_document(args.graph.as_deref(), &log, &uuid) {
-                Ok((path, _)) => WakeReadiness::Ready {
-                    with: path.display().to_string(),
-                },
+                Ok((path, document)) => {
+                    match tool_node_without_any_agent(&document, &args.agents) {
+                        Some(tool) => WakeReadiness::Blocked {
+                            refusal: format!(
+                                "tool node `{}` names tool `{}`; a graph with tool nodes needs \
+                                 at least one --agent file to carry them, and none was given",
+                                tool.id, tool.tool
+                            ),
+                        },
+                        None => WakeReadiness::Ready {
+                            with: path.display().to_string(),
+                        },
+                    }
+                }
                 Err(error) => WakeReadiness::Blocked {
                     refusal: format!("{error:#}"),
                 },
@@ -861,7 +913,7 @@ fn render_wake_preview(
     now: OffsetDateTime,
 ) -> String {
     let mut out = format!(
-        "{} run(s) due to wake at {} (dry run):\n",
+        "{} run(s) due as of {} (dry run):\n",
         previews.len(),
         render::format_ts(now)
     );
@@ -1996,6 +2048,28 @@ async fn build_graph_agents(paths: &[PathBuf]) -> Result<(HashMap<String, Agent>
         .map(|agent| (agent.def_hash().to_owned(), agent))
         .collect();
     Ok((agents, servers))
+}
+
+/// The first `tool` node in `graph`, when `agents` (the raw `--agent` paths, not
+/// yet built) is empty; `None` when at least one `--agent` was given, whatever
+/// the graph contains.
+///
+/// This is coarser than [`check_graph_resolvable`]'s own tool check: that one
+/// asks whether some BUILT agent carries the exact tool a node names, which
+/// needs a live [`Agent`] with its tool set populated. This one asks the
+/// question a preview can still answer with nothing built at all: whether
+/// there is any agent to ask in the first place. A `tool` node has no model of
+/// its own to fall back on, so with zero `--agent` files given, every `tool`
+/// node in the document is unreachable regardless of which one it names, and
+/// `wake --dry-run` can say so directly instead of reporting the run "ready".
+fn tool_node_without_any_agent<'a>(graph: &'a Graph, agents: &[PathBuf]) -> Option<&'a ToolNode> {
+    if !agents.is_empty() {
+        return None;
+    }
+    graph.nodes.iter().find_map(|node| match node {
+        Node::Tool(tool) => Some(tool),
+        _ => None,
+    })
 }
 
 /// Checks every agent and tool the graph references resolves from what was

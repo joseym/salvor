@@ -75,6 +75,15 @@ const OTHER_GRAPH: &str = r#"{
   "edges": []
 }"#;
 
+/// A single-tool graph: no model in its own loop, so the tool it names can
+/// only come from an agent's tool set, which is exactly what a bare
+/// `wake --dry-run` (no `--agent` at all) has none of to check it against.
+const TOOL_GRAPH: &str = r#"{
+  "schema_version": 1,
+  "nodes": [ { "kind": "tool", "payload": { "id": "step", "tool": "missing" } } ],
+  "edges": []
+}"#;
+
 /// The hash a run records for a graph document, computed with the engine's own
 /// function so a seeded log and a real file on disk agree the way the binary
 /// makes them agree.
@@ -189,9 +198,9 @@ async fn log_len(store_path: &Path, uuid: &str) -> usize {
     store.read_log(run_id).await.expect("log reads").len()
 }
 
-/// A store with nothing due says so plainly and exits 0. Two ways to have
-/// nothing due, and both read the same: no runs at all, and a run whose
-/// deadline is still ahead.
+/// A store with nothing sleeping in it at all says so plainly and exits 0.
+/// This is the one case `nothing to wake` can call "no timers": a bare store
+/// has no run to name a deadline for.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn nothing_due_is_reported_and_succeeds() {
     let dir = tempdir().expect("tempdir");
@@ -205,40 +214,66 @@ async fn nothing_due_is_reported_and_succeeds() {
         "nothing due is not a failure: {out}"
     );
     assert!(
-        out.contains("nothing to wake"),
-        "the report names the situation: {out}"
+        out.contains(&format!(
+            "nothing to wake: no run in {} is sleeping",
+            store.display()
+        )),
+        "no run at all is told apart from a run not yet due: {out}"
     );
+}
 
-    // A run sleeping a year out is present, folds to sleeping, and is still
-    // not due, so it must not appear.
-    let future = seed_sleeping(
+/// A store where nothing is DUE, but something IS sleeping, says which run and
+/// when it comes due instead of the "no run is sleeping" wording: that is the
+/// one thing an operator staring at a quiet cron entry actually wants to know.
+/// Exit stays 0, because a deadline not yet reached is not a failure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nothing_due_names_the_next_deadline_when_a_run_is_sleeping_ahead() {
+    let dir = tempdir().expect("tempdir");
+    let store = dir.path().join("salvor.db");
+    let now = OffsetDateTime::now_utc();
+
+    // Three hours and a minute out, so the coarsest unit the shared formatter
+    // reports is a stable `3h`, however long the binary takes to start; see
+    // `resume_refuses_a_run_that_is_not_due_yet` for why only that prefix is
+    // pinned rather than the whole `3h Nm` span.
+    let later = seed_sleeping(
         &store,
         agent_head(),
-        OffsetDateTime::now_utc() + Duration::days(365),
+        now + Duration::hours(3) + Duration::minutes(1),
     )
     .await;
-    let later = run_salvor(&store, &["wake"]).await;
-    let out = String::from_utf8_lossy(&later.stdout);
-    assert!(later.status.success(), "still not a failure: {out}");
-    assert!(out.contains("nothing to wake"), "still nothing due: {out}");
+    // A second run, sleeping further out still, so the message names the
+    // EARLIEST deadline, not merely some sleeping run's.
+    seed_sleeping(&store, graph_head(), now + Duration::days(30)).await;
+
+    let woke = run_salvor(&store, &["wake"]).await;
+    let out = String::from_utf8_lossy(&woke.stdout);
+    assert!(woke.status.success(), "not due is not a failure: {out}");
     assert!(
-        !out.contains(&future),
-        "a run whose deadline is ahead is not named: {out}"
+        out.contains(&format!(
+            "nothing to wake: the next run in {} is due at",
+            store.display()
+        )),
+        "the store and the situation are named: {out}"
+    );
+    assert!(
+        out.contains("(in 3h"),
+        "and how long is left, against the earlier of the two: {out}"
     );
     assert_eq!(
-        log_len(&store, &future).await,
+        log_len(&store, &later).await,
         2,
-        "and nothing was appended to it"
+        "asking merely reports the deadline; nothing was appended"
     );
 
     // The sleeping run is visible in `list` all the same, under its own label
     // and its own group: sleeping is motion, not a to-do item.
     let listed = run_salvor(&store, &["list", "--status", "sleeping"]).await;
     let out = String::from_utf8_lossy(&listed.stdout);
-    assert!(out.contains(&future) && out.contains("sleeping"), "{out}");
+    assert!(out.contains(&later) && out.contains("sleeping"), "{out}");
     let grouped = run_salvor(&store, &["list", "--group", "progress"]).await;
     assert!(
-        String::from_utf8_lossy(&grouped.stdout).contains(&future),
+        String::from_utf8_lossy(&grouped.stdout).contains(&later),
         "a sleeping run is in the progress group"
     );
 }
@@ -265,7 +300,7 @@ async fn a_dry_run_lists_what_is_due_and_drives_nothing() {
     let dry = run_salvor(&store, &["wake", "--dry-run"]).await;
     let out = String::from_utf8_lossy(&dry.stdout);
     let flat = common::flatten_wrapped_prose(&out);
-    assert!(out.contains("2 run(s) due to wake"), "the count: {out}");
+    assert!(out.contains("2 run(s) due as of"), "the count: {out}");
     assert!(out.contains(&agent_run), "the agent run is listed: {out}");
     assert!(out.contains(&graph_run), "the graph run is listed: {out}");
     assert!(!out.contains(&not_due), "the run not yet due is not: {out}");
@@ -497,6 +532,76 @@ async fn a_dry_run_also_checks_the_graph_file_even_when_only_an_agent_run_is_due
         "a bad file given fails the preview even though the due run itself is ready: {out}"
     );
     assert_eq!(log_len(&store, &uuid).await, 2, "a dry run drives nothing");
+}
+
+/// A due graph run whose document has a `tool` node needs an agent to carry
+/// that tool; with no `--agent` at all there is nothing for the drive to ever
+/// check the tool name against, and a dry run says so up front rather than
+/// reporting the run "ready" and letting the real wake discover the same gap
+/// a moment later. With a suitable `--agent` supplied, the preview goes back
+/// to reporting ready: it only rules out having no agent at all, the rest of
+/// tool resolution is still the drive's own job.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dry_run_blocks_a_graph_with_tool_nodes_when_no_agent_is_given() {
+    let dir = tempdir().expect("tempdir");
+    let store = dir.path().join("salvor.db");
+    let now = OffsetDateTime::now_utc();
+
+    let recorded = hash_of(TOOL_GRAPH);
+    let graph = write_graph(dir.path(), "tool.json", TOOL_GRAPH);
+    let uuid = seed_sleeping(
+        &store,
+        graph_head_recording(&recorded),
+        now - Duration::hours(1),
+    )
+    .await;
+
+    let bare = run_salvor(
+        &store,
+        &[
+            "wake",
+            "--dry-run",
+            "--graph",
+            graph.to_str().expect("a utf-8 path"),
+        ],
+    )
+    .await;
+    let out = common::flatten_wrapped_prose(&String::from_utf8_lossy(&bare.stdout));
+    assert!(out.contains(&uuid), "the run is named: {out}");
+    assert!(
+        out.contains("cannot be woken with these files:") && out.contains("tool node `step`"),
+        "the refusal names the tool node, with no agent built to check it against: {out}"
+    );
+    assert_eq!(
+        bare.status.code(),
+        Some(1),
+        "a graph with an unreachable tool node cannot be woken"
+    );
+    assert_eq!(log_len(&store, &uuid).await, 2, "a dry run drives nothing");
+
+    // A suitable --agent given: the no-agent block clears, and the preview
+    // reports the run ready again, exactly as any other graph run would be.
+    let agent = dir.path().join("agent.toml");
+    std::fs::write(&agent, "model = \"claude-test-model\"\n").expect("write agent toml");
+    let ready = run_salvor(
+        &store,
+        &[
+            "wake",
+            "--dry-run",
+            "--graph",
+            graph.to_str().expect("a utf-8 path"),
+            "--agent",
+            agent.to_str().expect("a utf-8 path"),
+        ],
+    )
+    .await;
+    let out = common::flatten_wrapped_prose(&String::from_utf8_lossy(&ready.stdout));
+    assert!(
+        out.contains(&format!("would wake with {}", graph.display())),
+        "an --agent given clears the block, whether or not it actually carries the tool: {out}"
+    );
+    assert!(ready.status.success(), "the preview now passes: {out}");
+    assert_eq!(log_len(&store, &uuid).await, 2, "still nothing driven");
 }
 
 /// The reporting decision a sweep makes when a drive comes back with an error,
