@@ -75,12 +75,16 @@ pub async fn due_runs(
 ) -> Result<Vec<DueRun>, StoreError> {
     let mut due = Vec::new();
     for summary in store.list_runs().await? {
-        let Ok(log) = store.read_log(summary.run_id).await else {
-            tracing::warn!(
-                run_id = %summary.run_id.as_uuid(),
-                "skipping a run whose log will not read while selecting due timers"
-            );
-            continue;
+        let log = match store.read_log(summary.run_id).await {
+            Ok(log) => log,
+            Err(err) => {
+                tracing::warn!(
+                    run_id = %summary.run_id.as_uuid(),
+                    error = %err,
+                    "skipping a run whose log will not read while selecting due timers"
+                );
+                continue;
+            }
         };
         if let RunStatus::Sleeping { wake_at } = derive_state(&log).status
             && wake_at <= now

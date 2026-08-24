@@ -582,10 +582,22 @@ impl EventStore for SqliteStore {
     async fn read_log(&self, run_id: RunId) -> Result<Vec<EventEnvelope>, StoreError> {
         let run_id_text = run_id.as_uuid().to_string();
 
-        let guard = self.conn()?;
+        let mut guard = self.conn()?;
+        // The rows and the head move together under `append`'s one
+        // transaction, so reading them apart is reading two different
+        // moments: a concurrent append committed between the two SELECTs
+        // makes this read see N rows against the head for N+1, and
+        // `chain::verify` below reports a perfectly sound log as tampered.
+        // One transaction gives both SELECTs the same snapshot instead.
+        // DEFERRED, unlike the writers documented on this type: this
+        // transaction only reads, so it never needs to upgrade to a write
+        // lock and never blocks a concurrent writer's IMMEDIATE one.
+        let tx = guard
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(backend)?;
         let mut stored: Vec<(SequenceNumber, String, String, String)> = Vec::new();
         {
-            let mut stmt = guard
+            let mut stmt = tx
                 .prepare(
                     "SELECT seq, envelope, prev_hash, row_hash FROM events
                      WHERE run_id = ?1 ORDER BY chain_idx ASC",
@@ -612,7 +624,7 @@ impl EventStore for SqliteStore {
             }
         }
 
-        let recorded_head: Option<(i64, String)> = guard
+        let recorded_head: Option<(i64, String)> = tx
             .query_row(
                 "SELECT chain_len, head_hash FROM chain_heads WHERE run_id = ?1",
                 params![run_id_text],
@@ -620,6 +632,9 @@ impl EventStore for SqliteStore {
             )
             .optional()
             .map_err(backend)?;
+        // Dropped unwritten: this transaction never wrote anything, so there
+        // is nothing to commit, only the snapshot to release.
+        drop(tx);
 
         let rows: Vec<ChainRow<'_>> = stored
             .iter()
