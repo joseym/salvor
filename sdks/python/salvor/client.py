@@ -4,21 +4,25 @@ The client holds no durability logic and no run state. It submits definitions
 and inputs, reads events, and decodes the error envelope into exceptions. Every
 guarantee, exact replay, crash-safe resume, the write-ahead reconciliation
 rule, lives in the one Rust process the client talks to.
+
+It holds no protocol either. Which path each method calls, what goes in the
+body, and how the answer decodes all live in :mod:`salvor._core`, which knows
+nothing about sockets; this module is the half that sends. :class:`salvor.AsyncClient`
+is the same surface over ``httpx.AsyncClient``, reading the same core, which is
+why the two can carry the same behaviour without carrying it twice.
 """
 
 from __future__ import annotations
 
-import json
 import time
 from typing import Any, Iterator, Optional, Union
 
 import httpx
 
-from .errors import (
-    SalvorAPIError,
-    SalvorStreamError,
-    decode_error,
-)
+from ._core import api, wire
+from ._core.sse import EventTail, event_frame, events_stream, frames as sse_frames
+from ._core.wire import Call
+from .errors import SalvorAPIError
 from .graph import Graph
 from .models import (
     ClientToolDecl,
@@ -37,14 +41,6 @@ from .models import (
     RunSummary,
     StoredGraph,
 )
-
-
-def _document(document: Union[Graph, dict[str, Any]]) -> dict[str, Any]:
-    """The wire JSON for a graph document, from either a built
-    :class:`~salvor.graph.Graph` or a plain dict of the same fields. A dict is
-    passed through untouched, so a document authored by hand (or read from a
-    file) needs no builder."""
-    return document.to_dict() if isinstance(document, Graph) else document
 
 
 class EventStream:
@@ -89,12 +85,9 @@ class Client:
         timeout: float = 30.0,
         max_stream_retries: int = 5,
     ) -> None:
-        self.base_url = base_url.rstrip("/")
+        self.base_url, headers = api.connection(base_url, token)
         self._token = token
         self._max_stream_retries = max_stream_retries
-        headers = {}
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
         self._http = httpx.Client(base_url=self.base_url, headers=headers, timeout=timeout)
         # The event stream needs its own long-lived timeout: the read side of a
         # live tail blocks between events, so the read timeout is disabled while
@@ -128,26 +121,15 @@ class Client:
         Returns:
             The agent hash, for example ``"sha256:34e0..."``.
         """
-        if isinstance(definition, str):
-            content = definition.encode("utf-8")
-            content_type = "application/toml"
-        else:
-            content = json.dumps(definition).encode("utf-8")
-            content_type = "application/json"
-        resp = self._http.post(
-            "/v1/agents", content=content, headers={"Content-Type": content_type}
-        )
-        return self._json(resp)["agent"]
+        return self._send(api.register_agent(definition))
 
     def list_agents(self) -> list[str]:
         """List the registered agent hashes."""
-        resp = self._http.get("/v1/agents")
-        return [a["agent"] for a in self._json(resp).get("agents", [])]
+        return self._send(api.list_agents())
 
     def get_agent(self, agent_hash: str) -> dict[str, Any]:
         """Read one registered definition back: its hash, format, and body."""
-        resp = self._http.get(f"/v1/agents/{agent_hash}")
-        return self._json(resp)
+        return self._send(api.get_agent(agent_hash))
 
     # -- runs -----------------------------------------------------------------
 
@@ -179,29 +161,20 @@ class Client:
         Returns:
             The run id.
         """
-        body: dict[str, Any] = {"agent": agent, "input": input}
-        if run_id is not None:
-            body["run_id"] = run_id
-        if labels is not None:
-            body["labels"] = labels
-        resp = self._http.post("/v1/runs", json=body)
-        return self._json(resp)["run"]
+        return self._send(api.start_run(agent, input, run_id, labels))
 
     def list_runs(self) -> list[RunSummary]:
         """List every run with its folded status and counts."""
-        resp = self._http.get("/v1/runs")
-        return [RunSummary.from_json(r) for r in self._json(resp).get("runs", [])]
+        return self._send(api.list_runs())
 
     def get_run(self, run_id: str) -> RunState:
         """Get one run's derived state (status, usage, pending call, counts)."""
-        resp = self._http.get(f"/v1/runs/{run_id}")
-        return RunState.from_json(self._json(resp))
+        return self._send(api.get_run(run_id))
 
     def replay(self, run_id: str) -> ReplayState:
         """Dry-run replay: the derived state as a pure fold of the log,
         executing nothing. This is what ``salvor replay --dry-run`` prints."""
-        resp = self._http.get(f"/v1/runs/{run_id}/replay")
-        return ReplayState.from_json(self._json(resp))
+        return self._send(api.replay(run_id))
 
     def resume(self, run_id: str, input: Any = None) -> ResumeResult:
         """Continue a run: resume a parked one, or recover a crashed one.
@@ -213,9 +186,7 @@ class Client:
         is refused, raising :class:`~salvor.errors.NeedsReconciliationError`;
         use :meth:`resolve` to move past it.
         """
-        body = {} if input is None else {"input": input}
-        resp = self._http.post(f"/v1/runs/{run_id}/resume", json=body)
-        return ResumeResult.from_json(self._json(resp))
+        return self._send(api.resume(run_id, input))
 
     def resolve(self, run_id: str, output: Any) -> RunState:
         """Record a dangling write's completion by hand, the operator side of
@@ -226,17 +197,7 @@ class Client:
         done and never re-runs it. It records exactly one event and drives
         nothing.
         """
-        resp = self._http.post(f"/v1/runs/{run_id}/resolve", json={"output": output})
-        obj = self._json(resp)
-        # The resolve response nests the status; hand back a RunState view of it
-        # so the caller reads the run the same way get_run does.
-        return RunState.from_json(
-            {
-                "run": obj.get("run", run_id),
-                "status": obj.get("status", {}),
-                "event_count": obj.get("event_count", 0),
-            }
-        )
+        return self._send(api.resolve(run_id, output))
 
     # -- graphs ---------------------------------------------------------------
 
@@ -261,13 +222,11 @@ class Client:
                 :meth:`~salvor.graph.GraphBuilder.build`, or the same document
                 as a dict.
         """
-        resp = self._http.post("/v1/graphs", json=_document(document))
-        return GraphSubmitted.from_json(self._json(resp))
+        return self._send(api.submit_graph(document))
 
     def list_graphs(self) -> list[GraphSummary]:
         """List the stored graphs, each with its hash and shape summary."""
-        resp = self._http.get("/v1/graphs")
-        return [GraphSummary.from_json(g) for g in self._json(resp).get("graphs", [])]
+        return self._send(api.list_graphs())
 
     def get_graph(self, graph_hash: str) -> StoredGraph:
         """Read one stored document back by hash.
@@ -277,8 +236,7 @@ class Client:
         hash from before a server restart gets: see :meth:`submit_graph` on the
         in-memory store.
         """
-        resp = self._http.get(f"/v1/graphs/{graph_hash}")
-        return StoredGraph.from_json(self._json(resp))
+        return self._send(api.get_graph(graph_hash))
 
     def validate_graph(self, document: Union[Graph, dict[str, Any]]) -> GraphValidation:
         """Validate a document without storing it: :meth:`submit_graph`'s dry
@@ -288,8 +246,7 @@ class Client:
         document comes back with ``valid=False`` and the full error list instead
         of raising. Nothing is ever stored.
         """
-        resp = self._http.post("/v1/graphs/validate", json=_document(document))
-        return GraphValidation.from_json(self._json(resp))
+        return self._send(api.validate_graph(document))
 
     def start_graph_run(
         self,
@@ -332,11 +289,7 @@ class Client:
         Returns:
             The run id.
         """
-        body: dict[str, Any] = {"graph_hash": graph_hash, "input": input}
-        if labels is not None:
-            body["labels"] = labels
-        resp = self._http.post("/v1/graph-runs", json=body)
-        return self._json(resp)["run"]
+        return self._send(api.start_graph_run(graph_hash, input, labels))
 
     def get_run_graph(self, run_id: str) -> GraphProjection:
         """A graph run's per-node projection: which nodes the walk has reached,
@@ -346,8 +299,7 @@ class Client:
         pending state. Refuses with ``not_a_graph_run`` for an ordinary agent
         run, which has no walk to project.
         """
-        resp = self._http.get(f"/v1/runs/{run_id}/graph")
-        return GraphProjection.from_json(self._json(resp))
+        return self._send(api.get_run_graph(run_id))
 
     def fork_run(
         self,
@@ -372,11 +324,9 @@ class Client:
         recorded permanently on the child. :meth:`preview_fork` asks the same
         question first, without creating anything.
         """
-        body: dict[str, Any] = {"from_node": from_node}
-        if acknowledge_writes is not None:
-            body["acknowledge_writes"] = acknowledge_writes
-        resp = self._http.post(f"/v1/runs/{run_id}/fork", json=body)
-        return ForkResult.from_json(self._json(resp))
+        return self._send(
+            api.fork_run(run_id, from_node, acknowledge_writes, dry_run=False)
+        )
 
     def preview_fork(
         self,
@@ -393,18 +343,15 @@ class Client:
         ``origin_needs_reconciliation``, ``not_a_graph_run``) still raise here,
         so a fork that could never proceed is reported rather than faked.
         """
-        body: dict[str, Any] = {"from_node": from_node, "dry_run": True}
-        if acknowledge_writes is not None:
-            body["acknowledge_writes"] = acknowledge_writes
-        resp = self._http.post(f"/v1/runs/{run_id}/fork", json=body)
-        return ForkPreview.from_json(self._json(resp))
+        return self._send(
+            api.fork_run(run_id, from_node, acknowledge_writes, dry_run=True)
+        )
 
     def list_forks(self, run_id: str) -> ForksIndex:
         """The forks of a run, as the server's own DERIVED index: an origin is
         immutable and never points forward at its children, so this is a scan of
         every run's recorded origin, labelled ``derived`` to say so."""
-        resp = self._http.get(f"/v1/runs/{run_id}/forks")
-        return ForksIndex.from_json(self._json(resp))
+        return self._send(api.list_forks(run_id))
 
     # -- client-performed tools -------------------------------------------------
 
@@ -420,10 +367,7 @@ class Client:
         against, published here so a client never keeps a second copy that
         can quietly drift from it.
         """
-        resp = self._http.get("/v1/client-tools")
-        return [
-            ClientToolDecl.from_json(t) for t in self._json(resp).get("client_tools", [])
-        ]
+        return self._send(api.list_client_tools())
 
     # -- event stream ---------------------------------------------------------
 
@@ -451,87 +395,51 @@ class Client:
         return stream
 
     def _events(self, run_id: str, from_seq: int, stream: EventStream) -> Iterator[Event]:
-        next_seq = from_seq
-        last_seen: Optional[int] = None
-        attempts = 0
+        tail = EventTail(run_id, from_seq, self._max_stream_retries)
         while True:
             try:
-                ended = False
-                for kind, obj in self._read_frames(run_id, next_seq):
-                    if kind == "event":
-                        event = Event.from_envelope(obj)
-                        if last_seen is not None and event.seq <= last_seen:
-                            continue  # already delivered before a drop; skip it
-                        last_seen = event.seq
-                        next_seq = event.seq + 1
-                        attempts = 0  # forward progress refreshes the retry budget
-                        yield event
-                    elif kind == "end":
-                        stream.end = EndFrame.from_json(obj)
-                        ended = True
-                        break
-                if ended:
-                    return
+                for kind, obj in self._read_frames(run_id, tail.next_seq):
+                    what, value = tail.accept(kind, obj)
+                    if what == "event":
+                        yield value
+                    elif what == "end":
+                        stream.end = value
+                        return
                 # The stream closed with no end frame: the connection dropped
                 # mid-tail. Fall through to reconnect from the cursor.
             except (httpx.TransportError, httpx.RemoteProtocolError):
                 pass  # transient drop; reconnect below
-            attempts += 1
-            if attempts > self._max_stream_retries:
-                raise SalvorStreamError(
-                    f"event stream for run {run_id} dropped and did not resume "
-                    f"after {self._max_stream_retries} attempts"
-                )
-            time.sleep(min(0.25 * attempts, 2.0))
+            time.sleep(tail.backoff())
 
     def _read_frames(self, run_id: str, from_seq: int) -> Iterator[tuple[str, dict[str, Any]]]:
         """Open one connection and yield ``(kind, obj)`` per server-sent frame,
         where ``kind`` is ``"event"`` (an envelope) or ``"end"`` (the terminal
-        frame). Parses the SSE line protocol directly over fetch streaming."""
-        params = {"from_seq": from_seq}
+        frame). The line protocol itself is
+        :class:`salvor._core.sse.SSEDecoder`, fed one line at a time."""
+        call = events_stream(run_id, from_seq)
         with self._http.stream(
-            "GET",
-            f"/v1/runs/{run_id}/events",
-            params=params,
+            call.method,
+            call.path,
+            params=call.params,
             timeout=self._stream_timeout,
         ) as resp:
             if resp.status_code != 200:
-                body = resp.read()
-                raise self._error(resp.status_code, body)
-            event_name: Optional[str] = None
-            data_lines: list[str] = []
-            for line in resp.iter_lines():
-                if line == "":
-                    # A blank line dispatches the accumulated frame.
-                    if data_lines:
-                        payload = json.loads("\n".join(data_lines))
-                        yield ("end" if event_name == "end" else "event", payload)
-                    event_name = None
-                    data_lines = []
-                    continue
-                if line.startswith(":"):
-                    continue  # a comment / keep-alive line
-                field, _, value = line.partition(":")
-                if value.startswith(" "):
-                    value = value[1:]
-                if field == "event":
-                    event_name = value
-                elif field == "data":
-                    data_lines.append(value)
-                # `id:` lines carry the seq; the seq is also inside the data
-                # envelope, so there is nothing extra to track here.
+                raise self._error(resp.status_code, resp.read())
+            for frame in sse_frames(resp.iter_lines(), flush_trailing=False):
+                yield event_frame(frame)
 
     # -- helpers --------------------------------------------------------------
 
+    def _send(self, call: Call) -> Any:
+        """Perform one described call: send it, decode the answer, parse it."""
+        resp = self._http.request(call.method, call.path, **wire.request_kwargs(call))
+        return call.parse(wire.decode_json(resp.status_code, resp.content))
+
     def _json(self, resp: httpx.Response) -> dict[str, Any]:
-        if resp.status_code // 100 != 2:
-            raise self._error(resp.status_code, resp.content)
-        if not resp.content:
-            return {}
-        return resp.json()
+        return wire.decode_json(resp.status_code, resp.content)
 
     def _error(self, status: int, body: bytes) -> SalvorAPIError:
-        return decode_error(status, body)
+        return wire.error(status, body)
 
     def open_client_run(
         self,

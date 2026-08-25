@@ -206,6 +206,67 @@ itself.
 `examples/browser-client-run` drives this same client-driven surface from a
 browser page, and `example/client_run_loop.py` drives it from Python.
 
+## Async
+
+Everything above has an async twin: `AsyncClient` for `Client`, and
+`AsyncClientRunDriver` for `ClientRunDriver`. Construct it the same way, with
+the same arguments, and await every method by the same name.
+
+```python
+from salvor import AsyncClient
+
+async with AsyncClient("http://127.0.0.1:8080", token=None) as client:
+    agent  = await client.register_agent(toml_or_dict)
+    run_id = await client.start_run(agent, {"question": "..."})
+    state  = await client.get_run(run_id)
+```
+
+There is no separate list of methods to learn, because there is no separate
+list. Both clients read one sans-IO core that holds every path, every body and
+every decode, so a method means on `AsyncClient` exactly what it means on
+`Client`, returns the same models, and raises the same errors. The test suite
+runs one set of scenario bodies through both transports for that reason.
+
+Streaming is `async for`, and the two streaming methods are not coroutines:
+they hand back the iterator, and the request goes out when iteration starts.
+
+```python
+stream = client.stream_events(run_id)          # not awaited
+async for event in stream:
+    print(event.seq, event.kind)
+print(stream.end.status.state)
+```
+
+The client-driven driver works the same way, with two exceptions worth knowing
+about. `open_client_run` IS awaited, because opening a run is a request. And
+`envelope(...)` is not, because it builds a dict and touches nothing.
+
+```python
+async with AsyncClient("http://127.0.0.1:8080") as client:
+    run = await client.open_client_run()                       # awaited
+    await run.append([run.envelope(0, "RunStarted",            # envelope is not
+                                   agent_def_hash=agent, input=task)])
+    result = await run.model_step(1, request)
+
+    stream = run.model_step_stream(1, request)                 # not awaited
+    async for delta in stream:
+        ...
+    completion = stream.completion
+
+    # the model step took seqs 1 and 2 (intent, completion), so the park
+    # starts at 3 and the reading it derives from lands there first
+    wake_at = await run.sleep_for(3, timedelta(hours=1))
+    if not (await run.await_wake(5)).woken:
+        return                                                 # still asleep
+
+    await run.append([run.envelope(6, "RunCompleted", output=answer)])
+```
+
+`AsyncClientRunDriver.open(base_url, ...)` opens (or re-opens) a run on its own
+connection, awaited, the way `ClientRunDriver.open` does on a synchronous one.
+Closing is awaited on both async classes: `await client.close()`, or let
+`async with` do it. `aclose()` is accepted as well, for hands used to httpx.
+
 ## Graphs
 
 A graph document composes `agent`, `tool`, `gate`, `branch`, `map`, `fold`, and
