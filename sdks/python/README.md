@@ -386,6 +386,189 @@ the origin: `client.fork_run(run_id, "review")`, previewed first with
 `fork_run` docstring in `salvor/client.py` for the write-replay-hazard refusal
 a fork guards against.
 
+## LangChain
+
+`salvor.langchain` is an optional module that makes an existing `create_agent`
+app durable without changing its graph, its provider or its key. LangChain is
+an extra, so the plain `import salvor` pulls none of it in:
+
+```sh
+pip install 'salvor[langchain]'
+```
+
+Then add one middleware to the agent you already have:
+
+```python
+from langchain.agents import create_agent
+from salvor import AsyncClient
+from salvor.langchain import SalvorMiddleware
+
+salvor = AsyncClient("http://127.0.0.1:8080")
+
+agent = create_agent(
+    model=model,
+    tools=tools,
+    middleware=[SalvorMiddleware(salvor)],
+)
+
+await agent.ainvoke(
+    {"messages": [{"role": "user", "content": "how is ORD-7781?"}]},
+    {"configurable": {"thread_id": "order-7781"}},
+)
+```
+
+The middleware records over an asynchronous client, so drive the agent with
+`ainvoke` and `astream`. A synchronous `agent.invoke` is refused by name rather
+than quietly recording nothing.
+
+### What gets recorded
+
+Every model call and every tool call the agent makes, each as the intent and
+completion pair salvor records for any run. The model call is still LangChain's:
+the middleware opens the intent with a content hash of the request, lets the
+call through to whatever provider and key the app configured, and records the
+answer and its token counts. Salvor never sees the request and never holds the
+key, which is why the recorded `ModelCallRequested` says `performed_by:
+"client"`. A tool call is the same shape, with the operator's derived
+idempotency key on the intent, so a retried write presents the key the first
+attempt used and the provider collapses the duplicate. Pass
+`record_prompts=True` to store the request body on the intent as well, for an
+inspector to show; replay never reads it, because the correlation key is the
+hash alone.
+
+A tool that talks to its own provider can read that derived key without changing
+its signature. `current_tool_call()` inside a tool body returns the
+`ToolCallContext` salvor recorded for the call in flight: its `key`, `seq`,
+`run_id` and `tool`. Hand `key` onward as the provider's own idempotency token,
+and a retried write presents the key the first attempt used.
+
+```python
+from salvor.langchain import current_tool_call
+
+@tool
+async def refund_card(charge_id: str) -> dict:
+    """Refund a charge."""
+    call = current_tool_call()
+    return await payments.refund(charge_id, idempotency_key=call.key)
+```
+
+### What replay means
+
+Invoking the same thread again re-opens the same run and walks the recorded
+positions. Where the log already holds an answer, the middleware returns it and
+the provider is not called; where the log already holds a tool result, the tool
+body does not run. A thread that ran to the end and is invoked again a second
+time costs nothing at all and returns the same final message.
+
+A replayed answer says so. It carries `response_metadata["salvor"]` with
+`{"replayed": True, "seq": ..., "run": ...}`, and under `agent.astream` it
+arrives as one whole message rather than a re-tokenised imitation of the
+original stream. The tokens happened once, on the invoke that paid for them, and
+nothing here pretends otherwise.
+
+A run that died between a tool's intent and its completion is the case the whole
+design is for. The log ends at the intent, which is exactly what an unfinished
+write looks like, and the next invoke replays everything before it for free,
+performs that one call again under the same derived key, and records the
+completion. One intent, one completion, no second charge.
+
+Parallel tool calls in one model turn are serialised rather than refused. A
+turnstile inside the middleware admits one open intent per run at a time, in the
+order the AI message listed the calls, so both are recorded and both replay at
+the same positions on a later invoke. The order comes from that message and not
+from which coroutine the event loop happens to start first: measured over five
+identical runs of a three-tool turn, LangChain reached the middleware in three
+different orders, so arrival order could not be allowed to decide where a call
+lands in the log.
+
+### The thread id is the run id
+
+A LangGraph `thread_id` that is already a UUID is used as the salvor run id
+unchanged, so an application whose thread ids are UUIDs can look a run up by the
+id it already holds. Any other thread id is hashed into one: SHA-256 of the
+thread id, the first 16 bytes taken, with the version nibble set to 8 (RFC
+9562's custom version, which is what a hash-derived id honestly is) and the
+variant bits set. The mapping is stable forever and the same on every machine,
+and the same in the TypeScript SDK, so a thread driven from either language is
+the same run. Pass `thread_id_to_run_id` to replace it when your two ids live in
+a table somewhere. Invoking without a thread id is an error, not a silent
+pass-through: without one there is nothing for a later invoke to resume.
+
+A thread's run stays open. The middleware never appends `RunCompleted` on its
+own, because a thread that looks done today may get one more turn tomorrow. Call
+`finish_thread(client, thread_id)` when the task really is over: it appends
+`RunCompleted`, defaulting the output to the content of the last recorded AI
+message, and a later invoke of that thread is refused by name. It refuses to
+close a run whose log ends at a call that was never completed; settle that first.
+
+### What the operator declares
+
+A tool's effect class, its schemas and its idempotency key are the operator's,
+never this middleware's. They come from a client-tool declaration the server was
+started with:
+
+```toml
+name = "lookup_order"
+effect = "read"
+trust_completion = true
+
+[input_schema]
+type = "object"
+required = ["order_id"]
+
+[input_schema.properties.order_id]
+type = "string"
+
+[output_schema]
+type = "object"
+required = ["order_id", "status", "total_cents"]
+```
+
+```sh
+salvor serve --client-tool lookup-order.toml
+```
+
+The middleware sends the tool's name and the arguments the model produced, and
+nothing else. A tool with no declaration is refused, and the error names the
+tool and the declaration it needs rather than quietly recording the call as a
+harmless read. `trust_completion = true` with an `[output_schema]` is what lets
+the middleware record what the tool returned; a declaration without them leaves
+every call for that tool to be settled by hand with `resolve`, once someone has
+verified it externally. `examples/client-tools/refund-card.toml` is the fully
+commented version of the same file.
+
+The recorded output is the tool's own result, which is what the output schema
+describes. LangChain builds a tool message by stringifying whatever the tool
+returned, so the result is recovered by parsing that content back when the parse
+round-trips exactly; when it does not, the content is recorded as the string it
+is, and an object schema will refuse it and say so.
+
+### The honest limits
+
+This is a recorded effect ledger with exactly-once writes and salvor's budgets,
+under LangGraph's orchestration. It is not replay of the graph. LangGraph still
+owns the clock, the randomness and the branch order, and salvor sees the calls
+rather than the decisions between them. A graph that branches on `time.time()`
+takes a different branch on the second invoke, and the middleware will meet a
+recorded position that does not match what it is being asked for. When that
+happens it stops replaying and appends the rest of the invoke at the end of the
+log, so the fork is recorded rather than lost. The one case it refuses is a log
+whose last event is a call that never completed: settle that first, then invoke
+again.
+
+A thread is one task. Re-invoking it replays it; sending a genuinely new turn
+down the same thread is a fork by the rule above, and pays for the calls the new
+turn makes. Give a new task a new thread id.
+
+`wrap_tool_call` exists only inside `create_agent`. A hand-built `StateGraph`
+that calls tools from its own node has no hook for the middleware to sit in, so
+such a graph gets model recording only and its tool calls stay outside the
+ledger.
+
+Changing a tool's schema or a model's settings mid-flight changes the request
+hash, which is the same fork as above and is meant to be: the question is not
+the one the recorded answer was an answer to.
+
 ## Runnable example
 
 `example/agent.toml` is a model-only agent that answers one question. It is the
