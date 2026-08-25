@@ -35,6 +35,7 @@ export {
   SalvorApiError,
   NeedsReconciliationError,
   DivergenceError,
+  LeaseHeldError,
   SalvorStreamError,
 } from "./errors.js";
 export {

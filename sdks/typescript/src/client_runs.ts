@@ -61,6 +61,19 @@ export interface OpenClientRunOptions {
   input?: unknown;
   /** A client-chosen run id. Passing an existing one re-opens (resumes) it. */
   runId?: string;
+  /**
+   * The held lease's own token, presented on a re-open so it comes back
+   * under the SAME token instead of being refused.
+   *
+   * Re-opening a run whose driver still holds a current lease is refused
+   * (`409 lease_held`, see {@link LeaseHeldError}) unless the request
+   * presents that lease's own token in `X-Drive-Token`: the run's own driver
+   * rebuilding its cursor after losing local state, not a second writer.
+   * Omit it for a fresh run, or when the run is not currently held (a lapsed
+   * lease or a finished run re-opens under a fresh lease regardless of what,
+   * if anything, is presented here).
+   */
+  driveToken?: string;
   /** Record each model step's request body on its intent. Default false. */
   recordPrompts?: boolean;
   /** An optional shared-secret bearer token, sent as `Authorization: Bearer`. */
@@ -193,10 +206,16 @@ export interface Waking {
 /**
  * Open a fresh client-driven run, or re-open (resume) an existing one.
  *
- * Passing a `runId` this server already holds re-opens it: the recorded log
- * comes back on {@link ClientRunDriver.logEnvelopes} and a fresh lease is
- * minted, so a resuming client always holds the current one and the superseded
- * lease stops working. Omitting it opens a fresh run the server mints an id for.
+ * Passing a `runId` this server has no current lease on (never opened, a
+ * lapsed lease, or a finished run) re-opens it: the recorded log comes back
+ * on {@link ClientRunDriver.logEnvelopes} and a fresh lease is minted, so a
+ * resuming client always holds the current one and any superseded lease
+ * stops working. Passing a `runId` whose driver still holds a current lease
+ * is refused as {@link LeaseHeldError} UNLESS `options.driveToken` is that
+ * lease's own token, in which case the recorded log comes back under the
+ * SAME token rather than a fresh one: the run's own driver rebuilding its
+ * cursor, not a second writer taking the run over. Omitting `runId` entirely
+ * opens a fresh run the server mints an id for.
  */
 export async function openClientRun(
   baseUrl: string,
@@ -214,7 +233,18 @@ export async function openClientRun(
   if (options.input !== undefined) body.input = options.input;
   if (options.runId !== undefined) body.run_id = options.runId;
 
-  const obj = await requestJson(base, headers, timeoutMs, "POST", "/v1/client-runs", body);
+  const extraHeaders: Record<string, string> = {};
+  if (options.driveToken !== undefined) extraHeaders["X-Drive-Token"] = options.driveToken;
+
+  const obj = await requestJson(
+    base,
+    headers,
+    timeoutMs,
+    "POST",
+    "/v1/client-runs",
+    body,
+    extraHeaders,
+  );
   const log = ((obj.log as Record<string, unknown>[]) ?? []).map(parseEvent);
   return new ClientRunDriver(base, headers, timeoutMs, {
     runId: obj.run as string,

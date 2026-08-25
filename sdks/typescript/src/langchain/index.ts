@@ -54,7 +54,7 @@ import {
 } from "@langchain/core/messages";
 import type { SalvorClient } from "../client.js";
 import type { ClientRunDriver } from "../client_runs.js";
-import { SalvorApiError } from "../errors.js";
+import { LeaseHeldError, SalvorApiError } from "../errors.js";
 import type { ClientToolDecl, Usage } from "../types.js";
 import { runWithToolCall } from "./current_call.js";
 import { SalvorMiddlewareError, ToolNeedsResolution } from "./errors.js";
@@ -246,7 +246,7 @@ export function salvorMiddleware(options: SalvorMiddlewareOptions) {
     try {
       driver = await client.openClientRun({ runId, recordPrompts });
     } catch (error) {
-      throw serverDrivenRunError(error, threadId, runId);
+      throw openRefusalError(error, threadId, runId);
     }
     const tail = driver.logEnvelopes.at(-1);
     if (tail?.kind === "RunCompleted") {
@@ -267,12 +267,20 @@ export function salvorMiddleware(options: SalvorMiddlewareOptions) {
       {
         threadId,
         recordPrompts,
-        // A lease is not a thing an invoke owns for its own lifetime: a salvor
-        // restart or a second instance of this app on the same thread mints a
-        // new one and this driver's stops working mid-invoke. Re-opening with
-        // the same run id returns the recorded state and a fresh lease, which
-        // is all the tape needs to carry on from where it stood.
-        reopen: () => client.openClientRun({ runId, recordPrompts }),
+        // Called only when the server has forgotten the run entirely
+        // (`unknown_run`, a salvor restart): the lease registry does not
+        // survive the process, so re-opening with the same run id adopts it
+        // back off its recorded log and mints a fresh lease, which is all the
+        // tape needs to carry on from where it stood. A step refused because
+        // another driver actively holds the lease is not retried this way at
+        // all; see `tape.ts`'s own `lease`.
+        reopen: async () => {
+          try {
+            return await client.openClientRun({ runId, recordPrompts });
+          } catch (error) {
+            throw openRefusalError(error, threadId, runId);
+          }
+        },
       },
     );
   }
@@ -612,6 +620,30 @@ function toolOutput(message: ToolMessage): unknown {
     /* not JSON; the content is the result */
   }
   return content;
+}
+
+/**
+ * Turn every refusal an open (or re-open) can hit into the named error this
+ * middleware surfaces, trying each of the two open-time refusals in turn and
+ * returning anything else unchanged.
+ *
+ * `lease_held` is the one-driver case: another driver's lease on this run is
+ * still current, live, right now. There is nothing to retry here, and this
+ * open never mints a lease or records anything, so the invoke stops before a
+ * single tool has run. `run_exists` is the older, unrelated refusal handled
+ * by {@link serverDrivenRunError}.
+ */
+function openRefusalError(error: unknown, threadId: string, runId: string): unknown {
+  if (error instanceof LeaseHeldError) {
+    return new SalvorMiddlewareError(
+      `thread \`${threadId}\` (run ${runId}) cannot be opened: another driver holds its ` +
+        `lease right now, and it lapses in ${error.lapsesInSeconds}s if that driver goes ` +
+        "quiet (or as soon as the run finishes). One driver per thread at a time. Wait " +
+        "for the lease to lapse and invoke again, or confirm no other process is already " +
+        "driving this thread.",
+    );
+  }
+  return serverDrivenRunError(error, threadId, runId);
 }
 
 /**

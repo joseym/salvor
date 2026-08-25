@@ -52,15 +52,30 @@
  * ## The lease
  *
  * Every write this tape makes presents the drive token the run was opened
- * with, and that token stops working the moment anything else opens the same
- * run: another instance of the app on the same thread, or the same app after a
- * salvor restart. The lease is therefore not something an invoke may assume it
- * keeps for its own lifetime. `lease()` wraps each guarded step: a refusal that
- * says the presented token is not the run's current one re-opens the run once,
- * re-reads the log, and retries the step where it stood. A second refusal is
- * something else entirely, and is refused by name, because two processes
- * trading a lease back and forth would record each other's calls in an order
- * neither of them asked for.
+ * with. Two, and only two, things can make the server refuse it:
+ *
+ * - `invalid_drive_token`: something else now holds the run's lease, so this
+ *   tape's token is superseded. That something is another driver of the same
+ *   thread, live, right now, which is exactly the condition one driver per
+ *   thread exists to rule out. `lease()` refuses this by name at once,
+ *   without re-opening and without a second attempt: there is no order in
+ *   which two live drivers can both be right about what comes next, so
+ *   trading the lease back and forth would only let them record each other's
+ *   calls out of turn.
+ * - `unknown_run`: this server has no lease for the run AND its log does not
+ *   (yet, from this process's view) say it is client-driven, which is what a
+ *   restart looks like: the lease registry does not survive the process, and
+ *   this tape's own copy of that fact is now stale. Nobody else is driving in
+ *   this case, so `lease()` re-opens once, rebuilds what it knows of the log
+ *   from what comes back, and retries the step where it stood.
+ *
+ * The two are told apart because they mean opposite things: retrying on
+ * `invalid_drive_token` would hand the run to whichever of two live drivers
+ * asks last, and refusing outright on `unknown_run` would make an invoke fail
+ * a durability feature exists to survive. A retry after the one re-open
+ * `unknown_run` earns is still possible to lose to a genuinely new driver
+ * that opened the restarted server first; that second refusal is
+ * `invalid_drive_token` too, and gets the same immediate, unretried refusal.
  */
 
 import type { ClientRunDriver } from "../client_runs.js";
@@ -112,8 +127,10 @@ export interface RunTapeOptions {
   recordPrompts: boolean;
   /**
    * Open the run again and hand back a driver holding a fresh lease. Called
-   * only when the server refuses a step because this tape's drive token is no
-   * longer the run's current one; see `lease`.
+   * only when the server has forgotten the run entirely (`unknown_run`, what
+   * a restart looks like); a step refused because another driver actively
+   * holds the lease (`invalid_drive_token`) is never retried this way. See
+   * `lease`.
    */
   reopen: () => Promise<ClientRunDriver>;
 }
@@ -346,8 +363,8 @@ export class RunTape {
               `at seq ${seq} that an earlier invoke left open: its declaration sets ` +
               "`trust_completion = false`, so that call's result was never reported and it " +
               "is a call that was never completed. Settle it first (`salvor resolve " +
-              `${this.runId} --output '<json the tool returned>'\`, the Inspector, or ` +
-              "`driver.resolve(...)`) and invoke again.",
+              `${this.runId} --store <the server's store> --output '<json the tool ` +
+              `returned>'\`, the Inspector, or \`driver.resolve(...)\`) and invoke again.`,
           );
         }
         const output = await perform({ seq, idempotencyKey: opened.idempotencyKey });
@@ -489,38 +506,45 @@ export class RunTape {
   // -- the lease -------------------------------------------------------------
 
   /**
-   * Run one guarded step, taking the run up again if the lease it presented is
-   * no longer the run's current one.
+   * Run one guarded step, taking the run up again only when this server has
+   * simply forgotten it (a restart), and refusing by name at once when
+   * something else is actively driving it.
    *
-   * `step` reads `this.driver` itself rather than closing over one, because the
-   * retry has to go through the driver the re-open handed back, not the one
-   * whose token was just refused.
-   *
-   * Twice is the limit, and the second refusal is refused by name. A lease
-   * taken once is a restart or a redeploy, which is exactly what this middleware
-   * exists to survive; a lease taken twice inside one invoke is another driver
-   * actively working the same thread, and there is no order in which two of them
-   * can both be right about what comes next.
+   * `step` reads `this.driver` itself rather than closing over one, because a
+   * retry after `unknown_run` has to go through the driver the re-open handed
+   * back, not the one whose token was just refused.
    */
   private async lease<T>(step: () => Promise<T>): Promise<T> {
     try {
       return await step();
     } catch (error) {
-      if (!lostLease(error)) throw error;
+      if (isSupersededLease(error)) throw this.oneDriverError();
+      if (!isForgottenRun(error)) throw error;
       await this.reopen(error);
       try {
         return await step();
       } catch (again) {
-        if (!lostLease(again)) throw again;
-        throw new SalvorMiddlewareError(
-          `run ${this.runId} (thread \`${this.threadId}\`) was taken from this ` +
-            "invoke twice: it re-opened the run once and something opened it again " +
-            "before the step could be retried. One driver per thread at a time. " +
-            "Invoke a given thread id from one process at a time, and give work " +
-            "that must run alongside it a thread id of its own.",
-        );
+        if (isSupersededLease(again)) throw this.oneDriverError();
+        throw again;
       }
     }
+  }
+
+  /**
+   * The refusal for `invalid_drive_token`: another driver holds this run's
+   * lease right now, live, which is exactly what one driver per thread rules
+   * out. There is nothing to retry here, because a re-open would either hand
+   * the run back (if that other driver has since gone quiet, in which case
+   * the NEXT invoke succeeds on its own) or take it from whoever holds it now,
+   * which is the same fight this refusal exists to avoid having.
+   */
+  private oneDriverError(): SalvorMiddlewareError {
+    return new SalvorMiddlewareError(
+      `run ${this.runId} (thread \`${this.threadId}\`) is no longer this invoke's to ` +
+        "drive: another driver holds its lease now. One driver per thread at a time. " +
+        "Invoke a given thread id from one process at a time, and give work that must " +
+        "run alongside it a thread id of its own.",
+    );
   }
 
   /**
@@ -570,8 +594,8 @@ export class RunTape {
             `run ${this.runId} asked for ${what} at seq ${this.cursor}, but the log ` +
               `holds a ${recorded.kind} there, and its last event (seq ${tail.seq}, ` +
               `${tail.kind}) is a call that was never completed. Settle that call ` +
-              `first (\`salvor run resolve ${this.runId} <output>\`, or the resolve ` +
-              `endpoint) and invoke again.`,
+              `first (\`salvor resolve ${this.runId} --store <the server's store> ` +
+              "--output <output>`, or the resolve endpoint) and invoke again.",
           );
         }
         this.forked = this.cursor;
@@ -604,20 +628,25 @@ export class RunTape {
 }
 
 /**
- * Whether the server refused this step because the lease it presented is not
- * the run's.
- *
- * Two codes, one meaning. `invalid_drive_token` is a lease superseded by
- * something else opening the same run. `unknown_run` on a run this tape opened
- * itself is the same fact from the other side: the server has forgotten every
- * client-driven run it was holding, which is what a restart looks like. Both
- * are worth one attempt at taking the run up again; nothing else is.
+ * Whether the server refused this step because another driver holds this
+ * run's lease right now, live: `invalid_drive_token`, the token this tape
+ * presented is no longer the current one. This is the one-driver case, and it
+ * is never worth a re-open: whoever holds the lease is driving the run this
+ * instant, and there is no order in which two live drivers can both be right
+ * about what comes next.
  */
-function lostLease(error: unknown): boolean {
-  return (
-    error instanceof SalvorApiError &&
-    (error.code === "invalid_drive_token" || error.code === "unknown_run")
-  );
+function isSupersededLease(error: unknown): boolean {
+  return error instanceof SalvorApiError && error.code === "invalid_drive_token";
+}
+
+/**
+ * Whether the server refused this step because it has forgotten the run
+ * entirely: `unknown_run` on a run this tape itself opened. Leases live only
+ * in the server's memory, so this is what a restart looks like from here, not
+ * a live competitor; it is the one case worth taking the run up again for.
+ */
+function isForgottenRun(error: unknown): boolean {
+  return error instanceof SalvorApiError && error.code === "unknown_run";
 }
 
 /** The refusal's own token, for an error message that quotes what was said. */

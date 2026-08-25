@@ -43,9 +43,9 @@ export interface FinishedThread {
  *   `RunFailed`);
  * - the log ends at an open intent: a model or tool call salvor recorded as
  *   requested but never recorded as completed. That call has to be settled
- *   first (`salvor run resolve <run> <output>`, or the resolve endpoint),
- *   because a `RunCompleted` appended past it would silently abandon
- *   whatever that call was doing.
+ *   first (`salvor resolve <run> --store <path> --output <output>`, or the
+ *   resolve endpoint), because a `RunCompleted` appended past it would
+ *   silently abandon whatever that call was doing.
  *
  * `output` defaults to the content of the last recorded AI message, read
  * back from the run's own log the same way a replayed model call is (see
@@ -81,8 +81,9 @@ export async function finishThread(
     const what = tail.kind === "ModelCallRequested" ? "a model call" : "a tool call";
     throw new SalvorMiddlewareError(
       `run ${runId} (thread \`${threadId}\`) ends at ${what} (seq ${tail.seq}) that ` +
-        "was requested and never completed. Settle it first (`salvor run resolve " +
-        `${runId} <output>\`, or the resolve endpoint) and finish the thread again.`,
+        "was requested and never completed. Settle it first (`salvor resolve " +
+        `${runId} --store <the server's store> --output <output>\`, or the resolve ` +
+        "endpoint) and finish the thread again.",
     );
   }
 

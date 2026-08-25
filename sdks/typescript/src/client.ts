@@ -82,6 +82,12 @@ export class SalvorClient {
   private readonly headers: Record<string, string>;
   private readonly timeoutMs: number;
   private readonly maxStreamRetries: number;
+  /**
+   * The last drive token this client obtained for a run it opened, by run id.
+   * See {@link openClientRun} on why this instance, and no one else,
+   * remembers it.
+   */
+  private readonly leaseTokens = new Map<string, string>();
 
   constructor(baseUrl: string, options: SalvorClientOptions = {}) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
@@ -449,13 +455,32 @@ export class SalvorClient {
    * the events it produces, while the server owns the durable log and guards
    * every append. This is the second of Salvor's two modes; {@link startRun} is
    * the server-driven first.
+   *
+   * This instance remembers the drive token it was last handed for a given
+   * `runId` and presents it here automatically when `options.driveToken` is
+   * not given explicitly. That is what lets this SAME client re-open a run it
+   * already drove, a moment or a day later, without being refused as a
+   * stranger to its own lease (see {@link LeaseHeldError}): the run's own
+   * driver, in the sense the server means it, is whichever caller last
+   * presented that lease's token, and this object is the one place in a
+   * process that would know it. A genuinely different driver, whether a
+   * second `SalvorClient` in this same process or a wholly separate one, has
+   * no such memory and is refused exactly as it should be while the lease it
+   * is trying to take is still current. Pass `options.driveToken` explicitly
+   * to override this (or to present a token this instance never saw, read
+   * back from wherever an application persists it).
    */
   openClientRun(options: OpenClientRunOptions = {}): Promise<ClientRunDriver> {
     const token = this.headers["Authorization"]?.replace(/^Bearer /, "");
+    const cached = options.runId ? this.leaseTokens.get(options.runId) : undefined;
     return openClientRun(this.baseUrl, {
       token,
       timeoutMs: this.timeoutMs,
+      driveToken: cached,
       ...options,
+    }).then((driver) => {
+      this.leaseTokens.set(driver.runId, driver.driveToken);
+      return driver;
     });
   }
 

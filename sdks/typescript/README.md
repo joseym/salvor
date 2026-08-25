@@ -279,6 +279,24 @@ await agent.invoke(
 );
 ```
 
+### Catching what the middleware throws
+
+`createAgent` wraps every error a middleware throws in its own `MiddlewareError`,
+copying the original's `name` and `message` but keeping the actual instance
+only as `.cause`. So a `catch` around `agent.invoke` has to unwrap it to reach
+the typed error salvor's own middleware threw:
+
+```ts
+} catch (e) {
+  if (e.cause instanceof ToolNeedsResolution) { /* ... */ }
+}
+```
+
+The same unwrap applies to `SalvorMiddlewareError` itself (the one-driver
+refusal below, a fork onto an unexpected path, and the rest of what this
+middleware refuses by name): check `e.cause instanceof SalvorMiddlewareError`,
+or `e.cause instanceof ToolNeedsResolution` for its more specific subclass.
+
 ### Try it without a key
 
 The client-driven tool below needs a declaration before the model can call
@@ -520,11 +538,14 @@ after the call has already happened.
 
 The run is left at `seq`, an intent with no completion, the same shape a crash
 between intent and completion leaves. Settle it by hand once you have checked
-what the tool actually did: `salvor resolve <run> --output '<json the tool
-returned>'`, the Inspector, or `driver.resolve(output)`. Invoke the thread again
-and the resolved output replays in the call's place; invoke it again before
-resolving and it meets the same open intent, refused by name, naming the same
-fix.
+what the tool actually did: `salvor resolve <run> --store <path> --output
+'<json the tool returned>'`, the Inspector, or `driver.resolve(output)`.
+`--store` has to name the SERVER's store file; this middleware only ever
+speaks HTTP to that server, so it has no way to know that path itself, which
+is why `ToolNeedsResolution.message` prints a `--store <the server's store>`
+placeholder there rather than a guess. Invoke the thread again and the
+resolved output replays in the call's place; invoke it again before resolving
+and it meets the same open intent, refused by name, naming the same fix.
 
 ### The honest limits
 
@@ -557,12 +578,22 @@ A thread is one task. Re-invoking it replays it; sending a genuinely new turn
 down the same thread is a fork by the rule above, and pays for the calls the new
 turn makes. Give a new task a new thread id.
 
-The run's lease lives in the server's memory, not on disk. If salvor itself
-restarts mid-invoke, the middleware notices its open run is gone, re-opens it
-once, and continues from the log as if the restart had not happened. If a
-second instance of your app invokes the same thread at the same time, the
-later one takes the lease and the earlier one fails, naming the thread: one
-driver per thread at a time, and the newest caller wins it.
+The run's lease lives in the server's memory, not on disk. A lease is HELD,
+not handed to whoever asks last: while a driver's lease on a thread's run is
+current, a second instance invoking that same thread is refused at once,
+before it runs a single tool, naming the thread and how many seconds until the
+hold lapses on its own (`lease_held`; a driver that goes quiet for the lease
+TTL, 60 seconds by default, stops holding it). A lease taken out from under an
+active invoke mid-step, by contrast, means a second driver is live on the
+thread RIGHT NOW; that is refused too (`invalid_drive_token`), by the same
+one-driver message, and neither case is ever retried by re-opening, because
+there is no order in which two live drivers can both be right about what
+comes next.
+
+If salvor itself restarts mid-invoke, none of this applies: the lease registry
+dies with the process but the log does not, so the middleware notices its open
+run is gone (`unknown_run`), re-opens it once, and continues from the log as
+if the restart had not happened.
 
 `wrapToolCall` exists only inside `createAgent`. A hand-built `StateGraph` that
 calls tools from its own node has no hook for the middleware to sit in, so such

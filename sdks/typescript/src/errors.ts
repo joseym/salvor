@@ -62,6 +62,25 @@ export class NeedsReconciliationError extends SalvorApiError {
  */
 export class DivergenceError extends SalvorApiError {}
 
+/**
+ * Raised when re-opening a client-driven run is refused because another
+ * driver's lease on it is still current (`409 lease_held`). Nothing is
+ * recorded and no lease is minted; the driver that already holds the run
+ * keeps it.
+ *
+ * `lapsesInSeconds` is the whole seconds until that hold lapses on its own if
+ * the other driver goes quiet; re-opening then, or as soon as the run
+ * finishes, succeeds. The run's own driver is not refused this way at all: it
+ * presents its current token as `driveToken` on {@link openClientRun} and gets
+ * the recorded log back under that same token instead.
+ */
+export class LeaseHeldError extends SalvorApiError {
+  /** Whole seconds until the current hold lapses on its own. */
+  get lapsesInSeconds(): number {
+    return (this.details.lapses_in_seconds as number | undefined) ?? 0;
+  }
+}
+
 /** Raised when the event stream drops and cannot be resumed within the retry budget. */
 export class SalvorStreamError extends SalvorError {}
 
@@ -81,6 +100,9 @@ export function errorFrom(status: number, body: string): SalvorApiError {
   }
   if (code === "divergence") {
     return new DivergenceError(code, message, status, details);
+  }
+  if (code === "lease_held") {
+    return new LeaseHeldError(code, message, status, details);
   }
   return new SalvorApiError(code, message, status, details);
 }

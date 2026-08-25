@@ -53,8 +53,10 @@ import { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import type { ChatResult } from "@langchain/core/outputs";
 import { z } from "zod";
 
-import { SalvorClient } from "../dist/index.js";
+import { ClientRunDriver, SalvorClient, type SalvorEvent } from "../dist/index.js";
 import {
+  RunTape,
+  SalvorMiddlewareError,
   type SalvorForkNotice,
   ToolNeedsResolution,
   currentToolCall,
@@ -380,9 +382,25 @@ function reset(): void {
   midToolCall = undefined;
 }
 
+/**
+ * Read a run's recorded log straight off the log-read endpoint, which needs no
+ * drive token (see `GET /v1/client-runs/{id}/log` in API.md). A bare
+ * `openClientRun` would try to mint or take the lease, which a run another
+ * driver still holds refuses with `409 lease_held`; these assertions only want
+ * to read what is recorded, so they never touch the lease at all.
+ */
+async function readLog(threadId: string): Promise<SalvorEvent[]> {
+  const runId = await runIdForThread(threadId);
+  const driver = new ClientRunDriver(client!.baseUrl, {}, 5000, {
+    runId,
+    driveToken: "",
+    log: [],
+  });
+  return driver.log();
+}
+
 async function kindsOf(threadId: string): Promise<string[]> {
-  const run = await client!.openClientRun({ runId: await runIdForThread(threadId) });
-  return run.logEnvelopes.map((event) => event.kind);
+  return (await readLog(threadId)).map((event) => event.kind);
 }
 
 function agentFor(
@@ -403,8 +421,8 @@ function agentFor(
 async function eventsOf(threadId: string): Promise<
   { kind: string; seq: number; payload: Record<string, unknown> }[]
 > {
-  const run = await client!.openClientRun({ runId: await runIdForThread(threadId) });
-  return run.logEnvelopes.map((event) => ({
+  const log = await readLog(threadId);
+  return log.map((event) => ({
     kind: event.kind,
     seq: event.seq,
     payload: event.payload,
@@ -716,8 +734,8 @@ test("two tool calls in one model turn are serialised by the turnstile and both 
 
   // The order the model asked for is the order the log recorded, which is what
   // makes the pair replayable rather than merely serialized.
-  const run = await client!.openClientRun({ runId: await runIdForThread(threadId) });
-  const inputs = run.logEnvelopes
+  const loggedTools = await readLog(threadId);
+  const inputs = loggedTools
     .filter((event) => event.kind === "ToolCallRequested")
     .map((event) => (event.payload.input as { order_id: string }).order_id);
   deepStrictEqual(inputs, ["ORD-1", "ORD-2"]);
@@ -773,8 +791,8 @@ test("three tool calls in one model turn are recorded in the model's order even 
   ];
 
   async function recordedInputs(): Promise<string[]> {
-    const run = await client!.openClientRun({ runId: await runIdForThread(threadId) });
-    return run.logEnvelopes
+    const log = await readLog(threadId);
+    return log
       .filter((event) => event.kind === "ToolCallRequested")
       .map((event) => (event.payload.input as { order_id: string }).order_id);
   }
@@ -1092,8 +1110,7 @@ test("a tool body reads currentToolCall(), and the key matches the recorded inte
   strictEqual(capturedCall!.tool, "lookup_order");
   strictEqual(capturedCall!.runId, await runIdForThread(threadId));
 
-  const run = await client!.openClientRun({ runId: await runIdForThread(threadId) });
-  const intent = run.logEnvelopes.find((event) => event.kind === "ToolCallRequested")!;
+  const intent = (await readLog(threadId)).find((event) => event.kind === "ToolCallRequested")!;
   strictEqual(capturedCall!.seq, intent.seq, "the seq matches the recorded intent");
   strictEqual(
     capturedCall!.key,
@@ -1113,8 +1130,7 @@ test("a tool body reads currentToolCall(), and the key matches the recorded inte
   strictEqual(capturedCall, undefined, "the replay never ran the tool body");
   strictEqual(ran.lookup, 0);
 
-  const replayedRun = await client!.openClientRun({ runId: await runIdForThread(threadId) });
-  const replayedIntent = replayedRun.logEnvelopes.find(
+  const replayedIntent = (await readLog(threadId)).find(
     (event) => event.kind === "ToolCallRequested",
   )!;
   strictEqual(
@@ -1289,27 +1305,44 @@ test("a tool declared trust_completion = false runs once, then stops the invoke 
 
 // -- the lease ---------------------------------------------------------------
 
-/**
- * A stand-in for a second instance of this application: it opens the same run,
- * which mints a fresh lease and stops the middleware's own token working.
- *
- * Nothing about it is exotic. Opening a client-driven run is the only way to
- * drive one, so any second process that invokes the same thread does exactly
- * this, and the first process finds out the next time it writes.
- */
-async function anotherDriverOpens(threadId: string): Promise<void> {
-  await client!.openClientRun({ runId: await runIdForThread(threadId) });
-}
-
-test("a lease taken by another driver mid-invoke is taken back once, and the invoke finishes", async (t) => {
+test("a second instance on a held thread is refused with lease_held before running anything", async (t) => {
   if (!base) return t.skip("salvor serve not available");
   reset();
-  const threadId = "thread-lease-retaken";
+  const threadId = "thread-lease-held";
+  const runId = await runIdForThread(threadId);
 
-  // The takeover happens inside the tool body, which is to say between the tool
-  // call's intent and its completion: the tape holds an open intent, and the
-  // very next thing it does is a write it no longer has the lease for.
-  midToolCall = () => anotherDriverOpens(threadId);
+  // A genuinely independent SalvorClient: no memory of any lease `client!`
+  // has ever held, exactly what a second instance of this application would
+  // be. Sharing `client!` here would let the "rival" ride the same
+  // instance's own remembered token (see `SalvorClient.openClientRun`) and
+  // succeed as if it were the very driver it is supposed to be contesting.
+  const rival = new SalvorClient(base!);
+
+  // The rival tries to open the SAME thread while the first invoke is inside
+  // a tool body, holding an open intent: the moment a second driver's own
+  // open is refused, not the moment it would have written something.
+  midToolCall = async () => {
+    const second = createAgent({
+      model: new ScriptedModel(ONE_TOOL_SCRIPT) as never,
+      tools: [lookupOrder, stampLedger] as never,
+      middleware: [salvorMiddleware({ client: rival })],
+    });
+    let refusal: unknown;
+    try {
+      await second.invoke(
+        { messages: [{ role: "user", content: "how is ORD-7781?" }] },
+        { configurable: { thread_id: threadId } },
+      );
+      throw new Error("expected the second instance's invoke to be refused");
+    } catch (error) {
+      refusal = causeOf(error);
+    }
+    ok(refusal instanceof SalvorMiddlewareError, "the middleware itself named the refusal");
+    const text = (refusal as Error).message;
+    match(text, new RegExp(threadId), "the error names the thread");
+    match(text, new RegExp(runId), "and the run");
+    match(text, /lapses in \d+s/, "and when the hold lapses");
+  };
 
   const { agent, model } = agentFor(ONE_TOOL_SCRIPT);
   const answer = await agent.invoke(
@@ -1318,11 +1351,10 @@ test("a lease taken by another driver mid-invoke is taken back once, and the inv
   );
 
   strictEqual(model.calls.count, 2, "both model calls happened");
-  strictEqual(ran.lookup, 1, "the tool body ran once, not once per lease");
+  strictEqual(ran.lookup, 1, "the tool body ran exactly once: the rival never got in");
   strictEqual(textOf(answer.messages.at(-1)!), "Order ORD-7781 is paid, 4200 cents.");
 
-  // The retry re-posted the completion; it did not re-perform the call. One
-  // intent, one completion, nothing doubled.
+  // Nothing the rival tried to do landed: one intent, one completion, per step.
   deepStrictEqual(await kindsOf(threadId), [
     "RunStarted",
     "ModelCallRequested",
@@ -1333,8 +1365,8 @@ test("a lease taken by another driver mid-invoke is taken back once, and the inv
     "ModelCallCompleted",
   ]);
 
-  // And the thread still replays afterwards: taking the lease back left the
-  // cursor where it stood rather than restarting the walk.
+  // And the thread still replays afterwards, `client!`'s own remembered
+  // lease intact throughout.
   reset();
   const second = agentFor(ONE_TOOL_SCRIPT);
   await second.agent.invoke(
@@ -1346,60 +1378,94 @@ test("a lease taken by another driver mid-invoke is taken back once, and the inv
 });
 
 /**
- * A client that lets something else open the run immediately after every open
- * this middleware performs: an instance that is not going away, and will keep
- * taking the thread back.
+ * `invalid_drive_token`, the other one-driver refusal, needs a lease that is
+ * first lapsed (so a second driver can legitimately take the run) and then
+ * taken while the first driver is still mid-step. `salvor serve --help`
+ * carries no `--client-lease-ttl` flag: the TTL is `SALVOR_CLIENT_LEASE_TTL_SECS`
+ * only, an environment variable a server reads at startup, so this spins up
+ * its own short-TTL server rather than waiting out the suite's default 60s.
+ *
+ * It also drives `RunTape` directly instead of through a full `createAgent`
+ * app: the point under test is `tape.ts`'s own `lease()`, and the server-side
+ * mechanics (a lapsed lease, a fresh open, a stale token) are the same either
+ * way. This is the driver-API fallback the case calls for in the absence of a
+ * CLI flag to shrink the TTL from inside a `createAgent` run.
  */
-function contestedClient(threadId: string): SalvorClient {
-  return new Proxy(client!, {
-    get(target, property) {
-      const value = Reflect.get(target, property) as unknown;
-      if (property !== "openClientRun") {
-        return typeof value === "function" ? value.bind(target) : value;
-      }
-      return async (options: unknown) => {
-        const driver = await target.openClientRun(options as never);
-        await anotherDriverOpens(threadId);
-        return driver;
-      };
-    },
-  }) as SalvorClient;
-}
-
-test("a run taken twice inside one invoke is refused, naming the thread and the one-driver rule", async (t) => {
+test("a lease that lapses and is taken mid-step surfaces invalid_drive_token by name, never retried", async (t) => {
   if (!base) return t.skip("salvor serve not available");
-  reset();
-  const threadId = "thread-lease-contested";
-  const input = { messages: [{ role: "user", content: "how is ORD-7781?" }] };
-  const runId = await runIdForThread(threadId);
-
-  // Record the thread once, normally, so the contested invoke below meets the
-  // takeover at a step in the middle of a walk rather than at `RunStarted`.
-  const first = agentFor(ONE_TOOL_SCRIPT);
-  await first.agent.invoke(input, { configurable: { thread_id: threadId } });
-  strictEqual((await kindsOf(threadId)).length, 7);
-
-  reset();
-  const model = new ScriptedModel(ONE_TOOL_SCRIPT);
-  const contested = createAgent({
-    model: model as never,
-    tools: [lookupOrder, stampLedger] as never,
-    middleware: [salvorMiddleware({ client: contestedClient(threadId) })],
-  });
-
-  await rejects(
-    () => contested.invoke(input, { configurable: { thread_id: threadId } }),
-    (error: unknown) => {
-      const text = String((error as Error).message ?? error);
-      match(text, new RegExp(threadId), "the error names the thread");
-      match(text, new RegExp(runId), "and the run");
-      match(text, /one driver per thread at a time/i, "and the rule");
-      return true;
+  const dir = mkdtempSync(join(tmpdir(), "salvor-ts-lease-"));
+  const shortPort = await freePort();
+  const shortBase = `http://127.0.0.1:${shortPort}`;
+  const shortTtlSecs = 1;
+  const child = spawn(
+    SALVOR,
+    ["--store", join(dir, "short.db"), "serve", "--bind", `127.0.0.1:${shortPort}`],
+    {
+      stdio: "ignore",
+      env: { PATH: "/usr/bin:/bin", SALVOR_CLIENT_LEASE_TTL_SECS: String(shortTtlSecs) },
     },
   );
+  try {
+    const deadline = Date.now() + 15000;
+    for (;;) {
+      try {
+        if ((await fetch(`${shortBase}/v1/client-tools`)).ok) break;
+      } catch {
+        /* not up yet */
+      }
+      if (Date.now() > deadline) throw new Error("short-TTL salvor serve did not come up");
+      await new Promise((r) => setTimeout(r, 100));
+    }
 
-  // It gave up rather than fighting for the run: nothing new was recorded.
-  strictEqual((await kindsOf(threadId)).length, 7, "the refused invoke wrote nothing");
+    const shortClient = new SalvorClient(shortBase);
+    const driver = await shortClient.openClientRun({});
+    const threadId = "thread-lease-lapsed";
+
+    let reopenCalls = 0;
+    const tape = await RunTape.open(
+      driver,
+      { agent_def_hash: "sha256:agent", input: {} },
+      {
+        threadId,
+        recordPrompts: false,
+        reopen: () => {
+          reopenCalls += 1;
+          throw new Error("must never be asked to re-open: invalid_drive_token is not a restart");
+        },
+      },
+    );
+
+    // Nothing drives the run again for longer than the TTL, so its lease
+    // lapses; a second, independent client then bare-opens the idle run and
+    // is handed a fresh lease rather than refused, exactly as an idle run
+    // going quiet is supposed to work.
+    await new Promise((r) => setTimeout(r, (shortTtlSecs + 0.5) * 1000));
+    await new SalvorClient(shortBase).openClientRun({ runId: driver.runId });
+
+    // The tape's next step still presents the token it opened with, now
+    // superseded, and salvor answers `invalid_drive_token`. Refused by name
+    // at once, not retried: a lease taken while this tape was mid-step is a
+    // live second driver, not a restart, and re-opening could only hand the
+    // run to one of two live drivers picked by timing.
+    await rejects(
+      () =>
+        tape.modelCall("sha256:req-1", { model: "m" }, async () => {
+          throw new Error("must not be called: the step never reaches the provider");
+        }),
+      (error: unknown) => {
+        ok(error instanceof SalvorMiddlewareError, "a named middleware refusal");
+        const text = (error as Error).message;
+        match(text, new RegExp(threadId), "the error names the thread");
+        match(text, new RegExp(driver.runId), "and the run");
+        match(text, /one driver per thread at a time/i, "and the rule");
+        return true;
+      },
+    );
+    strictEqual(reopenCalls, 0, "never re-opened: invalid_drive_token is not the restart case");
+  } finally {
+    child.kill();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 /**

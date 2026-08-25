@@ -41,12 +41,16 @@ export interface ToolNeedsResolutionDetails {
  * not, and the run sits exactly where a crash mid-write would leave it, until
  * a person looks at `output` and records it by hand.
  *
- * That hand-off is `salvor resolve <run> --output <json>`, the Inspector, or
- * {@link ClientRunDriver.resolve}, any of which append the one completion
- * this middleware would not. Re-invoking the thread afterwards meets that
- * recorded completion at `seq` and replays it like any other settled call;
- * re-invoking before it is resolved meets the same open intent and is refused
- * by the tape's own "never completed" check instead, naming the same command.
+ * That hand-off is `salvor resolve <run> --store <path> --output <json>`, the
+ * Inspector, or {@link ClientRunDriver.resolve}, any of which append the one
+ * completion this middleware would not. `--store` names the SERVER's store
+ * file, which this middleware has no way to know (it only ever speaks HTTP to
+ * the server, never opens the store itself), so the printed command below
+ * carries a placeholder for it rather than a path that would just be wrong.
+ * Re-invoking the thread afterwards meets that recorded completion at `seq`
+ * and replays it like any other settled call; re-invoking before it is
+ * resolved meets the same open intent and is refused by the tape's own
+ * "never completed" check instead, naming the same command.
  */
 export class ToolNeedsResolution extends SalvorMiddlewareError {
   /** The run stopped at `seq`, waiting on a person. */
@@ -70,9 +74,9 @@ export class ToolNeedsResolution extends SalvorMiddlewareError {
         "`403 client_completion_refused`). Run " +
         `${details.run} (thread \`${details.thread}\`) is stopped at seq ${details.seq} until ` +
         "a person confirms the tool's output and records it by hand: " +
-        `\`salvor resolve ${details.run} --output '${canonicalJson(details.output)}'\`, the ` +
-        "Inspector, or `driver.resolve(...)`. Then invoke the thread again: the resolved " +
-        "output replays in this call's place.",
+        `\`salvor resolve ${details.run} --store <the server's store> --output ` +
+        `'${canonicalJson(details.output)}'\`, the Inspector, or \`driver.resolve(...)\`. ` +
+        "Then invoke the thread again: the resolved output replays in this call's place.",
     );
     this.run = details.run;
     this.seq = details.seq;
