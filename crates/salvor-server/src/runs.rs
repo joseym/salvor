@@ -347,12 +347,34 @@ pub async fn replay(
 }
 
 /// `POST /v1/runs/{id}/resume`: continue a run, dispatching on its state.
+///
+/// Refused with `409 client_driven_run` for a run opened through
+/// `/v1/client-runs`, before its state is even read: that run's client is its
+/// only legal driver, and this endpoint starting a background driver for it
+/// would race the client's own drive token for the same log positions.
 pub async fn resume(
     State(state): State<AppState>,
     Path(run_id_text): Path<String>,
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
     let run_id = parse_run_id(&run_id_text)?;
+
+    // A run opened through `/v1/client-runs` is driven by its caller under a
+    // single-writer drive token, not by a task in this process. Refuse before
+    // anything state-dependent, including the still-sleeping and
+    // reconciliation refusals below: whatever the log folds to, this server
+    // resuming it here would be a second writer racing the client's lease,
+    // even when the agent the run recorded happens to be registered here too.
+    // Mirrors the wake sweeper's own check in `wake::sweep`.
+    if state.is_client_run(run_id) {
+        return Err(ApiError::ClientDrivenRun(format!(
+            "run {} is client-driven; its client resumes it by re-opening \
+             POST /v1/client-runs, not this endpoint, so this server never becomes a second \
+             writer against the client's lease",
+            run_id.as_uuid()
+        )));
+    }
+
     let request: ResumeRequest = parse_body_or_default(&body)?;
 
     let log = state.store().read_log(run_id).await.map_err(store_error)?;
@@ -507,6 +529,15 @@ pub(crate) async fn redrive(
 }
 
 /// `POST /v1/runs/{id}/resolve`: record a dangling write's completion by hand.
+///
+/// Unlike resume, this takes no client-driven guard. It appends exactly one
+/// completion event inline and spawns no driver, so it never becomes a second
+/// writer contending for a run of positions the way a spawned drive would; and
+/// an operator needs it to reach a client-driven run whose client cannot be
+/// reached to reopen it and drive its own resolve. `POST
+/// /v1/client-runs/{id}/resolve` is the client's own path when it still holds
+/// its lease; this is the same override [`abandon`] already is for any run,
+/// whatever drove it.
 pub async fn resolve(
     State(state): State<AppState>,
     Path(run_id_text): Path<String>,

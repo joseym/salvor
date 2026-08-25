@@ -56,6 +56,7 @@ codes:
 | 409 | `write_replay_hazard` | A fork would re-execute recorded writes the operator has not acknowledged; `details.writes` lists exactly the ones still needing acknowledgement |
 | 409 | `run_exists` | Starting a run at an id that already has history |
 | 409 | `wrong_state` | A verb applied to a run in the wrong state (resolving a run with no dangling write) |
+| 409 | `client_driven_run` | Resuming a run opened through `/v1/client-runs`; its client is the only legal driver, so its own re-open is what resumes it |
 | 409 | `needs_reconciliation` | Resuming a run whose log ends at a write intent with no completion; `details.intent` carries the recorded write |
 | 409 | `still_sleeping` | Resuming a run parked on a durable timer before its instant; `details.wake_at` and `details.remaining_seconds` say when it can be driven. Nothing is recorded |
 | 401 | `missing_drive_token` | A client-driven append with no drive token (see [Client-driven runs](#client-driven-runs)) |
@@ -436,6 +437,12 @@ sequence 0 (a full replay).
 Continue a run. The server reads the run's derived state and dispatches on it,
 the same mapping `salvor resume` uses:
 
+- **Client-driven** (opened through `/v1/client-runs`): refused `409
+  client_driven_run` before anything else, whatever the run's state folds to.
+  That run's client holds the single-writer drive token and is its only legal
+  driver; resuming it here would start a second writer racing the client's
+  lease, even when the agent it recorded happens to be registered on this
+  server too. Its client resumes it by re-opening `POST /v1/client-runs`.
 - **Parked** (suspended or budget-exceeded): the request must carry an `input`,
   validated against the recorded suspension schema or the budget-extension
   shape before anything is recorded. The run then resumes in the background.
@@ -517,6 +524,14 @@ the same mapping `salvor resume` uses:
 
 - `404 unknown_agent` when the agent the run started under is not registered on
   this server (re-register it, then resume).
+- `409 client_driven_run` when the run was opened through `/v1/client-runs`:
+
+```json
+{ "error": {
+  "code": "client_driven_run",
+  "message": "run ... is client-driven; its client resumes it by re-opening POST /v1/client-runs, not this endpoint, so this server never becomes a second writer against the client's lease"
+} }
+```
 
 To watch the continuation, open the event stream after a `202`.
 
@@ -935,6 +950,10 @@ started with `409 divergence`; it does not judge the deadline, because
 `wake_at` is the client's own recorded instant and the clock that decides it
 has arrived is the client's. `GET /v1/runs/{id}` reports such a run as
 `{ "state": "sleeping", "wake_at": "<RFC 3339>" }` like any other.
+
+For the same reason, `POST /v1/runs/{id}/resume` (the server-driven surface)
+refuses a client-driven run outright, `409 client_driven_run`, whatever its
+state: only its own client may drive it, by re-opening `POST /v1/client-runs`.
 
 The generic append carries only the control and deterministic-context events the
 client's cursor emits itself, which hold no secret and no side effect:

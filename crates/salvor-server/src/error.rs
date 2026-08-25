@@ -42,6 +42,17 @@ pub enum ApiError {
     /// A verb was applied to a run in the wrong state (resuming a finished
     /// run, resolving a run that has no dangling write). HTTP 409.
     WrongState(String),
+    /// The server-driven resume endpoint was called on a run opened through
+    /// `/v1/client-runs`. HTTP 409. That run's client holds the single-writer
+    /// drive token and is the only legal driver of it; resuming it here, even
+    /// when the agent it recorded happens to be registered on this server,
+    /// would start a second writer racing the client's lease for the same
+    /// positions. Checked before any state-dependent dispatch, so it also
+    /// pre-empts the still-sleeping and reconciliation refusals: a
+    /// client-driven run is refused this way regardless of what its log folds
+    /// to. Nothing is recorded and no driver task is spawned. The message
+    /// names `/v1/client-runs`, the surface that does resume it.
+    ClientDrivenRun(String),
     /// A client-driven append arrived with no drive token. HTTP 401. The drive
     /// token is the per-run single-writer lease; every append must present it.
     MissingDriveToken(String),
@@ -197,6 +208,7 @@ impl ApiError {
             ApiError::UnknownAgent(_) => (StatusCode::NOT_FOUND, "unknown_agent"),
             ApiError::RunExists(_) => (StatusCode::CONFLICT, "run_exists"),
             ApiError::WrongState(_) => (StatusCode::CONFLICT, "wrong_state"),
+            ApiError::ClientDrivenRun(_) => (StatusCode::CONFLICT, "client_driven_run"),
             ApiError::InvalidGraph { .. } => (StatusCode::BAD_REQUEST, "invalid_graph"),
             ApiError::ApprovalSchemaViolation { .. } => {
                 (StatusCode::BAD_REQUEST, "approval_schema_violation")
@@ -242,6 +254,7 @@ impl ApiError {
             | ApiError::UnknownAgent(m)
             | ApiError::RunExists(m)
             | ApiError::WrongState(m)
+            | ApiError::ClientDrivenRun(m)
             | ApiError::Internal(m)
             | ApiError::MissingDriveToken(m)
             | ApiError::InvalidDriveToken(m)

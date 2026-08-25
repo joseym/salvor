@@ -6,7 +6,7 @@ mod common;
 
 use common::{
     CountBehavior, ScriptedModel, TestServer, agent_factory, app_state, counter, fixed_clock,
-    get_json, memory_store, post_json,
+    get_json, memory_store, post_json, register_agent, sample_toml,
 };
 use reqwest::StatusCode;
 use salvor_core::{Effect, Event, EventEnvelope, ReplayCursor, RunId, SequenceNumber};
@@ -938,4 +938,85 @@ async fn a_sleep_completion_with_no_sleep_started_is_refused() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "already awake: {body}");
     assert_eq!(body["error"]["code"], "divergence");
+}
+
+/// The server-driven resume endpoint refuses a client-driven run outright,
+/// even when the agent its `RunStarted` names is registered on this very
+/// server: that agent being buildable here is not permission to drive this
+/// run here, since the run's client already holds the single-writer lease on
+/// it.
+#[tokio::test]
+async fn resuming_a_client_driven_run_through_the_server_endpoint_is_refused() {
+    let server = client_server().await;
+    let client = reqwest::Client::new();
+
+    // The same agent the run's RunStarted will name, registered on this
+    // server: the exact case the owner decision calls out.
+    let agent = register_agent(&client, &server.base, sample_toml(), None).await;
+
+    let (run, token) = open_run(&client, &server.base).await;
+
+    // Park it on a durable timer whose instant has not arrived against the
+    // server's fixed clock (noon on 2026-07-10). An unguarded resume would
+    // dispatch on this state and answer `409 still_sleeping`; the refusal
+    // this test checks for must arrive before that dispatch, not instead of
+    // it only when the run happens to be due.
+    let (status, body) = append(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        vec![
+            env_value(
+                &run,
+                0,
+                Event::RunStarted {
+                    agent_def_hash: agent,
+                    input: json!({ "topic": "otters" }),
+                    labels: None,
+                },
+            ),
+            env_value(&run, 1, Event::NowObserved { now: ts() }),
+            env_value(
+                &run,
+                2,
+                Event::SleepStarted {
+                    wake_at: datetime!(2026-07-10 13:00:00 UTC),
+                },
+            ),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "parking the run: {body}");
+
+    let (status, body) = post_json(
+        &client,
+        &format!("{}/v1/runs/{run}/resume", server.base),
+        json!({}),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "a client-driven run is refused, not dispatched on: {body}"
+    );
+    assert_eq!(body["error"]["code"], "client_driven_run");
+
+    let run_id = RunId::from_uuid(Uuid::parse_str(&run).expect("run id"));
+
+    // Nothing was appended past the park the refusal ran ahead of.
+    let log = server
+        .state
+        .store()
+        .read_log(run_id)
+        .await
+        .expect("log reads");
+    assert_eq!(log.len(), 3, "the refusal recorded nothing: {log:?}");
+
+    // And no server-side driver task attached to a run its own client drives.
+    assert!(
+        !server.state.is_run_active(run_id),
+        "the refusal never reaches the code that spawns a drive"
+    );
 }
