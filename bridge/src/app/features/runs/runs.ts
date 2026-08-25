@@ -653,7 +653,12 @@ export class Runs {
     return {
       z: i % 2 === 1,
       [`g-${groupOf(r.status, r.waitingOn)}`]: true,
-      attention: isWaiting(r.status, r.waitingOn),
+      // An overdue sleeper takes the same attention wash a stalled row does, even though it
+      // stays in the `progress` group (see run-model.ts GROUP): the owner call is that a run
+      // sitting past its deadline reads as attention on sight, not just a quiet note beside its
+      // pill. Nothing else about its classification moves: filters, counts and the Inbox still
+      // see it as `sleeping`/`progress`, only the row's own paint changes.
+      attention: isWaiting(r.status, r.waitingOn) || r.overdue === true,
       'is-failed': r.status === 'failed',
       'is-done': r.status === 'completed',
       'is-sel': this.runSel() === r.id,

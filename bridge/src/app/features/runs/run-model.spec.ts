@@ -216,36 +216,36 @@ describe('overdueSince: the clock-only check, the Inspector\'s wasm fold has no 
 
 describe('overdueOf: the server field wins when present, wake_at otherwise', () => {
   const NOW = Date.parse('2026-08-20T12:00:00Z');
-  function sleeping(raw: Record<string, unknown>): RunStatus {
-    return { state: 'sleeping', wakeAt: raw['wake_at'] as string | undefined, raw };
+  function sleeping(opts: { wakeAt?: string; overdue?: boolean; overdueSeconds?: number }): RunStatus {
+    return { state: 'sleeping', wakeAt: opts.wakeAt, overdue: opts.overdue, overdueSeconds: opts.overdueSeconds, raw: {} };
   }
 
-  it('a non-sleeping status is never overdue, whatever raw carries', () => {
-    const status: RunStatus = { state: 'running', raw: { overdue: true, overdue_seconds: 99 } };
+  it('a non-sleeping status is never overdue, whatever the typed fields carry', () => {
+    const status: RunStatus = { state: 'running', overdue: true, overdueSeconds: 99, raw: {} };
     expect(overdueOf(status, NOW)).toEqual({ overdue: false });
   });
 
   it('before the server has an opinion, a wake_at in the past derives overdue from the clock', () => {
-    expect(overdueOf(sleeping({ wake_at: '2026-08-20T10:00:00Z' }), NOW)).toEqual({
+    expect(overdueOf(sleeping({ wakeAt: '2026-08-20T10:00:00Z' }), NOW)).toEqual({
       overdue: true,
       overdueSeconds: 7200,
     });
   });
 
   it('before the deadline, nothing renders as overdue: derived from the clock, same as the server would say', () => {
-    expect(overdueOf(sleeping({ wake_at: '2026-08-20T13:00:00Z' }), NOW)).toEqual({ overdue: false });
+    expect(overdueOf(sleeping({ wakeAt: '2026-08-20T13:00:00Z' }), NOW)).toEqual({ overdue: false });
   });
 
-  it('the server\'s own overdue/overdue_seconds win outright once present, over what the clock alone would derive', () => {
-    // wake_at here is still in the FUTURE by the browser's own math, but the server's clock says
+  it('the server\'s own overdue/overdueSeconds win outright once present, over what the clock alone would derive', () => {
+    // wakeAt here is still in the FUTURE by the browser's own math, but the server's clock says
     // otherwise (e.g. clock skew): the server's word is final, never second-guessed.
     expect(
-      overdueOf(sleeping({ wake_at: '2026-08-20T13:00:00Z', overdue: true, overdue_seconds: 45 }), NOW),
+      overdueOf(sleeping({ wakeAt: '2026-08-20T13:00:00Z', overdue: true, overdueSeconds: 45 }), NOW),
     ).toEqual({ overdue: true, overdueSeconds: 45 });
   });
 
   it('the server can also say not-overdue explicitly, and that wins too, even past a naive wake_at read', () => {
-    expect(overdueOf(sleeping({ wake_at: '2026-08-20T10:00:00Z', overdue: false }), NOW)).toEqual({
+    expect(overdueOf(sleeping({ wakeAt: '2026-08-20T10:00:00Z', overdue: false }), NOW)).toEqual({
       overdue: false,
     });
   });
@@ -340,14 +340,16 @@ describe('toRunRow: bakes the derived status and carries driver evidence', () =>
     expect(r.overdueSeconds).toBe(7200);
   });
 
-  it('the server-computed overdue/overdue_seconds on raw win over the row\'s own clock derivation', () => {
+  it('the server-computed overdue/overdueSeconds win over the row\'s own clock derivation', () => {
     const r = toRunRow(
       {
         run: 'r1',
         status: {
           state: 'sleeping',
           wakeAt: new Date(NOW - 7_200_000).toISOString(),
-          raw: { overdue: true, overdue_seconds: 30 },
+          overdue: true,
+          overdueSeconds: 30,
+          raw: {},
         },
         eventCount: 2,
         raw: {},

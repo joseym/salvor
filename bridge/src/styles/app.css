@@ -343,10 +343,11 @@
 #runs-table td.c-events { color: var(--fg); font-weight: 600; }
 #runs-table td.c-age    { color: var(--faint); }
 
-/* OVERDUE NOTE: a sleeping run whose wake_at has passed, shown beside its status pill. Secondary
-   text in the same muted register as the age column above, deliberately NOT the amber attention
-   wash: the row stays in the progress group (see run-model.ts GROUP), so the Inspector band is
-   where overdue reads as attention, not the ledger row. */
+/* OVERDUE NOTE: a sleeping run whose wake_at has passed, shown beside its status pill. The note
+   text itself stays this muted register; the amber attention wash (tr.attention, see rowClasses
+   in runs.ts) now comes from the ROW, the same rail/background a stalled row takes, even though
+   the run stays in the progress group (see run-model.ts GROUP) and its status pill keeps reading
+   `sleeping`. */
 .overdue-note { margin-left: var(--space-2); font-size: var(--text-xs); color: var(--faint); letter-spacing: 0.08px; white-space: nowrap; }
 
 /* ── AGENT COLUMN (item 15a). Replaces the old "Last event" cell. A readable name/label reads in
