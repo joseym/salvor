@@ -538,10 +538,8 @@ export class RunTape {
       throw new SalvorMiddlewareError(
         `run ${this.runId} (thread \`${this.threadId}\`) refused this invoke's drive ` +
           `token (${describe(cause)}), and re-opening the run was refused too: ` +
-          `${why}. A salvor server holds its client-driven leases in memory, so a ` +
-          "server that restarted no longer knows this run and will not adopt the log " +
-          "it already holds. The recorded log is intact; drive the thread from the " +
-          "server that opened it.",
+          `${why}. The server refuses to re-open a run when it is not marked as ` +
+          "client-driven in its log, or when the store no longer holds it.",
       );
     }
     this.driver = driver;
