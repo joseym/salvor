@@ -9,7 +9,7 @@ its own function rather than something the middleware infers.
 
 Once :func:`finish_thread` has recorded ``RunCompleted``, the run is closed the
 way every salvor run is closed: nothing may be appended to it again. An
-``agent.ainvoke`` on that thread meets this when the middleware opens the run,
+``agent.invoke`` on that thread meets this when the middleware opens the run,
 finds the log already ends at ``RunCompleted``, and raises
 :class:`~salvor.langchain.SalvorMiddlewareError` naming the thread rather than
 letting the append fail somewhere less legible.
@@ -18,15 +18,18 @@ letting the append fail somewhere less legible.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, List, Union
+from typing import Any, Awaitable, Callable, List, Tuple, Union
 
 from ..async_client import AsyncClient
+from ..client import Client
 from ..models import Event
 from .errors import SalvorMiddlewareError
 from .hash import run_id_for_thread
 from .messages import stored_ai_message
 
 __all__ = ["FinishedThread", "finish_thread"]
+
+ThreadIdToRunId = Callable[[str], Union[str, Awaitable[str]]]
 
 
 @dataclass
@@ -38,21 +41,27 @@ class FinishedThread:
     seq: int
 
 
-async def finish_thread(
-    client: AsyncClient,
+def finish_thread(
+    client: Union[Client, AsyncClient],
     thread_id: str,
     output: Any = None,
-    thread_id_to_run_id: Callable[
-        [str], Union[str, Awaitable[str]]
-    ] = run_id_for_thread,
-) -> FinishedThread:
+    thread_id_to_run_id: ThreadIdToRunId = run_id_for_thread,
+) -> Union[FinishedThread, Awaitable[FinishedThread]]:
     """Append ``RunCompleted`` to the run behind ``thread_id``, closing it.
+
+    Takes whichever client the middleware was given, and answers the way that
+    client answers everything else::
+
+        finish_thread(Client("http://127.0.0.1:8080"), "order-7781")
+        await finish_thread(AsyncClient("http://127.0.0.1:8080"), "order-7781")
 
     ``thread_id_to_run_id`` defaults to :func:`~salvor.langchain.run_id_for_thread`,
     the same mapping :class:`~salvor.langchain.SalvorMiddleware` uses by
     default; pass the same function an application gave the middleware when it
     overrode the default, so ``finish_thread`` closes the run the middleware
-    actually opened.
+    actually opened. It may answer with an awaitable only under an
+    :class:`~salvor.AsyncClient`, which is the only client with anything to
+    await it with.
 
     Refused, appending nothing, as
     :class:`~salvor.langchain.SalvorMiddlewareError` when:
@@ -75,12 +84,59 @@ async def finish_thread(
     same default rather than forcing a null; pass the value you want recorded
     when you want a particular one.
     """
+    if isinstance(client, AsyncClient):
+        return _afinish_thread(client, thread_id, output, thread_id_to_run_id)
+    return _finish_thread(client, thread_id, output, thread_id_to_run_id)
+
+
+def _finish_thread(
+    client: Client,
+    thread_id: str,
+    output: Any,
+    thread_id_to_run_id: ThreadIdToRunId,
+) -> FinishedThread:
+    """:func:`finish_thread` over the synchronous client."""
+    run_id = thread_id_to_run_id(thread_id)
+    if not isinstance(run_id, str):
+        raise SalvorMiddlewareError(
+            "`thread_id_to_run_id` returned something to await, and "
+            "`finish_thread` was given salvor's synchronous `Client`, which "
+            "has nothing to await it with. Return the run id itself, or pass "
+            "an `AsyncClient`."
+        )
+    driver = client.open_client_run(run_id=run_id)
+    seq, resolved = _completion(driver.log_envelopes, thread_id, run_id, output)
+    appended = driver.append([driver.envelope(seq, "RunCompleted", output=resolved)])
+    return _receipt(run_id, seq, appended)
+
+
+async def _afinish_thread(
+    client: AsyncClient,
+    thread_id: str,
+    output: Any,
+    thread_id_to_run_id: ThreadIdToRunId,
+) -> FinishedThread:
+    """:func:`finish_thread` over the asynchronous client."""
     run_id = thread_id_to_run_id(thread_id)
     if not isinstance(run_id, str):
         run_id = await run_id
     driver = await client.open_client_run(run_id=run_id)
-    log = driver.log_envelopes
+    seq, resolved = _completion(driver.log_envelopes, thread_id, run_id, output)
+    appended = await driver.append(
+        [driver.envelope(seq, "RunCompleted", output=resolved)]
+    )
+    return _receipt(run_id, seq, appended)
 
+
+def _completion(
+    log: List[Event], thread_id: str, run_id: str, output: Any
+) -> Tuple[int, Any]:
+    """Where this run's ``RunCompleted`` goes and what it records, or the
+    refusal that says why the run cannot be closed at all.
+
+    Every rule :func:`finish_thread` carries is here, decided from the log
+    alone, so the two transports differ only in how they read it and write it.
+    """
     if not log:
         raise SalvorMiddlewareError(
             "thread `{thread}` (run {run}) has never been invoked, so there is "
@@ -104,10 +160,11 @@ async def finish_thread(
         )
 
     resolved = output if output is not None else _last_ai_message_content(log)
-    seq = tail.seq + 1
-    appended = await driver.append(
-        [driver.envelope(seq, "RunCompleted", output=resolved)]
-    )
+    return tail.seq + 1, resolved
+
+
+def _receipt(run_id: str, seq: int, appended: List[int]) -> FinishedThread:
+    """The receipt, preferring the seq the server reports over the one asked for."""
     return FinishedThread(run_id=run_id, seq=appended[0] if appended else seq)
 
 

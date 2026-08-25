@@ -400,15 +400,34 @@ Then add one middleware to the agent you already have:
 
 ```python
 from langchain.agents import create_agent
-from salvor import AsyncClient
+from salvor import Client
 from salvor.langchain import SalvorMiddleware
 
-salvor = AsyncClient("http://127.0.0.1:8080")
+salvor = Client("http://127.0.0.1:8080")
 
 agent = create_agent(
     model=model,
     tools=tools,
     middleware=[SalvorMiddleware(salvor)],
+)
+
+agent.invoke(
+    {"messages": [{"role": "user", "content": "how is ORD-7781?"}]},
+    {"configurable": {"thread_id": "order-7781"}},
+)
+```
+
+Both ways of driving an agent work, and the client says which one this agent is
+driven by. A `Client` records under `agent.invoke` and `agent.stream`; an
+`AsyncClient` records under `await agent.ainvoke` and `agent.astream`:
+
+```python
+from salvor import AsyncClient
+
+agent = create_agent(
+    model=model,
+    tools=tools,
+    middleware=[SalvorMiddleware(AsyncClient("http://127.0.0.1:8080"))],
 )
 
 await agent.ainvoke(
@@ -417,9 +436,13 @@ await agent.ainvoke(
 )
 ```
 
-The middleware records over an asynchronous client, so drive the agent with
-`ainvoke` and `astream`. A synchronous `agent.invoke` is refused by name rather
-than quietly recording nothing.
+The recording is the same recording either way: the same log positions, the same
+request hashes, the same derived keys, so a thread recorded under one client can
+be resumed under the other. Driving the agent the way the client does not
+support is refused by name, and the refusal says which client to pass, rather
+than quietly recording nothing. Under the synchronous client nothing here starts
+an event loop and nothing starts a thread of its own: the calls to the control
+plane are made on whichever thread LangChain is already running the agent on.
 
 ### What gets recorded
 
@@ -476,10 +499,17 @@ Parallel tool calls in one model turn are serialised rather than refused. A
 turnstile inside the middleware admits one open intent per run at a time, in the
 order the AI message listed the calls, so both are recorded and both replay at
 the same positions on a later invoke. The order comes from that message and not
-from which coroutine the event loop happens to start first: measured over five
-identical runs of a three-tool turn, LangChain reached the middleware in three
-different orders, so arrival order could not be allowed to decide where a call
-lands in the log.
+from arrival: measured over five identical runs of a three-tool turn under
+`ainvoke`, LangChain reached the middleware in three different orders, so
+arrival order could not be allowed to decide where a call lands in the log.
+Under `invoke` the turn's calls arrive on LangChain's thread pool instead, and
+the same rule admits them in the same order, so both drives record the same
+turn at the same positions.
+
+`current_tool_call()` reads back the key of the call in flight on either drive:
+it is a `ContextVar`, and LangChain carries the current context into the tasks
+and the worker threads it runs a turn's tools on, so a tool body reads its own
+call's key and never a neighbour's.
 
 ### The thread id is the run id
 
@@ -499,7 +529,11 @@ own, because a thread that looks done today may get one more turn tomorrow. Call
 `finish_thread(client, thread_id)` when the task really is over: it appends
 `RunCompleted`, defaulting the output to the content of the last recorded AI
 message, and a later invoke of that thread is refused by name. It refuses to
-close a run whose log ends at a call that was never completed; settle that first.
+close a run whose log ends at a call that was never completed; settle that
+first. It takes whichever client the middleware was given and answers the way
+that client answers everything else, so it is `finish_thread(client, thread)`
+under a `Client` and `await finish_thread(client, thread)` under an
+`AsyncClient`.
 
 ### What the operator declares
 

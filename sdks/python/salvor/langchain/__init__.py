@@ -10,19 +10,24 @@ recorded answers at the positions the first one wrote them and returns those
 instead.
 
     from langchain.agents import create_agent
-    from salvor import AsyncClient
+    from salvor import Client
     from salvor.langchain import SalvorMiddleware
 
     agent = create_agent(
         model=model,
         tools=tools,
-        middleware=[SalvorMiddleware(AsyncClient("http://127.0.0.1:8080"))],
+        middleware=[SalvorMiddleware(Client("http://127.0.0.1:8080"))],
     )
 
-    await agent.ainvoke(
+    agent.invoke(
         {"messages": [{"role": "user", "content": "how is ORD-7781?"}]},
         {"configurable": {"thread_id": "order-7781"}},
     )
+
+Give it an ``AsyncClient`` instead and the same agent is driven with
+``await agent.ainvoke(...)`` and ``agent.astream(...)``. The recording is the
+same recording either way: the same positions, the same request hashes, the same
+derived keys, so a thread recorded by one can be resumed by the other.
 
 What this is, and what it is not
 --------------------------------
@@ -59,11 +64,13 @@ Importing this module without it raises :class:`ImportError` naming that line.
 
 from __future__ import annotations
 
+from .async_run_tape import AsyncRunTape
 from .current_call import ToolCallContext, current_tool_call
 from .errors import SalvorMiddlewareError
 from .hash import canonical_json, hash_value, is_uuid, run_id_for_thread, sha256_hex
 from .request import canonical_request, request_hash
-from .tape import ModelOutcome, RunTape, ToolOutcome
+from .run_tape import RunTape
+from .tape import ModelOutcome, ToolOutcome, TurnPosition
 
 # LangChain itself is reached only from here down. These are the modules that
 # import it, so a checkout without the extra installed fails here and is told
@@ -81,6 +88,7 @@ except ImportError as missing:  # pragma: no cover - depends on what is installe
     ) from missing
 
 __all__ = [
+    "AsyncRunTape",
     "FinishedThread",
     "ModelOutcome",
     "ReplayChatModel",
@@ -89,6 +97,7 @@ __all__ = [
     "SalvorMiddlewareError",
     "ToolCallContext",
     "ToolOutcome",
+    "TurnPosition",
     "canonical_json",
     "canonical_request",
     "current_tool_call",

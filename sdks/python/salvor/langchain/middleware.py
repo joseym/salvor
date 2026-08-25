@@ -1,21 +1,34 @@
 """The middleware: one line added to an agent somebody already wrote.
 
-Everything else in this package exists to serve the four hooks below. They open
-the thread's run, hash the model request, record what the model and the tools
-did, and hand the recorded answers back on a re-invoke.
+Everything else in this package exists to serve the hooks below. They open the
+thread's run, hash the model request, record what the model and the tools did,
+and hand the recorded answers back on a re-invoke.
+
+There are two of each hook, because there are two ways to drive a LangChain
+agent. A middleware built over salvor's synchronous :class:`~salvor.Client`
+serves ``agent.invoke`` and ``agent.stream`` through ``before_agent``,
+``wrap_model_call``, ``wrap_tool_call`` and ``after_agent``; one built over
+:class:`~salvor.AsyncClient` serves ``agent.ainvoke`` and ``agent.astream``
+through the ``a``-prefixed four. The client decides which pair does the work,
+and driving the agent the other way is refused by name rather than quietly
+recording nothing.
 """
 
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Awaitable, Callable, Dict, Optional, Union
+import threading
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
 
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, ToolMessage
 
 from ..async_client import AsyncClient
+from ..client import Client
 from ..errors import SalvorAPIError
-from .current_call import ToolCallContext, run_with_tool_call
+from ..models import Event
+from .async_run_tape import AsyncRunTape
+from .current_call import ToolCallContext, arun_with_tool_call, run_with_tool_call
 from .errors import SalvorMiddlewareError
 from .hash import hash_value, run_id_for_thread
 from .messages import (
@@ -28,7 +41,8 @@ from .messages import (
 )
 from .replay_model import ReplayChatModel
 from .request import canonical_request, request_hash
-from .tape import OpenedCall, RunTape, TurnPosition
+from .run_tape import RunTape
+from .tape import ModelAnswer, ModelOutcome, OpenedCall, ToolOutcome, TurnPosition
 
 __all__ = ["SalvorMiddleware", "salvor_middleware"]
 
@@ -40,6 +54,7 @@ __all__ = ["SalvorMiddleware", "salvor_middleware"]
 AGENT_DEF = {"middleware": "@salvor-run/client/langchain"}
 
 ThreadIdToRunId = Callable[[str], Union[str, Awaitable[str]]]
+AnyClient = Union[Client, AsyncClient]
 
 
 class SalvorMiddleware(AgentMiddleware):
@@ -47,27 +62,33 @@ class SalvorMiddleware(AgentMiddleware):
     a salvor run, and replays them on a re-invoke of the same thread.
 
         from langchain.agents import create_agent
-        from salvor import AsyncClient
+        from salvor import Client
         from salvor.langchain import SalvorMiddleware
 
         agent = create_agent(
             model=model,
             tools=tools,
-            middleware=[SalvorMiddleware(AsyncClient("http://127.0.0.1:8080"))],
+            middleware=[SalvorMiddleware(Client("http://127.0.0.1:8080"))],
         )
 
-        await agent.ainvoke(
+        agent.invoke(
             {"messages": [{"role": "user", "content": "how is ORD-7781?"}]},
             {"configurable": {"thread_id": "order-7781"}},
         )
 
-    Asynchronous, deliberately. Every call this middleware makes to the control
-    plane is a request, and the hooks it sits in have an awaited form
-    (``awrap_model_call``, ``awrap_tool_call``), so the whole path is one
-    coroutine and no thread or nested event loop is involved anywhere. Drive
-    the agent with ``ainvoke`` and ``astream``; the synchronous hooks are
-    implemented only to refuse ``invoke`` by name, because a middleware that
-    quietly recorded nothing would be worse than one that says what it needs.
+    Pass :class:`~salvor.AsyncClient` instead and the same agent is driven with
+    ``await agent.ainvoke(...)`` and ``agent.astream(...)``. Whichever client is
+    given, the recording is the same recording: the same positions, the same
+    request hashes, the same derived keys, the same log. A run opened by one can
+    be resumed by the other.
+
+    The client is what decides, and it decides for the whole invocation. A
+    synchronous client under ``ainvoke``, or an asynchronous one under
+    ``invoke``, is refused with a sentence naming the client to pass, because a
+    middleware that recorded nothing would be worse than one that says what it
+    needs. Under the synchronous client nothing here starts an event loop and
+    nothing starts a thread: the calls to the control plane are made on
+    whichever thread LangChain is already running the agent on.
 
     ``wrap_tool_call`` exists only inside ``create_agent``. A hand-built
     ``StateGraph`` calling tools in its own node has no hook for the middleware
@@ -77,83 +98,267 @@ class SalvorMiddleware(AgentMiddleware):
 
     def __init__(
         self,
-        client: AsyncClient,
+        client: AnyClient,
         *,
         thread_id_to_run_id: Optional[ThreadIdToRunId] = None,
         record_prompts: bool = False,
     ) -> None:
         """
         Args:
-            client: The control plane every thread's run is opened against.
+            client: The control plane every thread's run is opened against, and
+                the choice of how the agent is driven. A
+                :class:`~salvor.Client` records under ``agent.invoke`` and
+                ``agent.stream``; an :class:`~salvor.AsyncClient` records under
+                ``agent.ainvoke`` and ``agent.astream``.
             thread_id_to_run_id: The run id for a LangGraph ``thread_id``. The
                 default is :func:`~salvor.langchain.run_id_for_thread`: a
                 thread id that is already a UUID is used as the run id
                 unchanged, anything else is hashed into one. Replace it when
                 your thread ids and your run ids are kept in a table
-                somewhere. May return the id or an awaitable of it.
+                somewhere. May return an awaitable of the id when the client is
+                an :class:`~salvor.AsyncClient`.
             record_prompts: Record each model request's body on its intent, so
                 an inspector can show the exact prompt. Off by default,
                 because the body carries user data. Replay never reads it: the
                 correlation key is the request hash alone.
         """
         super().__init__()
+        if not isinstance(client, (Client, AsyncClient)):
+            raise SalvorMiddlewareError(
+                "SalvorMiddleware records over a salvor client: pass "
+                "`Client(...)` to record under `agent.invoke`, or "
+                "`AsyncClient(...)` to record under `await agent.ainvoke`. It "
+                "was given a {kind}.".format(kind=type(client).__name__)
+            )
         self._client = client
+        #: True when the client is asynchronous, which is what decides whether
+        #: the awaited hooks or the blocking ones do the work.
+        self._awaited = isinstance(client, AsyncClient)
         self._to_run_id = thread_id_to_run_id or run_id_for_thread
         self._record_prompts = record_prompts
         #: One tape per live invocation, keyed by run id.
-        self._tapes = {}  # type: Dict[str, RunTape]
-        #: In-flight opens, so a turn's parallel tool calls share one open.
+        self._tapes = {}  # type: Dict[str, Any]
+        #: In-flight asynchronous opens, so a turn's parallel tool calls share
+        #: one open rather than racing each other for the lease.
         self._opening = {}  # type: Dict[str, asyncio.Task]
+        #: The same guarantee for the synchronous path, where a turn's parallel
+        #: tool calls arrive on a thread pool rather than on one event loop.
+        self._open_lock = threading.Lock()
 
     @property
     def name(self) -> str:
         return "SalvorMiddleware"
 
-    # -- the run --------------------------------------------------------------
+    # -- the synchronous hooks -------------------------------------------------
 
-    async def _identify(self, runtime: Any) -> Dict[str, str]:
-        """The thread this hook is running for, and the run id it maps to."""
-        thread_id = _thread_id(runtime)
-        if not isinstance(thread_id, str) or not thread_id:
-            raise SalvorMiddlewareError(
-                "SalvorMiddleware needs a thread id: invoke the agent with "
-                '`config={"configurable": {"thread_id": "..."}}`. The thread id '
-                "is the run id, so without one there is nothing for a later "
-                "invoke to resume."
+    def before_agent(self, state: Any, runtime: Any) -> None:
+        """Take up the thread's run for this invocation.
+
+        Opening here rather than lazily is what makes a second invoke start
+        from a clean cursor: even an invocation that failed halfway and never
+        reached ``after_agent`` leaves nothing behind that the next one would
+        inherit.
+        """
+        self._blocking_hook()
+        self._tapes.pop(self._identify(runtime)["run_id"], None)
+        self._tape_for(runtime)
+        return None
+
+    def after_agent(self, state: Any, runtime: Any) -> None:
+        """Let go of the run. The log is the durable part; the cursor is not."""
+        self._blocking_hook()
+        self._tapes.pop(self._identify(runtime)["run_id"], None)
+        return None
+
+    def wrap_model_call(self, request: Any, handler: Any) -> Any:
+        """Record the model call, or return the recorded answer.
+
+        The live call is LangChain's: the intent is opened with a hash of the
+        request, ``handler`` sends it with whatever provider and key the app
+        configured, and the answer is recorded. Salvor never sees the request
+        and never holds the key.
+        """
+        self._blocking_hook()
+        tape = self._tape_for(getattr(request, "runtime", None))
+        live = {}  # type: Dict[str, Any]
+
+        def perform() -> ModelAnswer:
+            response = handler(request)
+            live["response"] = response
+            return _answer_of(response, tape.run_id)
+
+        outcome = tape.model_call(
+            request_hash(request), canonical_request(request), perform
+        )
+        if not outcome.replayed and "response" in live:
+            return live["response"]
+        # The recorded answer goes back through LangChain's own handler, with a
+        # stand-in model in the provider's place, so a streaming caller sees the
+        # replayed turn arrive whole instead of seeing nothing at all. See
+        # `replay_model.py` for why that indirection is worth having.
+        return handler(_replaying(request, outcome, tape.run_id))
+
+    def wrap_tool_call(self, request: Any, handler: Any) -> Any:
+        """Record the tool call, or return the recorded result.
+
+        The intent goes in before the tool runs, which is the write-ahead rule:
+        a call that was asked for and never reported is visible in the log as
+        exactly that, rather than being indistinguishable from a call nobody
+        made. The turnstile inside the tape is what lets a model turn ask for
+        several tools at once: LangChain runs them on a thread pool, and they
+        are recorded one after another, in the order the model listed them,
+        with none of them refused.
+        """
+        self._blocking_hook()
+        tape = self._tape_for(getattr(request, "runtime", None))
+        name = request.tool_call["name"]
+        live = {}  # type: Dict[str, Any]
+
+        def perform(opened: OpenedCall) -> Any:
+            def body() -> Any:
+                live["message"] = _tool_message_of(handler(request), name)
+                return tool_output(live["message"])
+
+            return run_with_tool_call(_context(opened, tape.run_id, name), body)
+
+        try:
+            outcome = tape.tool_call(
+                name, _tool_args(request), perform, _turn_position(request)
             )
+        except SalvorAPIError as error:
+            undeclared = _undeclared_tool_error(error, name)
+            if undeclared is None:
+                raise
+            raise undeclared from error
+
+        if not outcome.replayed and "message" in live:
+            return live["message"]
+        return _replayed_tool_message(outcome, request, name, tape.run_id)
+
+    # -- the awaited hooks ------------------------------------------------------
+
+    async def abefore_agent(self, state: Any, runtime: Any) -> None:
+        """:meth:`before_agent`, awaited."""
+        self._awaited_hook()
+        identity = await self._aidentify(runtime)
+        self._tapes.pop(identity["run_id"], None)
+        await self._atape_for(runtime)
+        return None
+
+    async def aafter_agent(self, state: Any, runtime: Any) -> None:
+        """:meth:`after_agent`, awaited."""
+        self._awaited_hook()
+        identity = await self._aidentify(runtime)
+        self._tapes.pop(identity["run_id"], None)
+        return None
+
+    async def awrap_model_call(self, request: Any, handler: Any) -> Any:
+        """:meth:`wrap_model_call`, awaited."""
+        self._awaited_hook()
+        tape = await self._atape_for(getattr(request, "runtime", None))
+        live = {}  # type: Dict[str, Any]
+
+        async def perform() -> ModelAnswer:
+            response = await handler(request)
+            live["response"] = response
+            return _answer_of(response, tape.run_id)
+
+        outcome = await tape.model_call(
+            request_hash(request), canonical_request(request), perform
+        )
+        if not outcome.replayed and "response" in live:
+            return live["response"]
+        return await handler(_replaying(request, outcome, tape.run_id))
+
+    async def awrap_tool_call(self, request: Any, handler: Any) -> Any:
+        """:meth:`wrap_tool_call`, awaited. The turn's calls arrive as tasks on
+        one event loop here rather than on a thread pool, and are admitted in
+        the same order either way."""
+        self._awaited_hook()
+        tape = await self._atape_for(getattr(request, "runtime", None))
+        name = request.tool_call["name"]
+        live = {}  # type: Dict[str, Any]
+
+        async def perform(opened: OpenedCall) -> Any:
+            async def body() -> Any:
+                live["message"] = _tool_message_of(await handler(request), name)
+                return tool_output(live["message"])
+
+            return await arun_with_tool_call(_context(opened, tape.run_id, name), body)
+
+        try:
+            outcome = await tape.tool_call(
+                name, _tool_args(request), perform, _turn_position(request)
+            )
+        except SalvorAPIError as error:
+            undeclared = _undeclared_tool_error(error, name)
+            if undeclared is None:
+                raise
+            raise undeclared from error
+
+        if not outcome.replayed and "message" in live:
+            return live["message"]
+        return _replayed_tool_message(outcome, request, name, tape.run_id)
+
+    # -- the run, blocking -------------------------------------------------------
+
+    def _identify(self, runtime: Any) -> Dict[str, str]:
+        """The thread this hook is running for, and the run id it maps to."""
+        thread_id = _required_thread_id(runtime)
+        run_id = self._to_run_id(thread_id)
+        if not isinstance(run_id, str):
+            raise SalvorMiddlewareError(
+                "`thread_id_to_run_id` returned something to await, and this "
+                "middleware was given salvor's synchronous `Client`, which has "
+                "nothing to await it with. Return the run id itself, or pass an "
+                "`AsyncClient` and drive the agent with `ainvoke`."
+            )
+        return {"thread_id": thread_id, "run_id": run_id}
+
+    def _tape_for(self, runtime: Any) -> RunTape:
+        """This invocation's tape, opening the run once however many hooks ask.
+
+        A model turn's parallel tool calls reach this from several pool threads
+        at the same moment, so the lease is opened under a lock and the rest of
+        them find the tape already there.
+        """
+        identity = self._identify(runtime)
+        run_id = identity["run_id"]
+        with self._open_lock:
+            existing = self._tapes.get(run_id)
+            if existing is not None:
+                return existing
+            driver = self._client.open_client_run(
+                run_id=run_id, record_prompts=self._record_prompts
+            )
+            _refuse_a_finished_run(
+                driver.log_envelopes, identity["thread_id"], run_id
+            )
+            tape = RunTape.open(
+                driver, _started(identity["thread_id"]), self._record_prompts
+            )
+            self._tapes[run_id] = tape
+            return tape
+
+    # -- the run, awaited ---------------------------------------------------------
+
+    async def _aidentify(self, runtime: Any) -> Dict[str, str]:
+        """:meth:`_identify`, awaiting a mapping that answers with an awaitable."""
+        thread_id = _required_thread_id(runtime)
         run_id = self._to_run_id(thread_id)
         if not isinstance(run_id, str):
             run_id = await run_id
         return {"thread_id": thread_id, "run_id": run_id}
 
-    async def _open_tape(self, run_id: str, thread_id: str) -> RunTape:
-        driver = await self._client.open_client_run(
-            run_id=run_id, record_prompts=self._record_prompts
-        )
-        log = driver.log_envelopes
-        if log and log[-1].kind == "RunCompleted":
-            raise SalvorMiddlewareError(
-                "thread `{thread}` (run {run}) is finished: `finish_thread` "
-                "recorded its `RunCompleted`, and a completed run cannot be "
-                "appended to. Give the next task a new thread id.".format(
-                    thread=thread_id, run=run_id
-                )
-            )
-        return await RunTape.open(
-            driver,
-            {"agent_def_hash": hash_value(AGENT_DEF), "input": {"thread_id": thread_id}},
-            self._record_prompts,
-        )
-
-    async def _tape_for(self, runtime: Any) -> RunTape:
-        """This invocation's tape, opening the run once however many hooks ask.
+    async def _atape_for(self, runtime: Any) -> AsyncRunTape:
+        """:meth:`_tape_for`, awaited.
 
         A model turn's parallel tool calls all reach this at the same moment,
         so the first one to arrive parks its open in ``_opening`` and the rest
         await that same task rather than opening the run again and racing each
         other for the lease.
         """
-        identity = await self._identify(runtime)
+        identity = await self._aidentify(runtime)
         run_id = identity["run_id"]
         existing = self._tapes.get(run_id)
         if existing is not None:
@@ -162,7 +367,7 @@ class SalvorMiddleware(AgentMiddleware):
         if in_flight is not None:
             return await in_flight
         started = asyncio.ensure_future(
-            self._open_tape(run_id, identity["thread_id"])
+            self._aopen_tape(run_id, identity["thread_id"])
         )
         self._opening[run_id] = started
         try:
@@ -172,133 +377,42 @@ class SalvorMiddleware(AgentMiddleware):
         self._tapes[run_id] = tape
         return tape
 
-    # -- the hooks ------------------------------------------------------------
-
-    async def abefore_agent(self, state: Any, runtime: Any) -> None:
-        """Take up the thread's run for this invocation.
-
-        Opening here rather than lazily is what makes a second invoke start
-        from a clean cursor: even an invocation that failed halfway and never
-        reached ``after_agent`` leaves nothing behind that the next one would
-        inherit.
-        """
-        identity = await self._identify(runtime)
-        self._tapes.pop(identity["run_id"], None)
-        await self._tape_for(runtime)
-        return None
-
-    async def aafter_agent(self, state: Any, runtime: Any) -> None:
-        """Let go of the run. The log is the durable part; the cursor is not."""
-        identity = await self._identify(runtime)
-        self._tapes.pop(identity["run_id"], None)
-        return None
-
-    async def awrap_model_call(self, request: Any, handler: Any) -> Any:
-        """Record the model call, or return the recorded answer.
-
-        The live call is LangChain's: the intent is opened with a hash of the
-        request, ``handler`` sends it with whatever provider and key the app
-        configured, and the answer is recorded. Salvor never sees the request
-        and never holds the key.
-        """
-        tape = await self._tape_for(getattr(request, "runtime", None))
-        wanted = request_hash(request)
-        live = {}  # type: Dict[str, Any]
-
-        async def perform():
-            response = await handler(request)
-            answer = _ai_message_of(response, tape.run_id)
-            live["response"] = response
-            return stored_form(answer), usage_of(answer)
-
-        outcome = await tape.model_call(wanted, canonical_request(request), perform)
-        if not outcome.replayed and "response" in live:
-            return live["response"]
-        # The recorded answer goes back through LangChain's own handler, with a
-        # stand-in model in the provider's place, so a streaming caller sees the
-        # replayed turn arrive whole instead of seeing nothing at all. See
-        # `replay_model.py` for why that indirection is worth having.
-        recorded = mark(
-            stored_ai_message(outcome.response, tape.run_id), outcome.seq, tape.run_id
+    async def _aopen_tape(self, run_id: str, thread_id: str) -> AsyncRunTape:
+        driver = await self._client.open_client_run(
+            run_id=run_id, record_prompts=self._record_prompts
         )
-        return await handler(request.override(model=ReplayChatModel(recorded)))
+        _refuse_a_finished_run(driver.log_envelopes, thread_id, run_id)
+        return await AsyncRunTape.open(
+            driver, _started(thread_id), self._record_prompts
+        )
 
-    async def awrap_tool_call(self, request: Any, handler: Any) -> Any:
-        """Record the tool call, or return the recorded result.
+    # -- which way this agent is being driven --------------------------------------
 
-        The intent goes in before the tool runs, which is the write-ahead rule:
-        a call that was asked for and never reported is visible in the log as
-        exactly that, rather than being indistinguishable from a call nobody
-        made. The turnstile inside the tape is what lets a model turn ask for
-        several tools at once: they are recorded one after another, in the
-        order the model listed them, and none of them is refused.
-        """
-        tape = await self._tape_for(getattr(request, "runtime", None))
-        name = request.tool_call["name"]
-        args = request.tool_call.get("args") or {}
-        live = {}  # type: Dict[str, Any]
-
-        async def perform(opened: OpenedCall) -> Any:
-            context = ToolCallContext(
-                key=opened.idempotency_key,
-                seq=opened.seq,
-                run_id=tape.run_id,
-                tool=name,
+    def _blocking_hook(self) -> None:
+        """Refuse a synchronous drive of an asynchronous client."""
+        if self._awaited:
+            raise SalvorMiddlewareError(
+                "SalvorMiddleware was given salvor's asynchronous "
+                "`AsyncClient`, so this agent has to be driven asynchronously: "
+                "`await agent.ainvoke(...)` or `agent.astream(...)` rather than "
+                "`agent.invoke(...)`. To drive it synchronously, give the "
+                "middleware salvor's synchronous `Client(...)` instead."
             )
 
-            async def body() -> Any:
-                result = await handler(request)
-                if not isinstance(result, ToolMessage):
-                    raise SalvorMiddlewareError(
-                        "the tool `{tool}` returned a LangGraph Command rather "
-                        "than a tool message. A Command is graph control flow, "
-                        "not a recorded result, so this middleware cannot put "
-                        "it in the log. Return a value or a ToolMessage from "
-                        "tools you want recorded.".format(tool=name)
-                    )
-                live["message"] = result
-                return tool_output(result)
-
-            return await run_with_tool_call(context, body)
-
-        try:
-            outcome = await tape.tool_call(name, args, perform, _turn_position(request))
-        except SalvorAPIError as error:
-            undeclared = _undeclared_tool_error(error, name)
-            if undeclared is None:
-                raise
-            raise undeclared from error
-
-        if not outcome.replayed and "message" in live:
-            return live["message"]
-        content = outcome.output
-        return mark(
-            ToolMessage(
-                content=as_tool_content(content),
-                tool_call_id=request.tool_call.get("id") or "",
-                name=name,
-                # A recorded completion is, by construction, a call that
-                # reported a result: salvor refuses to record one any other way.
-                status="success",
-            ),
-            outcome.seq,
-            tape.run_id,
-        )
-
-    # -- the synchronous hooks -------------------------------------------------
-
-    def before_agent(self, state: Any, runtime: Any) -> None:
-        raise _needs_async()
-
-    def wrap_model_call(self, request: Any, handler: Any) -> Any:
-        raise _needs_async()
-
-    def wrap_tool_call(self, request: Any, handler: Any) -> Any:
-        raise _needs_async()
+    def _awaited_hook(self) -> None:
+        """Refuse an asynchronous drive of a synchronous client."""
+        if not self._awaited:
+            raise SalvorMiddlewareError(
+                "SalvorMiddleware was given salvor's synchronous `Client`, so "
+                "this agent has to be driven synchronously: `agent.invoke(...)` "
+                "or `agent.stream(...)` rather than `await "
+                "agent.ainvoke(...)`. To drive it asynchronously, give the "
+                "middleware salvor's asynchronous `AsyncClient(...)` instead."
+            )
 
 
 def salvor_middleware(
-    client: AsyncClient,
+    client: AnyClient,
     *,
     thread_id_to_run_id: Optional[ThreadIdToRunId] = None,
     record_prompts: bool = False,
@@ -306,7 +420,8 @@ def salvor_middleware(
     """Build a :class:`SalvorMiddleware`.
 
     The function form, for an app that reads better with one; it takes the same
-    arguments and means the same thing by each of them.
+    arguments and means the same thing by each of them, ``Client`` for an agent
+    driven with ``invoke`` and ``AsyncClient`` for one driven with ``ainvoke``.
     """
     return SalvorMiddleware(
         client,
@@ -318,13 +433,38 @@ def salvor_middleware(
 # -- helpers -------------------------------------------------------------------
 
 
-def _needs_async() -> SalvorMiddlewareError:
-    return SalvorMiddlewareError(
-        "SalvorMiddleware records over an asynchronous salvor client, so the "
-        "agent has to be driven asynchronously: use `await agent.ainvoke(...)` "
-        "or `agent.astream(...)` rather than `agent.invoke(...)`. Salvor's "
-        "synchronous `Client` is unaffected; it is this adapter that is async."
-    )
+def _started(thread_id: str) -> Dict[str, Any]:
+    """What a fresh run's ``RunStarted`` records."""
+    return {
+        "agent_def_hash": hash_value(AGENT_DEF),
+        "input": {"thread_id": thread_id},
+    }
+
+
+def _refuse_a_finished_run(log: List[Event], thread_id: str, run_id: str) -> None:
+    """Refuse an invoke of a thread somebody has already finished, before
+    anything tries to append to a closed run."""
+    if log and log[-1].kind == "RunCompleted":
+        raise SalvorMiddlewareError(
+            "thread `{thread}` (run {run}) is finished: `finish_thread` "
+            "recorded its `RunCompleted`, and a completed run cannot be "
+            "appended to. Give the next task a new thread id.".format(
+                thread=thread_id, run=run_id
+            )
+        )
+
+
+def _required_thread_id(runtime: Any) -> str:
+    """The LangGraph thread id this hook is running for, refused when absent."""
+    thread_id = _thread_id(runtime)
+    if not isinstance(thread_id, str) or not thread_id:
+        raise SalvorMiddlewareError(
+            "SalvorMiddleware needs a thread id: invoke the agent with "
+            '`config={"configurable": {"thread_id": "..."}}`. The thread id '
+            "is the run id, so without one there is nothing for a later "
+            "invoke to resume."
+        )
+    return thread_id
 
 
 def _thread_id(runtime: Any) -> Optional[str]:
@@ -351,13 +491,26 @@ def _thread_id(runtime: Any) -> Optional[str]:
     return thread_id if isinstance(thread_id, str) else None
 
 
+def _tool_args(request: Any) -> Dict[str, Any]:
+    """The arguments the model produced for this call."""
+    return request.tool_call.get("args") or {}
+
+
+def _context(opened: OpenedCall, run_id: str, tool: str) -> ToolCallContext:
+    """What the tool body about to run will read from ``current_tool_call()``."""
+    return ToolCallContext(
+        key=opened.idempotency_key, seq=opened.seq, run_id=run_id, tool=tool
+    )
+
+
 def _turn_position(request: Any) -> Optional[TurnPosition]:
     """Where this tool call sits in the model turn that asked for it.
 
     Read from the state rather than from arrival order, because arrival order
-    is not the model's order in Python (see :meth:`RunTape._await_turn`). The
-    AI message that listed this call is found by its call id, and the rank is
-    the call's index in that message's ``tool_calls``.
+    is not the model's order in Python (see
+    :meth:`salvor.langchain.tape.Tape.admitted`). The AI message that listed
+    this call is found by its call id, and the rank is the call's index in that
+    message's ``tool_calls``.
 
     ``None`` when the position cannot be read: a call with no id, a state this
     middleware cannot walk, or an id no recorded turn claims. The tape then
@@ -390,14 +543,57 @@ def _messages_of(state: Any) -> list:
     return list(messages) if messages else []
 
 
+def _answer_of(response: Any, run: str) -> ModelAnswer:
+    """What a live model call reports back to the tape: the stored form of the
+    AI message it produced, and the token counts it cost."""
+    answer = _ai_message_of(response, run)
+    return stored_form(answer), usage_of(answer)
+
+
+def _replaying(request: Any, outcome: ModelOutcome, run: str) -> Any:
+    """The same model request with the recorded answer in the provider's place."""
+    recorded = mark(stored_ai_message(outcome.response, run), outcome.seq, run)
+    return request.override(model=ReplayChatModel(recorded))
+
+
+def _tool_message_of(result: Any, tool: str) -> ToolMessage:
+    """The tool message a handler returned, refusing graph control flow."""
+    if not isinstance(result, ToolMessage):
+        raise SalvorMiddlewareError(
+            "the tool `{tool}` returned a LangGraph Command rather than a tool "
+            "message. A Command is graph control flow, not a recorded result, "
+            "so this middleware cannot put it in the log. Return a value or a "
+            "ToolMessage from tools you want recorded.".format(tool=tool)
+        )
+    return result
+
+
+def _replayed_tool_message(
+    outcome: ToolOutcome, request: Any, tool: str, run: str
+) -> ToolMessage:
+    """The recorded result of a tool call, as the message LangGraph expects."""
+    return mark(
+        ToolMessage(
+            content=as_tool_content(outcome.output),
+            tool_call_id=request.tool_call.get("id") or "",
+            name=tool,
+            # A recorded completion is, by construction, a call that reported a
+            # result: salvor refuses to record one any other way.
+            status="success",
+        ),
+        outcome.seq,
+        run,
+    )
+
+
 def _ai_message_of(response: Any, run: str) -> AIMessage:
     """The AI message a model call produced, from whichever shape the handler
     returned it in.
 
-    LangChain's async handler answers with a ``ModelResponse`` whose ``result``
-    is usually one ``AIMessage`` and occasionally that message plus a tool
-    message carrying structured output. The answer this middleware records is
-    the AI message: that is what a later invoke has to hand back.
+    LangChain's handler answers with a ``ModelResponse`` whose ``result`` is
+    usually one ``AIMessage`` and occasionally that message plus a tool message
+    carrying structured output. The answer this middleware records is the AI
+    message: that is what a later invoke has to hand back.
     """
     if isinstance(response, AIMessage):
         return response
