@@ -55,6 +55,7 @@ import tempfile
 import threading
 import time
 import unittest
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -84,7 +85,7 @@ except ImportError:  # pragma: no cover - depends on what is installed
         "(pip install -e 'sdks/python[langchain]')"
     ) from None
 
-from salvor import AsyncClient, Client
+from salvor import AsyncClient, Client, SalvorAPIError
 from salvor.langchain import (
     SalvorMiddleware,
     SalvorMiddlewareError,
@@ -1290,26 +1291,25 @@ class MiddlewareScenarios:
 
     # -- (m) the server this run was opened on restarts mid-invoke ------------
 
-    def test_a_server_restart_mid_invoke_stops_and_says_the_lease_is_gone(
+    def test_a_server_restart_mid_invoke_is_survived_by_the_reopen_once_path(
         self,
     ) -> None:
-        """A restarted salvor does not hand a run back, and the middleware says
-        so rather than retrying into the same refusal.
+        """A restarted salvor hands a client-driven run back, and the invoke
+        that was mid-flight when it restarted carries straight through.
 
-        A server holds its client-driven leases in memory. The log is on disk
-        and reads back, but the lease does not survive the process, so a
-        restarted salvor does not recognise a run it opened before and refuses
-        to adopt one that already has recorded history (`run_exists`). Taking
-        the run up again is the right move when another driver took the lease,
-        and this is what happens when there is nothing to take it up from: the
-        invoke stops, naming the thread and the run, with the log intact behind
-        it and the tool having run exactly once.
-
-        Carrying on across a restart is not the client's to fix. It needs a
-        salvor that adopts a client-driven run it finds in its own store.
+        A server holds its client-driven leases in memory, but the log is on
+        disk, and `RunStarted` carries `driven_by: client`, stamped once by the
+        server and read back on every open. A restarted salvor no longer holds
+        the lease, but it still reads its own store, recognises the run as
+        client-driven from that marker, and hands it back with a fresh lease
+        and the recorded log. That is exactly what the tape's re-open-once path
+        (`_guarded`) already does for a lease another driver took, so a restart
+        mid-invoke costs this invoke nothing beyond the one retried write: the
+        tool runs exactly once, its intent and completion are each recorded
+        exactly once, and the invoke finishes with the answer it would have
+        given without the restart at all.
         """
         thread_id = "thread-server-restart"
-        run_id = run_id_for_thread(thread_id)
         port = free_port()
         base = "http://127.0.0.1:{port}".format(port=port)
         workspace = tempfile.mkdtemp(prefix="salvor-py-")
@@ -1331,20 +1331,92 @@ class MiddlewareScenarios:
             try:
                 meddling["do"] = restart_the_server
                 agent, _ = self.agent_for(ONE_TOOL_SCRIPT, own)
-                with self.assertRaises(SalvorMiddlewareError) as caught:
-                    await self.invoke(agent, ASK, self.thread(thread_id))
-                text = str(caught.exception)
-                self.assertIn(thread_id, text, "the error names the thread")
-                self.assertIn(run_id, text, "and the run")
-                self.assertIn(
-                    "could not be taken up again",
-                    text,
-                    "and that the run itself is what could not be recovered",
+                answer = await self.invoke(agent, ASK, self.thread(thread_id))
+                self.assertEqual(
+                    self.text_of(answer["messages"][-1]),
+                    "Order ORD-7781 is paid, 4200 cents.",
+                    "the invoke completed across the restart",
                 )
-                self.assertEqual(ran["lookup"], 1, "the tool ran once and not again")
+                self.assertEqual(ran["lookup"], 1, "the tool body ran exactly once")
+                kinds = await self.kinds_of(own, thread_id)
+                self.assertEqual(
+                    kinds,
+                    [
+                        "RunStarted",
+                        "ModelCallRequested",
+                        "ModelCallCompleted",
+                        "ToolCallRequested",
+                        "ToolCallCompleted",
+                        "ModelCallRequested",
+                        "ModelCallCompleted",
+                    ],
+                    "one intent and one completion for the call the restart landed inside",
+                )
+                self.assertEqual(kinds.count("ToolCallRequested"), 1)
+                self.assertEqual(kinds.count("ToolCallCompleted"), 1)
+
+                # A further invoke of the same thread replays entirely: the
+                # restart is behind it, and nothing about it is paid for twice.
+                reset()
+                again_agent, again_model = self.agent_for(ONE_TOOL_SCRIPT, own)
+                again = await self.invoke(again_agent, ASK, self.thread(thread_id))
+                self.assertEqual(again_model.calls["count"], 0, "zero model calls on replay")
+                self.assertEqual(ran["lookup"], 0, "zero tool executions on replay")
+                self.assertEqual(
+                    self.text_of(again["messages"][-1]),
+                    "Order ORD-7781 is paid, 4200 cents.",
+                    "the same final message",
+                )
             finally:
                 meddling["do"] = None
                 await call(own.close)
+
+        self.drive(body)
+
+    # -- (n) a run id that belongs to salvor's other mode ----------------------
+
+    def test_a_server_driven_run_ids_open_is_refused_naming_the_thread_and_the_reason(
+        self,
+    ) -> None:
+        """A run started in salvor's other mode does not become client-driven
+        just because a thread's id happens to map to it.
+
+        `open_client_run` recognises a client-driven run two ways: this
+        process's own lease registry, or `driven_by: client` on the recorded
+        `RunStarted`, which is the marker that lets the restart above be
+        survived. A run this test starts with `start_run` carries neither, so
+        the very first open the middleware makes for a thread mapped to its id
+        is refused (`run_exists`), before any model call or tool call happens.
+        This is the refusal `cannot_reopen` exists to give a name to when it
+        turns up on a re-open mid-invoke instead of on the first one; nothing
+        else in this suite still reaches a salvor that refuses to hand a run
+        back at all, now that a restart does not. A UUID thread id is used
+        unchanged as the run id (`run_id_for_thread`), so the refusal, which
+        can only name the run, names the thread too.
+        """
+
+        async def body(client: Any) -> None:
+            agent_hash = await call(
+                client.register_agent,
+                {"model": "vector-model", "system_prompt": "a plain assistant"},
+            )
+            thread_id = str(uuid.uuid4())
+            await call(client.start_run, agent_hash, {"q": "hi"}, run_id=thread_id)
+
+            agent, model = self.agent_for(ONE_TOOL_SCRIPT, client)
+            with self.assertRaises(SalvorAPIError) as caught:
+                await self.invoke(agent, ASK, self.thread(thread_id))
+            text = str(caught.exception)
+            self.assertIn(
+                thread_id, text, "the error names the thread (its run id, unchanged)"
+            )
+            self.assertIn(
+                "server-driven run",
+                text,
+                "and the reason: it belongs to salvor's other mode",
+            )
+            self.assertEqual(model.calls["count"], 0, "refused before any model call")
+            self.assertEqual(ran["lookup"], 0, "refused before any tool call")
 
         self.drive(body)
 
