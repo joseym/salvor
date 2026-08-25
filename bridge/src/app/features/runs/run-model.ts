@@ -347,21 +347,19 @@ export function overdueSince(wakeAt: string | undefined, now: number = Date.now(
 
 /**
  * Overdue-ness for a sleeping run's typed {@link RunStatus}. The server now folds `overdue` and
- * `overdue_seconds` onto a `sleeping` status itself once ITS OWN clock passes `wake_at` (see the
+ * `overdueSeconds` onto a `sleeping` status itself once ITS OWN clock passes `wake_at` (see the
  * `sleeping` row of `crates/salvor-server/API.md`), and when that's present it wins outright: it
  * is the server's clock reporting on its own deadline, not this browser's guess at the same
- * question, so it cannot be second-guessed by a client-side recomputation. The typed
- * {@link RunStatus} doesn't surface the two fields as named properties (only `wakeAt` is;
- * {@link waitingOnOf} reads off `raw` for the same shape of gap), so they're read off `raw`, the
- * SDK's escape hatch for anything not yet promoted to a field of its own. Falls back to
- * {@link overdueSince} against `wakeAt` for an older server that predates the field.
+ * question, so it cannot be second-guessed by a client-side recomputation. The SDK now promotes
+ * both to named fields on {@link RunStatus} itself (see `sdks/typescript/src/types.ts`), so they
+ * are read straight off `status`, the same as `wakeAt` always was. Falls back to
+ * {@link overdueSince} against `wakeAt` for an older server that predates the fields (the two
+ * typed keys are absent together, never one without the other; see the field's own doc comment).
  */
 export function overdueOf(status: RunStatus, now: number = Date.now()): Overdue {
   if (status.state !== 'sleeping') return NOT_OVERDUE;
-  const raw = status.raw;
-  if (raw && typeof raw['overdue'] === 'boolean') {
-    const seconds = raw['overdue_seconds'];
-    return { overdue: raw['overdue'], overdueSeconds: typeof seconds === 'number' ? seconds : undefined };
+  if (typeof status.overdue === 'boolean') {
+    return { overdue: status.overdue, overdueSeconds: status.overdueSeconds };
   }
   return overdueSince(status.wakeAt, now);
 }

@@ -425,6 +425,64 @@ async fn submit_rejects_a_branch_edge_labeled_with_no_matching_case() {
     );
 }
 
+/// An outbound edge from a branch that carries no label at all is refused
+/// with `400 invalid_graph`, naming both the branch node and the edge's
+/// target: it can never fire either, by the same engine rule as a
+/// mismatched label, so it gets the same submit-time treatment.
+#[tokio::test]
+async fn submit_rejects_a_branch_edge_with_no_label() {
+    let server = TestServer::spawn(graph_state(
+        agent_factory(
+            String::new(),
+            "unused",
+            Effect::Read,
+            common::CountBehavior::Record,
+            counter(),
+        ),
+        ToolRegistry::new(),
+    ))
+    .await;
+    let client = reqwest::Client::new();
+    let document = json!({
+        "schema_version": 1,
+        "nodes": [
+            { "kind": "tool", "payload": { "id": "assess", "tool": "assess" } },
+            { "kind": "branch", "payload": { "id": "route", "on": "assess.outcome", "cases": [
+                { "name": "paid", "when": { "kind": "expression", "value": "outcome == \"paid\"" } },
+                { "name": "lost", "when": { "kind": "expression", "value": "outcome == \"lost\"" } }
+              ] } },
+            { "kind": "tool", "payload": { "id": "celebrate", "tool": "notify" } },
+            { "kind": "tool", "payload": { "id": "close", "tool": "notify" } }
+        ],
+        "edges": [
+            { "from": "assess", "to": "route" },
+            { "from": "route", "to": "celebrate", "label": "paid" },
+            { "from": "route", "to": "close" }
+        ]
+    });
+
+    let (status, body) = post_json(
+        &client,
+        &format!("{}/v1/graphs", server.base),
+        document,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_graph");
+    let errors = body["error"]["details"]["errors"]
+        .as_array()
+        .expect("error list");
+    assert!(
+        errors
+            .iter()
+            .any(|e| e["code"] == "branch_edge_without_label"
+                && e["node"] == "route"
+                && e["to"] == "close"),
+        "the unlabelled edge is named node/target-precise: {errors:?}"
+    );
+}
+
 /// A document with a dangling edge is refused with `400 invalid_graph` carrying
 /// the complete, node/edge-precise error list.
 #[tokio::test]

@@ -219,4 +219,34 @@ describe('Runs: agent column + grouping', () => {
     fixture.detectChanges();
     expect(runs.visible().map((r) => r.id)).toEqual(['r1']);
   });
+
+  it('an overdue sleeping row takes the same attention paint a stalled row does, but one still short of its deadline does not', async () => {
+    vi.stubGlobal(
+      'fetch',
+      routeFetch({
+        '/v1/runs': {
+          runs: [
+            { run: 'overdue1', status: { state: 'sleeping', wake_at: '2020-01-01T00:00:00Z' }, event_count: 1 },
+            { run: 'notdue1', status: { state: 'sleeping', wake_at: '2099-01-01T00:00:00Z' }, event_count: 1 },
+          ],
+        },
+      }),
+    );
+    TestBed.overrideProvider(SALVOR_CLIENT, { useValue: new SalvorClient('http://test.local') });
+    const fixture = await mount();
+    const el = fixture.nativeElement as HTMLElement;
+    const runs = fixture.componentInstance;
+    runs.setGroupMode('flat'); // both rows sit in one progress group; flat mode skips the header
+    fixture.detectChanges();
+
+    const overdueRow = el.querySelector('tr[data-id="overdue1"]')!;
+    expect(overdueRow.classList.contains('attention')).toBe(true);
+    // the group classification does not move: it is still a progress-group sleeper, not waiting
+    expect(overdueRow.classList.contains('g-progress')).toBe(true);
+    expect(overdueRow.querySelector('.overdue-note')).toBeTruthy();
+
+    const notDueRow = el.querySelector('tr[data-id="notdue1"]')!;
+    expect(notDueRow.classList.contains('attention')).toBe(false);
+    expect(notDueRow.querySelector('.overdue-note')).toBeNull();
+  });
 });

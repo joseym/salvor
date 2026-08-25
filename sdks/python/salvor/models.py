@@ -91,6 +91,27 @@ class RunStatus:
         """
         return self.raw.get("wake_at")
 
+    @property
+    def overdue(self) -> bool:
+        """Whether a sleeping run's deadline has passed, or ``False``.
+
+        The server computes this against its own clock rather than the client
+        deriving it from ``wake_at``, and sends the key only once it is true;
+        every other case, including a sleeping run not yet due, folds to
+        ``False`` here rather than leaving the caller to check for ``None``.
+        """
+        return bool(self.raw.get("overdue", False))
+
+    @property
+    def overdue_seconds(self) -> Optional[int]:
+        """Whole seconds since ``wake_at``, or ``None`` before the deadline.
+
+        Present alongside ``overdue`` and absent alongside its absence: the
+        server sends the two keys together or not at all.
+        """
+        value = self.raw.get("overdue_seconds")
+        return int(value) if value is not None else None
+
 
 @dataclass
 class PendingCall:

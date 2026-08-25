@@ -171,3 +171,43 @@ test("listRuns decodes labels when the server sends them, and leaves it undefine
     s.server.close();
   }
 });
+
+test("listRuns decodes overdue and overdueSeconds when the server sends them, and leaves both undefined otherwise", async () => {
+  const s = stub({
+    "/v1/runs": () => ({
+      status: 200,
+      body: {
+        runs: [
+          {
+            run: "overdue",
+            status: {
+              state: "sleeping",
+              wake_at: "2026-07-11T13:00:00Z",
+              overdue: true,
+              overdue_seconds: 90,
+            },
+            event_count: 2,
+          },
+          {
+            run: "not-due-yet",
+            status: { state: "sleeping", wake_at: "2026-07-11T13:00:00Z" },
+            event_count: 2,
+          },
+        ],
+      },
+    }),
+  });
+  const base = await s.ready;
+  try {
+    const client = new SalvorClient(base);
+    const runs = await client.listRuns();
+    const overdue = runs.find((r) => r.run === "overdue")!;
+    const notDueYet = runs.find((r) => r.run === "not-due-yet")!;
+    strictEqual(overdue.status.overdue, true);
+    strictEqual(overdue.status.overdueSeconds, 90);
+    strictEqual(notDueYet.status.overdue, undefined);
+    strictEqual(notDueYet.status.overdueSeconds, undefined);
+  } finally {
+    s.server.close();
+  }
+});

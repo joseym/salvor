@@ -272,10 +272,25 @@ export function validateGraph(g: WfGraph): WfError[] {
     const src = g.nodes.find((n) => n.id === e.from);
     if (src && src.kind === 'branch') {
       if (!e.label) {
+        // Aligned to the server's own rule
+        // (`salvor_graph::validate::BranchEdgeWithoutLabel`): the engine only
+        // ever takes a branch's edge by matching the fired case's name against
+        // the label, and a fired case's name is always set, so an edge with no
+        // label at all can never match it either, exactly like one labeled
+        // with a name no case declares. The same one-click reasoning applies:
+        // when exactly one of the branch's declared cases has no edge
+        // realizing it, that is the unambiguous case to label this edge with.
+        const casesWithNoEdge = (src.cases ?? []).filter(
+          (c) => !g.edges.some((other) => other.from === src.id && other.label === c),
+        );
+        const target = casesWithNoEdge.length === 1 ? casesWithNoEdge[0] : undefined;
         errs.push({
           code: 'edge_type',
           edge: i,
           msg: `An edge out of the branch ${src.id} carries no case. Every branch edge names the case it realizes.`,
+          ...(target
+            ? { fix: { label: `Label it "${target}"`, kind: 'relabel_case', edge: i, case: target } }
+            : {}),
         });
       } else if (!(src.cases ?? []).includes(e.label)) {
         // Aligned to the server's own rule (`salvor_graph::validate::BranchEdgeWithoutCase`), the

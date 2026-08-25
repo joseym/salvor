@@ -943,6 +943,9 @@ fn graph_error_json(error: &GraphError) -> Value {
         GraphError::BranchEdgeWithoutCase { node, label } => json!({
             "code": "branch_edge_without_case", "message": message, "node": node, "label": label,
         }),
+        GraphError::BranchEdgeWithoutLabel { node, to } => json!({
+            "code": "branch_edge_without_label", "message": message, "node": node, "to": to,
+        }),
         GraphError::InvalidFoldStopExpression { node, error } => json!({
             "code": "invalid_fold_stop_expression", "message": message, "node": node, "error": error,
         }),

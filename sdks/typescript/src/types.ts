@@ -32,6 +32,14 @@ export interface RunStatus {
    * instant passes and something drives it again, which for a client-driven
    * run is its own driver (see `ClientRunDriver.awaitWake`). */
   wakeAt?: string;
+  /** True once a `sleeping` run's deadline has passed, alongside
+   * `overdueSeconds` (whole seconds since `wakeAt`). Both are absent, not
+   * `false`/`0`, on a sleeping run that has not reached its deadline yet, and
+   * absent for every other state: the server computes this against its own
+   * clock rather than the client deriving it from `wakeAt`, so the two keys
+   * arrive together or not at all. */
+  overdue?: boolean;
+  overdueSeconds?: number;
   /** Present only on an `abandoned` run that was parked at a dangling write:
    * the outstanding intent (`seq`, `tool`) the abandonment recorded rather than
    * claiming settled. Absent for every other abandonment and every other state. */
@@ -402,6 +410,8 @@ export function parseStatus(obj: unknown): RunStatus {
     reason: o.reason as string | undefined,
     inputSchema: o.input_schema,
     wakeAt: o.wake_at as string | undefined,
+    overdue: o.overdue as boolean | undefined,
+    overdueSeconds: o.overdue_seconds as number | undefined,
     unresolvedWrite:
       uw && typeof uw === "object"
         ? { seq: Number(uw.seq ?? 0), tool: String(uw.tool ?? "") }
