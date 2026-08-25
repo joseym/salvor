@@ -24,7 +24,7 @@ use serde_json::Value;
 use time::OffsetDateTime;
 
 use crate::effect::Effect;
-use crate::event::{Budget, Event, EventEnvelope, SuspensionKind, UnresolvedWrite};
+use crate::event::{Budget, Event, EventEnvelope, Performer, SuspensionKind, UnresolvedWrite};
 use crate::id::SequenceNumber;
 
 /// Token usage accumulated across every completed model call in a log.
@@ -343,6 +343,37 @@ pub fn derive_state(log: &[EventEnvelope]) -> RunState {
         }
     }
     state
+}
+
+/// Whether `log` is a client-driven run's own log, on the log's own evidence:
+/// the `RunStarted` at its head carries `driven_by: client`.
+///
+/// This is the durable half of the answer to "who drives this run". A process
+/// that opened the run and holds an in-memory lease on it knows the other
+/// half, but that registry is authoritative only for runs the process itself
+/// opened, and after a restart (or in a process, such as `salvor wake`, that
+/// never opened the run at all) it knows nothing. Only the head is read,
+/// because only the head can carry the marker: a run head appears at seq 0
+/// and nowhere else (the append-guard enforces that), and the field is
+/// stamped by the surface that opens a client-driven run, so a later event
+/// cannot forge it onto a run that is not one.
+///
+/// Every surface that must not become a second writer against a client's
+/// drive lease calls this on the log before acting: `salvor-server`'s
+/// client-run surface (to adopt rather than refuse a run reopened after a
+/// restart), its resume endpoint (to keep refusing one), its wake sweeper
+/// (to keep leaving a due timer to its client), and `salvor-cli`'s `wake`
+/// sweep (to leave the same run alone rather than re-driving it as a second
+/// writer).
+#[must_use]
+pub fn log_is_client_driven(log: &[EventEnvelope]) -> bool {
+    matches!(
+        log.first().map(|envelope| &envelope.event),
+        Some(Event::RunStarted {
+            driven_by: Some(Performer::Client),
+            ..
+        })
+    )
 }
 
 #[cfg(test)]

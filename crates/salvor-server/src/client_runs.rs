@@ -1934,18 +1934,13 @@ fn is_sleeping(log: &[EventEnvelope]) -> bool {
 /// registry would make a restart quietly re-arm this server as a driver of runs
 /// it does not own.
 ///
-/// Only the head is read, because only the head can carry the marker: a run
-/// head may appear at seq 0 and nowhere else (the append-guard enforces that),
-/// and this server stamps the field itself in [`append`], so a caller cannot
-/// write the marker onto a run it does not drive.
+/// The check itself lives in [`salvor_replay::log_is_client_driven`], the
+/// pure crate both this server and `salvor-cli`'s `wake` sweep depend on, so
+/// the two processes that must each leave a client-driven run alone read the
+/// same marker the same way. This wrapper only narrows visibility to the
+/// crate, matching the narrower one this module used before the check moved.
 pub(crate) fn log_is_client_driven(log: &[EventEnvelope]) -> bool {
-    matches!(
-        log.first().map(|envelope| &envelope.event),
-        Some(Event::RunStarted {
-            driven_by: Some(Performer::Client),
-            ..
-        })
-    )
+    salvor_replay::log_is_client_driven(log)
 }
 
 /// The per-run lease gate shared by every driving endpoint: the run must be a
