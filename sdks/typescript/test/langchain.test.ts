@@ -18,8 +18,10 @@
  * every message from it carries a marker saying so, and the invoke says it once
  * out loud. And the drive lease a run is opened with is not something an invoke
  * owns for its own lifetime, so a run taken by another driver mid-invoke is
- * taken back once, a run taken twice is refused by name, and a server that
- * restarts under an invoke is reported rather than surfaced as a bare 404.
+ * taken back once, a run taken twice is refused by name, a server that restarts
+ * under an invoke is survived under a fresh lease the restarted server mints,
+ * and a run id that was never client-driven to begin with is refused by name
+ * instead of adopted.
  *
  * The model is a small `BaseChatModel` scripted turn by turn rather than one of
  * the fakes in `@langchain/core/utils/testing`. Those cannot script a
@@ -35,6 +37,7 @@
 
 import { deepStrictEqual, match, notStrictEqual, ok, rejects, strictEqual } from "node:assert";
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { createServer as netServer } from "node:net";
 import type { AddressInfo } from "node:net";
@@ -63,6 +66,13 @@ import {
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..", "..", "..");
 const SALVOR = resolve(repoRoot, "target", "debug", "salvor");
+/**
+ * An `[llm] base_url_env` name for the one test that starts a real
+ * server-driven run. Pointed at a loopback port nothing listens on, so the
+ * background driver's model call fails at once, on no network, instead of
+ * reaching the public Anthropic endpoint with no key.
+ */
+const SERVER_DRIVEN_MODEL_BASE_URL_ENV = "SALVOR_TS_TEST_MODEL_BASE_URL";
 const DECLS = [
   resolve(here, "client-tools", "lookup-order.toml"),
   resolve(here, "client-tools", "stamp-ledger.toml"),
@@ -299,7 +309,13 @@ async function startServe(): Promise<ChildProcess> {
       `127.0.0.1:${port}`,
       ...DECLS.flatMap((path) => ["--client-tool", path]),
     ],
-    { stdio: "ignore", env: { PATH: "/usr/bin:/bin" } },
+    {
+      stdio: "ignore",
+      env: {
+        PATH: "/usr/bin:/bin",
+        [SERVER_DRIVEN_MODEL_BASE_URL_ENV]: "http://127.0.0.1:1",
+      },
+    },
   );
   const deadline = Date.now() + 15000;
   while (Date.now() < deadline) {
@@ -1387,34 +1403,103 @@ test("a run taken twice inside one invoke is refused, naming the thread and the 
 });
 
 /**
- * A salvor restart mid-invoke, and the honest limit of what the middleware can
- * do about it.
+ * A salvor restart mid-invoke, survived.
  *
- * A server keeps its client-driven leases in memory and adopts nothing on
- * startup: a restarted `salvor serve` answers every drive call for a run it
- * used to hold with `unknown_run`, and refuses to re-open that run because its
- * log is history the new process did not open. So the middleware does the one
- * thing available to it and does it once: it tries to take the run up again,
- * and when the server will not hand it back it says so by name, naming the
- * thread, the run and why, instead of surfacing a bare 404 from inside
- * somebody else's agent loop.
- *
- * What is NOT claimed here is that the invoke survives. It cannot, against a
- * server built this way; adopting a client-driven run's recorded log after a
- * restart is a change to `salvor serve`, not to this middleware. What the case
- * does hold the middleware to is the part that is its own: the tool body ran
- * exactly once, so a lost server is a stopped run and never a doubled write.
+ * A server keeps its client-driven leases in memory, but a restarted
+ * `salvor serve` reads a run's `driven_by: client` marker straight off its
+ * recorded `RunStarted` and adopts it back, minting a fresh lease for whoever
+ * asks. The tape's own `lease()` already retries a step exactly once against
+ * whatever driver `reopen` hands back, so the one thing this case has to prove
+ * is that the retry lands on a server that now says yes: the invoke completes,
+ * the interrupted tool call is not performed twice, and the log holds exactly
+ * one intent and one completion for it, in place, not doubled and not
+ * abandoned.
  */
-test("a salvor restart mid-invoke is reported by name, and the interrupted call is not performed twice", async (t) => {
+test("a salvor restart mid-invoke is survived: the run resumes under a fresh lease", async (t) => {
   if (!base) return t.skip("salvor serve not available");
   reset();
   const threadId = "thread-server-restarted";
-  const runId = await runIdForThread(threadId);
 
   // Between the tool call's intent and its completion, the server this invoke
   // has been driving goes away and a fresh one comes up on the same port and
   // the same store.
   midToolCall = () => restartServe();
+
+  const { agent } = agentFor(ONE_TOOL_SCRIPT);
+  const answer = await agent.invoke(
+    { messages: [{ role: "user", content: "how is ORD-7781?" }] },
+    { configurable: { thread_id: threadId } },
+  );
+
+  strictEqual(ran.lookup, 1, "the tool body ran exactly once, despite the restart");
+  strictEqual(
+    textOf(answer.messages.at(-1)!),
+    "Order ORD-7781 is paid, 4200 cents.",
+    "the invoke finished under the fresh lease the restarted server minted",
+  );
+
+  // One intent, one completion for the interrupted call, nothing doubled and
+  // nothing left dangling.
+  deepStrictEqual(await kindsOf(threadId), [
+    "RunStarted",
+    "ModelCallRequested",
+    "ModelCallCompleted",
+    "ToolCallRequested",
+    "ToolCallCompleted",
+    "ModelCallRequested",
+    "ModelCallCompleted",
+  ]);
+
+  // A further re-invoke of the same thread pays for none of it: the restart is
+  // history the log carries now, not a cost the next invoke bears again.
+  reset();
+  const second = agentFor(ONE_TOOL_SCRIPT);
+  const again = await second.agent.invoke(
+    { messages: [{ role: "user", content: "how is ORD-7781?" }] },
+    { configurable: { thread_id: threadId } },
+  );
+  strictEqual(second.model.calls.count, 0, "zero model calls on the replay");
+  strictEqual(ran.lookup, 0, "zero tool executions on the replay");
+  strictEqual(textOf(again.messages.at(-1)!), textOf(answer.messages.at(-1)!));
+  strictEqual((await kindsOf(threadId)).length, 7, "the replay wrote nothing");
+});
+
+/**
+ * The refusal a lost lease's re-open can still hit: not a restart (adopted
+ * since 3d0f051) but a run id that was never client-driven to begin with.
+ *
+ * A thread id maps to a run id, and nothing stops that id from already naming
+ * a run started through the server-driven `/v1/runs` path. Salvor will not
+ * adopt such a run for client-driven use, and this middleware turns that
+ * refusal into a message naming the thread and the reason rather than letting
+ * a bare `run_exists` surface from inside somebody else's agent loop.
+ */
+test("a server-driven run's id refuses a client-driven open, naming the thread and why", async (t) => {
+  if (!base) return t.skip("salvor serve not available");
+  reset();
+
+  const agentHash = await client!.registerAgent({
+    model: "test-model",
+    llm: { base_url_env: SERVER_DRIVEN_MODEL_BASE_URL_ENV },
+  });
+
+  // A UUID thread id is its own run id (see the thread-id-rule tests below),
+  // which is what lets a server-driven run started under it collide with the
+  // run a LangChain invoke on that same thread would open.
+  const threadId = randomUUID();
+  const runId = await runIdForThread(threadId);
+  strictEqual(runId, threadId, "the chosen thread id already is its run id");
+  await client!.startRun(agentHash, null, { runId });
+
+  // Wait for `RunStarted` to land: opening before it would find an empty log,
+  // which salvor is free to adopt rather than refuse.
+  const deadline = Date.now() + 5000;
+  while ((await client!.getRun(runId)).eventCount < 1) {
+    if (Date.now() > deadline) {
+      throw new Error("the server-driven run never recorded its RunStarted");
+    }
+    await new Promise((r) => setTimeout(r, 20));
+  }
 
   const { agent } = agentFor(ONE_TOOL_SCRIPT);
   await rejects(
@@ -1426,25 +1511,11 @@ test("a salvor restart mid-invoke is reported by name, and the interrupted call 
     (error: unknown) => {
       const text = String((error as Error).message ?? error);
       match(text, new RegExp(threadId), "the error names the thread");
-      match(text, new RegExp(runId), "and the run");
-      match(text, /re-opening the run was refused/, "and what it tried");
-      match(text, /restarted/, "and what happened");
+      match(text, /server-driven run/, "and the reason");
       return true;
     },
   );
-  strictEqual(ran.lookup, 1, "the tool body ran once and was never retried");
-
-  // The store outlived the process, so the log is still readable through the
-  // run endpoints even though the run can no longer be driven. It ends at the
-  // intent of the call that was in flight: asked for, never reported.
-  const kinds: string[] = [];
-  for await (const event of client!.streamEvents(runId)) kinds.push(event.kind);
-  deepStrictEqual(kinds, [
-    "RunStarted",
-    "ModelCallRequested",
-    "ModelCallCompleted",
-    "ToolCallRequested",
-  ]);
+  strictEqual(ran.lookup, 0, "the middleware never reached the tool");
 });
 
 // -- the thread-id rule ------------------------------------------------------

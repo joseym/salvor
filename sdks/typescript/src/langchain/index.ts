@@ -242,10 +242,12 @@ export function salvorMiddleware(options: SalvorMiddlewareOptions) {
   }
 
   async function openTape(runId: string, threadId: string): Promise<RunTape> {
-    const driver: ClientRunDriver = await client.openClientRun({
-      runId,
-      recordPrompts,
-    });
+    let driver: ClientRunDriver;
+    try {
+      driver = await client.openClientRun({ runId, recordPrompts });
+    } catch (error) {
+      throw serverDrivenRunError(error, threadId, runId);
+    }
     const tail = driver.logEnvelopes.at(-1);
     if (tail?.kind === "RunCompleted") {
       throw new SalvorMiddlewareError(
@@ -610,6 +612,28 @@ function toolOutput(message: ToolMessage): unknown {
     /* not JSON; the content is the result */
   }
   return content;
+}
+
+/**
+ * Turn the server's refusal to open a server-driven run for client-driven use
+ * into a message naming the thread this middleware was asked to drive.
+ *
+ * A thread id maps to a run id (see `runIdForThread`), and nothing stops that
+ * id from already naming a run someone started through the server-driven
+ * `/v1/runs` path. Salvor refuses to adopt such a run as client-driven rather
+ * than become a second writer on its log, and this middleware has no thread
+ * name to offer back for it: the caller has to give this task a thread id
+ * that has not already started a run the other way.
+ */
+function serverDrivenRunError(error: unknown, threadId: string, runId: string): unknown {
+  if (!(error instanceof SalvorApiError) || error.code !== "run_exists") {
+    return error;
+  }
+  return new SalvorMiddlewareError(
+    `thread \`${threadId}\` (run ${runId}) cannot be opened for a client-driven run: ` +
+      `${error.message}. Give this task a thread id that has never named a ` +
+      "server-driven run.",
+  );
 }
 
 /**
