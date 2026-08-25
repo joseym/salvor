@@ -32,6 +32,7 @@ export interface WfFix {
     | 'repoint'
     | 'repoint_body'
     | 'drop_label'
+    | 'relabel_case'
     | 'drop_edge'
     | 'complete_hash'
     | 'attach_agent'
@@ -45,8 +46,9 @@ export interface WfFix {
   /** The donor agent hash an `attach_agent` fix reuses: always a hash already present on some
    * other node in the same document, never invented. */
   readonly hash?: string;
-  /** The case name a `realize_case` fix draws its new edge's label from: the same case the
-   * `unrealized_case` error names. */
+  /** The case name a `realize_case` fix draws its new edge's label from (the same case the
+   * `unrealized_case` error names), or the case name a `relabel_case` fix rewrites an existing
+   * edge's `label` to. */
   readonly case?: string;
 }
 
@@ -276,10 +278,25 @@ export function validateGraph(g: WfGraph): WfError[] {
           msg: `An edge out of the branch ${src.id} carries no case. Every branch edge names the case it realizes.`,
         });
       } else if (!(src.cases ?? []).includes(e.label)) {
+        // Aligned to the server's own rule (`salvor_graph::validate::BranchEdgeWithoutCase`), the
+        // mirror of `unrealized_case`: the engine only ever takes a branch's edge by matching the
+        // fired case's name against the label, so a label naming nothing can never fire and the
+        // edge is dead. Almost always this is the OTHER half of the exact same typo
+        // `unrealized_case` catches (the case spelled one way, the edge meant to realize it spelled
+        // another), so when exactly one of the branch's declared cases has no edge realizing it,
+        // that is the one candidate the typo was probably reaching for; with zero or more than one,
+        // there is nothing unambiguous to offer.
+        const casesWithNoEdge = (src.cases ?? []).filter(
+          (c) => !g.edges.some((other) => other.from === src.id && other.label === c),
+        );
+        const target = casesWithNoEdge.length === 1 ? casesWithNoEdge[0] : undefined;
         errs.push({
           code: 'edge_type',
           edge: i,
           msg: `The branch ${src.id} has no case "${e.label}". Its cases are: ${(src.cases ?? []).join(', ')}.`,
+          ...(target
+            ? { fix: { label: `Relabel to "${target}"`, kind: 'relabel_case', edge: i, case: target } }
+            : {}),
         });
       }
     } else if (src && e.label) {
@@ -379,6 +396,11 @@ export function applyFix(g: WfGraph, fix: WfFix): WfGraph {
               )
             : n,
         ),
+      };
+    case 'relabel_case':
+      return {
+        ...g,
+        edges: g.edges.map((e, i) => (i === fix.edge && fix.case !== undefined ? { ...e, label: fix.case } : e)),
       };
     case 'drop_label':
       return {

@@ -64,6 +64,43 @@ describe('validateGraph', () => {
     expect(codes).toContain('unrealized_case');
   });
 
+  // Aligned to the server's own rule (`salvor_graph::validate::BranchEdgeWithoutCase`), the mirror
+  // of `unrealized_case`: the edge itself carries the typo this time (`lst` for the case `lost`),
+  // not the case. Relabeling to the one declared case with no edge of its own is unambiguous, so
+  // it is offered as a one-click fix.
+  it('a branch edge naming an undeclared case offers to relabel it, when exactly one case has none', () => {
+    const g: WfGraph = {
+      ...CLEAN,
+      nodes: [...CLEAN.nodes, { id: 'br', kind: 'branch', name: 'br', cases: ['lost', 'paid'] }],
+      edges: [
+        { from: 'a', to: 'br' },
+        { from: 'br', to: 'b', label: 'lst' }, // meant to realize "lost"
+        { from: 'br', to: 'b', label: 'paid' },
+      ],
+    };
+    const err = validateGraph(g).find((e) => e.code === 'edge_type' && e.msg.includes('lst'));
+    expect(err?.fix).toMatchObject({ kind: 'relabel_case', case: 'lost' });
+
+    const fixed = applyFix(g, err!.fix!);
+    expect(fixed.edges).toContainEqual({ from: 'br', to: 'b', label: 'lost' });
+    expect(validateGraph(fixed).some((e) => e.code === 'edge_type')).toBe(false);
+    expect(validateGraph(fixed).some((e) => e.code === 'unrealized_case')).toBe(false);
+  });
+
+  it('a branch edge naming an undeclared case offers no fix when more than one case has none', () => {
+    // Neither "x" nor "y" has a realizing edge, so there is nothing unambiguous to relabel to.
+    const g: WfGraph = {
+      ...CLEAN,
+      nodes: [...CLEAN.nodes, { id: 'br', kind: 'branch', name: 'br', cases: ['x', 'y'] }],
+      edges: [
+        { from: 'a', to: 'br' },
+        { from: 'br', to: 'b', label: 'zzz' },
+      ],
+    };
+    const err = validateGraph(g).find((e) => e.code === 'edge_type');
+    expect(err?.fix).toBeUndefined();
+  });
+
   // Aligned to the server's own rule (`salvor_graph::validate::BranchCaseWithoutEdge`): a case
   // with no matching edge label is node/case-precise, exactly like the server's error, and offers
   // a one-click route to a terminal node (one with no outbound edge of its own) when the graph
