@@ -59,6 +59,23 @@ pub enum ApiError {
     /// A client-driven append presented a drive token that is not the run's
     /// current lease. HTTP 403. Only the run's current writer may drive it.
     InvalidDriveToken(String),
+    /// A run was re-opened while another driver's lease on it is still current.
+    /// HTTP 409, the same state conflict a still-sleeping refusal is: the verb
+    /// is right and the run is simply not available to a second writer yet.
+    /// Carries how long until the hold lapses, so the caller can wait rather
+    /// than poll.
+    ///
+    /// Nothing is recorded and no lease is minted, so the driver that holds the
+    /// run keeps driving it. Taking the run away from a live driver is what this
+    /// exists to prevent: two processes that both believe they hold the run
+    /// append the same steps twice and one of them dies on a divergence.
+    LeaseHeld {
+        /// The human sentence.
+        message: String,
+        /// Whole seconds until the holder's lease lapses if it stays quiet,
+        /// rounded up so a hold with any time left never reports zero.
+        lapses_in_seconds: i64,
+    },
     /// A client-driven append carried an event kind this endpoint does not
     /// accept (a model or tool event, which the model-step and tool-step
     /// endpoints own). HTTP 422.
@@ -224,6 +241,7 @@ impl ApiError {
             ApiError::StillSleeping { .. } => (StatusCode::CONFLICT, "still_sleeping"),
             ApiError::MissingDriveToken(_) => (StatusCode::UNAUTHORIZED, "missing_drive_token"),
             ApiError::InvalidDriveToken(_) => (StatusCode::FORBIDDEN, "invalid_drive_token"),
+            ApiError::LeaseHeld { .. } => (StatusCode::CONFLICT, "lease_held"),
             ApiError::UnsupportedEventKind(_) => {
                 (StatusCode::UNPROCESSABLE_ENTITY, "unsupported_event_kind")
             }
@@ -275,7 +293,8 @@ impl ApiError {
             | ApiError::OriginNeedsReconciliation { message: m, .. }
             | ApiError::WriteReplayHazard { message: m, .. }
             | ApiError::NeedsReconciliation { message: m, .. }
-            | ApiError::StillSleeping { message: m, .. } => m.clone(),
+            | ApiError::StillSleeping { message: m, .. }
+            | ApiError::LeaseHeld { message: m, .. } => m.clone(),
             ApiError::Unauthorized => "missing or invalid bearer token".to_owned(),
         }
     }
@@ -309,6 +328,11 @@ impl IntoResponse for ApiError {
             } => {
                 error["details"] =
                     json!({ "wake_at": wake_at, "remaining_seconds": remaining_seconds });
+            }
+            ApiError::LeaseHeld {
+                lapses_in_seconds, ..
+            } => {
+                error["details"] = json!({ "lapses_in_seconds": lapses_in_seconds });
             }
             _ => {}
         }

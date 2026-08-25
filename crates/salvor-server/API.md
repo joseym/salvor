@@ -61,6 +61,7 @@ codes:
 | 409 | `still_sleeping` | Resuming a run parked on a durable timer before its instant; `details.wake_at` and `details.remaining_seconds` say when it can be driven. Nothing is recorded |
 | 401 | `missing_drive_token` | A client-driven append with no drive token (see [Client-driven runs](#client-driven-runs)) |
 | 403 | `invalid_drive_token` | A client-driven append whose drive token is not the run's current lease |
+| 409 | `lease_held` | Re-opening a client-driven run whose driver still holds a current lease; `details.lapses_in_seconds` says how long until the hold lapses. Nothing is recorded and no lease is minted |
 | 409 | `divergence` | A client-driven append that is not the legal next event, or different bytes at an already-recorded position |
 | 422 | `unsupported_event_kind` | A client-driven append carrying a model or tool event, which this surface does not accept |
 | 413 | `payload_too_large` | A client-driven append over the body-size or per-batch cap |
@@ -263,7 +264,10 @@ already holds:
 - A **client-driven** run is `"attached"` exactly when this process holds a
   current lease for it: the driver presented its drive token within the lease
   TTL (default 60s; `salvor serve` reads `SALVOR_CLIENT_LEASE_TTL_SECS`). A
-  lapsed lease (the tab closed, the SDK exited) is `"none"`.
+  lapsed lease (the tab closed, the SDK exited) is `"none"`. It is the same
+  lease, read the same way, that decides whether re-opening the run is refused
+  with `409 lease_held` (see [The drive token](#the-drive-token)), so a run that
+  reports `"attached"` here is exactly a run another driver cannot take.
 
 `driver` follows the same zero-vs-absent rule as the folded fields, one way: it
 is **omitted entirely for a terminal run** (`completed` or `failed`), because
@@ -978,8 +982,32 @@ Opening a client-driven run mints a per-run `drive_token`: the single-writer
 lease. Every append must present it in the `X-Drive-Token` header. It is the
 per-run gate that layers on top of the process-wide bearer, so one authenticated
 caller cannot drive another caller's run, and a second live driver without the
-current lease is refused. Re-opening a run mints a fresh lease, so a resuming tab
-always holds the current one; the superseded lease stops working.
+current lease is refused.
+
+**A lease is held until it lapses.** Re-opening a run whose driver still holds a
+current lease is `409 lease_held`, not a fresh token: the refusal carries
+`details.lapses_in_seconds`, the whole seconds until the hold expires if that
+driver stays quiet. A driver proves it is alive by presenting its token: every
+driving call (append, model step, tool step, an intent, a completion, resolve)
+refreshes the lease. Go quiet for the lease TTL (`SALVOR_CLIENT_LEASE_TTL_SECS`,
+60s by default) and the hold lapses; the next open takes the run and mints a
+fresh lease, and the quiet driver's token is then `403 invalid_drive_token` on
+its next call. A `completed`, `failed`, or `abandoned` run is never held: it
+takes no more appends from anyone, so it re-opens straight away.
+
+The run's own driver may re-open it, presenting its current token in the
+`X-Drive-Token` header. That returns the recorded log under the **same** token,
+so a client rebuilding its cursor is not made to give up the lease it holds and
+a call already in flight under that token stays valid. `record_prompts` is
+ignored on such a re-open; the lease keeps what it was opened with.
+
+The rule is not "newest caller wins", and deliberately so. The caller re-opening
+a live run is usually not the driver that has it, but a second app instance, a
+duplicated tab, or a middleware retrying after a failed call. Handing it the
+lease puts two drivers on one log: both run the same step, and the one that
+loses the race to a position takes a `409 divergence` after doing the work. A
+refreshed tab still resumes, because the tab that went away stopped presenting
+its token and its lease lapses.
 
 Leases live in the server process and do not survive its restart, but the run
 does. A client-driven run's `RunStarted` records `driven_by: "client"`, stamped
@@ -1018,15 +1046,34 @@ The empty `log` is what the client builds its cursor from. The client then
 appends its own `RunStarted` at seq 0 through the events endpoint.
 
 - Response `200` for a re-open, with `log` carrying every recorded envelope and
-  a fresh `drive_token`. Two things make a `run_id` re-openable, and either is
-  enough: this server opened it since it started (it holds the lease), or the
-  run's own log says it is client-driven, its `RunStarted` carrying
-  `driven_by: "client"`. The second is what makes a restart survivable: the
-  lease registry dies with the process, the log does not, so a server that has
-  just come back re-opens a run its client is still driving instead of refusing
-  it as foreign. Adopting a run this way mints a fresh lease exactly as any
-  other re-open does, and the returned `log` is the recorded state the client
-  rebuilds its cursor from, dangling intent and all.
+  a `drive_token`: a fresh one when the run was unheld, or the caller's own one
+  back when it presented it (see [The drive token](#the-drive-token)). Two
+  things make a `run_id` re-openable, and either is enough: this server opened
+  it since it started (it holds the lease), or the run's own log says it is
+  client-driven, its `RunStarted` carrying `driven_by: "client"`. The second is
+  what makes a restart survivable: the lease registry dies with the process, the
+  log does not, so a server that has just come back re-opens a run its client is
+  still driving instead of refusing it as foreign. Adopting a run this way mints
+  a fresh lease, and the returned `log` is the recorded state the client rebuilds
+  its cursor from, dangling intent and all.
+- `409 lease_held` when another driver's lease on the run is still current and
+  the request did not present that lease's token. Nothing is recorded and no
+  lease is minted, so the driver that has the run keeps it.
+
+```json
+{
+  "error": {
+    "code": "lease_held",
+    "message": "another driver holds run 6f...; its lease lapses in 60s if that driver goes quiet, and re-opening works then (or as soon as the run finishes)",
+    "details": { "lapses_in_seconds": 60 }
+  }
+}
+```
+
+  A caller that means to take over waits `lapses_in_seconds` and asks again. A
+  caller that IS the driver presents its token instead and is not refused. The
+  hold never survives the server process: a restart leaves no lease to hold,
+  so the first open after one always succeeds.
 - `409 run_exists` when the chosen `run_id` already has history and its log does
   not record it as client-driven, which means it is a server-driven run. That
   refusal is unchanged by a restart, so the two modes still cannot collide over

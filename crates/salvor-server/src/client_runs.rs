@@ -54,8 +54,18 @@
 //! Opening a run mints a per-run `drive_token`, required on every append. It is
 //! the per-run gate that layers on top of the process-wide bearer: one
 //! authenticated caller still cannot drive another caller's run, and a second
-//! live driver without the current lease is refused. Re-opening a run mints a
-//! fresh lease, so a resuming tab always holds the current one.
+//! live driver without the current lease is refused.
+//!
+//! A lease is held until it lapses. Re-opening a run whose lease is still
+//! current is refused with `409 lease_held` rather than handed a fresh token,
+//! because the caller re-opening is usually not the driver that already has the
+//! run: two app instances on one thread, a duplicated tab, a retrying
+//! middleware. Handing the newest caller the lease would put both of them to
+//! work on the same log, and the one that loses the race to a position dies on
+//! a divergence after having already run the step. The driver that holds the
+//! run keeps it until it goes quiet for the lease TTL or the run finishes; the
+//! refusal says how long that is, so the second caller waits instead of
+//! polling.
 //!
 //! # The lease is process-lived; the run is not
 //!
@@ -99,6 +109,7 @@
 //! everywhere an envelope is written.
 
 use std::convert::Infallible;
+use std::time::Duration;
 
 use axum::Json;
 use axum::body::Bytes;
@@ -108,7 +119,8 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use salvor_core::{
-    Effect, Event, EventEnvelope, LogValidator, Performer, RunId, SequenceNumber, TokenUsage,
+    Effect, Event, EventEnvelope, LogValidator, Performer, RunId, RunStatus, SequenceNumber,
+    TokenUsage, derive_state,
 };
 use salvor_llm::{ContentDelta, MessageAccumulator, StreamEvent};
 use salvor_runtime::{
@@ -294,6 +306,33 @@ struct ResolveRequest {
 /// Re-opening a known client run returns its full recorded log and a fresh
 /// lease, for a refreshed tab to rebuild its cursor.
 ///
+/// # A held lease is not taken away
+///
+/// A re-open only mints a fresh lease when nobody is driving the run: this
+/// process holds no lease for it (it never opened it, or it restarted), the
+/// lease it holds has lapsed because the driver went quiet for the TTL, or the
+/// run has finished and there is nothing left to drive. While a driver's lease
+/// is current, a re-open from anyone else is `409 lease_held`, carrying
+/// `details.lapses_in_seconds` so the caller knows when the hold expires.
+///
+/// The alternative, handing the run to whoever asked most recently, reads
+/// well for the one case it was written for (a tab the user refreshed, whose
+/// old driver is gone) and badly for every other: two app instances on one
+/// thread, a duplicated tab, a middleware that re-opens on a failed call. Each
+/// of those leaves two live drivers appending the same steps to one log, and
+/// the one that loses a position race takes a divergence after it has already
+/// done the work. A refreshed tab still resumes as before, because its old
+/// driver stopped presenting a token and its lease lapses.
+///
+/// A driver re-opening its OWN run, presenting its current token in the
+/// `X-Drive-Token` header, is allowed and keeps the lease it already has: it
+/// gets the recorded log back under the same token, which is what a client
+/// rebuilding its cursor after losing local state needs, and no second writer
+/// appears because the only writer is the one asking. No new token is minted,
+/// so a request already in flight under that token is not invalidated by the
+/// re-open. `record_prompts` on such a re-open is ignored; the lease keeps the
+/// setting it was opened with.
+///
 /// Two things say a run id is client-driven, and either is enough. The first is
 /// this process's own lease registry, which answers for every run opened since
 /// the server started. The second is the run's log: the `RunStarted` at its
@@ -309,6 +348,7 @@ struct ResolveRequest {
 /// and it is still refused, so the two modes cannot collide over one store.
 pub async fn open(
     State(state): State<AppState>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
     let request: OpenRequest = parse_body(&body)?;
@@ -326,8 +366,28 @@ pub async fn open(
     // A re-open: either this process opened the run (the lease registry knows
     // it, which is also the only evidence a run opened but not yet started has)
     // or its recorded log says it is client-driven (which survives the restart
-    // the registry does not). Return the recorded log and a fresh lease.
+    // the registry does not). Return the recorded log, and a fresh lease unless
+    // a driver still holds one.
     if state.is_client_run(run_id) || log_is_client_driven(&log) {
+        if let Some((held, remaining)) = state.current_client_lease(run_id)
+            && !run_is_finished(&log)
+        {
+            let presented = headers
+                .get(DRIVE_TOKEN_HEADER)
+                .and_then(|value| value.to_str().ok());
+            if presented != Some(held.drive_token.as_str()) {
+                return Err(lease_held(run_id, remaining));
+            }
+            // The holder re-opening its own run. It is the only writer either
+            // way, so nothing needs taking away: hand back the recorded log
+            // under the token it already has, and count the request as the
+            // proof of life it is.
+            state.touch_client_run(run_id);
+            return Ok((
+                StatusCode::OK,
+                Json(open_body(run_id, &held.drive_token, &log)),
+            ));
+        }
         let drive_token = state.lease_client_run(run_id, request.record_prompts);
         return Ok((StatusCode::OK, Json(open_body(run_id, &drive_token, &log))));
     }
@@ -1989,6 +2049,42 @@ fn parse_run_id(text: &str) -> Result<RunId, ApiError> {
     Uuid::parse_str(text).map(RunId::from_uuid).map_err(|_| {
         ApiError::BadRequest(format!("`{text}` is not a valid run id (expected a UUID)"))
     })
+}
+
+/// Whether a run's log says it is over, so no driver could still be working on
+/// it and a re-open may take it regardless of any lease left behind.
+///
+/// This asks the recorded log, not the lease, because a driver that completed a
+/// run and then vanished leaves a lease that is still current for the rest of
+/// the TTL. Refusing a re-open on that would make the last minute of every
+/// finished run needlessly unopenable, and there is nothing to protect: a
+/// finished run takes no more appends from anyone.
+fn run_is_finished(log: &[EventEnvelope]) -> bool {
+    matches!(
+        derive_state(log).status,
+        RunStatus::Completed { .. } | RunStatus::Failed { .. } | RunStatus::Abandoned { .. }
+    )
+}
+
+/// The refusal for a re-open of a run whose driver still holds a current lease,
+/// naming how long the hold has left.
+///
+/// `remaining` is rounded UP to whole seconds. Rounding down would let a hold
+/// with a fraction of a second left report `0`, and a caller reading that as
+/// "try again now" would come straight back into the same refusal; rounding up
+/// means the number is always a time at which retrying can actually work.
+fn lease_held(run_id: RunId, remaining: Duration) -> ApiError {
+    let lapses_in_seconds = i64::try_from(remaining.as_nanos().div_ceil(1_000_000_000))
+        .unwrap_or(i64::MAX)
+        .max(1);
+    ApiError::LeaseHeld {
+        message: format!(
+            "another driver holds run {}; its lease lapses in {lapses_in_seconds}s if that \
+             driver goes quiet, and re-opening works then (or as soon as the run finishes)",
+            run_id.as_uuid()
+        ),
+        lapses_in_seconds,
+    }
 }
 
 /// The not-found error for a run that is not a client-driven run here.
