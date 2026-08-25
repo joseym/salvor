@@ -37,12 +37,15 @@
 //!
 //! # Everything questionable is a failure, never output
 //!
-//! A malformed request is [`ToolError::Handler`](crate::ToolError::Handler)
-//! naming `_meta.salvor` and the problem. It is never quietly treated as an
-//! ordinary result. That rule is the whole point of this module: a server
-//! author who writes `sleepUntil`, or an ISO week date, or both park keys at
-//! once, has asked for something specific and has not got it, and the failure
-//! that says so costs one run. A silent fall-through costs a person the
+//! A malformed request is
+//! [`ToolError::MalformedResult`](crate::ToolError::MalformedResult) naming
+//! `_meta.salvor` and the problem, and it fails the call once whatever the
+//! tool's effect class: the bytes are already on the wire, so a retry decodes
+//! them to the same refusal. It is never quietly treated as an ordinary
+//! result. That rule is the whole point of this module: a server author who
+//! writes `sleepUntil`, or an ISO week date, or both park keys at once, has
+//! asked for something specific and has not got it, and the failure that says
+//! so costs one run. A silent fall-through costs a person the
 //! afternoon it takes to work out why the tool "just returned."
 //!
 //! For the same reason, a strictness that would look excessive elsewhere is

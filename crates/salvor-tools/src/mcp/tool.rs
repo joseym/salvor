@@ -46,6 +46,10 @@ use super::park::{ParkRequest, park_request};
 /// came off a wire. The `park` submodule holds both shapes and every refusal;
 /// the [module docs](super) state the wire contract.
 ///
+/// A refusal is [`ToolError::MalformedResult`], which no effect class retries.
+/// The server's request is on the wire already and reading it again cannot
+/// reach a different answer.
+///
 /// The ordinary content stays the tool's output for a result that asks for
 /// nothing. For one that does park, the runtime records its own sentinel as
 /// the completion's output (that is what carries the reason, schema, or
@@ -201,16 +205,18 @@ impl DynTool for McpTool {
         // refusal has to beat the plain error report or the contradiction
         // would be swallowed by it.
         //
-        // A malformed request is a Handler failure rather than something
-        // quieter for a reason worth stating: the server ran, produced a
-        // result, and asked for something this client could not carry out. The
-        // effect's retry policy is the right treatment for that, and it is the
-        // treatment a server error already gets. Nothing here is ever fed back
-        // to the model as an argument correction; the model did not write the
-        // `_meta`.
-        let park = park_request(&result).map_err(|message| ToolError::Handler {
+        // A malformed request is `MalformedResult` rather than `Handler`, and
+        // the difference is one of retries. A handler failure is the world
+        // saying no, which a second attempt can change; a `_meta.salvor` this
+        // client cannot read is the server author's own bug, and re-running a
+        // read or an idempotent tool two more times decodes the identical
+        // bytes to the identical refusal. So the call fails once, on every
+        // effect class, and the message says what to fix. Nothing here is ever
+        // fed back to the model as an argument correction; the model did not
+        // write the `_meta`.
+        let park = park_request(&result).map_err(|detail| ToolError::MalformedResult {
             tool: self.name.clone(),
-            source: HandlerError::message(message),
+            detail,
         })?;
 
         // A tool-reported error (`isError == true`) is the MCP way of saying

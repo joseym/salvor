@@ -409,12 +409,12 @@ async fn a_park_request_crosses_http_unchanged() {
         .call_json(&ToolCtx::new(None), json!({}))
         .await
         .expect_err("a misspelled park key fails the call");
-    let ToolError::Handler { source, .. } = error else {
-        panic!("a malformed park is a handler failure");
+    let ToolError::MalformedResult { detail, .. } = error else {
+        panic!("a malformed park is an unreadable result, on this transport as on the other");
     };
     assert!(
-        source.to_string().contains("`_meta.salvor"),
-        "the refusal names the key, got: {source}"
+        detail.contains("`_meta.salvor"),
+        "the refusal names the key, got: {detail}"
     );
 
     client.close().await.expect("clean shutdown");

@@ -58,7 +58,9 @@
 //!   ```
 //!
 //!   `kind` is one of `"invalid_input"`, `"handler"`, or
-//!   `"output_serialization"` (the three `ToolError` variants), `message` is
+//!   `"output_serialization"`: the layer that failed, not the `ToolError`
+//!   variant, so a new variant that fails at a layer already named records
+//!   under that layer's string rather than widening the format. `message` is
 //!   the **full** error chain (sources joined with `": "`), and `attempts`
 //!   counts executions including retries. The full error always lives here,
 //!   in the log; what reaches the model is compacted separately (see
@@ -86,8 +88,12 @@ pub const SLEEP_SENTINEL_KEY: &str = "__salvor_sleep";
 /// The reserved key marking a completion output as a recorded tool failure.
 pub const ERROR_SENTINEL_KEY: &str = "__salvor_error";
 
-/// Which layer of the tool dispatch produced a recorded failure. Mirrors the
-/// three `salvor_tools::ToolError` variants.
+/// Which layer of the tool dispatch produced a recorded failure.
+///
+/// A layer, not a `ToolError` variant. More than one variant can fail at the
+/// same layer, and where that happens they share the wire string: the strings
+/// are a stable format replay parses, and a reader wanting the particulars
+/// reads the message, which carries them in full.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolFailureKind {
     /// The model's arguments did not match the tool's input schema; the tool
@@ -95,7 +101,9 @@ pub enum ToolFailureKind {
     InvalidInput,
     /// The tool ran and its handler failed.
     Handler,
-    /// The tool succeeded but its output could not be serialized.
+    /// The tool ran but what came back could not be turned into a usable
+    /// result: an output that would not serialize, or a park request the
+    /// client could not read.
     OutputSerialization,
 }
 
@@ -150,6 +158,12 @@ impl ToolFailure {
             // handling, only its own message.
             salvor_tools::ToolError::MissingIdempotencyKey { .. } => ToolFailureKind::InvalidInput,
             salvor_tools::ToolError::Handler { .. } => ToolFailureKind::Handler,
+            // A result the dispatch layer could not read failed on the same
+            // side of the call as an output that would not serialize: the tool
+            // ran, and what it handed back is unusable. It shares that wire
+            // kind for the reason the line above shares `invalid_input`, and
+            // its own message says which of the two happened.
+            salvor_tools::ToolError::MalformedResult { .. } => ToolFailureKind::OutputSerialization,
             salvor_tools::ToolError::OutputSerialization { .. } => {
                 ToolFailureKind::OutputSerialization
             }

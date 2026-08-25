@@ -74,10 +74,10 @@
 //! `RetryPolicy`: `Read` and `Idempotent` handler failures re-execute up to
 //! [`MAX_TOOL_ATTEMPTS`] total attempts (idempotent retries reuse the same
 //! key, carried on `ToolCtx`), `Write` failures never re-execute, and input
-//! validation or output serialization failures never retry because they
-//! would fail identically again. Whatever the final result, the completion
-//! is recorded: an output, a suspension sentinel, or a failure object (see
-//! [`crate::wire`]).
+//! validation, an unreadable tool result, or output serialization never
+//! retries because it would fail identically again. Whatever the final result,
+//! the completion is recorded: an output, a suspension sentinel, or a failure
+//! object (see [`crate::wire`]).
 //!
 //! # Sleeping belongs between calls, never inside one
 //!
@@ -1068,6 +1068,10 @@ impl RunCtx {
                         Err(error) => {
                             // Only a handler failure is retryable, and only
                             // when the effect's policy allows a re-attempt.
+                            // Every other variant is a fault in the arguments
+                            // or in the tool itself, and a second attempt
+                            // would reach the same verdict against a slower
+                            // clock.
                             let may_retry = matches!(error, ToolError::Handler { .. })
                                 && policy.allows_retry()
                                 && attempts < MAX_TOOL_ATTEMPTS;

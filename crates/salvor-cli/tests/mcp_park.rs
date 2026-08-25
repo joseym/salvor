@@ -295,57 +295,86 @@ async fn an_mcp_suspension_records_its_kind_and_resumes_without_a_second_call() 
 /// `_meta.salvor`. The alternative, passing the result through as ordinary
 /// output, is the bug this contract exists to prevent: a server author would
 /// see a tool that "just returned" and have nothing to read.
+///
+/// It costs one execution on every effect class, which is what the count file
+/// is here to prove. `read` is the class the runtime does re-run: a tool that
+/// reports a failure on a read is called up to three times. A misspelled park
+/// is not that kind of failure. The bytes are already in hand, the second and
+/// third calls would decode the same `sleepUntil`, and the only thing three
+/// executions buy over one is two more trips to a server that has already
+/// given its answer. So both classes below show a single line in the count
+/// file and a single recorded failure carrying the message the client wrote.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_malformed_park_request_is_a_recorded_failure_naming_the_key() {
-    let dir = tempdir().expect("tempdir");
-    let store = dir.path().join("salvor.db");
-    let count_file = dir.path().join("count.txt");
+async fn a_malformed_park_request_fails_once_on_every_effect_class() {
+    for effect in ["read", "write"] {
+        let dir = tempdir().expect("tempdir");
+        let store = dir.path().join("salvor.db");
+        let count_file = dir.path().join("count.txt");
 
-    let model = GateModel::mount(vec![
-        (
+        let model = GateModel::mount(vec![
+            (
+                1,
+                tool_use_response("tu_bad", "bad_park", json!({}), 100, 20),
+            ),
+            (3, text_response("gave up on the park", 150, 30)),
+        ])
+        .await;
+        let agent = write_agent(
+            dir.path(),
+            &model.uri(),
+            &count_file,
+            &format!("effect_overrides = {{ bad_park = \"{effect}\" }}"),
+        );
+
+        let run = run_salvor(
+            &store,
+            &[
+                "run",
+                "--agent",
+                agent.to_str().unwrap(),
+                "--input",
+                "\"go\"",
+            ],
+        )
+        .await;
+        let run_id = run_id_from(&String::from_utf8_lossy(&run.stdout));
+
+        let recorded = log(&store, &run_id).await;
+        let output = completion_output(&recorded);
+        let failure = output
+            .get("__salvor_error")
+            .unwrap_or_else(|| panic!("a `{effect}` malformed park records a failure, not output"));
+        let message = failure["message"]
+            .as_str()
+            .expect("the failure has a message");
+        assert!(
+            message.contains("`_meta.salvor` has an unknown key `sleepUntil`"),
+            "the recorded message names the key and the mistake: {message}"
+        );
+        assert_eq!(
+            failure["attempts"], 1,
+            "a `{effect}` malformed park is settled on the first attempt: {failure}"
+        );
+        assert_eq!(
+            count_lines(&count_file),
             1,
-            tool_use_response("tu_bad", "bad_park", json!({}), 100, 20),
-        ),
-        (3, text_response("gave up on the park", 150, 30)),
-    ])
-    .await;
-    let agent = write_agent(
-        dir.path(),
-        &model.uri(),
-        &count_file,
-        "effect_overrides = { bad_park = \"write\" }",
-    );
-
-    let run = run_salvor(
-        &store,
-        &[
-            "run",
-            "--agent",
-            agent.to_str().unwrap(),
-            "--input",
-            "\"go\"",
-        ],
-    )
-    .await;
-    let run_id = run_id_from(&String::from_utf8_lossy(&run.stdout));
-
-    let recorded = log(&store, &run_id).await;
-    let output = completion_output(&recorded);
-    let failure = output
-        .get("__salvor_error")
-        .expect("the malformed park was recorded as a tool failure, not as output");
-    let message = failure["message"]
-        .as_str()
-        .expect("the failure has a message");
-    assert!(
-        message.contains("`_meta.salvor` has an unknown key `sleepUntil`"),
-        "the recorded message names the key and the mistake: {message}"
-    );
-    assert!(
-        !kinds(&recorded)
-            .iter()
-            .any(|kind| kind == "SleepStarted" || kind == "Suspended"),
-        "nothing parked: {:?}",
-        kinds(&recorded)
-    );
+            "the `{effect}` tool executed once, whatever the recorded attempt count claims"
+        );
+        assert_eq!(
+            kinds(&recorded)
+                .iter()
+                .filter(|kind| *kind == "ToolCallCompleted")
+                .count(),
+            1,
+            "one call, one completion, one failure: {:?}",
+            kinds(&recorded)
+        );
+        assert!(
+            !kinds(&recorded)
+                .iter()
+                .any(|kind| kind == "SleepStarted" || kind == "Suspended"),
+            "nothing parked: {:?}",
+            kinds(&recorded)
+        );
+    }
 }

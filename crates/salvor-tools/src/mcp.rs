@@ -96,6 +96,14 @@
 //! A result with no `_meta.salvor` is untouched and records exactly as it
 //! always did.
 //!
+//! Such a failure is
+//! [`ToolError::MalformedResult`](crate::ToolError::MalformedResult), and it
+//! costs exactly one execution whatever the tool's effect. A `Read` is
+//! otherwise re-run on a failure, but the request that could not be read is
+//! already in hand, and calling the same server again produces the same
+//! misspelling. Retrying would turn one clear failure into three and delay
+//! the only thing the author needs, which is the message.
+//!
 //! # Client-side input validation is structural only
 //!
 //! A native [`TypedTool`](crate::TypedTool) validates the model's JSON against

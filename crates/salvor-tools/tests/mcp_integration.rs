@@ -273,6 +273,11 @@ async fn a_tool_can_ask_the_run_to_wait_for_a_signal() {
 /// Every way a park request can be wrong fails the call with a message naming
 /// `_meta.salvor`. None of them is quietly handed back as output, which is the
 /// bug this contract exists to make impossible.
+///
+/// The variant matters as much as the failure. `MalformedResult` is the one
+/// the runtime loop never retries, so a park the server spelled wrong costs
+/// one execution on a `Read` exactly as it does on a `Write`. A `Handler`
+/// here would buy two more calls to the same server and the same misspelling.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_malformed_park_request_fails_the_call() {
     let server = connect().await;
@@ -290,13 +295,22 @@ async fn a_malformed_park_request_fails_the_call() {
             .call_json(&ToolCtx::new(None), json!({ "shape": shape }))
             .await
             .expect_err("a malformed park request never resolves to an outcome");
-        let ToolError::Handler { tool, source } = error else {
-            panic!("a malformed `{shape}` park is a handler failure");
+        // Read before the destructure, because this is what the runtime
+        // records: the error's own text, with the refusal inside it.
+        let rendered = error.to_string();
+        let ToolError::MalformedResult { tool, detail } = error else {
+            panic!(
+                "a malformed `{shape}` park is an unreadable result, never a retryable handler failure"
+            );
         };
         assert_eq!(tool, "bad_park");
         assert!(
-            source.to_string().contains("`_meta.salvor"),
-            "the `{shape}` refusal names the key, got: {source}"
+            detail.contains("`_meta.salvor"),
+            "the `{shape}` refusal names the key, got: {detail}"
+        );
+        assert!(
+            rendered.contains(&detail),
+            "the refusal reaches the log verbatim, got: {rendered}"
         );
     }
 
