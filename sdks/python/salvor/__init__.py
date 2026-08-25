@@ -89,6 +89,7 @@ __all__ = [
     "AsyncModelStepStream",
     "ClientToolDecl",
     "ClientToolIntentResult",
+    "ClientModelIntentResult",
     "Waking",
     "SalvorError",
     "SalvorAPIError",
@@ -189,9 +190,11 @@ def __getattr__(name: str):
         "ModelStepResult",
         "ModelStepStream",
         "ClientToolIntentResult",
+        "ClientModelIntentResult",
         "Waking",
     ):
         from .client_runs import (
+            ClientModelIntentResult,
             ClientRunDriver,
             ClientToolIntentResult,
             ModelStepResult,
@@ -203,6 +206,7 @@ def __getattr__(name: str):
         globals()["ModelStepResult"] = ModelStepResult
         globals()["ModelStepStream"] = ModelStepStream
         globals()["ClientToolIntentResult"] = ClientToolIntentResult
+        globals()["ClientModelIntentResult"] = ClientModelIntentResult
         globals()["Waking"] = Waking
         return globals()[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

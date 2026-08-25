@@ -31,6 +31,7 @@ import httpx
 
 from ._core import api, driver as rules, wire
 from ._core.driver import (
+    ClientModelIntentResult,
     ClientToolIntentResult,
     ModelStepResult,
     Waking,
@@ -257,6 +258,28 @@ class AsyncClientRunDriver:
         """Await :meth:`salvor.ClientRunDriver.client_tool_completion`."""
         await self._send(
             rules.client_tool_completion(self.run_id, self.drive_token, seq, output)
+        )
+
+    # -- client-performed model calls -------------------------------------------
+
+    async def client_model_intent(
+        self, seq: int, request_hash: str, request_body: Any = None
+    ) -> ClientModelIntentResult:
+        """Await :meth:`salvor.ClientRunDriver.client_model_intent`."""
+        return await self._send(
+            rules.client_model_intent(
+                self.run_id, self.drive_token, seq, request_hash, request_body
+            )
+        )
+
+    async def client_model_completion(
+        self, seq: int, response: Any, usage: dict[str, int]
+    ) -> None:
+        """Await :meth:`salvor.ClientRunDriver.client_model_completion`."""
+        await self._send(
+            rules.client_model_completion(
+                self.run_id, self.drive_token, seq, response, usage
+            )
         )
 
     # -- durable timers --------------------------------------------------------

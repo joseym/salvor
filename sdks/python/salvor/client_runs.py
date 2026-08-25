@@ -56,6 +56,7 @@ import httpx
 
 from ._core import api, driver as rules, wire
 from ._core.driver import (
+    ClientModelIntentResult,
     ClientToolIntentResult,
     ModelStepResult,
     Waking,
@@ -67,6 +68,7 @@ from .models import Event
 
 __all__ = [
     "ClientRunDriver",
+    "ClientModelIntentResult",
     "ClientToolIntentResult",
     "ModelStepResult",
     "ModelStepStream",
@@ -400,6 +402,66 @@ class ClientRunDriver:
         """
         self._send(
             rules.client_tool_completion(self.run_id, self.drive_token, seq, output)
+        )
+
+    # -- client-performed model calls -------------------------------------------
+
+    def client_model_intent(
+        self, seq: int, request_hash: str, request_body: Any = None
+    ) -> ClientModelIntentResult:
+        """Open a model call the CLIENT performs, in its own process, with its
+        own key and its own model configuration.
+
+        ``seq`` is the log position the client's cursor reserved for the
+        intent; ``request_hash`` is the client's own hash of the request it is
+        about to send. This server never sees the request and cannot recompute
+        the hash the way :meth:`model_step` does, so the hash is the client's
+        claim over its own request, and self-punishing rather than dangerous to
+        anyone else: a client that hashes inconsistently diverges against its
+        own history and nobody else's. ``request_body`` is recorded on the
+        intent only when the run was opened with ``record_prompts=True``; sent
+        to a run that does not record prompts, it is dropped and never written.
+
+        The returned ``settled`` is ``True`` when the intent at ``seq`` already
+        has its completion recorded, ``False`` otherwise, and when it is
+        ``True`` the recorded ``response`` and ``usage`` ride along, so a
+        caller retrying this call after a dropped response returns them
+        without a second request and without a separate log read.
+
+        Raises :class:`~salvor.errors.DivergenceError` for a different
+        ``request_hash`` at an already-recorded position, a non-model event
+        there, an intent there this SERVER performed, or a ``seq`` the log is
+        not ready for.
+        """
+        return self._send(
+            rules.client_model_intent(
+                self.run_id, self.drive_token, seq, request_hash, request_body
+            )
+        )
+
+    def client_model_completion(
+        self, seq: int, response: Any, usage: dict[str, int]
+    ) -> None:
+        """Report what a client-performed model call returned.
+
+        ``seq`` must name the pending intent at the end of the log; ``usage``
+        is required, not optional, because it is what a token budget counts,
+        and a completion that quietly reported none would under-count every
+        budget the run is held to. The response is recorded verbatim, with no
+        schema to check it against: its shape is the provider's, not an
+        operator's.
+
+        Raises :class:`~salvor.errors.DivergenceError` when the log does not
+        end at a model intent, or ends at one whose ``seq`` is not the one
+        named. Raises :class:`~salvor.errors.SalvorAPIError` with code
+        ``client_completion_refused`` when the pending intent was performed by
+        the SERVER: a client must not close a call salvor made, since salvor
+        holds the real response.
+        """
+        self._send(
+            rules.client_model_completion(
+                self.run_id, self.drive_token, seq, response, usage
+            )
         )
 
     # -- durable timers --------------------------------------------------------

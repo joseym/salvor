@@ -292,6 +292,41 @@ class ClientRunLoopRealServer(unittest.TestCase):
         self.assertEqual(stream.completion.response, result.response)
         self.assertEqual(self.provider_hits(), before + 1, "streaming replay paid nothing")
 
+    def test_client_model_intent_and_completion_settle_a_client_performed_call(
+        self,
+    ) -> None:
+        run = ClientRunDriver.open(self.base)
+        self.addCleanup(run.close)
+        run.append([self.started(run, 0)])
+
+        intent = run.client_model_intent(1, "sha256:the-request")
+        self.assertEqual(intent.seq, 1)
+        self.assertFalse(intent.settled, "nothing has reported on it yet")
+        self.assertIsNone(intent.response)
+
+        run.client_model_completion(
+            1,
+            {"content": [{"type": "text", "text": "the plan"}]},
+            {"input_tokens": 10, "output_tokens": 5},
+        )
+        self.assertEqual(
+            [e.kind for e in run.log()],
+            ["RunStarted", "ModelCallRequested", "ModelCallCompleted"],
+        )
+
+        # A re-post of the same hash now reports itself settled, carrying the
+        # recorded response and usage back without a second log read.
+        settled = run.client_model_intent(1, "sha256:the-request")
+        self.assertTrue(settled.settled)
+        self.assertEqual(settled.response["content"][0]["text"], "the plan")
+        self.assertEqual(settled.usage.input_tokens, 10)
+        self.assertEqual(settled.usage.output_tokens, 5)
+
+        # A different hash at the same recorded position is a divergence: the
+        # client's cursor and the log disagree about what request was sent.
+        with self.assertRaises(DivergenceError):
+            run.client_model_intent(1, "sha256:a-different-request")
+
     def test_sleep_parks_the_run_and_only_the_deadline_wakes_it(self) -> None:
         """Three drives over one run: park, come back too soon, come back late.
 

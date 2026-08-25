@@ -163,7 +163,13 @@ with Client("http://127.0.0.1:8080") as client:
     receipt = charge_card(intent.idempotency_key, {"amount_cents": 500})  # your code, your key
     run.client_tool_completion(4, receipt)
 
-    run.append([run.envelope(5, "RunCompleted", output=answer)])
+    # A model call the client makes itself, with its own key and config:
+    m_intent = run.client_model_intent(5, "sha256:the-request")     # -> ClientModelIntentResult
+    if not m_intent.settled:
+        response, usage = call_your_own_model(request)              # your code, your key
+        run.client_model_completion(5, response, usage)
+
+    run.append([run.envelope(6, "RunCompleted", output=answer)])
 ```
 
 The driver can also park the run on a durable timer: `sleep_until(seq, wake_at)`
@@ -180,7 +186,8 @@ before then.
 
 The driver's full surface: `open` (also re-opens, i.e. resumes, an existing
 run), `log(from_seq=0)`, `append(events)`, `model_step`, `model_step_stream`,
-`tool_step`, `client_tool_intent`, `client_tool_completion`, `sleep_until`,
+`tool_step`, `client_tool_intent`, `client_tool_completion`,
+`client_model_intent`, `client_model_completion`, `sleep_until`,
 `sleep_for`, `await_wake`, and
 `resolve(output)`. Re-opening a run returns its recorded log on
 `run.log_envelopes` and mints a fresh drive token (the single-writer lease every
@@ -202,6 +209,22 @@ report or carries no output schema to check it against; settle those by hand
 with `resolve` once you have verified the call externally. A reported output
 that fails the declared schema is refused too, and there the fix is the output
 itself.
+
+`client_model_intent` and `client_model_completion` are the same idea for a
+model call: a team that wants its own key and its own model configuration
+calls the provider itself, and salvor only records that the call happened and
+what it returned. Open the intent with `request_hash`, your own hash of the
+request you are about to send, since this server never sees the request and
+cannot recompute the hash the way `model_step` does; a `settled` of `False`
+means make the call, `True` means it is already recorded and the returned
+`response` and `usage` are the answer, paid for on an earlier drive. Report
+the completion with the response and the token counts, since `usage` is what
+every budget counts against and there is no way for salvor to fold one out of
+a response shape it has never seen. A different hash at an already-recorded
+position raises `DivergenceError`, the same as a diverging tool call would;
+there is no `client_completion_refused` case here beyond the server having
+performed the call itself, since a model response carries no operator schema
+to check a report against.
 
 `examples/browser-client-run` drives this same client-driven surface from a
 browser page, and `example/client_run_loop.py` drives it from Python.

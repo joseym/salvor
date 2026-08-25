@@ -78,6 +78,38 @@ class ClientToolIntentResult:
 
 
 @dataclass
+class ClientModelIntentResult:
+    """The receipt from opening a model call the client performs: the
+    position, whether this position's completion is already recorded, and,
+    when it is, the recorded response and its usage.
+
+    ``settled`` is ``True`` when the intent at ``seq`` already has its
+    completion recorded, ``False`` otherwise. It is what a caller retrying
+    :meth:`~salvor.client_runs.ClientRunDriver.client_model_intent` after a
+    dropped response uses to tell "the call still has to be made" from
+    "already recorded, return this instead" without a separate log read;
+    ``response`` and ``usage`` carry the recorded answer only when ``settled``
+    is ``True``.
+    """
+
+    seq: int
+    settled: bool
+    response: Any = None
+    usage: Optional[Usage] = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_json(cls, obj: dict[str, Any]) -> "ClientModelIntentResult":
+        return cls(
+            seq=int(obj.get("seq", 0)),
+            settled=bool(obj.get("settled", False)),
+            response=obj.get("response"),
+            usage=Usage.from_json(obj.get("usage")),
+            raw=obj,
+        )
+
+
+@dataclass
 class Waking:
     """What a check on a durable timer found.
 
@@ -229,6 +261,37 @@ def client_tool_completion(
         f"/v1/client-runs/{run_id}/client-tool-completion",
         parse=discard,
         json_body={"seq": seq, "output": output},
+        headers=lease(drive_token),
+    )
+
+
+def client_model_intent(
+    run_id: str,
+    drive_token: str,
+    seq: int,
+    request_hash: str,
+    request_body: Any = None,
+) -> Call:
+    body: dict[str, Any] = {"seq": seq, "request_hash": request_hash}
+    if request_body is not None:
+        body["request_body"] = request_body
+    return Call(
+        "POST",
+        f"/v1/client-runs/{run_id}/client-model-intent",
+        parse=ClientModelIntentResult.from_json,
+        json_body=body,
+        headers=lease(drive_token),
+    )
+
+
+def client_model_completion(
+    run_id: str, drive_token: str, seq: int, response: Any, usage: dict[str, int]
+) -> Call:
+    return Call(
+        "POST",
+        f"/v1/client-runs/{run_id}/client-model-completion",
+        parse=discard,
+        json_body={"seq": seq, "response": response, "usage": usage},
         headers=lease(drive_token),
     )
 
