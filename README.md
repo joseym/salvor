@@ -190,7 +190,7 @@ salvor graph validate examples/graphs/invalid-dangling-edge.json
 
 names the dangling edge: ``edge `research` -> `aprove` references unknown node id `aprove` (did you mean `approve`?)``
 
-Every `branch` case must label at least one outbound edge out of that node; a case that should end the run points at a terminal node rather than being left unrouted. Validation refuses the graph otherwise, naming the node and the case.
+Every `branch` case must label at least one outbound edge out of that node; a case that should end the run points at a terminal node rather than being left unrouted. Validation refuses the graph otherwise, naming the node and the case. The mirror image is refused too: an outbound edge from a `branch` node labeled with a name none of its cases declare is dead (it can never fire), and validation names the node and the label.
 
 `salvor graph run` drives a document over the store exactly as `salvor run` drives an agent run: each walked node is recorded, a branch records `BranchTaken` while the losing arm records `NodeSkipped`, a gate parks the run durably until a human answers, a `delay` node parks the run durably for a declared number of seconds and holds nothing while it sleeps, and a `fold` runs its body up to a declared bound, each pass folding over the last, until its stop condition holds and its join rule picks the winner, all of it recorded pass by pass. The kill-and-resume guarantee is the one from the top of this file, unchanged. Typed builders exist in Rust, TypeScript and Python, each reducing to the same document, and `salvor graph schema` emits the JSON Schema checked in at [`docs/graph-schema.json`](docs/graph-schema.json) for editor completion.
 

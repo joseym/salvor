@@ -152,6 +152,52 @@ fn validate_rejects_a_branch_case_with_no_matching_edge() {
     );
 }
 
+/// An outbound edge from a branch labeled with a name no case declares is the
+/// mirror mistake: a misspelled edge label (`lst`) that realizes neither of
+/// the branch's declared cases (`lost`, `paid`). Both declared cases carry
+/// their own correctly labeled edge, so this isolates the new check alone.
+#[test]
+fn validate_rejects_a_branch_edge_labeled_with_no_matching_case() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("unmatched_label.json");
+    let doc = r#"{
+      "schema_version": 1,
+      "nodes": [
+        { "kind": "tool", "payload": { "id": "assess", "tool": "assess" } },
+        { "kind": "branch", "payload": { "id": "route", "on": "assess.outcome", "cases": [
+            { "name": "lost", "when": { "kind": "expression", "value": "outcome == \"lost\"" } },
+            { "name": "paid", "when": { "kind": "expression", "value": "outcome == \"paid\"" } }
+          ] } },
+        { "kind": "tool", "payload": { "id": "close", "tool": "notify" } },
+        { "kind": "tool", "payload": { "id": "celebrate", "tool": "notify" } }
+      ],
+      "edges": [
+        { "from": "assess", "to": "route" },
+        { "from": "route", "to": "close", "label": "lost" },
+        { "from": "route", "to": "celebrate", "label": "paid" },
+        { "from": "route", "to": "close", "label": "lst" }
+      ]
+    }"#;
+    fs::write(&path, doc).expect("write");
+
+    let output = salvor()
+        .args(["graph", "validate"])
+        .arg(&path)
+        .output()
+        .expect("runs");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(1), "invalid exits 1: {output:?}");
+    assert!(
+        stderr.contains("branch node `route`") && stderr.contains("labeled `lst`"),
+        "names the branch and the offending label: {stderr}"
+    );
+    assert!(
+        stderr.contains("names no case"),
+        "says what went wrong: {stderr}"
+    );
+}
+
 #[test]
 fn validate_rejects_an_unknown_field() {
     let dir = tempdir().expect("tempdir");

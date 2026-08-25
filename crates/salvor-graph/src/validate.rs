@@ -196,6 +196,22 @@ pub enum GraphError {
         case: String,
     },
 
+    /// An outbound edge from a `branch` node carries a `label` that matches no
+    /// case the branch declares. Caught at submit for the same reason as
+    /// [`GraphError::BranchCaseWithoutEdge`], from the other side: the engine
+    /// only ever takes a branch's edge by matching the fired case's name
+    /// against the label, so a label naming nothing can never fire and the
+    /// edge just sits there, dead. See [`check_branch_edge_labels`].
+    #[error(
+        "branch node `{node}`: outbound edge labeled `{label}` names no case; rename the label to match one of the branch's cases, or declare the case `{label}` on the branch"
+    )]
+    BranchEdgeWithoutCase {
+        /// The branch node's id.
+        node: String,
+        /// The edge label that matches no declared case.
+        label: String,
+    },
+
     /// A `fold` node's `stop_when` predicate does not parse in the
     /// [`crate::expr`] condition language. Caught at submit so a bad predicate is
     /// never a run-time failure, exactly like a branch case's expression.
@@ -317,6 +333,7 @@ pub fn validate(graph: &Graph) -> Result<GraphSummary, Vec<GraphError>> {
     check_node_names(graph, &mut errors);
     check_branch_expressions(graph, &mut errors);
     check_branch_case_edges(graph, &mut errors);
+    check_branch_edge_labels(graph, &mut errors);
     check_fold_expressions(graph, &mut errors);
     check_fold_reference_shapes(graph, &mut errors);
     check_acyclic(graph, &mut errors);
@@ -546,9 +563,12 @@ fn check_branch_expressions(graph: &Graph, errors: &mut Vec<GraphError>) {
 /// case-precise, so a misspelled or forgotten edge label is an authoring
 /// mistake seen at submit, not a run that finishes looking healthy.
 ///
-/// The inverse (an edge labeled with a name no case declares) is not checked
-/// here: that edge is simply dead and never fires, which is a different, less
-/// silent mistake than the one this check exists to catch.
+/// The inverse, an outbound edge whose label names no case the branch
+/// declares, is checked separately by [`check_branch_edge_labels`]: it is a
+/// different mistake (the edge is dead outright, rather than silently making
+/// the run look like it took a path it did not), and each check has its own
+/// error variant so an author sees precisely which side of the label typo is
+/// theirs to fix.
 fn check_branch_case_edges(graph: &Graph, errors: &mut Vec<GraphError>) {
     for node in &graph.nodes {
         let Node::Branch(branch) = node else {
@@ -565,6 +585,49 @@ fn check_branch_case_edges(graph: &Graph, errors: &mut Vec<GraphError>) {
                 errors.push(GraphError::BranchCaseWithoutEdge {
                     node: branch.id.clone(),
                     case: case.name.clone(),
+                });
+            }
+        }
+    }
+}
+
+/// Every outbound edge from a `branch` node whose `label` is set must name one
+/// of the branch's own declared cases.
+///
+/// This is [`check_branch_case_edges`] read the other way. The engine takes a
+/// branch's live edge by matching the fired case's name against an edge's
+/// label (see `salvor_engine::is_live_inbound`); a label that names no case
+/// can never match anything a branch fires, so the edge is simply dead, no
+/// run ever takes it, and it sits in the document looking like a route that
+/// does not exist. In practice this is almost always the other half of
+/// exactly the same typo `check_branch_case_edges` catches: the case is
+/// spelled one way and the edge meant to realize it is spelled another, and
+/// one of the two is the mistake. Reporting both, node- and label-precise, is
+/// what lets an author see the mismatch and pick the correct spelling instead
+/// of guessing which side is wrong.
+///
+/// An outbound edge from a branch that carries NO label at all is not
+/// reported here: [`crate::document::Edge::label`] is optional, and this
+/// check only judges a label that IS set to something. Such an edge can also
+/// never fire, by the same engine rule, but an unlabelled edge does not name
+/// anything wrong the way a mismatched label does, so it is left alone.
+fn check_branch_edge_labels(graph: &Graph, errors: &mut Vec<GraphError>) {
+    for node in &graph.nodes {
+        let Node::Branch(branch) = node else {
+            continue;
+        };
+        let case_names: HashSet<&str> =
+            branch.cases.iter().map(|case| case.name.as_str()).collect();
+        for edge in &graph.edges {
+            if edge.from != branch.id {
+                continue;
+            }
+            if let Some(label) = &edge.label
+                && !case_names.contains(label.as_str())
+            {
+                errors.push(GraphError::BranchEdgeWithoutCase {
+                    node: branch.id.clone(),
+                    label: label.clone(),
                 });
             }
         }
@@ -1368,7 +1431,10 @@ mod tests {
     /// error, distinct from and reported alongside a sibling case that does
     /// have one: the mistake this catches is exactly a misspelled edge label
     /// (the case name and the label must match character for character), and
-    /// the message says what to do about it.
+    /// the message says what to do about it. The misspelled edge itself, `lst`,
+    /// is also reported by [`check_branch_edge_labels`]'s mirror check: a
+    /// single typo names no case on one side and realizes none on the other,
+    /// so both halves of it are named.
     #[test]
     fn branch_case_without_edge_is_reported() {
         let branch = Node::Branch(BranchNode {
@@ -1399,11 +1465,17 @@ mod tests {
         let errors = validate(&g).expect_err("invalid");
         assert_eq!(
             errors,
-            vec![GraphError::BranchCaseWithoutEdge {
-                node: "route".into(),
-                case: "lost".into(),
-            }],
-            "names the node and the unrouted case, and only that one: {errors:?}"
+            vec![
+                GraphError::BranchCaseWithoutEdge {
+                    node: "route".into(),
+                    case: "lost".into(),
+                },
+                GraphError::BranchEdgeWithoutCase {
+                    node: "route".into(),
+                    label: "lst".into(),
+                },
+            ],
+            "names the unrouted case AND the mislabeled edge that caused it, nothing else: {errors:?}"
         );
         let message = errors[0].to_string();
         assert!(
@@ -1413,6 +1485,73 @@ mod tests {
         assert!(
             message.contains("terminal node"),
             "says what to do about a route meant to end the run: {message}"
+        );
+    }
+
+    /// An outbound edge from a branch labeled with a name no case declares is
+    /// a node/label-precise error, the mirror of
+    /// [`branch_case_without_edge_is_reported`]: the label `lst` matches
+    /// neither of the branch's declared cases (`lost`, `paid`), so the edge is
+    /// dead and the message says what to do about it.
+    #[test]
+    fn branch_edge_without_case_is_reported() {
+        let branch = Node::Branch(BranchNode {
+            name: None,
+            id: "route".into(),
+            on: None,
+            agent_hash: None,
+            cases: vec![
+                BranchCase {
+                    name: "lost".into(),
+                    when: BranchCondition::Expression("outcome == \"lost\"".into()),
+                },
+                BranchCase {
+                    name: "paid".into(),
+                    when: BranchCondition::Expression("outcome == \"paid\"".into()),
+                },
+            ],
+        });
+        let g = graph(
+            vec![branch, agent("celebrate"), agent("close")],
+            // The edge meant to realize `lost` is misspelled `lst`, exactly
+            // the mistake this check exists to catch, from the edge's side.
+            vec![
+                labeled_edge("route", "close", "lst"),
+                labeled_edge("route", "celebrate", "paid"),
+            ],
+        );
+        let errors = validate(&g).expect_err("invalid");
+        assert!(
+            errors.contains(&GraphError::BranchEdgeWithoutCase {
+                node: "route".into(),
+                label: "lst".into(),
+            }),
+            "names the node and the offending label: {errors:?}"
+        );
+        // The sibling `lost` case, which now has no realizing edge either, is
+        // reported separately by the other check: both sides of the same
+        // typo are named.
+        assert!(
+            errors.contains(&GraphError::BranchCaseWithoutEdge {
+                node: "route".into(),
+                case: "lost".into(),
+            }),
+            "the case left unrouted by the typo is also named: {errors:?}"
+        );
+        let message = errors
+            .iter()
+            .find_map(|e| match e {
+                GraphError::BranchEdgeWithoutCase { .. } => Some(e.to_string()),
+                _ => None,
+            })
+            .expect("a BranchEdgeWithoutCase error");
+        assert!(
+            message.contains("route") && message.contains("lst"),
+            "{message}"
+        );
+        assert!(
+            message.contains("case"),
+            "says what to do about the mismatched label: {message}"
         );
     }
 
