@@ -29,7 +29,12 @@
 //!   [`Agent::output_schema`](salvor_runtime::Agent::output_schema));
 //! - a **tool** node records one tool call through the same write-ahead
 //!   intent/completion machinery the built-in loop uses, honoring the tool's
-//!   effect class;
+//!   effect class. A tool that asks to park the run parks it: a suspension
+//!   through `Suspended` / `Resumed`, a sleep through `SleepStarted` /
+//!   `SleepCompleted`. Either way the node stays entered with no `NodeExited`,
+//!   so a later drive re-enters it and continues from the recorded park. The
+//!   sleep request rides inside the call's own completion, so the call settles
+//!   (and releases any idempotency claim) before the timer starts;
 //! - a **gate** node parks the run through the exact `Suspended` / `Resumed`
 //!   machinery the built-in loop uses for a tool suspension: entering it records
 //!   `NodeEntered`, then `suspend` records the gate's `approval_schema` as the
@@ -106,7 +111,21 @@
 //!   `FoldConverged`. The chosen winner and the stop reason are recorded on
 //!   `FoldConverged`, then `NodeExited`. A `subgraph` body, or a body node that
 //!   is not an `agent` or `tool`, is a typed
-//!   [`EngineError::UnsupportedFoldBody`] refused before `NodeEntered`.
+//!   [`EngineError::UnsupportedFoldBody`] refused before `NodeEntered`;
+//! - a **delay** node parks the run on a durable timer, the timer counterpart
+//!   of the gate: `NodeEntered`, then `sleep_for` (a recorded clock reading
+//!   followed by `SleepStarted { wake_at }`), then a wait. Before the deadline
+//!   the drive returns [`GraphOutcome::Parked`] with
+//!   [`ParkReason::Sleeping`](salvor_runtime::ParkReason::Sleeping) and no
+//!   `NodeExited`, so a drive that arrives early records nothing and a later
+//!   one re-enters the same node and continues from the recorded sleep. At or
+//!   past the deadline `SleepCompleted` lands, `NodeExited` closes the node,
+//!   and the walk continues with the node's input passed through UNCHANGED: a
+//!   delay moves a run in time, never in value, so its output is its input
+//!   verbatim. It needs no event kind of its own; the sleep pair is the whole
+//!   vocabulary. The wait is a DURATION in the document and the instant is
+//!   derived from the recorded reading, which is what keeps the same document
+//!   runnable more than once (see [`salvor_graph::DelayNode`]).
 //!
 //! A node that is a map's or a fold's body is executed ONLY as that owner's
 //! per-item or per-pass worker; it is never walked independently, so its own
@@ -168,12 +187,12 @@ use std::collections::{HashMap, HashSet};
 use salvor_core::{Effect, RunId};
 use salvor_graph::expr::{Expr, Reference};
 use salvor_graph::{
-    AgentNode, BranchCondition, BranchNode, Edge, FoldBody, FoldJoin, FoldNode, GateNode, Graph,
-    MapBody, MapNode, Node, OnBound,
+    AgentNode, BranchCondition, BranchNode, DelayNode, Edge, FoldBody, FoldJoin, FoldNode,
+    GateNode, Graph, MapBody, MapNode, Node, OnBound,
 };
 use salvor_runtime::{
-    Agent, LoopOutcome, ParkReason, Resumption, RunCtx, ToolCallResult, drive_loop,
-    drive_loop_structured, hash_value,
+    Agent, LoopOutcome, ParkReason, Resumption, RunCtx, ToolCallResult, Waking, drive_loop,
+    drive_loop_structured, hash_value, slept_output,
 };
 use salvor_tools::DynTool;
 use serde_json::{Value, json};
@@ -280,7 +299,8 @@ pub fn graph_hash(graph: &Graph) -> Result<String, EngineError> {
 /// [`EngineError::UnknownAgent`] / [`EngineError::UnknownTool`] when a resolver
 /// cannot supply a node's executable; [`EngineError::MalformedGraph`] when the
 /// topology is not a DAG (or, unreachable in practice, a branch condition the
-/// validator accepted fails to parse here); [`EngineError::ToolFailed`] when a
+/// validator accepted fails to parse here, or a `delay` node's wait is zero or
+/// out of range, refused before that node's `NodeEntered`); [`EngineError::ToolFailed`] when a
 /// tool call fails; [`EngineError::Runtime`] for any replay divergence,
 /// reconciliation refusal, provider, or store error.
 pub async fn run_graph(
@@ -424,8 +444,15 @@ pub async fn run_graph(
                         });
                     }
                     ToolCallResult::Suspended(suspension) => {
-                        ctx.suspend(&suspension.reason, &suspension.input_schema)
-                            .await?;
+                        // Whatever the tool said it waits on is recorded and
+                        // reported. A node parked on a webhook is not a gate
+                        // and must not read as one.
+                        ctx.suspend_with_kind(
+                            &suspension.reason,
+                            &suspension.input_schema,
+                            suspension.kind,
+                        )
+                        .await?;
                         match ctx.await_resume().await? {
                             Resumption::Parked => {
                                 return Ok(GraphOutcome::Parked {
@@ -433,6 +460,7 @@ pub async fn run_graph(
                                     reason: ParkReason::Suspended {
                                         reason: suspension.reason,
                                         input_schema: suspension.input_schema,
+                                        kind: suspension.kind,
                                     },
                                 });
                             }
@@ -441,6 +469,33 @@ pub async fn run_graph(
                                 ctx.node_exited(id).await?;
                                 last_output = resume_input.clone();
                                 outputs.insert(id, resume_input);
+                            }
+                        }
+                    }
+                    // The timer park, the same shape as the suspension above:
+                    // the node stays entered with no `NodeExited`, so a later
+                    // drive re-enters it and continues from the recorded sleep.
+                    // The call settled before the sleep started (its completion
+                    // carried the request), so a node asleep for a week holds
+                    // no idempotency claim.
+                    ToolCallResult::Sleeping(sleep) => {
+                        ctx.sleep_until(sleep.wake_at).await?;
+                        match ctx.await_wake().await? {
+                            Waking::Asleep { wake_at } => {
+                                return Ok(GraphOutcome::Parked {
+                                    node: tool_node.id.clone(),
+                                    reason: ParkReason::Sleeping { wake_at },
+                                });
+                            }
+                            Waking::Woken => {
+                                // The tool named a deadline instead of a value,
+                                // so the node's output is derived from the wake
+                                // instant its completion recorded: pure, and
+                                // identical on every replay.
+                                let output = slept_output(sleep.wake_at);
+                                ctx.node_exited(id).await?;
+                                last_output = output.clone();
+                                outputs.insert(id, output);
                             }
                         }
                     }
@@ -487,6 +542,9 @@ pub async fn run_graph(
                             reason: ParkReason::Suspended {
                                 reason,
                                 input_schema: gate.approval_schema.clone(),
+                                // A gate is the human park by definition, so
+                                // it names no discriminator.
+                                kind: None,
                             },
                         });
                     }
@@ -494,6 +552,43 @@ pub async fn run_graph(
                         ctx.node_exited(id).await?;
                         last_output = resume_input.clone();
                         outputs.insert(id, resume_input);
+                    }
+                }
+            }
+            // A delay parks on a timer the way a gate parks on a person: enter
+            // the node, park, and leave no `NodeExited` behind, so a later
+            // drive re-enters it and continues from the recorded sleep. No
+            // delay-specific event kind: `SleepStarted` / `SleepCompleted` is
+            // the whole vocabulary, exactly as `Suspended` / `Resumed` is the
+            // gate's.
+            Node::Delay(delay) => {
+                // Refuse-before-record: the declared wait becomes a duration
+                // here, ahead of `NodeEntered`, so a document the validator
+                // would have refused leaves nothing in the log.
+                let duration = delay_duration(delay)?;
+                ctx.node_entered(id).await?;
+                // `sleep_for` is `now()` then `sleep_until`: the clock reading
+                // lands in the log as a `NowObserved` and the wake instant is
+                // derived from it, so the instant is a pure function of
+                // recorded data and every later drive derives the identical
+                // one. A wake instant baked into the document could not make
+                // that claim on a second run, which is why the field is a
+                // duration.
+                ctx.sleep_for(duration).await?;
+                match ctx.await_wake().await? {
+                    Waking::Asleep { wake_at } => {
+                        return Ok(GraphOutcome::Parked {
+                            node: delay.id.clone(),
+                            reason: ParkReason::Sleeping { wake_at },
+                        });
+                    }
+                    // A delay transforms nothing, so its output is its input
+                    // verbatim, the same pass-through a branch performs: the
+                    // node moves the run in time, never in value.
+                    Waking::Woken => {
+                        ctx.node_exited(id).await?;
+                        last_output = node_input.clone();
+                        outputs.insert(id, node_input);
                     }
                 }
             }
@@ -627,6 +722,36 @@ pub async fn record_permanent_refusal(
     }
     ctx.fail_run(&error.to_string()).await?;
     Ok(true)
+}
+
+/// The wait a `delay` node declares, as a duration the runtime can sleep for.
+///
+/// Two refusals, both pure functions of the frozen document and both raised
+/// BEFORE the node's `NodeEntered`, so a document that trips either leaves
+/// nothing in the log. A zero wait is the one
+/// [`salvor_graph::validate`] already reports as `NonPositiveDelay`; this
+/// re-checks it defensively for the same reason [`drive_fold`] re-checks a
+/// fold's bound, because a validator is a submit-time gate and the engine can
+/// be handed a document by some other route. A wait past `i64::MAX` seconds
+/// cannot be a [`time::Duration`] at all; it is astronomically out of range
+/// rather than merely long, and the alternative to naming it is a panic in a
+/// conversion.
+fn delay_duration(delay: &DelayNode) -> Result<time::Duration, EngineError> {
+    if delay.seconds < 1 {
+        return Err(EngineError::MalformedGraph {
+            detail: format!(
+                "delay node `{}`: seconds must be at least 1, found {}",
+                delay.id, delay.seconds
+            ),
+        });
+    }
+    let seconds = i64::try_from(delay.seconds).map_err(|_| EngineError::MalformedGraph {
+        detail: format!(
+            "delay node `{}`: a wait of {} seconds is outside the representable range",
+            delay.id, delay.seconds
+        ),
+    })?;
+    Ok(time::Duration::seconds(seconds))
 }
 
 /// How driving one map node's fan-out ended.
@@ -874,16 +999,33 @@ async fn run_body(
                     message: failure.message,
                 }),
                 ToolCallResult::Suspended(suspension) => {
-                    ctx.suspend(&suspension.reason, &suspension.input_schema)
-                        .await?;
+                    ctx.suspend_with_kind(
+                        &suspension.reason,
+                        &suspension.input_schema,
+                        suspension.kind,
+                    )
+                    .await?;
                     match ctx.await_resume().await? {
                         Resumption::Parked => Ok(IterationOutcome::Parked(ParkReason::Suspended {
                             reason: suspension.reason,
                             input_schema: suspension.input_schema,
+                            kind: suspension.kind,
                         })),
                         Resumption::Resumed(resume_input) => {
                             Ok(IterationOutcome::Output(resume_input))
                         }
+                    }
+                }
+                // The timer park. No join is recorded for a parked iteration or
+                // pass, so a later drive re-enters this same one and continues
+                // from the recorded sleep, exactly as a suspension does.
+                ToolCallResult::Sleeping(sleep) => {
+                    ctx.sleep_until(sleep.wake_at).await?;
+                    match ctx.await_wake().await? {
+                        Waking::Asleep { wake_at } => {
+                            Ok(IterationOutcome::Parked(ParkReason::Sleeping { wake_at }))
+                        }
+                        Waking::Woken => Ok(IterationOutcome::Output(slept_output(sleep.wake_at))),
                     }
                 }
             }

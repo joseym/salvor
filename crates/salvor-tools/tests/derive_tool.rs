@@ -69,7 +69,9 @@ async fn derived_tool_registers_and_dispatches() {
 
     match outcome {
         ToolOutcome::Output(value) => assert_eq!(value, json!({ "id": "JIRA-9" })),
-        ToolOutcome::Suspend(_) => panic!("tool returned an output, not a suspension"),
+        ToolOutcome::Suspend(_) | ToolOutcome::Sleep(_) => {
+            panic!("tool returned an output, not a park")
+        }
     }
 }
 

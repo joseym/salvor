@@ -62,6 +62,11 @@ impl HandlerError {
 /// - [`ToolError::Handler`] means the handler ran and returned a
 ///   [`HandlerError`]. This is a real execution failure, subject to the
 ///   effect's [retry policy](crate::RetryPolicy).
+/// - [`ToolError::MalformedResult`] means the tool ran and returned something
+///   this layer could not read as a result. Like `OutputSerialization` it is
+///   the tool author's own bug, so it is not retryable: the same bytes decode
+///   the same way on a second attempt, and the only thing a retry buys is a
+///   slower answer to a question already settled.
 /// - [`ToolError::OutputSerialization`] means the handler succeeded but its
 ///   `Output` value could not be serialized to JSON. This is an internal fault
 ///   in the tool definition, not the model's doing and not a retryable failure.
@@ -106,6 +111,22 @@ pub enum ToolError {
         /// The declared path, as the operator wrote it.
         path: String,
         /// What went wrong at that path, including the keys the input carries.
+        detail: String,
+    },
+    /// The tool ran and handed back a result the dispatch layer could not
+    /// read.
+    ///
+    /// Distinct from [`Handler`](Self::Handler), which is the tool saying its
+    /// own work failed. Here the work may well have succeeded; what arrived
+    /// with it is unreadable, which is a mistake in the tool rather than in
+    /// the world it talked to. That is the whole reason for the separate
+    /// variant: a handler failure is worth another attempt under the right
+    /// effect, and an unreadable result never is.
+    #[error("tool `{tool}` returned a result that could not be read: {detail}")]
+    MalformedResult {
+        /// The tool whose result could not be read.
+        tool: String,
+        /// What was wrong with it, in the words of whatever tried to read it.
         detail: String,
     },
     /// The handler succeeded but its output could not be serialized to JSON.

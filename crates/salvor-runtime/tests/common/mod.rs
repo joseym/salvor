@@ -25,8 +25,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use salvor_core::{Effect, Event, EventEnvelope, RunId};
 use salvor_llm::Config;
 use salvor_runtime::{Agent, AgentBuilder, ClockFn, RandomFn};
-use salvor_tools::{DynTool, HandlerError, Suspension, ToolCtx, ToolError, ToolOutcome};
+use salvor_tools::{DynTool, HandlerError, Sleep, Suspension, ToolCtx, ToolError, ToolOutcome};
 use serde_json::{Value, json};
+use time::OffsetDateTime;
 use time::macros::datetime;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
@@ -66,6 +67,8 @@ pub fn event_kinds(log: &[EventEnvelope]) -> Vec<&'static str> {
             Event::RandomObserved { .. } => "RandomObserved",
             Event::Suspended { .. } => "Suspended",
             Event::Resumed { .. } => "Resumed",
+            Event::SleepStarted { .. } => "SleepStarted",
+            Event::SleepCompleted {} => "SleepCompleted",
             Event::BudgetExceeded { .. } => "BudgetExceeded",
             Event::RunCompleted { .. } => "RunCompleted",
             Event::RunFailed { .. } => "RunFailed",
@@ -191,6 +194,11 @@ pub enum ToolBehavior {
     Fail(String),
     /// Ask to suspend the run.
     Suspend(Suspension),
+    /// Ask to park the run until this instant. A fixed instant rather than a
+    /// duration for the same reason the outcome carries one: what the tool
+    /// returns is recorded, and a test comparing whole logs needs it to be the
+    /// same value every drive.
+    Sleep(OffsetDateTime),
 }
 
 /// A scripted tool with a shared execution counter.
@@ -198,6 +206,10 @@ pub struct TestTool {
     pub name: String,
     pub effect: Effect,
     pub behavior: ToolBehavior,
+    /// The key this tool declares for every call, when it declares one. Only a
+    /// declared key is an identity the store deduplicates on, so this is what
+    /// a test needs to make a call take a claim at all.
+    pub declared_key: Option<String>,
     /// Incremented once per execution attempt, shared with the test body so
     /// executions can be counted across runtimes.
     pub calls: Arc<AtomicUsize>,
@@ -211,10 +223,18 @@ impl TestTool {
                 name: name.to_owned(),
                 effect,
                 behavior,
+                declared_key: None,
                 calls: calls.clone(),
             },
             calls,
         )
+    }
+
+    /// Declares `key` as this tool's idempotency key for every call.
+    #[must_use]
+    pub fn declaring_key(mut self, key: &str) -> Self {
+        self.declared_key = Some(key.to_owned());
+        self
     }
 }
 
@@ -236,6 +256,10 @@ impl DynTool for TestTool {
         json!({"type": "object"})
     }
 
+    fn idempotency_key(&self, _input: &Value) -> Option<String> {
+        self.declared_key.clone()
+    }
+
     async fn call_json(
         &self,
         _ctx: &ToolCtx,
@@ -249,7 +273,44 @@ impl DynTool for TestTool {
                 source: HandlerError::message(message.clone()),
             }),
             ToolBehavior::Suspend(suspension) => Ok(ToolOutcome::Suspend(suspension.clone())),
+            ToolBehavior::Sleep(wake_at) => Ok(ToolOutcome::Sleep(Sleep::until(*wake_at))),
         }
+    }
+}
+
+/// A clock a test sets by hand, shared with every [`RunCtx`](salvor_runtime::RunCtx)
+/// or [`Runtime`](salvor_runtime::Runtime) a scenario builds so the whole
+/// scenario reads one time.
+///
+/// The apparatus for every durable-timer test: a sleeping run continues when
+/// its deadline arrives, and "arrives" means the test said so. Nothing sleeps
+/// in real time and no test waits on one.
+#[derive(Clone)]
+pub struct TestClock {
+    now: Arc<std::sync::Mutex<OffsetDateTime>>,
+}
+
+impl TestClock {
+    /// A clock reading `start` until something moves it.
+    pub fn new(start: OffsetDateTime) -> Self {
+        Self {
+            now: Arc::new(std::sync::Mutex::new(start)),
+        }
+    }
+
+    /// The injected clock function: envelope timestamps and live `now`
+    /// observations both read it.
+    pub fn injected(&self) -> ClockFn {
+        let now = self.now.clone();
+        Arc::new(move || *now.lock().expect("clock is not poisoned"))
+    }
+
+    pub fn read(&self) -> OffsetDateTime {
+        *self.now.lock().expect("clock is not poisoned")
+    }
+
+    pub fn set(&self, instant: OffsetDateTime) {
+        *self.now.lock().expect("clock is not poisoned") = instant;
     }
 }
 

@@ -1,4 +1,4 @@
-import type { RunSummary } from '@salvor-run/client';
+import type { RunStatus, RunSummary } from '@salvor-run/client';
 
 /**
  * The Runs view-model: the fold's three-way GROUP split and per-state labels, plus a thin
@@ -18,12 +18,30 @@ export type Group = 'progress' | 'waiting' | 'terminal';
  * A stalled run is waiting on a PERSON (someone must restart its driver or
  * resolve/abandon it), so it groups with `waiting`, not `progress`: it is not
  * motion, and the health strip must not count it as such.
+ *
+ * `suspended` below is the HUMAN-GATE default: a run parked awaiting input from a person, which is
+ * what every suspension recorded before the server's `kind` discriminator existed means, and what
+ * an absent discriminator still means today. A suspension parked on an external SIGNAL instead
+ * (`kind: "signal"` on the wire, `waiting_on: "signal"` on the wasm fold) reads as `progress`
+ * instead, the same call `sleeping` makes below and for the same reason: nobody OWES it action, so
+ * it must never sit in the Inbox. This table alone cannot make that call (it is keyed on `state`
+ * alone, and both waits share the one `suspended` state), so {@link groupOf} overrides its answer
+ * for that one case; see its own doc comment for how.
  */
 export const GROUP: Readonly<Record<string, Group>> = {
   running: 'progress',
   awaiting_model: 'progress',
   awaiting_tool: 'progress',
   not_started: 'progress',
+  /**
+   * PROGRESS, not waiting: mirrors the CLI's own call exactly (`status_group` in
+   * `crates/salvor-cli-core/src/render.rs`). `waiting` means a PERSON is the only thing that will
+   * move this run; a `sleeping` run is parked on a durable timer and continues on its OWN once its
+   * `wake_at` instant arrives, whether anyone reads the list or not. Grouping it with the approval
+   * queue would put a run nobody can act on into the one group that exists to be a to-do list, so
+   * it must never sit in the Inbox.
+   */
+  sleeping: 'progress',
   suspended: 'waiting',
   budget_exceeded: 'waiting',
   needs_reconciliation: 'waiting',
@@ -42,6 +60,7 @@ export const LABEL: Readonly<Record<string, string>> = {
   running: 'running',
   awaiting_model: 'awaiting model',
   awaiting_tool: 'awaiting tool',
+  sleeping: 'sleeping',
   suspended: 'suspended',
   budget_exceeded: 'budget exceeded',
   needs_reconciliation: 'needs reconciliation',
@@ -80,6 +99,17 @@ export const STALL_GRACE_MS = 10_000;
  *      derived as one: honesty over a guess, and
  *   3. its last event is older than {@link STALL_GRACE_MS}.
  *
+ * `sleeping` is carved out BEFORE any of the three checks run, even though it groups with
+ * `progress` (see {@link GROUP}): a run parked on a durable timer holds no driver BY DESIGN, for
+ * as long as its nap lasts, so `driver: "none"` on a sleeping run is the honest resting state, not
+ * evidence of anything gone quiet. Without this carve-out every sleeping run older than
+ * {@link STALL_GRACE_MS} would misread as stalled the instant its own design (no driver while
+ * asleep) is mistaken for a driver that dropped.
+ *
+ * A `suspended` run parked on an external SIGNAL (`waitingOn === 'signal'`) gets the identical
+ * carve-out, for the identical reason: once {@link groupOf} answers `progress` for it, the driver
+ * check below would otherwise fire, and nobody holds a driver for a run parked on a webhook either.
+ *
  * Returns the effective status: `stalled` when the rule fires, otherwise the
  * server's own `state` unchanged. This is the client's verdict over the
  * server's evidence, the same division of labor `status` itself has.
@@ -89,22 +119,48 @@ export function derivedStatus(
   driver: string | undefined,
   last: string | undefined,
   now: number = Date.now(),
+  waitingOn?: 'signal',
 ): string {
-  if (groupOf(state) !== 'progress' || driver !== 'none') return state;
+  if (state === 'sleeping') return state;
+  if (state === 'suspended' && waitingOn === 'signal') return state;
+  if (groupOf(state, waitingOn) !== 'progress' || driver !== 'none') return state;
   const lastMs = last ? Date.parse(last) : Number.NaN;
   const ageMs = Number.isNaN(lastMs) ? Number.POSITIVE_INFINITY : now - lastMs;
   return ageMs >= STALL_GRACE_MS ? 'stalled' : state;
 }
 
-/** The group a state belongs to, defaulting unknown states to `progress` (never silently dropped). */
-export function groupOf(state: string): Group {
+/**
+ * The group a state belongs to, defaulting unknown states to `progress` (never silently dropped).
+ *
+ * `waitingOn` is the one override {@link GROUP} cannot itself express, because the table is keyed
+ * on `state` alone and a human gate and a signal wait share the one `suspended` state: pass it
+ * `'signal'` (the discriminator the server's `kind` / the wasm fold's `waiting_on` carries, absent
+ * for a human gate) and a `suspended` state reads `progress` instead of the table's `waiting`
+ * default, the same as `sleeping`. THE LEAST INVASIVE EXTENSION: an optional trailing parameter
+ * that defaults to `undefined`, so every existing single-argument call site (the Runs ledger's
+ * badge counts, sort, row classes, and the filter vocabulary among them) keeps reading a gate's
+ * `state` exactly as before, unchanged, without being taught about the discriminator at all.
+ */
+export function groupOf(state: string, waitingOn?: 'signal'): Group {
+  if (state === 'suspended' && waitingOn === 'signal') return 'progress';
   return GROUP[state] ?? 'progress';
 }
 export function labelOf(state: string): string {
   return LABEL[state] ?? state.replace(/_/g, ' ');
 }
-export function isWaiting(state: string): boolean {
-  return groupOf(state) === 'waiting';
+export function isWaiting(state: string, waitingOn?: 'signal'): boolean {
+  return groupOf(state, waitingOn) === 'waiting';
+}
+
+/**
+ * The `waiting_on` discriminator read straight off a `RunStatus`'s raw JSON (`status.raw.kind`;
+ * see `crates/salvor-server/src/json.rs`): the SDK's typed {@link RunStatus} does not surface it
+ * as its own field, only on `raw`, so this is the one place that unpacks it. `'signal'` means an
+ * external system, not a person, will resume the run; `undefined` for every other state and for a
+ * `suspended` run recorded before the discriminator existed, which is a human gate.
+ */
+export function waitingOnOf(status: RunStatus): 'signal' | undefined {
+  return status.state === 'suspended' && status.raw['kind'] === 'signal' ? 'signal' : undefined;
 }
 
 /** Token usage, flattened. */
@@ -138,13 +194,28 @@ export interface RunRow {
   readonly stepCount?: number;
   readonly agentDefHash?: string;
   readonly labels?: Readonly<Record<string, string>>;
+  /** The `waiting_on` discriminator (see {@link waitingOnOf}), carried onto the row so a
+   * `suspended` row's group/waiting classification can be re-derived correctly wherever the row
+   * travels, without every reader re-reading `raw` by hand. Absent for every state but a signal
+   * wait's `suspended`. */
+  readonly waitingOn?: 'signal';
+  /** Whether a `sleeping` run's `wake_at` has passed with nothing having woken it (see
+   * {@link overdueOf}). Always absent for every other state; `false`, never absent, for a
+   * sleeping run that just isn't due yet, so a reader never has to treat "unknown" and "not
+   * overdue" as the same thing. */
+  readonly overdue?: boolean;
+  /** Whole seconds since `wake_at`, alongside {@link overdue}. Absent whenever `overdue` is, and
+   * also on the rare case a source says overdue but can't say for how long. */
+  readonly overdueSeconds?: number;
 }
 
 export function toRunRow(s: RunSummary, now: number = Date.now()): RunRow {
   const driver = s.driver === 'attached' || s.driver === 'none' ? s.driver : undefined;
+  const waitingOn = waitingOnOf(s.status);
+  const overdue = overdueOf(s.status, now);
   return {
     id: s.run,
-    status: derivedStatus(s.status.state, driver, s.lastRecordedAt, now),
+    status: derivedStatus(s.status.state, driver, s.lastRecordedAt, now, waitingOn),
     eventCount: s.eventCount,
     first: s.firstRecordedAt,
     last: s.lastRecordedAt,
@@ -153,6 +224,9 @@ export function toRunRow(s: RunSummary, now: number = Date.now()): RunRow {
     stepCount: s.stepCount,
     agentDefHash: s.agentDefHash,
     labels: s.labels,
+    waitingOn,
+    overdue: s.status.state === 'sleeping' ? overdue.overdue : undefined,
+    overdueSeconds: overdue.overdueSeconds,
   };
 }
 
@@ -225,16 +299,69 @@ export function hourKey(iso: string | undefined): string {
   return iso ? iso.slice(0, 13) + ':00Z' : '';
 }
 
-/** A short relative age from an ISO timestamp against `now` (default: real wall clock). */
-export function age(iso: string | undefined, now: number = Date.now()): string {
-  if (!iso) return '-';
-  const then = Date.parse(iso);
-  if (Number.isNaN(then)) return '-';
-  const s = Math.max(0, Math.round((now - then) / 1000));
+/** Bucket a duration given in whole seconds the same way {@link age} buckets a timestamp:
+ *  seconds under a minute, then minutes, then hours, then days. Shared so "last event 10m ago"
+ *  and "overdue by 2h" round the exact same way and never drift into two different phrasings. */
+export function durationLabel(seconds: number): string {
+  const s = Math.max(0, Math.round(seconds));
   if (s < 60) return `${s}s`;
   const m = Math.round(s / 60);
   if (m < 60) return `${m}m`;
   const h = Math.round(m / 60);
   if (h < 48) return `${h}h`;
   return `${Math.round(h / 24)}d`;
+}
+
+/** A short relative age from an ISO timestamp against `now` (default: real wall clock). */
+export function age(iso: string | undefined, now: number = Date.now()): string {
+  if (!iso) return '-';
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return '-';
+  return durationLabel((now - then) / 1000);
+}
+
+/** Whether a sleeping run is overdue, and for how long in whole seconds. `overdueSeconds` is
+ *  absent when {@link overdue} is false, and also when it's true but no duration could be told
+ *  (never a fabricated 0). */
+export interface Overdue {
+  readonly overdue: boolean;
+  readonly overdueSeconds?: number;
+}
+
+const NOT_OVERDUE: Overdue = { overdue: false };
+
+/**
+ * Whether `wakeAt` (an ISO instant, or absent) has passed `now`, and for how long. This is the
+ * ONE clock check overdue-ness is ever computed with in this app: the runs list falls back to it
+ * for an older server ({@link overdueOf} below), and the Inspector uses it as its only path at
+ * all, because its wasm fold (see `inspector/wasm-fold.ts`) has no clock of its own; it only ever
+ * sees the recorded log, never the wall clock.
+ */
+export function overdueSince(wakeAt: string | undefined, now: number = Date.now()): Overdue {
+  const wakeMs = wakeAt ? Date.parse(wakeAt) : NaN;
+  // Strictly past, matching the server's own `now > wake_at` (see `crates/salvor-server/src/
+  // json.rs#status`): the deadline instant itself is not yet overdue.
+  if (Number.isNaN(wakeMs) || now <= wakeMs) return NOT_OVERDUE;
+  return { overdue: true, overdueSeconds: Math.floor((now - wakeMs) / 1000) };
+}
+
+/**
+ * Overdue-ness for a sleeping run's typed {@link RunStatus}. The server now folds `overdue` and
+ * `overdue_seconds` onto a `sleeping` status itself once ITS OWN clock passes `wake_at` (see the
+ * `sleeping` row of `crates/salvor-server/API.md`), and when that's present it wins outright: it
+ * is the server's clock reporting on its own deadline, not this browser's guess at the same
+ * question, so it cannot be second-guessed by a client-side recomputation. The typed
+ * {@link RunStatus} doesn't surface the two fields as named properties (only `wakeAt` is;
+ * {@link waitingOnOf} reads off `raw` for the same shape of gap), so they're read off `raw`, the
+ * SDK's escape hatch for anything not yet promoted to a field of its own. Falls back to
+ * {@link overdueSince} against `wakeAt` for an older server that predates the field.
+ */
+export function overdueOf(status: RunStatus, now: number = Date.now()): Overdue {
+  if (status.state !== 'sleeping') return NOT_OVERDUE;
+  const raw = status.raw;
+  if (raw && typeof raw['overdue'] === 'boolean') {
+    const seconds = raw['overdue_seconds'];
+    return { overdue: raw['overdue'], overdueSeconds: typeof seconds === 'number' ? seconds : undefined };
+  }
+  return overdueSince(status.wakeAt, now);
 }

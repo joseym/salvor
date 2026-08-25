@@ -56,7 +56,9 @@ codes:
 | 409 | `write_replay_hazard` | A fork would re-execute recorded writes the operator has not acknowledged; `details.writes` lists exactly the ones still needing acknowledgement |
 | 409 | `run_exists` | Starting a run at an id that already has history |
 | 409 | `wrong_state` | A verb applied to a run in the wrong state (resolving a run with no dangling write) |
+| 409 | `client_driven_run` | Resuming a run opened through `/v1/client-runs`; its client is the only legal driver, so its own re-open is what resumes it |
 | 409 | `needs_reconciliation` | Resuming a run whose log ends at a write intent with no completion; `details.intent` carries the recorded write |
+| 409 | `still_sleeping` | Resuming a run parked on a durable timer before its instant; `details.wake_at` and `details.remaining_seconds` say when it can be driven. Nothing is recorded |
 | 401 | `missing_drive_token` | A client-driven append with no drive token (see [Client-driven runs](#client-driven-runs)) |
 | 403 | `invalid_drive_token` | A client-driven append whose drive token is not the run's current lease |
 | 409 | `divergence` | A client-driven append that is not the legal next event, or different bytes at an already-recorded position |
@@ -308,11 +310,28 @@ Always `{ "state": "<name>", ... }`:
 | `state` | Extra keys |
 |---|---|
 | `not_started`, `running`, `awaiting_model`, `awaiting_tool`, `needs_reconciliation` | none |
-| `suspended` | `reason`, `input_schema` |
+| `suspended` | `reason`, `input_schema`, `kind` (only `"signal"`, and only when present) |
+| `sleeping` | `wake_at` (RFC 3339); once the server's clock is past it, also `overdue` (`true`) and `overdue_seconds` (whole seconds since `wake_at`) |
 | `budget_exceeded` | `budget` (`{kind, limit}`), `observed` |
 | `completed` | `output` |
 | `failed` | `error` |
 | `abandoned` | `reason` (when given), `unresolved_write` (`{seq, tool}`, only when a needs-reconciliation run was abandoned) |
+
+On `suspended`, `kind` says what the run is waiting on when it is not a person:
+`"signal"` means an external system (a webhook, a callback) will resume it, so
+it is nobody's task and belongs nowhere near an approval inbox. The key is
+absent for a human gate, which is what every suspension without it means.
+
+It resumes exactly the way anything resumes a run: whatever holds the bearer
+token calls `POST /v1/runs/{id}/resume` (the CLI equivalent is `salvor resume`)
+with a payload the recorded `input_schema` accepts. There is no separate
+webhook endpoint and no per-run secret, so nothing stops a resume that arrives
+before the real signal; the token is the whole boundary (see the README's
+"Operating it" section and `SECURITY.md`'s single shared secret). A signal
+wait carries no deadline of its own and waits until something resumes it; an
+operator can stand in for a signal that never comes with `salvor resume` or
+the Bridge Inspector's "Awaiting a signal" band, the only place the Bridge
+offers that action, since a signal wait never appears in the Inbox.
 
 #### The pending object
 
@@ -361,15 +380,32 @@ data: {"run_id":"6f...","seq":4,"schema_version":1,"recorded_at":"...","event":{
 - `id` is the event's sequence number.
 - Envelope frames carry no `event:` field, so a browser `EventSource` receives
   them through `onmessage`.
-- When the run reaches a resting point (completed, failed, suspended,
-  budget-exceeded, or needs-reconciliation) the stream sends one final frame
-  with `event: end` carrying the final status, then closes:
+- A `Suspended` event's payload carries the same optional `kind` the status
+  object does: `"signal"` with the same meaning and absence rule described
+  under [the status object](#the-status-object), so an SSE consumer can build
+  the same filter the Bridge does. The full payload is `{"reason": "...", "input_schema": {...}}` for a human gate and `{"reason": "...", "input_schema": {...}, "kind": "signal"}` for a signal wait.
+- When the run reaches a resting point (completed, failed, abandoned,
+  suspended, sleeping, budget-exceeded, or needs-reconciliation) the stream
+  sends one final frame with `event: end` carrying the status it rested at,
+  then closes:
 
 ```text
 event: end
 data: {"status":{"state":"completed","output":...}}
 
 ```
+
+  A run parked on a durable timer rests too, and its frame carries the deadline:
+
+```text
+event: end
+data: {"status":{"state":"sleeping","wake_at":"2026-08-14T09:00:00Z"}}
+
+```
+
+  Nothing drives a sleeping run, and its nap is measured in hours or days, so
+  the stream closes rather than polling for the duration. `wake_at` is when to
+  open a fresh stream; the events the wake records are read by that one.
 
 If the driving task was killed and no driver is running the run in this process,
 the end frame also carries `"detached": true`; recovering the run opens a fresh
@@ -401,11 +437,20 @@ sequence 0 (a full replay).
 Continue a run. The server reads the run's derived state and dispatches on it,
 the same mapping `salvor resume` uses:
 
+- **Client-driven** (opened through `/v1/client-runs`): refused `409
+  client_driven_run` before anything else, whatever the run's state folds to.
+  That run's client holds the single-writer drive token and is its only legal
+  driver; resuming it here would start a second writer racing the client's
+  lease, even when the agent it recorded happens to be registered on this
+  server too. Its client resumes it by re-opening `POST /v1/client-runs`.
 - **Parked** (suspended or budget-exceeded): the request must carry an `input`,
   validated against the recorded suspension schema or the budget-extension
   shape before anything is recorded. The run then resumes in the background.
 - **Crashed** (running, or interrupted mid model or tool step): the run
   recovers with no input. An `input` in the body is ignored.
+- **Sleeping**: past its `wake_at`, it re-drives exactly as a crashed run does,
+  which is what waking is. Before its `wake_at`, refused `409 still_sleeping`
+  with the deadline as evidence (see below).
 - **Needs reconciliation**: refused `409`, with the recorded write intent as
   evidence (see below). Use `resolve` to move past it.
 - **Finished** (completed or failed): reported, `200`, left alone.
@@ -463,8 +508,30 @@ the same mapping `salvor resume` uses:
 } }
 ```
 
+- `409 still_sleeping` when the run is parked on a durable timer whose instant
+  has not arrived. Nothing is recorded and no driver is spawned, so the run is
+  exactly as asleep as it was; retry at `wake_at` or later, or leave it to the
+  wake sweeper if this server holds the agent or graph the run recorded, or run
+  `salvor wake` with the run's files if it does not:
+
+```json
+{ "error": {
+  "code": "still_sleeping",
+  "message": "run ... is sleeping until 2026-08-14T09:00:00Z and cannot be resumed for another 1740s. It is not waiting on input: it continues when its deadline passes and something re-drives it: this server's wake sweeper, when it holds the agent or graph the run recorded, or salvor wake with the run's files",
+  "details": { "wake_at": "2026-08-14T09:00:00Z", "remaining_seconds": 1740 }
+} }
+```
+
 - `404 unknown_agent` when the agent the run started under is not registered on
   this server (re-register it, then resume).
+- `409 client_driven_run` when the run was opened through `/v1/client-runs`:
+
+```json
+{ "error": {
+  "code": "client_driven_run",
+  "message": "run ... is client-driven; its client resumes it by re-opening POST /v1/client-runs, not this endpoint, so this server never becomes a second writer against the client's lease"
+} }
+```
 
 To watch the continuation, open the event stream after a `202`.
 
@@ -543,8 +610,8 @@ refuses the abandonment.
 ## Graphs and graph runs
 
 A graph document is a control document: an acyclic set of nodes (`agent`,
-`tool`, `gate`, `branch`, `map`) authored once, submitted, hashed, and frozen
-for a run. Every node payload may carry an optional `name`: a short display
+`tool`, `gate`, `branch`, `map`, `fold`, `delay`) authored once, submitted,
+hashed, and frozen for a run. Every node payload may carry an optional `name`: a short display
 label (at most 64 characters, and, when set, not empty or all whitespace;
 `400 invalid_graph` reports a violation node-precise as `node_name_too_long`
 or `blank_node_name`). Unlike an agent definition's own `name` (excluded from
@@ -865,12 +932,35 @@ append-guard to confirm the incoming event is the one legal next event. The two
 modes never collide: a client-driven run and a server-driven run cannot share an
 id, and each surface serves only its own runs.
 
+A client-driven run may park on a durable timer, and its client is what wakes
+it. The generic append accepts the pair (`SleepStarted { wake_at }` and
+`SleepCompleted`) for the same reason it accepts `Suspended` and `Resumed`:
+both halves are recorded facts the client's own cursor produces, neither
+holds a secret, and neither has an effect outside the log. Nothing on the
+server waits for the deadline. The wake sweep leaves every client-driven run
+alone, current lease or lapsed, because re-driving one from this process
+would be a second writer racing the client's drive token for the same
+sequence numbers. So the client wakes its own run: on a later drive it
+replays its log, finds a `SleepStarted` with no `SleepCompleted` after it,
+compares the recorded `wake_at` against a clock reading it records as a
+`NowObserved`, and either stops (still asleep, nothing appended) or appends
+the `SleepCompleted` and carries on. The server enforces the order of the
+pair, refusing a `SleepCompleted` that would close a sleep the log never
+started with `409 divergence`; it does not judge the deadline, because
+`wake_at` is the client's own recorded instant and the clock that decides it
+has arrived is the client's. `GET /v1/runs/{id}` reports such a run as
+`{ "state": "sleeping", "wake_at": "<RFC 3339>" }` like any other.
+
+For the same reason, `POST /v1/runs/{id}/resume` (the server-driven surface)
+refuses a client-driven run outright, `409 client_driven_run`, whatever its
+state: only its own client may drive it, by re-opening `POST /v1/client-runs`.
+
 The generic append carries only the control and deterministic-context events the
 client's cursor emits itself, which hold no secret and no side effect:
 `RunStarted`, `NowObserved`, `RandomObserved`, `Suspended`, `Resumed`,
-`BudgetExceeded`, `RunCompleted`, `RunFailed`. The side-effecting steps, which
-the server must perform because it holds the key or the binary, have their own
-endpoints: the model call is the model-step endpoint and the tool call is the
+`SleepStarted`, `SleepCompleted`, `BudgetExceeded`, `RunCompleted`,
+`RunFailed`. The side-effecting steps, which the server must perform because it
+holds the key or the binary, have their own endpoints: the model call is the model-step endpoint and the tool call is the
 tool-step endpoint below, and a model or tool event is still refused on the
 generic append.
 
@@ -1292,3 +1382,91 @@ dropping the whole server mid-run loses nothing: a fresh server over the same
 store recovers the run from its log and continues it, re-executing no completed
 model or tool call. That is the same durability the CLI has, over HTTP, and it
 is exercised by the kill-safety test.
+
+### Waking a sleeping run
+
+A run parked on a durable timer (`{"state":"sleeping","wake_at":...}`) is
+passive data. Nothing in the server holds it and nothing fires at its instant;
+it continues only when something re-drives it, at which point the runtime reads
+the clock and either records the wake or leaves the run asleep. Driving a run
+early therefore cannot wake it: the deadline is enforced inside the run, not by
+whoever asked.
+
+`salvor serve` runs a **wake sweeper** for this. On an interval it lists the
+runs whose recorded `wake_at` is at or before now and re-drives each one through
+the same path `POST /v1/runs/{id}/resume` takes for a recoverable run, so a
+woken run behaves identically whether a person or the clock woke it.
+
+- **On by default**, every `--wake-interval` seconds (default `60`). A server
+  that held a store and let its timers pass would be silently wrong, so this is
+  not an opt-in.
+- **`--wake-interval 0` turns it off**, for an operator who sweeps from cron
+  with `salvor wake` instead and does not want two things reaching for the same
+  run.
+- **It never fights a driver already running.** A run a task in this process is
+  still driving is skipped, and the sweep drives sequentially, so no run is
+  driven twice at once.
+- **What this server holds decides it, not what started the run.** By the
+  hash a run recorded: an agent run wakes once that agent is registered with
+  `POST /v1/agents`, MCP tools and all, because the server rebuilds the agent
+  from that same definition; a graph run wakes once its document is
+  submitted with `POST /v1/graphs` and every `tool` node it carries names a
+  tool this server's own registry holds (empty by default). Over HTTP a
+  `tool` node resolves only against that registry, never against tools an
+  agent's own MCP declarations reach, so a graph run built that way cannot be
+  woken here regardless of what is registered. Two things leave a run
+  asleep: its recorded hash is not registered here at all (typically a run
+  started from the CLI against a store this server never saw), or it is a
+  graph run with an unmet `tool` node. Each case is logged and skipped, once
+  per sweep; the run stays due, so an operator wakes it instead with `salvor
+  wake`, passing the same `--agent`/`--graph` files the run needs.
+- **One bad run does not stop the sweep.** Every failure is per-run, and the
+  loop carries on to the next.
+
+There is no wake endpoint. Waking is a re-drive, and `POST /v1/runs/{id}/resume`
+already is one: sending it to a sleeping run whose deadline has passed wakes it.
+Sending it before the deadline is refused `409 still_sleeping` carrying
+`wake_at` and `remaining_seconds`, because the drive would record nothing and a
+`202 driving` for a run that did not move is worse than a refusal that says
+when to come back.
+
+### A tool can start the timer
+
+A tool parks its own run by returning the sleep outcome, which the runtime
+records **inside** that call's `ToolCallCompleted` (as
+`{"__salvor_sleep": {"wake_at": "..."}}`) before appending `SleepStarted`. The
+recorded order is therefore intent, completion, `SleepStarted`.
+
+That `{"__salvor_sleep": ...}` shape is what the runtime writes into the log
+from a native tool's `ToolOutcome::Sleep`; it is not a value a tool server
+sends.
+
+An MCP server can park the run that called it by putting the request under
+`_meta` on its tool result, in the `salvor` namespace:
+`{"_meta": {"salvor": {"suspend": {"reason": "...", "input_schema": {...}, "kind": "signal"}}}}`
+to wait for an input, or
+`{"_meta": {"salvor": {"sleep_until": "2026-08-14T09:00:00Z"}}}` to wait
+until an instant. `_meta` is the extension point the MCP specification
+reserves on every result, so a host that is not salvor reads an ordinary
+result with an unfamiliar metadata key. `kind` is optional and its only
+value is `"signal"`, meaning an external system owes the run a payload; omit
+it and the run waits on a person. `reason` and `input_schema` are both
+required. `sleep_until` is an RFC 3339 instant, never a duration: the
+runtime records the instant and replay reproduces it. The recorded order is
+intent, then the tool call's completion, then `SleepStarted` or `Suspended`;
+the completion settles the call and releases its idempotency claim before
+the wait begins, so a run parked for a week blocks no other run and holds no
+MCP process. A request that is malformed, names both keys, sits on a result
+flagged `isError`, or uses a key salvor does not know fails the tool call
+with a message naming `_meta.salvor` and the problem; it is never passed
+through as ordinary output. That failure is never retried, on any effect
+class: the request is already in hand, so reading it a second time reaches
+the same refusal, and the tool executes exactly once. A result with no
+`_meta.salvor` records exactly as it always has.
+
+That order is the point. The completion settles the call, and for a call
+carrying an idempotency key it settles the store's claim in the same atomic
+append, so a run that sleeps for a week holds no claim while it sleeps and a
+second run under the same key is never told `CallInFlight` by a sleeper. It
+also means a process death during the sleep leaves no dangling write intent:
+the write already completed.

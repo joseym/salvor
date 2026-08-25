@@ -40,8 +40,8 @@ export function clusterOf(r: RunRow, names: ReadonlyMap<string, string> = new Ma
  * outranks a group with neither. Kept here (not re-derived ad hoc) so the group sort and the flat
  * sort can never quietly diverge.
  */
-export function attentionRank(status: string): number {
-  return isWaiting(status) ? 2 : status === 'failed' ? 1 : 0;
+export function attentionRank(status: string, waitingOn?: 'signal'): number {
+  return isWaiting(status, waitingOn) ? 2 : status === 'failed' ? 1 : 0;
 }
 
 /** One header's worth of aggregate facts, plus the runs it holds (in the caller's given order:
@@ -82,8 +82,8 @@ export function buildRunGroups(
     kind: g.kind,
     name: g.name,
     runs: g.runs,
-    rank: Math.max(...g.runs.map((r) => attentionRank(r.status))),
-    waiting: g.runs.filter((r) => isWaiting(r.status)).length,
+    rank: Math.max(...g.runs.map((r) => attentionRank(r.status, r.waitingOn))),
+    waiting: g.runs.filter((r) => isWaiting(r.status, r.waitingOn)).length,
     latest: Math.max(...g.runs.map((r) => (r.last ? Date.parse(r.last) : 0))),
     states: [...new Set(g.runs.map((r) => r.status))],
   }));

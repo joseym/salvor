@@ -1,12 +1,13 @@
 //! The recorded wire shapes this crate layers on top of the core event
-//! vocabulary: the suspension sentinel, the structured tool-error object,
-//! and the deterministic rendering of JSON values into model-visible text.
+//! vocabulary: the suspension and sleep sentinels, the structured tool-error
+//! object, and the deterministic rendering of JSON values into model-visible
+//! text.
 //!
 //! # Why sentinels exist
 //!
 //! The replay cursor requires every tool intent to be followed by
-//! exactly one `ToolCallCompleted`. Two tool outcomes do not produce a plain
-//! output value, and both are encoded *inside* the completion's `output`
+//! exactly one `ToolCallCompleted`. Three tool outcomes do not produce a plain
+//! output value, and all three are encoded *inside* the completion's `output`
 //! field as a reserved-key JSON object:
 //!
 //! - **Suspension.** A live tool that returns `ToolOutcome::Suspend` still
@@ -20,6 +21,34 @@
 //!   completion replays through the cursor, decodes back into a suspension,
 //!   and the orchestration takes the identical path.
 //!
+//!   A tool that parks on a webhook rather than a person adds one key,
+//!   `"kind": "signal"`, which the runtime carries onto the `Suspended` event.
+//!   It is written only when the tool named it, so a gate's completion is the
+//!   two-key object above and nothing else, and it must round-trip: the
+//!   replayed suspension has to ask the cursor for the same discriminator the
+//!   log recorded, or the cursor reports a divergence.
+//!
+//! - **Sleep.** A live tool that returns `ToolOutcome::Sleep` gets a
+//!   completion too; its output is
+//!
+//!   ```json
+//!   {"__salvor_sleep": {"wake_at": "2026-08-14T09:00:00Z"}}
+//!   ```
+//!
+//!   `wake_at` is RFC 3339 normalized to UTC, the same reading rule every
+//!   recorded instant in a log follows. The runtime then records
+//!   `SleepStarted` and parks.
+//!
+//!   **Why this is a sentinel and not an event.** The completion settles the
+//!   tool call: it closes the intent, and for a keyed call it settles the
+//!   store's claim in the same atomic append. Only then is `SleepStarted`
+//!   recorded. So the recorded order is intent, completion, `SleepStarted`,
+//!   and a run that sleeps for a week holds no claim while it sleeps and
+//!   leaves no dangling write intent if the process dies. A sleep event
+//!   emitted *instead of* a completion would invert that: the claim would be
+//!   held for the length of the timer and every other run under that
+//!   idempotency key would get `CallInFlight` until it expired.
+//!
 //! - **Failure.** A tool call that exhausted its retries (or was never
 //!   retryable) also gets a completion; its output is
 //!
@@ -29,31 +58,42 @@
 //!   ```
 //!
 //!   `kind` is one of `"invalid_input"`, `"handler"`, or
-//!   `"output_serialization"` (the three `ToolError` variants), `message` is
+//!   `"output_serialization"`: the layer that failed, not the `ToolError`
+//!   variant, so a new variant that fails at a layer already named records
+//!   under that layer's string rather than widening the format. `message` is
 //!   the **full** error chain (sources joined with `": "`), and `attempts`
 //!   counts executions including retries. The full error always lives here,
 //!   in the log; what reaches the model is compacted separately (see
 //!   [`crate::compact`]).
 //!
-//! The two keys are reserved: a tool's own output must not be a one-key
-//! object using either name at the top level, or replay would misread it.
-//! Decoding only triggers on a JSON object with exactly one key equal to the
-//! sentinel, which keeps ordinary outputs (including objects that merely
+//! The three keys are reserved: a tool's own output must not be a one-key
+//! object using any of these names at the top level, or replay would misread
+//! it. Decoding only triggers on a JSON object with exactly one key equal to
+//! the sentinel, which keeps ordinary outputs (including objects that merely
 //! *contain* these names deeper down) unaffected.
 
-use salvor_tools::Suspension;
+use salvor_tools::{Sleep, Suspension};
 use serde_json::{Value, json};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 use crate::hash::canonical_json;
 
 /// The reserved key marking a completion output as a recorded suspension.
 pub const SUSPEND_SENTINEL_KEY: &str = "__salvor_suspend";
 
+/// The reserved key marking a completion output as a recorded sleep request.
+pub const SLEEP_SENTINEL_KEY: &str = "__salvor_sleep";
+
 /// The reserved key marking a completion output as a recorded tool failure.
 pub const ERROR_SENTINEL_KEY: &str = "__salvor_error";
 
-/// Which layer of the tool dispatch produced a recorded failure. Mirrors the
-/// three `salvor_tools::ToolError` variants.
+/// Which layer of the tool dispatch produced a recorded failure.
+///
+/// A layer, not a `ToolError` variant. More than one variant can fail at the
+/// same layer, and where that happens they share the wire string: the strings
+/// are a stable format replay parses, and a reader wanting the particulars
+/// reads the message, which carries them in full.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolFailureKind {
     /// The model's arguments did not match the tool's input schema; the tool
@@ -61,7 +101,9 @@ pub enum ToolFailureKind {
     InvalidInput,
     /// The tool ran and its handler failed.
     Handler,
-    /// The tool succeeded but its output could not be serialized.
+    /// The tool ran but what came back could not be turned into a usable
+    /// result: an output that would not serialize, or a park request the
+    /// client could not read.
     OutputSerialization,
 }
 
@@ -116,6 +158,12 @@ impl ToolFailure {
             // handling, only its own message.
             salvor_tools::ToolError::MissingIdempotencyKey { .. } => ToolFailureKind::InvalidInput,
             salvor_tools::ToolError::Handler { .. } => ToolFailureKind::Handler,
+            // A result the dispatch layer could not read failed on the same
+            // side of the call as an output that would not serialize: the tool
+            // ran, and what it handed back is unusable. It shares that wire
+            // kind for the reason the line above shares `invalid_input`, and
+            // its own message says which of the two happened.
+            salvor_tools::ToolError::MalformedResult { .. } => ToolFailureKind::OutputSerialization,
             salvor_tools::ToolError::OutputSerialization { .. } => {
                 ToolFailureKind::OutputSerialization
             }
@@ -144,14 +192,36 @@ pub fn error_chain(error: &dyn std::error::Error) -> String {
 }
 
 /// Encodes a suspension as the sentinel completion output.
+///
+/// `kind` is written only when the tool named one. The absent discriminator is
+/// the human gate, and omitting the key is what keeps a gate's recorded
+/// completion byte-identical to the one this function produced before
+/// suspensions could name what they wait on.
 #[must_use]
 pub fn encode_suspension(suspension: &Suspension) -> Value {
-    json!({
-        SUSPEND_SENTINEL_KEY: {
-            "reason": suspension.reason,
-            "input_schema": suspension.input_schema,
-        }
-    })
+    let mut body = json!({
+        "reason": suspension.reason,
+        "input_schema": suspension.input_schema,
+    });
+    if let Some(kind) = suspension.kind {
+        body.as_object_mut()
+            .expect("the sentinel body is an object")
+            .insert("kind".to_owned(), json!(kind));
+    }
+    json!({ SUSPEND_SENTINEL_KEY: body })
+}
+
+/// Encodes a sleep request as the sentinel completion output.
+///
+/// The instant is normalized to UTC before it is formatted, so a tool that
+/// returns `wake_at` in some other offset records the same instant every other
+/// recorded instant in the log is written in, and the value decoded back is
+/// the value the run sleeps on. It also removes the one way RFC 3339
+/// formatting can fail on a representable instant (an offset carrying
+/// seconds), which is what lets this return a `Value` rather than a `Result`.
+#[must_use]
+pub fn encode_sleep(sleep: &Sleep) -> Value {
+    json!({ SLEEP_SENTINEL_KEY: { "wake_at": rfc3339(sleep.wake_at) } })
 }
 
 /// Encodes a tool failure as the sentinel completion output.
@@ -168,13 +238,61 @@ pub fn encode_failure(failure: &ToolFailure) -> Value {
 }
 
 /// Decodes a completion output that is the suspension sentinel, if it is one.
+///
+/// The discriminator round-trips because replay depends on it. A later drive
+/// reads the tool's outcome back out of this recorded completion and asks the
+/// cursor to suspend again; a decode that dropped `kind` would ask for a gate
+/// where the log holds a signal, and the cursor calls that a divergence.
+/// A body with no `kind` decodes to `None`, the gate every completion written
+/// before this key meant.
 #[must_use]
 pub fn decode_suspension(output: &Value) -> Option<Suspension> {
     let body = sentinel_body(output, SUSPEND_SENTINEL_KEY)?;
+    let kind = match body.get("kind") {
+        None | Some(Value::Null) => None,
+        Some(kind) => Some(serde_json::from_value(kind.clone()).ok()?),
+    };
     Some(Suspension {
         reason: body.get("reason")?.as_str()?.to_owned(),
         input_schema: body.get("input_schema")?.clone(),
+        kind,
     })
+}
+
+/// Decodes a completion output that is the sleep sentinel, if it is one.
+#[must_use]
+pub fn decode_sleep(output: &Value) -> Option<Sleep> {
+    let body = sentinel_body(output, SLEEP_SENTINEL_KEY)?;
+    let wake_at = OffsetDateTime::parse(body.get("wake_at")?.as_str()?, &Rfc3339).ok()?;
+    Some(Sleep { wake_at })
+}
+
+/// What a woken tool call reports as its result: the tool asked to park until
+/// an instant, the run parked, and the instant came.
+///
+/// A slept call has no output of its own to hand back (the tool returned a
+/// deadline, not a value), and there is no resume input to stand in for one
+/// either, so the result is derived: a fixed key over the recorded wake
+/// instant. Both drivers use this one function, so a `tool` node's recorded
+/// output and the `tool_result` the built-in loop feeds the model say the same
+/// thing, and both are pure functions of the log.
+#[must_use]
+pub fn slept_output(wake_at: OffsetDateTime) -> Value {
+    json!({ "slept_until": rfc3339(wake_at) })
+}
+
+/// Formats an instant as RFC 3339 in UTC, the encoding every recorded instant
+/// in a log uses.
+///
+/// Infallible in practice, and deliberately: normalizing to UTC rules out an
+/// offset with seconds, and without the `time` crate's `large-dates` feature
+/// an `OffsetDateTime` cannot hold a year outside 0000..=9999. Those are the
+/// only two ways RFC 3339 formatting fails.
+fn rfc3339(instant: OffsetDateTime) -> String {
+    instant
+        .to_offset(time::UtcOffset::UTC)
+        .format(&Rfc3339)
+        .expect("an instant a run can hold formats as RFC 3339 in UTC")
 }
 
 /// Decodes a completion output that is the failure sentinel, if it is one.
@@ -217,17 +335,27 @@ pub fn content_string(value: &Value) -> String {
 mod tests {
     use super::*;
 
-    /// Both sentinels survive an encode/decode round trip.
+    /// Every sentinel survives an encode/decode round trip.
     #[test]
     fn sentinels_round_trip() {
-        let suspension = Suspension {
-            reason: "needs approval".to_owned(),
-            input_schema: json!({"type": "object", "required": ["approved"]}),
-        };
+        let suspension = Suspension::new(
+            "needs approval",
+            json!({"type": "object", "required": ["approved"]}),
+        );
         assert_eq!(
             decode_suspension(&encode_suspension(&suspension)),
-            Some(suspension)
+            Some(suspension.clone())
         );
+
+        // The signal discriminator survives the same round trip, and the gate
+        // above proves the key is absent when there is nothing to say.
+        let signal = suspension.on_signal();
+        let encoded = encode_suspension(&signal);
+        assert_eq!(encoded[SUSPEND_SENTINEL_KEY]["kind"], json!("signal"));
+        assert_eq!(decode_suspension(&encoded), Some(signal));
+
+        let sleep = Sleep::until(time::macros::datetime!(2026-08-14 09:00:00 UTC));
+        assert_eq!(decode_sleep(&encode_sleep(&sleep)), Some(sleep));
 
         let failure = ToolFailure {
             kind: ToolFailureKind::Handler,
@@ -251,6 +379,30 @@ mod tests {
             None
         );
         assert_eq!(decode_failure(&json!("__salvor_error")), None);
+        assert_eq!(
+            decode_sleep(&json!({"wake_at": "2026-08-14T09:00:00Z"})),
+            None
+        );
+        assert_eq!(
+            decode_sleep(&json!({SLEEP_SENTINEL_KEY: {"wake_at": "tomorrow"}})),
+            None
+        );
+    }
+
+    /// A wake instant recorded in another offset comes back as the same
+    /// instant in UTC, so the deadline the run sleeps on is the deadline the
+    /// tool asked for however the tool spelled it.
+    #[test]
+    fn a_sleep_instant_records_in_utc() {
+        let sleep = Sleep::until(time::macros::datetime!(2026-08-14 11:00:00 +02:00));
+        assert_eq!(
+            encode_sleep(&sleep),
+            json!({SLEEP_SENTINEL_KEY: {"wake_at": "2026-08-14T09:00:00Z"}})
+        );
+        assert_eq!(
+            decode_sleep(&encode_sleep(&sleep)).map(|decoded| decoded.wake_at),
+            Some(time::macros::datetime!(2026-08-14 09:00:00 UTC))
+        );
     }
 
     /// String values render bare; structured values render canonically.

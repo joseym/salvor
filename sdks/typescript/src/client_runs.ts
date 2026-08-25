@@ -12,9 +12,19 @@
  * The generic append carries only the control and deterministic-context events
  * the client emits itself, which hold no secret and no side effect
  * (`RunStarted`, `NowObserved`, `RandomObserved`, `Suspended`, `Resumed`,
- * `BudgetExceeded`, `RunCompleted`, `RunFailed`). The side-effecting steps, which
- * the server must perform because it holds the key or the binary, have their own
- * methods: {@link ClientRunDriver.modelStep} and {@link ClientRunDriver.toolStep}.
+ * `SleepStarted`, `SleepCompleted`, `BudgetExceeded`, `RunCompleted`,
+ * `RunFailed`). The side-effecting steps, which the server must perform because
+ * it holds the key or the binary, have their own methods:
+ * {@link ClientRunDriver.modelStep} and {@link ClientRunDriver.toolStep}.
+ *
+ * A client-driven run may park on a durable timer, and the client is what wakes
+ * it. Nothing on the server waits for the deadline: the wake sweeper leaves
+ * every client-driven run alone, because re-driving one there would be a second
+ * writer racing this driver's lease. So {@link ClientRunDriver.sleepFor} and
+ * {@link ClientRunDriver.sleepUntil} record the park, and
+ * {@link ClientRunDriver.awaitWake} on a later drive reads the clock and either
+ * stops (still asleep, nothing appended) or closes the pair and carries on. The
+ * methods carry the runtime's names because they carry the runtime's rules.
  *
  * This module is browser-safe as written: it uses `fetch` and the SDK's
  * hand-written SSE parser only, with no Node-only API, so the same driver runs
@@ -123,6 +133,25 @@ function parseClientToolIntentResult(
 }
 
 /**
+ * What a check on a durable timer found.
+ *
+ * `woken` is true when the sleep is over: either the log already held the
+ * `SleepCompleted` (a replay) or the deadline had passed and the call recorded
+ * it. False means the run is still asleep and nothing was appended; stop
+ * driving and come back later.
+ *
+ * `wakeAt` is the deadline this drive measured against, the instant
+ * {@link ClientRunDriver.sleepUntil} or {@link ClientRunDriver.sleepFor}
+ * recorded earlier in the same drive. It is undefined when this drive set no
+ * deadline at all, which is also why such a drive always reports still asleep:
+ * a wake nobody asked for has not arrived, and no clock reading makes it so.
+ */
+export interface Waking {
+  woken: boolean;
+  wakeAt?: Date;
+}
+
+/**
  * Open a fresh client-driven run, or re-open (resume) an existing one.
  *
  * Passing a `runId` this server already holds re-opens it: the recorded log
@@ -167,6 +196,13 @@ export class ClientRunDriver {
    */
   readonly logEnvelopes: SalvorEvent[];
 
+  /**
+   * The clock the durable-timer methods read. Replaceable, the way the runtime
+   * injects its own clock, so a test can drive a deadline past without waiting
+   * for it.
+   */
+  clock: () => Date = () => new Date();
+
   private readonly base: string;
   private readonly headers: Record<string, string>;
   private readonly timeoutMs: number;
@@ -184,6 +220,14 @@ export class ClientRunDriver {
     this.driveToken = opened.driveToken;
     this.logEnvelopes = opened.log;
   }
+
+  /**
+   * The deadline set earlier in THIS drive, live or replayed. The runtime keeps
+   * the same one on its context, and for the same reason: what
+   * {@link awaitWake} compares against is the instant the log recorded, never a
+   * duration and never a fresh reading.
+   */
+  private sleepingUntil?: Date;
 
   /**
    * Build one event-envelope for {@link append} at `seq`. Wraps `kind` and
@@ -400,6 +444,106 @@ export class ClientRunDriver {
   }
 
   /**
+   * Observe the clock at `seq`, recording the reading the first time.
+   *
+   * Returns the recorded reading when `seq` already holds a `NowObserved`, so a
+   * later drive replays the identical instant, and otherwise reads
+   * {@link clock}, appends it, and returns it. This is the one way a
+   * client-driven run gets time into its log: a reading taken outside the log
+   * means nothing to a replay, which has no clock of its own to interpret it
+   * against.
+   */
+  async now(seq: number): Promise<Date> {
+    const recorded = await this.eventAt(seq);
+    if (recorded?.kind === "NowObserved") {
+      return new Date(recorded.payload.now as string);
+    }
+    const reading = this.clock();
+    await this.append([
+      this.envelope(seq, "NowObserved", { now: reading.toISOString() }),
+    ]);
+    return reading;
+  }
+
+  /**
+   * Park the run on a durable timer at `seq`, returning `wakeAt`.
+   *
+   * `wakeAt` must be derived from recorded data, because a later drive presents
+   * it again and it has to be the same instant: derive it from an observed
+   * {@link now} (which {@link sleepFor} does for you), never from a clock read
+   * outside the log. A position already holding this exact park is a replay:
+   * nothing is appended. A position holding a DIFFERENT one is submitted
+   * anyway, so the server refuses it as the divergence it is rather than this
+   * driver quietly preferring one of the two instants.
+   *
+   * Follow it with {@link awaitWake}. Never park between a write tool's intent
+   * and its completion: the run holds that call's claim for the whole sleep,
+   * which for a durable timer is hours or weeks.
+   */
+  async sleepUntil(seq: number, wakeAt: Date): Promise<Date> {
+    const recorded = await this.eventAt(seq);
+    if (recorded?.kind === "SleepStarted") {
+      const already = new Date(recorded.payload.wake_at as string);
+      if (already.getTime() === wakeAt.getTime()) {
+        this.sleepingUntil = already;
+        return already;
+      }
+    }
+    await this.append([
+      this.envelope(seq, "SleepStarted", { wake_at: wakeAt.toISOString() }),
+    ]);
+    this.sleepingUntil = wakeAt;
+    return wakeAt;
+  }
+
+  /**
+   * Sleep for `durationMs` from a recorded reading of the clock, returning the
+   * wake instant it recorded.
+   *
+   * Exactly `now() + durationMs`, recorded: the reading goes into the log at
+   * `seq` as a `NowObserved` before the park is derived from it, and the park
+   * lands at `seq + 1`. So every later drive replays the identical reading and
+   * derives the identical instant, which is what a duration alone can never do.
+   * Carries every rule {@link sleepUntil} does.
+   */
+  async sleepFor(seq: number, durationMs: number): Promise<Date> {
+    const now = await this.now(seq);
+    return this.sleepUntil(seq + 1, new Date(now.getTime() + durationMs));
+  }
+
+  /**
+   * Ask whether the sleep is over, closing the pair at `seq` if it is.
+   *
+   * The log decides first: a `SleepCompleted` already recorded at `seq` means
+   * the sleep ended on an earlier drive, so this replays it and appends
+   * nothing. Otherwise {@link clock} decides, against the deadline
+   * {@link sleepUntil} or {@link sleepFor} recorded earlier in this same drive.
+   * At or past it the completion is appended and the run carries on; before it,
+   * nothing is appended and the returned {@link Waking} reports the run still
+   * asleep, which is the signal to stop driving and come back later.
+   *
+   * Nothing here can wake a run early, and that is deliberate: a driver that
+   * comes back too soon simply finds it still asleep, exactly as the server
+   * wakes nothing before its instant.
+   */
+  async awaitWake(seq: number): Promise<Waking> {
+    const recorded = await this.eventAt(seq);
+    const wakeAt = this.sleepingUntil;
+    if (recorded?.kind === "SleepCompleted") {
+      this.sleepingUntil = undefined;
+      return { woken: true, wakeAt };
+    }
+    // A drive that set no deadline has none that could have arrived, so it
+    // stays asleep, mirroring the runtime's stand-in for the same case.
+    if (wakeAt === undefined || this.clock().getTime() < wakeAt.getTime()) {
+      return { woken: false, wakeAt };
+    }
+    await this.append([this.envelope(seq, "SleepCompleted")]);
+    this.sleepingUntil = undefined;
+    return { woken: true, wakeAt };
+  }
+
+  /**
    * Record a dangling write's completion by hand, unsticking the run. Legal only
    * when the run's log ends at a dangling `Write` intent: it correlates `output`
    * to that intent and dispatches nothing. After it records the completion the
@@ -412,6 +556,19 @@ export class ClientRunDriver {
   }
 
   // -- helpers --------------------------------------------------------------
+
+  /**
+   * The recorded event at `seq`, or undefined when the log has not reached that
+   * position yet.
+   *
+   * One log read, deliberately: the durable-timer methods are called once per
+   * drive apiece, and a driver that has been away for a week cannot trust
+   * anything it cached before it left.
+   */
+  private async eventAt(seq: number): Promise<SalvorEvent | undefined> {
+    const tail = await this.log(seq);
+    return tail[0]?.seq === seq ? tail[0] : undefined;
+  }
 
   private get(path: string): Promise<Record<string, unknown>> {
     return requestJson(this.base, this.headers, this.timeoutMs, "GET", path);

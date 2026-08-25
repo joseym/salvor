@@ -4,10 +4,11 @@
 //! the identical final state (in fact, the identical final log) as the
 //! uninterrupted run.
 //!
-//! Four reference runs cover the log shapes a crash can leave behind: a
+//! Five reference runs cover the log shapes a crash can leave behind: a
 //! completed run touching every event kind, a run that dies between a write
-//! intent and its completion, a run that ends in failure, and a graph run
-//! whose fold node runs two passes and settles. The one deliberate exception
+//! intent and its completion, a run that ends in failure, a graph run whose
+//! fold node runs two passes and settles, and a run that parks on a durable
+//! timer and continues after waking. The one deliberate exception
 //! to "continuing reaches the same final state" is a prefix ending in a
 //! dangling write intent: continuing from there must refuse with
 //! needs-reconciliation rather than re-execute the write, and the test
@@ -80,6 +81,11 @@ enum Step {
         reason: &'static str,
         schema: Value,
         resume: Value,
+    },
+    /// A durable timer: the run parks until the recorded instant, and the
+    /// drive that finds the deadline passed records the wake.
+    Sleep {
+        wake_at: OffsetDateTime,
     },
     /// A budget crossing interposed by the runtime between steps, followed
     /// by a human extending the budget and resuming.
@@ -250,6 +256,19 @@ fn drive(script: &[Step], prefix: &[EventEnvelope]) -> Result<Drive, ReplayError
                     Outcome::Live(parked) => push!(parked.resume(resume.clone())),
                 }
             }
+            // The scripted timer always wakes: this harness asks what a drive
+            // does once the deadline has passed, which is the case where the
+            // sleep has to replay rather than re-park.
+            Step::Sleep { wake_at } => {
+                match cursor.sleep_started(*wake_at)? {
+                    Outcome::Replayed(()) => {}
+                    Outcome::Live(emitted) => push!(emitted),
+                }
+                match cursor.sleep_completed()? {
+                    Outcome::Replayed(()) => {}
+                    Outcome::Live(asleep) => push!(asleep.wake()),
+                }
+            }
             Step::Budget {
                 budget,
                 observed,
@@ -318,18 +337,28 @@ fn expected_status(prefix: &[EventEnvelope]) -> RunStatus {
         | Event::ToolCallCompleted { .. }
         | Event::NowObserved { .. }
         | Event::RandomObserved { .. }
-        | Event::Resumed { .. } => RunStatus::Running,
+        | Event::Resumed { .. }
+        // A recorded wake returns the run to running, exactly as a resume
+        // does: the timer is spent and the run is between steps again.
+        | Event::SleepCompleted {} => RunStatus::Running,
+        Event::SleepStarted { wake_at } => RunStatus::Sleeping { wake_at: *wake_at },
         Event::ModelCallRequested { .. } => RunStatus::AwaitingModel,
         Event::ToolCallRequested { effect, .. } => match effect {
             Effect::Write => RunStatus::NeedsReconciliation,
             Effect::Read | Effect::Idempotent => RunStatus::AwaitingTool,
         },
+        // Whatever the suspension waits on, the status it implies is the
+        // same shape: parked, awaiting input the recorded schema accepts,
+        // carrying the discriminator through so a surface can tell who owes
+        // that input.
         Event::Suspended {
             reason,
             input_schema,
+            kind,
         } => RunStatus::Suspended {
             reason: reason.clone(),
             input_schema: input_schema.clone(),
+            kind: *kind,
         },
         Event::BudgetExceeded { budget, observed } => RunStatus::BudgetExceeded {
             budget: *budget,
@@ -560,6 +589,47 @@ fn fold_script() -> Vec<Step> {
     ]
 }
 
+/// A run that sleeps on a durable timer in the middle of its work. The sleep
+/// brackets a model call on each side, so a crash can land before the timer,
+/// inside it (the log ending at the started sleep, the shape a genuinely
+/// parked run has on disk), and after the wake.
+fn sleep_script() -> Vec<Step> {
+    vec![
+        Step::Begin {
+            hash: "sha256:agent-v1",
+            input: json!({"topic": "otters"}),
+        },
+        Step::Now {
+            value: datetime!(2026-07-09 09:15:42.123456789 UTC),
+        },
+        Step::Model {
+            request_hash: "sha256:before-sleep",
+            response: json!({"text": "check back in a week"}),
+            usage: TokenUsage {
+                input_tokens: 60,
+                output_tokens: 20,
+            },
+        },
+        Step::Sleep {
+            wake_at: datetime!(2026-07-16 09:15:42.123456789 UTC),
+        },
+        Step::Now {
+            value: datetime!(2026-07-16 09:15:43 UTC),
+        },
+        Step::Model {
+            request_hash: "sha256:after-wake",
+            response: json!({"text": "still otters"}),
+            usage: TokenUsage {
+                input_tokens: 70,
+                output_tokens: 25,
+            },
+        },
+        Step::Complete {
+            output: json!({"summary": "slept on it"}),
+        },
+    ]
+}
+
 /// A run that ends in failure.
 fn failed_script() -> Vec<Step> {
     vec![
@@ -627,6 +697,37 @@ fn every_boundary_of_a_graph_fold_run() {
         derive_state(&reference.log).status,
         RunStatus::Completed { .. }
     ));
+    assert_every_boundary(&script);
+}
+
+/// Every prefix of the sleeping run folds coherently and continues to the
+/// identical final log: a kill while the run is parked on the timer replays
+/// the started sleep rather than re-recording it, and the prefix that ends at
+/// the sleep start folds to sleeping, carrying the recorded instant.
+#[test]
+fn every_boundary_of_a_sleeping_run() {
+    let script = sleep_script();
+    let reference = drive(&script, &[]).expect("reference run succeeds");
+    assert_eq!(reference.log.len(), 10);
+    assert!(matches!(
+        derive_state(&reference.log).status,
+        RunStatus::Completed { .. }
+    ));
+
+    // The parked shape, spelled out: the log cut at the started sleep is what
+    // a run asleep in the store actually looks like.
+    let parked = reference
+        .log
+        .iter()
+        .position(|env| matches!(env.event, Event::SleepStarted { .. }))
+        .expect("the script sleeps");
+    assert_eq!(
+        derive_state(&reference.log[..=parked]).status,
+        RunStatus::Sleeping {
+            wake_at: datetime!(2026-07-16 09:15:42.123456789 UTC),
+        }
+    );
+
     assert_every_boundary(&script);
 }
 

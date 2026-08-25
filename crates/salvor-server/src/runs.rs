@@ -37,7 +37,7 @@ use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use salvor_core::{Event, EventEnvelope, PendingCall, RunId, RunStatus, derive_state};
 use salvor_runtime::{
     RuntimeError, validate_against_schema, validate_extension_input, validate_labels,
@@ -233,6 +233,10 @@ pub async fn start(
 pub async fn list(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
     let store = state.store();
     let summaries = store.list_runs().await.map_err(store_error)?;
+    // Read once and reuse for every entry, so a listing with many sleeping
+    // runs judges "overdue" against one consistent instant rather than a
+    // clock that ticks partway through the loop.
+    let now = state.now();
     let mut runs = Vec::with_capacity(summaries.len());
     for summary in summaries {
         let mut entry = json!({
@@ -249,7 +253,7 @@ pub async fn list(State(state): State<AppState>) -> Result<impl IntoResponse, Ap
                     .filter(|envelope| matches!(envelope.event, Event::ModelCallRequested { .. }))
                     .count();
                 let map = entry.as_object_mut().expect("entry is a JSON object");
-                map.insert("status".to_owned(), json::status(&derived.status));
+                map.insert("status".to_owned(), json::status(&derived.status, now));
                 map.insert(
                     "usage".to_owned(),
                     json!({
@@ -311,7 +315,7 @@ pub async fn get(
     let derived = derive_state(&log);
     let mut body = json!({
         "run": run_id.as_uuid().to_string(),
-        "status": json::status(&derived.status),
+        "status": json::status(&derived.status, state.now()),
         "event_count": log.len(),
         "usage": {
             "input_tokens": derived.usage.input_tokens,
@@ -339,16 +343,38 @@ pub async fn replay(
     if log.is_empty() {
         return Err(unknown_run(run_id));
     }
-    Ok(Json(json::run_state(&derive_state(&log))))
+    Ok(Json(json::run_state(&derive_state(&log), state.now())))
 }
 
 /// `POST /v1/runs/{id}/resume`: continue a run, dispatching on its state.
+///
+/// Refused with `409 client_driven_run` for a run opened through
+/// `/v1/client-runs`, before its state is even read: that run's client is its
+/// only legal driver, and this endpoint starting a background driver for it
+/// would race the client's own drive token for the same log positions.
 pub async fn resume(
     State(state): State<AppState>,
     Path(run_id_text): Path<String>,
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
     let run_id = parse_run_id(&run_id_text)?;
+
+    // A run opened through `/v1/client-runs` is driven by its caller under a
+    // single-writer drive token, not by a task in this process. Refuse before
+    // anything state-dependent, including the still-sleeping and
+    // reconciliation refusals below: whatever the log folds to, this server
+    // resuming it here would be a second writer racing the client's lease,
+    // even when the agent the run recorded happens to be registered here too.
+    // Mirrors the wake sweeper's own check in `wake::sweep`.
+    if state.is_client_run(run_id) {
+        return Err(ApiError::ClientDrivenRun(format!(
+            "run {} is client-driven; its client resumes it by re-opening \
+             POST /v1/client-runs, not this endpoint, so this server never becomes a second \
+             writer against the client's lease",
+            run_id.as_uuid()
+        )));
+    }
+
     let request: ResumeRequest = parse_body_or_default(&body)?;
 
     let log = state.store().read_log(run_id).await.map_err(store_error)?;
@@ -376,7 +402,7 @@ pub async fn resume(
             // The status object is the canonical `json::status` shape (state,
             // reason, and any unresolved-write honesty), re-derived here so the
             // report matches every other surface that renders an abandoned run.
-            "status": json::status(&derived.status),
+            "status": json::status(&derived.status, state.now()),
         }))
         .into_response()),
         Disposition::NotStarted => Err(unknown_run(run_id)),
@@ -431,6 +457,31 @@ pub async fn resume(
             spawn_drive(state, run_id, built, DriveVerb::Resume(input));
             Ok(driving(run_id).into_response())
         }
+        // A due run re-drives here, through the recover path, which is why
+        // there is no wake endpoint. An early one is refused: the drive would
+        // record nothing and leave the run asleep, and answering `202 driving`
+        // to a request that changes nothing would be a lie the caller then has
+        // to discover by polling.
+        Disposition::Sleeping { wake_at } => {
+            let now = state.now();
+            if now < wake_at {
+                let remaining = wake_at - now;
+                return Err(ApiError::StillSleeping {
+                    message: format!(
+                        "run {} is sleeping until {} and cannot be resumed for another {}s. It is \
+                         not waiting on input: it continues when its deadline passes and something \
+                         re-drives it: this server's wake sweeper, when it holds the agent or graph \
+                         the run recorded, or salvor wake with the run's files",
+                        run_id.as_uuid(),
+                        json::rfc3339(wake_at),
+                        remaining.whole_seconds(),
+                    ),
+                    wake_at: json::rfc3339(wake_at),
+                    remaining_seconds: remaining.whole_seconds(),
+                });
+            }
+            redrive(state, run_id, &log).await
+        }
         Disposition::Recover => {
             if request.input.is_some() {
                 tracing::warn!(
@@ -438,20 +489,55 @@ pub async fn resume(
                     "this run crashed mid-step; the resume input is ignored when recovering"
                 );
             }
-            // The graph branch, mirroring the Resume arm: a crashed graph run
-            // recovers over the engine (no resume input), an agent run over the
-            // built-in loop.
-            if crate::graph::is_graph_run(&log) {
-                return crate::graph::drive_resume(state, run_id, &log, None).await;
-            }
-            let built = rebuild_agent(&state, &log).await?;
-            spawn_drive(state, run_id, built, DriveVerb::Recover);
-            Ok(driving(run_id).into_response())
+            redrive(state, run_id, &log).await
         }
     }
 }
 
+/// Re-drives a run from its recorded log with no new input: replay, then
+/// continue from the first unrecorded step.
+///
+/// The whole of the resume endpoint's `Recover` arm, factored out because it
+/// is also the whole of waking. A sleeping run continues by being driven with
+/// nothing supplied, and [`RunCtx::await_wake`](salvor_runtime::RunCtx::await_wake)
+/// decides against the injected clock whether the deadline has arrived, so a
+/// waker needs no verb of its own: it re-drives, and the run either wakes or
+/// records nothing and goes back to sleep. Routing the sweeper through this
+/// function rather than a parallel loop is what makes a run behave identically
+/// whether a person or the clock woke it.
+///
+/// The graph branch mirrors the resume endpoint's: a graph run continues over
+/// the engine, resolving its document by the hash the log records; an agent run
+/// rebuilds its agent and continues the built-in loop.
+///
+/// # Errors
+///
+/// [`ApiError::UnknownAgent`] when the agent the run started under is not
+/// registered here, [`ApiError::UnknownGraph`] for the graph equivalent, or
+/// whatever building the agent reports.
+pub(crate) async fn redrive(
+    state: AppState,
+    run_id: RunId,
+    log: &[EventEnvelope],
+) -> Result<Response, ApiError> {
+    if crate::graph::is_graph_run(log) {
+        return crate::graph::drive_resume(state, run_id, log, None).await;
+    }
+    let built = rebuild_agent(&state, log).await?;
+    spawn_drive(state, run_id, built, DriveVerb::Recover);
+    Ok(driving(run_id).into_response())
+}
+
 /// `POST /v1/runs/{id}/resolve`: record a dangling write's completion by hand.
+///
+/// Unlike resume, this takes no client-driven guard. It appends exactly one
+/// completion event inline and spawns no driver, so it never becomes a second
+/// writer contending for a run of positions the way a spawned drive would; and
+/// an operator needs it to reach a client-driven run whose client cannot be
+/// reached to reopen it and drive its own resolve. `POST
+/// /v1/client-runs/{id}/resolve` is the client's own path when it still holds
+/// its lease; this is the same override [`abandon`] already is for any run,
+/// whatever drove it.
 pub async fn resolve(
     State(state): State<AppState>,
     Path(run_id_text): Path<String>,
@@ -474,7 +560,7 @@ pub async fn resolve(
             Ok(Json(json!({
                 "run": run_id.as_uuid().to_string(),
                 "resolved": true,
-                "status": json::status(&derived.status),
+                "status": json::status(&derived.status, state.now()),
             })))
         }
         Err(RuntimeError::NotReconcilable { status, .. }) => Err(ApiError::WrongState(format!(
@@ -533,7 +619,7 @@ pub async fn abandon(
                 "run": run_id.as_uuid().to_string(),
                 "abandoned": true,
                 "appended_seq": appended_seq,
-                "status": json::status(&derived.status),
+                "status": json::status(&derived.status, state.now()),
             })))
         }
         Err(RuntimeError::UnknownRun { .. }) => Err(unknown_run(run_id)),
@@ -577,11 +663,37 @@ fn spawn_drive(state: AppState, run_id: RunId, built: BuiltAgent, verb: DriveVer
         };
         close_servers(servers).await;
         if let Err(error) = result {
-            tracing::error!(run_id = %run_id.as_uuid(), %error, "run drive ended with an error");
+            if is_position_conflict(&error) {
+                // Not a failure of this drive: another driver (a second server
+                // on this store, or a CLI `salvor wake`) won the race to the
+                // next position first. Exactly-once still held; this drive
+                // simply recorded nothing past the conflict, so `error!` would
+                // page an operator over something that self-healed.
+                tracing::info!(
+                    run_id = %run_id.as_uuid(),
+                    %error,
+                    "another driver took this run; this drive recorded nothing past the conflict"
+                );
+            } else {
+                tracing::error!(run_id = %run_id.as_uuid(), %error, "run drive ended with an error");
+            }
         }
         task_state.end_run(run_id);
     });
     state.set_handle(run_id, handle);
+}
+
+/// Whether a drive error is a lost position race rather than a real failure:
+/// the store rejected an append because another driver already recorded an
+/// event at that `(run_id, seq)`. Matched by TYPE, not by string, since the
+/// same `StoreError::Conflict` wording can arrive wrapped in unrelated ways.
+/// Mirrors `salvor-cli`'s `is_position_conflict` (read, not imported: the CLI
+/// crate is not a server dependency).
+fn is_position_conflict(error: &RuntimeError) -> bool {
+    matches!(
+        error,
+        RuntimeError::Store(salvor_store::StoreError::Conflict { .. })
+    )
 }
 
 /// Rebuilds the agent a run started under, from the definition registered

@@ -60,6 +60,19 @@ use crate::id::{RunId, SequenceNumber};
 /// entirely and serializes byte for byte as it did before, so a log recorded
 /// by an earlier binary replays unchanged and the version stays 1.
 ///
+/// The optional `kind` on [`Event::Suspended`] is the fourth. A suspension
+/// with no kind recorded is a human gate, which is what every suspension
+/// written before the field meant, and it omits the key entirely, so those
+/// logs replay byte for byte and the version stays 1.
+///
+/// # Why the durable-timer events do not bump this
+///
+/// [`Event::SleepStarted`] and [`Event::SleepCompleted`] are two more new
+/// variants, added the same read-compatible way: a log written before them
+/// contains neither kind, so every event in it parses to the identical value
+/// under the new build, and the version stays 1. Neither carries an optional
+/// field, so there is no additive-field question to answer for them.
+///
 /// # Why the graph events do not bump this
 ///
 /// The graph-run events ([`Event::GraphRunStarted`] and the node/branch/map/fold
@@ -107,6 +120,32 @@ pub enum Performer {
     /// that it happened. The log entry is the client's claim, not something
     /// salvor witnessed directly.
     Client,
+}
+
+/// What a suspended run is waiting on, when the answer is not a person.
+///
+/// A suspension records that the run parked awaiting schema-validated input.
+/// That is as true of a webhook delivering a payload as it is of an operator
+/// clicking approve, so both park the same way, through
+/// [`Event::Suspended`] and [`Event::Resumed`], and both validate the resume
+/// input against the recorded schema. The difference is who owes the run an
+/// answer, and it matters to every surface that lists work: a wait on an
+/// external system is not an operator's task and must not appear in an
+/// approval inbox as one.
+///
+/// Absent (`None` on [`Event::Suspended`]) is the human gate and stays
+/// unspoken, because it is what every suspension recorded before this type
+/// existed meant. Only the exceptions name themselves.
+///
+/// Serializes lowercase (`"signal"`), matching the wire style [`Performer`]
+/// and [`Effect`] use.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SuspensionKind {
+    /// An external system will resume the run with a payload: a webhook, a
+    /// callback, another service reporting back. Nobody is being asked to
+    /// decide anything, so no inbox should show this run.
+    Signal,
 }
 
 /// Where a deduplicated tool call took its recorded output from: the run and
@@ -364,18 +403,81 @@ pub enum Event {
         value: u64,
     },
     /// The run parked durably, awaiting input (for example, human approval).
-    /// Records why and the schema the resume input must satisfy.
+    /// Records why, the schema the resume input must satisfy, and optionally
+    /// what is expected to supply it.
     Suspended {
         /// Why the run suspended.
         reason: String,
         /// JSON Schema the [`Event::Resumed`] input is validated against.
         input_schema: serde_json::Value,
+        /// What the run is waiting on, when it is not a person.
+        ///
+        /// Absent is the original meaning and stays the default: a human gate,
+        /// which is every suspension recorded before this field existed. A
+        /// recorded [`SuspensionKind`] narrows that to a wait no operator can
+        /// answer, so a surface can route it away from an approval inbox.
+        ///
+        /// Additive-optional under the same contract `labels` on
+        /// [`Event::RunStarted`] and `deduplicated_from` on
+        /// [`Event::ToolCallCompleted`] set (see the [`SCHEMA_VERSION`] docs):
+        /// absent omits the key entirely, so a human gate's suspension
+        /// serializes byte for byte as it did before this field existed, and a
+        /// log written before it deserializes with the field defaulted to
+        /// `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<SuspensionKind>,
     },
     /// A suspended run resumed with the given input.
     Resumed {
         /// The input supplied on resume.
         input: serde_json::Value,
     },
+    /// The run parked until a recorded instant: a durable timer. Nothing holds
+    /// the run while it sleeps. A parked run is passive data in the store, and
+    /// this event is the whole of what makes it a sleeping one, so the sleep
+    /// survives a process restart the way every other recorded fact does.
+    ///
+    /// # Why `wake_at` is an instant and not a duration
+    ///
+    /// A duration would need a clock to interpret: "sleep ten minutes" only
+    /// means something alongside the moment it was said, and asking how much of
+    /// it is left is a question about now. Replay must not consult a clock, so
+    /// the instant is computed once while the run is live (from an observed
+    /// [`Event::NowObserved`] plus whatever the caller wanted to wait) and
+    /// recorded here. Every later reader, replaying or folding, reaches the
+    /// same wake time by reading it rather than by recomputing it.
+    ///
+    /// # Wire compatibility
+    ///
+    /// Added the same read-compatible way the deterministic-context, graph, and
+    /// abandonment events were: a new variant, so a log written before it
+    /// contains none of the kind. [`SCHEMA_VERSION`] stays 1; the constant's
+    /// docs carry the full argument.
+    SleepStarted {
+        /// The instant the run may continue at. RFC 3339 on the wire with
+        /// nanosecond precision, encoded exactly as [`Event::NowObserved`]'s
+        /// `now` is, so one reading rule covers every recorded instant in a log.
+        #[serde(with = "time::serde::rfc3339")]
+        wake_at: OffsetDateTime,
+    },
+    /// The sleep ended and the run may continue. Carries nothing: the sleep it
+    /// closes is the [`Event::SleepStarted`] before it, and that event already
+    /// holds every value either one has to say.
+    ///
+    /// # Why the pair is two events and not one with a nullable field
+    ///
+    /// A single `Slept { wake_at, completed: Option<..> }` would have to be
+    /// rewritten when the sleep ended, and no event in this log is ever
+    /// rewritten: the log is append-only, and an event records that something
+    /// happened rather than tracking the current state of something. Two events
+    /// also give a fold the two boundaries it needs. The status changes at each
+    /// of them (see [`RunStatus::Sleeping`](crate::RunStatus::Sleeping)), and a
+    /// wall-time budget excludes exactly the span between them.
+    ///
+    /// The payload is empty rather than absent so the wire form keeps the same
+    /// two-key shape as every other event, `{"kind":..,"payload":{}}`, which is
+    /// the shape a bare [`Event::RunAbandoned`] already serializes to.
+    SleepCompleted {},
     /// A declared budget was exceeded. The run suspends rather than dies, so a
     /// human can raise the limit and resume.
     BudgetExceeded {
@@ -802,10 +904,20 @@ mod tests {
         assert_round_trips(Event::Suspended {
             reason: "awaiting approval".into(),
             input_schema: serde_json::json!({"type": "object"}),
+            kind: None,
+        });
+        assert_round_trips(Event::Suspended {
+            reason: "awaiting the shipping webhook".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+            kind: Some(SuspensionKind::Signal),
         });
         assert_round_trips(Event::Resumed {
             input: serde_json::json!({"approved": true}),
         });
+        assert_round_trips(Event::SleepStarted {
+            wake_at: datetime!(2026-07-16 12:00:00.123456789 UTC),
+        });
+        assert_round_trips(Event::SleepCompleted {});
         assert_round_trips(Event::BudgetExceeded {
             budget: Budget {
                 kind: BudgetKind::CostUsd,
@@ -1217,6 +1329,94 @@ mod tests {
         assert_eq!(
             json,
             r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"RandomObserved","payload":{"value":18446744073709551615}}}"#
+        );
+    }
+
+    /// Pins a `Suspended` with no kind recorded: the payload is `reason` and
+    /// `input_schema` and nothing else, which is the exact form every human
+    /// gate has serialized to since before the discriminator existed. This is
+    /// the additive-optional contract the [`SCHEMA_VERSION`] docs promise for
+    /// `kind`, checked directly on the event that carries it.
+    #[test]
+    fn suspended_without_a_kind_serializes_to_pinned_json() {
+        let env = envelope(Event::Suspended {
+            reason: "awaiting approval".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+            kind: None,
+        });
+        let json = serde_json::to_string(&env).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"Suspended","payload":{"reason":"awaiting approval","input_schema":{"type":"object"}}}}"#
+        );
+        assert!(
+            !json.contains(r#""kind":"signal""#),
+            "a human gate must not emit the discriminator: {json}"
+        );
+    }
+
+    /// Pins a `Suspended` waiting on a signal: the discriminator rides last,
+    /// after `input_schema`, and lowercase, the wire style `Performer` and
+    /// `Effect` already use.
+    #[test]
+    fn suspended_for_a_signal_serializes_to_pinned_json() {
+        let env = envelope(Event::Suspended {
+            reason: "awaiting the shipping webhook".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+            kind: Some(SuspensionKind::Signal),
+        });
+        let json = serde_json::to_string(&env).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"Suspended","payload":{"reason":"awaiting the shipping webhook","input_schema":{"type":"object"},"kind":"signal"}}}"#
+        );
+    }
+
+    /// A suspension written before the discriminator existed still reads, and
+    /// reads as a human gate. The wire form here is copied from a log recorded
+    /// by the earlier build, keys and all, so nothing but a real compatibility
+    /// break can make this test fail.
+    #[test]
+    fn a_suspension_recorded_before_the_discriminator_reads_as_a_human_gate() {
+        let wire = r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"Suspended","payload":{"reason":"awaiting approval","input_schema":{"type":"object"}}}}"#;
+        let env: EventEnvelope = serde_json::from_str(wire).expect("deserialize");
+        assert_eq!(
+            env.event,
+            Event::Suspended {
+                reason: "awaiting approval".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+                kind: None,
+            }
+        );
+        assert_eq!(serde_json::to_string(&env).expect("serialize"), wire);
+    }
+
+    /// Pins the exact serialized form of the durable-timer pair. `wake_at`
+    /// rides as RFC 3339 with all nine fractional digits, the same encoding
+    /// [`context_events_serialize_to_pinned_json`] pins for `NowObserved`, and
+    /// the payload-free completion still carries an (empty) `payload` object,
+    /// so both keep the two-key wire shape every other event has.
+    ///
+    /// The other half of this contract, that adding these variants changed no
+    /// byte of any log written before them, is proven by every pinned test
+    /// above passing untouched: [`envelope_serializes_to_pinned_json`] is the
+    /// representative one.
+    #[test]
+    fn sleep_events_serialize_to_pinned_json() {
+        let started = envelope(Event::SleepStarted {
+            wake_at: datetime!(2026-07-16 12:00:00.123456789 UTC),
+        });
+        let json = serde_json::to_string(&started).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"SleepStarted","payload":{"wake_at":"2026-07-16T12:00:00.123456789Z"}}}"#
+        );
+
+        let completed = envelope(Event::SleepCompleted {});
+        let json = serde_json::to_string(&completed).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"SleepCompleted","payload":{}}}"#
         );
     }
 

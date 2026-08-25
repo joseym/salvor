@@ -84,6 +84,55 @@ describe('Inbox', () => {
     expect(cards.querySelector('.state.all-clear')).toBeNull();
   });
 
+  it('a sleeping run parked on a durable timer is never listed as a card: it moves on its own, never on a person', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        runs: [{ run: 'r-sleep', status: { state: 'sleeping', wake_at: '2026-08-20T09:00:00Z' }, event_count: 2 }],
+      }),
+    );
+    const fixture = await mount();
+    const el = fixture.nativeElement as HTMLElement;
+
+    expect(el.querySelector('.state.all-clear')).toBeTruthy();
+    expect(el.querySelector('#inbox-cards form')).toBeNull();
+    expect(el.textContent).toContain('All clear');
+  });
+
+  it('a suspended run waiting on an external signal is never listed as a card: nobody owes it action', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        runs: [
+          {
+            run: 'r-signal',
+            status: { state: 'suspended', reason: 'awaiting webhook', input_schema: { properties: {} }, kind: 'signal' },
+            event_count: 1,
+          },
+        ],
+      }),
+    );
+    const fixture = await mount();
+    const el = fixture.nativeElement as HTMLElement;
+
+    expect(el.querySelector('.state.all-clear')).toBeTruthy();
+    expect(el.querySelector('#inbox-cards form')).toBeNull();
+    expect(el.textContent).toContain('All clear');
+  });
+
+  it('a suspended run with no kind (a human gate, every run recorded before the discriminator existed) is still a card', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        runs: [
+          { run: 'r-gate', status: { state: 'suspended', reason: 'approve me', input_schema: { properties: {} } }, event_count: 1 },
+        ],
+      }),
+    );
+    const fixture = await mount();
+    const el = fixture.nativeElement as HTMLElement;
+
+    expect(el.querySelector('form[data-resume="r-gate"]')).toBeTruthy();
+    expect(el.querySelector('.state.all-clear')).toBeNull();
+  });
+
   it('the lede states the real snake_case statuses, not the fixture-era hyphenated slugs', async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ runs: [] }));
     const fixture = await mount();

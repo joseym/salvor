@@ -131,6 +131,34 @@
       ],
       "type": "object"
     },
+    "DelayNode": {
+      "additionalProperties": false,
+      "description": "A `delay` node: a durable wait that parks the run, then continues the walk.\n\n# Why the wait is a DURATION and not an instant\n\nA graph document is authored once, content-addressed, and then run any\nnumber of times: the hash IS the identity, and the same document backs\n`salvor graph run`, `POST /v1/graph-runs`, and every fork of every run that\nreferenced it. An absolute wake instant baked into the document would make\nit a single-use artifact: correct on the first run and already in the past\non the second, where every delay would fall through instantly and the\ndocument would silently mean something else than it did the day it was\nwritten.\n\nA duration says the thing that stays true across runs (\"hold this for an\nhour\"), and it is what every other author-time number in this format\nalready is: a `map`'s `concurrency`, a `fold`'s `max_iterations`. Nothing in\na graph document is a value belonging to one particular run, and this field\nkeeps it that way. The instant is resolved at EXECUTION, by\n`salvor_runtime::RunCtx::sleep_for`, which observes the clock into the log\nfirst and derives `wake_at` from that recorded reading, so the wake instant\nis recorded once and replays identically forever.\n\nThere is deliberately no second, absolute spelling. Two ways to say a wait\nwould need a mutual-exclusion rule in the validator and would leave authors\nchoosing between one form that composes and one that expires; a format with\none answer is the smaller thing to keep true.",
+      "properties": {
+        "id": {
+          "description": "The node's stable id, unique within the document.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Optional short display label for this node. See the module docs' \"The\noptional node display name\" section for the bound and the deliberate\nhash-inclusion contrast with the agent `name` field. Additive: absent\non the wire when unset.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "seconds": {
+          "description": "How long the run waits, in whole seconds, measured from the clock\nreading the engine records on entering the node. Must be at least 1;\n`crate::validate` reports a zero wait by node id.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "seconds"
+      ],
+      "type": "object"
+    },
     "Edge": {
       "additionalProperties": false,
       "description": "A directed edge: a typed payload flows from one node to another.\n\nEdges are the single source of graph topology. Referential integrity, the\nacyclic check, and the entry/terminal summary all read the edge list. No\nports are modeled here; a `port` pair is a documented additive\nfollow-up.",
@@ -421,7 +449,7 @@
       "type": "object"
     },
     "Node": {
-      "description": "One node in a graph: exactly one of the six kinds the runtime knows how to\nexecute.\n\nAdjacently tagged like the event enum: each node serializes as `{\"kind\":\n\"...\", \"payload\": {...}}`. The tag (`kind`) and content (`payload`) live in\nseparate keys, which never collides with a payload field and does not force\npayloads to be JSON objects. `deny_unknown_fields` on the enum rejects any\nkey other than `kind` and `payload`.\n\nThe stable node id lives inside each payload (every payload struct carries\nan `id`), reachable generically through `Node::id`. Keeping the id in the\npayload is what lets the outer shape stay exactly the two-key adjacent\ntagging the event log uses, with no third common field to special-case.",
+      "description": "One node in a graph: exactly one of the seven kinds the runtime knows how to\nexecute.\n\nAdjacently tagged like the event enum: each node serializes as `{\"kind\":\n\"...\", \"payload\": {...}}`. The tag (`kind`) and content (`payload`) live in\nseparate keys, which never collides with a payload field and does not force\npayloads to be JSON objects. `deny_unknown_fields` on the enum rejects any\nkey other than `kind` and `payload`.\n\nThe stable node id lives inside each payload (every payload struct carries\nan `id`), reachable generically through `Node::id`. Keeping the id in the\npayload is what lets the outer shape stay exactly the two-key adjacent\ntagging the event log uses, with no third common field to special-case.",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -523,6 +551,24 @@
             },
             "payload": {
               "$ref": "#/$defs/FoldNode"
+            }
+          },
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A durable wait: parks the run on a timer, then continues the walk. It\ntransforms nothing, so its output is its input verbatim.",
+          "properties": {
+            "kind": {
+              "const": "delay",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/DelayNode"
             }
           },
           "required": [

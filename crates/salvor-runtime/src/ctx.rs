@@ -22,7 +22,10 @@
 //! | [`model_call`](RunCtx::model_call) | `model_call` | persist intent, call provider, persist completion |
 //! | [`tool_call`](RunCtx::tool_call) | `tool_call` | persist intent **before executing**, execute, persist completion |
 //! | [`suspend`](RunCtx::suspend) | `suspend` | persist `Suspended` |
+//! | [`suspend_for_signal`](RunCtx::suspend_for_signal) | `suspend_for_signal` | persist `Suspended` marked as a signal wait |
 //! | [`await_resume`](RunCtx::await_resume) | `await_resume` | persist `Resumed` when input was provided |
+//! | [`sleep_until`](RunCtx::sleep_until) | `sleep_started` | persist `SleepStarted` |
+//! | [`await_wake`](RunCtx::await_wake) | `sleep_completed` | read the injected clock; persist `SleepCompleted` once the instant has passed |
 //! | [`budget_exceeded`](RunCtx::budget_exceeded) | `budget_exceeded` | persist `BudgetExceeded` |
 //! | [`complete_run`](RunCtx::complete_run) / [`fail_run`](RunCtx::fail_run) | same | persist the terminal event |
 //!
@@ -71,23 +74,45 @@
 //! `RetryPolicy`: `Read` and `Idempotent` handler failures re-execute up to
 //! [`MAX_TOOL_ATTEMPTS`] total attempts (idempotent retries reuse the same
 //! key, carried on `ToolCtx`), `Write` failures never re-execute, and input
-//! validation or output serialization failures never retry because they
-//! would fail identically again. Whatever the final result, the completion
-//! is recorded: an output, a suspension sentinel, or a failure object (see
-//! [`crate::wire`]).
+//! validation, an unreadable tool result, or output serialization never
+//! retries because it would fail identically again. Whatever the final result,
+//! the completion is recorded: an output, a suspension sentinel, or a failure
+//! object (see [`crate::wire`]).
+//!
+//! # Sleeping belongs between calls, never inside one
+//!
+//! [`sleep_until`](RunCtx::sleep_until) and [`sleep_for`](RunCtx::sleep_for)
+//! must not be called between a claimed tool call's intent and its
+//! completion. A claim is held for the whole span between the two, so every
+//! other run presenting that idempotency key gets `CallInFlight` for as long
+//! as the sleep lasts, and a durable timer lasts hours or weeks where a call
+//! lasts seconds. A process death inside such a sleep is worse: it leaves a
+//! dangling `Write` intent, which derives to
+//! [`RunStatus::NeedsReconciliation`](salvor_core::RunStatus::NeedsReconciliation)
+//! and stops the run until a human answers for the write by hand.
+//!
+//! Nothing in `RunCtx` can enforce the ordering, because the caller owns it
+//! and this type sees one request at a time. Sleep between completed calls.
+//!
+//! A tool that asks for the sleep itself is not an exception to that rule, it
+//! is the rule mechanized. A tool returning `ToolOutcome::Sleep` has its
+//! request encoded into its own `ToolCallCompleted` (see [`crate::wire`]), so
+//! the call settles, the claim releases, and only then does the driver call
+//! [`sleep_until`](RunCtx::sleep_until). The recorded order is intent,
+//! completion, `SleepStarted`, and a sleeping run therefore holds no claim.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use salvor_core::{
     Budget, DedupOrigin, Effect, Emitted, Event, EventEnvelope, ModelReply, Outcome, PendingCall,
-    ReplayCursor, RunId, SequenceNumber, TokenUsage,
+    ReplayCursor, RunId, SequenceNumber, SuspensionKind, TokenUsage,
 };
 use salvor_llm::{Client, MessageAccumulator, MessageRequest, MessageResponse, StreamEvent};
 use salvor_store::{CallClaim, CallClaimant, CallCommitment, EventStore};
-use salvor_tools::{DynTool, RetryPolicy, Suspension, ToolCtx, ToolError, ToolOutcome};
+use salvor_tools::{DynTool, RetryPolicy, Sleep, Suspension, ToolCtx, ToolError, ToolOutcome};
 use serde_json::Value;
-use time::OffsetDateTime;
+use time::{Duration, OffsetDateTime, PrimitiveDateTime};
 use uuid::Uuid;
 
 use crate::error::RuntimeError;
@@ -95,7 +120,8 @@ use crate::hash::hash_value;
 use crate::labels::validate_labels;
 use crate::model::{response_value, usage_of};
 use crate::wire::{
-    ToolFailure, decode_failure, decode_suspension, encode_failure, encode_suspension,
+    ToolFailure, decode_failure, decode_sleep, decode_suspension, encode_failure, encode_sleep,
+    encode_suspension,
 };
 
 /// The injected clock: called once per persisted event (for the envelope
@@ -133,6 +159,14 @@ pub enum ToolCallResult {
     /// The tool asked to park the run. Follow with [`RunCtx::suspend`] and
     /// [`RunCtx::await_resume`].
     Suspended(Suspension),
+    /// The tool asked to park the run until an instant. Follow with
+    /// [`RunCtx::sleep_until`] and [`RunCtx::await_wake`].
+    ///
+    /// The call itself is finished when this is returned: its completion is
+    /// recorded and any idempotency claim is settled, so the sleep that
+    /// follows holds nothing. See [`crate::wire`] for why the request travels
+    /// in the completion rather than as an event of its own.
+    Sleeping(Sleep),
 }
 
 /// What [`RunCtx::await_resume`] produced.
@@ -145,6 +179,28 @@ pub enum Resumption {
     Parked,
 }
 
+/// What [`RunCtx::await_wake`] produced: the timer counterpart of
+/// [`Resumption`], and separate from it because the two park for different
+/// reasons and end differently. A suspension ends when someone supplies an
+/// input; a sleep ends when an instant arrives and carries no input at all.
+#[derive(Debug, Clone, Copy)]
+pub enum Waking {
+    /// The wake is recorded, whether it was replayed from the log or just
+    /// persisted. Continue the run.
+    Woken,
+    /// The wake instant has not arrived. The run is parked durably; the
+    /// recorded `SleepStarted` already holds the deadline, so the process may
+    /// simply stop driving it and come back at `wake_at` or later.
+    ///
+    /// Named for the state the run is in rather than for the non-event that
+    /// left it there, exactly as [`Resumption::Parked`] is.
+    Asleep {
+        /// The recorded instant the run may continue at, so a caller deciding
+        /// when to come back does not have to re-derive the log.
+        wake_at: OffsetDateTime,
+    },
+}
+
 /// The public durability substrate for one run. See the module docs.
 pub struct RunCtx {
     cursor: ReplayCursor,
@@ -153,6 +209,13 @@ pub struct RunCtx {
     clock: ClockFn,
     random: RandomFn,
     resume_input: Option<Value>,
+    /// The wake instant of the sleep this drive last recorded or replayed,
+    /// set by [`sleep_until`](Self::sleep_until) and read by
+    /// [`await_wake`](Self::await_wake) to decide whether the deadline has
+    /// arrived. Not state about the run (the log holds that); state about
+    /// where this drive is, which is why it is not persisted and why a fresh
+    /// context starts without it.
+    sleeping_until: Option<OffsetDateTime>,
     /// Whether to record the full model request body on each
     /// `ModelCallRequested`. Off unless [`with_record_prompts`](Self::with_record_prompts)
     /// turns it on. See that method for the PII rationale.
@@ -212,6 +275,7 @@ impl RunCtx {
             clock,
             random,
             resume_input: None,
+            sleeping_until: None,
             record_prompts: false,
             labels: None,
         })
@@ -1004,6 +1068,10 @@ impl RunCtx {
                         Err(error) => {
                             // Only a handler failure is retryable, and only
                             // when the effect's policy allows a re-attempt.
+                            // Every other variant is a fault in the arguments
+                            // or in the tool itself, and a second attempt
+                            // would reach the same verdict against a slower
+                            // clock.
                             let may_retry = matches!(error, ToolError::Handler { .. })
                                 && policy.allows_retry()
                                 && attempts < MAX_TOOL_ATTEMPTS;
@@ -1022,6 +1090,14 @@ impl RunCtx {
                         encode_suspension(&suspension),
                         ToolCallResult::Suspended(suspension),
                     ),
+                    Ok(ToolOutcome::Sleep(sleep)) => {
+                        // The instant is normalized on the way into the
+                        // completion, so what the caller sleeps on is what the
+                        // log holds and what every later drive decodes.
+                        let output = encode_sleep(&sleep);
+                        let recorded = decode_sleep(&output).unwrap_or(sleep);
+                        (output, ToolCallResult::Sleeping(recorded))
+                    }
                     Err(error) => {
                         let failure = ToolFailure::from_error(&error, attempts);
                         (encode_failure(&failure), ToolCallResult::Failed(failure))
@@ -1122,8 +1198,10 @@ impl RunCtx {
         Ok(Some(decode_tool_output(output)))
     }
 
-    /// Parks the run: records `Suspended { reason, input_schema }`. Follow
-    /// with [`await_resume`](Self::await_resume).
+    /// Parks the run on a human gate: records `Suspended { reason,
+    /// input_schema }`, with no discriminator, which is what every suspension
+    /// recorded before signals existed means. Follow with
+    /// [`await_resume`](Self::await_resume).
     ///
     /// # Errors
     ///
@@ -1134,7 +1212,60 @@ impl RunCtx {
         reason: &str,
         input_schema: &Value,
     ) -> Result<(), RuntimeError> {
-        match self.cursor.suspend(reason, input_schema)? {
+        self.suspend_with_kind(reason, input_schema, None).await
+    }
+
+    /// Parks the run on an external signal: records `Suspended` with
+    /// [`SuspensionKind::Signal`](salvor_core::SuspensionKind::Signal), for a
+    /// wait a webhook or callback answers rather than a person. Follow with
+    /// [`await_resume`](Self::await_resume), exactly as a gate does.
+    ///
+    /// The run parks, validates, and resumes identically either way. The
+    /// recorded discriminator exists so a surface can route: a signal wait is
+    /// nobody's task, and listing it in an approval inbox invents work for an
+    /// operator who cannot do it.
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeError::Replay`] on divergence (a replayed suspension whose
+    /// discriminator differs included); [`RuntimeError::Store`] when
+    /// persistence fails.
+    pub async fn suspend_for_signal(
+        &mut self,
+        reason: &str,
+        input_schema: &Value,
+    ) -> Result<(), RuntimeError> {
+        self.suspend_with_kind(reason, input_schema, Some(SuspensionKind::Signal))
+            .await
+    }
+
+    /// Parks the run on a suspension whose discriminator is already a value:
+    /// records `Suspended { reason, input_schema, kind }`. Follow with
+    /// [`await_resume`](Self::await_resume).
+    ///
+    /// This exists for the drivers, which read the kind off a
+    /// [`Suspension`](salvor_tools::Suspension) a tool returned and cannot
+    /// choose between the two named methods without matching on it. Hand-written
+    /// orchestration should say [`suspend`](Self::suspend) or
+    /// [`suspend_for_signal`](Self::suspend_for_signal) instead, so the call
+    /// site reads as what it is.
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeError::Replay`] on divergence (a replayed suspension whose
+    /// discriminator differs included); [`RuntimeError::Store`] when
+    /// persistence fails.
+    pub async fn suspend_with_kind(
+        &mut self,
+        reason: &str,
+        input_schema: &Value,
+        kind: Option<SuspensionKind>,
+    ) -> Result<(), RuntimeError> {
+        let requested = match kind {
+            None => self.cursor.suspend(reason, input_schema)?,
+            Some(SuspensionKind::Signal) => self.cursor.suspend_for_signal(reason, input_schema)?,
+        };
+        match requested {
             Outcome::Replayed(()) => Ok(()),
             Outcome::Live(emitted) => {
                 persist(self.store.as_ref(), self.run_id, &self.clock, &emitted).await
@@ -1164,6 +1295,122 @@ impl RunCtx {
                 }
                 None => Ok(Resumption::Parked),
             },
+        }
+    }
+
+    /// Parks the run on a durable timer: records `SleepStarted { wake_at }`.
+    /// Follow with [`await_wake`](Self::await_wake).
+    ///
+    /// `wake_at` must be derived from recorded data, because replay presents
+    /// it again and the cursor matches it exactly: derive it from an observed
+    /// [`now`](Self::now) (which [`sleep_for`](Self::sleep_for) does for you),
+    /// never from a clock read outside the log. An instant recomputed from an
+    /// ambient clock differs on every drive and diverges on the first one.
+    ///
+    /// # Never inside a claimed tool call
+    ///
+    /// A sleep must not be recorded between a claimed call's intent and its
+    /// completion. The claim is held for the whole span, so every other run
+    /// under that idempotency key gets `CallInFlight` for as long as the run
+    /// sleeps, which for a durable timer is hours or weeks rather than the
+    /// seconds a call takes. Worse, a process death mid-sleep strands a
+    /// dangling `Write` intent, which derives to
+    /// [`RunStatus::NeedsReconciliation`](salvor_core::RunStatus::NeedsReconciliation)
+    /// and needs a human before the run moves again. Sleeping belongs between
+    /// completed calls. Nothing here can enforce that (the caller owns the
+    /// ordering, and this context sees one request at a time), so this
+    /// paragraph is the guardrail.
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeError::Replay`] on divergence, including a `wake_at` that
+    /// differs from the recorded one; [`RuntimeError::Store`] when
+    /// persistence fails.
+    pub async fn sleep_until(&mut self, wake_at: OffsetDateTime) -> Result<(), RuntimeError> {
+        match self.cursor.sleep_started(wake_at)? {
+            Outcome::Replayed(()) => {}
+            Outcome::Live(emitted) => {
+                persist(self.store.as_ref(), self.run_id, &self.clock, &emitted).await?;
+            }
+        }
+        self.sleeping_until = Some(wake_at);
+        Ok(())
+    }
+
+    /// Sleeps for `duration` from a recorded reading of the clock, returning
+    /// the wake instant it recorded.
+    ///
+    /// Exactly `now() + duration`, recorded: the reading goes into the log as
+    /// a `NowObserved` before the sleep is derived from it, so every later
+    /// drive replays the identical reading and derives the identical instant.
+    /// A duration alone means nothing to a replay, which has no clock to
+    /// interpret it against; this is the composition that turns one into an
+    /// instant without leaving determinism behind.
+    ///
+    /// Carries every constraint [`sleep_until`](Self::sleep_until) does,
+    /// including the never-inside-a-claimed-call rule. Follow it with
+    /// [`await_wake`](Self::await_wake).
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeError::SleepOverflow`] when the wake instant would fall
+    /// outside the representable range; [`RuntimeError::Replay`] on
+    /// divergence; [`RuntimeError::Store`] when persistence fails.
+    pub async fn sleep_for(&mut self, duration: Duration) -> Result<OffsetDateTime, RuntimeError> {
+        let now = self.now().await?;
+        let wake_at = now
+            .checked_add(duration)
+            .ok_or(RuntimeError::SleepOverflow { now, duration })?;
+        self.sleep_until(wake_at).await?;
+        Ok(wake_at)
+    }
+
+    /// Asks whether the sleep is over.
+    ///
+    /// Replayed: the log holds the `SleepCompleted`, so the sleep already
+    /// ended and the run carries on. Live: the injected clock decides. At or
+    /// past the recorded wake instant the completion is recorded and the run
+    /// continues; before it, the run stays asleep and [`Waking::Asleep`] tells
+    /// the caller to stop driving.
+    ///
+    /// The clock read belongs here and not in the cursor, which reads none;
+    /// it is the same category of live-only decision as "was a resume input
+    /// provided", and like that one it is never recorded as an observation,
+    /// because what the log needs is the fact that the sleep ended, not the
+    /// instant something noticed. Enforcing the deadline here also means no
+    /// caller can wake a run early by driving it early: a driver that comes
+    /// back too soon simply finds it still asleep.
+    ///
+    /// Call it after [`sleep_until`](Self::sleep_until) or
+    /// [`sleep_for`](Self::sleep_for) in the same drive, so the deadline to
+    /// compare against is in hand. Without a sleep before it, there is no
+    /// deadline that could have arrived and the run stays asleep.
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeError::Replay`] on divergence; [`RuntimeError::Store`] when
+    /// persistence fails.
+    pub async fn await_wake(&mut self) -> Result<Waking, RuntimeError> {
+        match self.cursor.sleep_completed()? {
+            Outcome::Replayed(()) => {
+                self.sleeping_until = None;
+                Ok(Waking::Woken)
+            }
+            Outcome::Live(asleep) => {
+                // The last representable instant stands in for a deadline
+                // this drive never set: a wake nobody asked for has not
+                // arrived, and no clock reading will make it so.
+                let wake_at = self
+                    .sleeping_until
+                    .unwrap_or_else(|| PrimitiveDateTime::MAX.assume_utc());
+                if (self.clock)() < wake_at {
+                    return Ok(Waking::Asleep { wake_at });
+                }
+                let emitted = asleep.wake();
+                persist(self.store.as_ref(), self.run_id, &self.clock, &emitted).await?;
+                self.sleeping_until = None;
+                Ok(Waking::Woken)
+            }
         }
     }
 
@@ -1339,6 +1586,9 @@ async fn persist_settling(
 fn decode_tool_output(output: Value) -> ToolCallResult {
     if let Some(suspension) = decode_suspension(&output) {
         return ToolCallResult::Suspended(suspension);
+    }
+    if let Some(sleep) = decode_sleep(&output) {
+        return ToolCallResult::Sleeping(sleep);
     }
     if let Some(failure) = decode_failure(&output) {
         return ToolCallResult::Failed(failure);

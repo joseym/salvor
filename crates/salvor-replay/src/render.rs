@@ -36,6 +36,8 @@ pub fn event_kind(event: &Event) -> &'static str {
         Event::RandomObserved { .. } => "RandomObserved",
         Event::Suspended { .. } => "Suspended",
         Event::Resumed { .. } => "Resumed",
+        Event::SleepStarted { .. } => "SleepStarted",
+        Event::SleepCompleted {} => "SleepCompleted",
         Event::BudgetExceeded { .. } => "BudgetExceeded",
         Event::RunCompleted { .. } => "RunCompleted",
         Event::RunFailed { .. } => "RunFailed",
@@ -123,6 +125,8 @@ pub fn event_detail(event: &Event) -> String {
             });
             if let Some(reason) = suspension_reason(output) {
                 format!("suspends: {reason}{copied}")
+            } else if let Some(wake_at) = sleep_wake_at(output) {
+                format!("sleeps until {}{copied}", format_ts(wake_at))
             } else if let Some(failure) = recorded_failure(output) {
                 format!(
                     "error ({}, {} attempt(s)): {}{copied}",
@@ -138,6 +142,10 @@ pub fn event_detail(event: &Event) -> String {
         Event::RandomObserved { value } => format!("value {value}"),
         Event::Suspended { reason, .. } => format!("reason: {reason}"),
         Event::Resumed { input } => format!("input {}", truncate_json(input)),
+        // The wake instant is the whole of what a reader wants here, rendered
+        // by the same component-wise formatter `NowObserved` uses.
+        Event::SleepStarted { wake_at } => format!("until {}", format_ts(*wake_at)),
+        Event::SleepCompleted {} => "woke".to_owned(),
         Event::BudgetExceeded { budget, observed } => {
             format!(
                 "{} limit {}, observed {}",
@@ -211,6 +219,10 @@ pub fn event_detail(event: &Event) -> String {
 /// must stay free of that dependency to remain buildable for wasm32.
 const SUSPEND_SENTINEL_KEY: &str = "__salvor_suspend";
 
+/// The reserved key marking a completion output as a recorded sleep request.
+/// See [`SUSPEND_SENTINEL_KEY`] for the shared-contract note.
+const SLEEP_SENTINEL_KEY: &str = "__salvor_sleep";
+
 /// The reserved key marking a completion output as a recorded tool failure.
 /// See [`SUSPEND_SENTINEL_KEY`] for the shared-contract note.
 const ERROR_SENTINEL_KEY: &str = "__salvor_error";
@@ -240,6 +252,20 @@ fn suspension_reason(output: &Value) -> Option<&str> {
     // satisfy; a body missing it is not one.
     body.get("input_schema")?;
     Some(reason)
+}
+
+/// The wake instant of a completion output that is the sleep sentinel; `None`
+/// for every other value.
+///
+/// The recorded field is an RFC 3339 string, parsed back to an instant so the
+/// line renders through the same formatter `Event::SleepStarted`'s does. A
+/// value that will not parse is not a sleep sentinel: rendering an
+/// unreadable deadline as if it were one would be worse than showing the
+/// recorded output verbatim.
+fn sleep_wake_at(output: &Value) -> Option<OffsetDateTime> {
+    let body = sentinel_body(output, SLEEP_SENTINEL_KEY)?;
+    let recorded = body.get("wake_at")?.as_str()?;
+    OffsetDateTime::parse(recorded, &time::format_description::well_known::Rfc3339).ok()
 }
 
 /// The recorded fields of a completion output that is the failure sentinel;

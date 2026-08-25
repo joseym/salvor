@@ -23,12 +23,12 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerInfo};
+use rmcp::model::{CallToolResult, ContentBlock, Meta, ServerCapabilities, ServerInfo};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::{ErrorData, ServerHandler, tool, tool_handler, tool_router};
 use salvor_tools::mcp::{EffectOverrides, IdempotencyKeys, McpServer};
-use salvor_tools::{DynTool, Effect, ToolCtx, ToolOutcome};
+use salvor_tools::{DynTool, Effect, SuspensionKind, ToolCtx, ToolError, ToolOutcome};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
@@ -93,6 +93,44 @@ impl HttpFixture {
     #[tool(description = "Do something with unstated effects.")]
     async fn mutate(&self) -> Result<CallToolResult, ErrorData> {
         Ok(CallToolResult::success(vec![ContentBlock::text("mutated")]))
+    }
+
+    /// Parks the calling run until an external system reports back. The park
+    /// request travels in `_meta`, which is transport-independent: the same
+    /// bytes reach the client over HTTP as over a child's stdout.
+    #[tool(
+        description = "Park the calling run until an external system reports back.",
+        annotations(read_only_hint = true)
+    )]
+    async fn await_signal(&self) -> Result<CallToolResult, ErrorData> {
+        let mut meta = Meta::new();
+        meta.insert(
+            "salvor".to_owned(),
+            json!({"suspend": {
+                "reason": "waiting on the settlement webhook",
+                "input_schema": {"type": "object", "properties": {"paid": {"type": "boolean"}}},
+                "kind": "signal",
+            }}),
+        );
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            "waiting on the settlement webhook",
+        )])
+        .with_meta(Some(meta)))
+    }
+
+    /// Asks for a park with the key misspelled, which must fail the call
+    /// rather than pass the result through as output.
+    #[tool(description = "Return a malformed park request.")]
+    async fn bad_park(&self) -> Result<CallToolResult, ErrorData> {
+        let mut meta = Meta::new();
+        meta.insert(
+            "salvor".to_owned(),
+            json!({"sleepUntil": "2026-08-14T09:00:00Z"}),
+        );
+        Ok(
+            CallToolResult::success(vec![ContentBlock::text("asking for a park")])
+                .with_meta(Some(meta)),
+        )
     }
 }
 
@@ -258,7 +296,9 @@ async fn a_tool_call_round_trips_over_http() {
             value.to_string().contains("echo-me"),
             "the server echoed the input back, got: {value}"
         ),
-        ToolOutcome::Suspend(_) => panic!("an MCP tool never suspends"),
+        ToolOutcome::Suspend(_) | ToolOutcome::Sleep(_) => {
+            panic!("an MCP tool never parks its run: the protocol has no way to ask")
+        }
     }
 
     client.close().await.expect("clean shutdown");
@@ -340,5 +380,43 @@ async fn an_unauthenticated_client_is_rejected() {
         "a gated server rejects an unauthenticated client"
     );
 
+    server.shutdown();
+}
+
+// --- Parking through `_meta.salvor`, over HTTP ---------------------------
+
+/// The park contract is a property of the result, not of the transport: a
+/// server reached by URL parks its caller the same way a spawned child does,
+/// and gets the same refusal when it asks wrongly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_park_request_crosses_http_unchanged() {
+    let server = spawn_server(false).await;
+    let client = connect(&server.url).await;
+
+    let outcome = find(&client, "await_signal")
+        .call_json(&ToolCtx::new(None), json!({}))
+        .await
+        .expect("the call succeeds");
+    match outcome {
+        ToolOutcome::Suspend(suspension) => {
+            assert_eq!(suspension.kind, Some(SuspensionKind::Signal));
+            assert_eq!(suspension.reason, "waiting on the settlement webhook");
+        }
+        other => panic!("expected a suspension, got {other:?}"),
+    }
+
+    let error = find(&client, "bad_park")
+        .call_json(&ToolCtx::new(None), json!({}))
+        .await
+        .expect_err("a misspelled park key fails the call");
+    let ToolError::MalformedResult { detail, .. } = error else {
+        panic!("a malformed park is an unreadable result, on this transport as on the other");
+    };
+    assert!(
+        detail.contains("`_meta.salvor"),
+        "the refusal names the key, got: {detail}"
+    );
+
+    client.close().await.expect("clean shutdown");
     server.shutdown();
 }

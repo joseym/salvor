@@ -80,6 +80,12 @@ export const WF_KINDS: WfKindTable = {
     // no reference to a field the document does not have yet.
     seed: (id) => one((b) => b.fold(id, { kind: 'node', value: '' }, 1, 'false', { kind: 'last' })),
   },
+  delay: {
+    blurb: 'a durable wait, then the walk continues',
+    // 1 second: the smallest wait the validator accepts, the same floor `map`'s worker count and
+    // `fold`'s iteration bound start at above.
+    seed: (id) => one((b) => b.delay(id, 1)),
+  },
 };
 
 /**

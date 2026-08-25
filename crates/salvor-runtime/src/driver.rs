@@ -18,7 +18,8 @@
 //!     ctx.model_call
 //!     if the response has tool_use blocks {
 //!         dispatch each through ctx.tool_call
-//!         (suspension parks; failure compacts into the tool_result)
+//!         (suspension parks; sleep parks on a timer; failure compacts into
+//!          the tool_result)
 //!         append tool results to the conversation
 //!     } else {
 //!         ctx.complete_run(final text)
@@ -54,7 +55,9 @@
 //! the conversation is rebuilt from replayed model responses, tool outputs,
 //! and resume inputs; budget observations come from recorded usage and
 //! recorded `now` observations; idempotency keys derive from recorded
-//! random bits; error compaction is a pure function of recorded failures.
+//! random bits; error compaction is a pure function of recorded failures; a
+//! woken tool call's result is a fixed shape over the wake instant its own
+//! recorded completion holds, never a clock read.
 //! So a replayed drive makes bit-identical requests (hashes match) and
 //! takes identical branches.
 //!
@@ -76,11 +79,11 @@ use serde_json::Value;
 
 use crate::agent::Agent;
 use crate::compact::FailureTracker;
-use crate::ctx::{Resumption, RunCtx, ToolCallResult};
+use crate::ctx::{Resumption, RunCtx, ToolCallResult, Waking};
 use crate::error::RuntimeError;
 use crate::runtime::ParkReason;
 use crate::validate::validate_against_schema;
-use crate::wire::content_string;
+use crate::wire::{content_string, slept_output};
 use salvor_core::Effect;
 use salvor_core::{BudgetExtensions, BudgetObservations};
 use time::OffsetDateTime;
@@ -425,13 +428,23 @@ async fn drive_loop_inner(
                     result_blocks.push(ContentBlock::tool_error(tool_use_id, content));
                 }
                 ToolCallResult::Suspended(suspension) => {
-                    ctx.suspend(&suspension.reason, &suspension.input_schema)
-                        .await?;
+                    // The tool's discriminator is recorded and then carried
+                    // out to the caller unchanged. A tool that parked the run
+                    // on a webhook has said so, and a park report that turned
+                    // that back into a human gate would send an operator
+                    // looking for an approval nobody is asking them for.
+                    ctx.suspend_with_kind(
+                        &suspension.reason,
+                        &suspension.input_schema,
+                        suspension.kind,
+                    )
+                    .await?;
                     match ctx.await_resume().await? {
                         Resumption::Parked => {
                             return Ok(LoopOutcome::Parked(ParkReason::Suspended {
                                 reason: suspension.reason,
                                 input_schema: suspension.input_schema,
+                                kind: suspension.kind,
                             }));
                         }
                         Resumption::Resumed(resume_input) => {
@@ -440,6 +453,30 @@ async fn drive_loop_inner(
                             result_blocks.push(ContentBlock::tool_result(
                                 tool_use_id,
                                 content_string(&resume_input),
+                            ));
+                        }
+                    }
+                }
+                // The timer counterpart of the arm above, and deliberately its
+                // twin: park, and on a later drive carry on from the recorded
+                // events. The call is already settled when this arm runs (its
+                // completion carried the request), so the sleep that starts
+                // here holds no idempotency claim, however long it lasts.
+                ToolCallResult::Sleeping(sleep) => {
+                    ctx.sleep_until(sleep.wake_at).await?;
+                    match ctx.await_wake().await? {
+                        Waking::Asleep { wake_at } => {
+                            return Ok(LoopOutcome::Parked(ParkReason::Sleeping { wake_at }));
+                        }
+                        Waking::Woken => {
+                            // The tool returned a deadline rather than a value,
+                            // so the result is derived from the recorded wake
+                            // instant. Deterministic: the instant comes from
+                            // the completion, not from a clock read here.
+                            failures.record_success();
+                            result_blocks.push(ContentBlock::tool_result(
+                                tool_use_id,
+                                content_string(&slept_output(sleep.wake_at)),
                             ));
                         }
                     }

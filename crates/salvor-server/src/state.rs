@@ -101,6 +101,15 @@ pub struct RegisteredAgent {
     pub name: Option<String>,
 }
 
+/// How often the wake sweeper looks for due timers, unless
+/// [`AppState::with_wake_interval`] says otherwise.
+///
+/// A minute. The unit a durable timer is written in is hours or days, so the
+/// resolution that matters is "within a minute of the deadline", and sweeping
+/// costs a fold of every run's log (status is not a stored column); a shorter
+/// interval would pay that repeatedly to sharpen a number nobody measures.
+pub const DEFAULT_WAKE_INTERVAL: Duration = Duration::from_secs(60);
+
 /// The shared, cheaply cloned handle every route works through.
 #[derive(Clone)]
 pub struct AppState {
@@ -133,6 +142,13 @@ struct Inner {
     hooks: Option<(ClockFn, RandomFn)>,
     auth_token: Option<String>,
     poll_interval: Duration,
+    // How often the wake sweeper looks for runs whose durable timer has come
+    // due. A `Duration` with a real default rather than an `Option`, exactly
+    // like `poll_interval` above: a sleeping run nobody re-drives never wakes,
+    // so the sweep is part of what serving a store means, not an opt-in. Zero
+    // is the off switch (`salvor serve --wake-interval 0`), for an operator who
+    // wakes runs from cron with `salvor wake` instead.
+    wake_interval: Duration,
     agents: Mutex<HashMap<String, RegisteredAgent>>,
     // The graph documents this process has accepted, keyed by their reproducible
     // content hash (`salvor_engine::graph_hash`). In-memory, exactly like the
@@ -166,6 +182,16 @@ struct Inner {
     // long model call between drive operations never reads as a false stall; a
     // test shortens it (see `with_client_lease_ttl`) to prove the lapse.
     client_lease_ttl: Duration,
+    // Runs the wake sweeper has already warned about being unwakeable here (its
+    // agent or graph is not registered in this process). Only the first sighting
+    // per run logs at WARN; every later pass while a run's id stays in this set
+    // logs the same fields at DEBUG, so an operator who has not fixed the
+    // registration gap yet is not paged again every sweep interval, but the
+    // fields to find and fix it are still there for anyone who turns on
+    // debug-level logging. Cleared when the run wakes or drops out of the due
+    // set, so a run that becomes unwakeable again later (a fresh nap, a
+    // different recorded agent hash) warns again.
+    unwakeable_warned: Mutex<HashSet<RunId>>,
 }
 
 /// The per-run lease state for a client-driven run.
@@ -204,12 +230,14 @@ impl AppState {
                 hooks: None,
                 auth_token: None,
                 poll_interval: Duration::from_millis(50),
+                wake_interval: DEFAULT_WAKE_INTERVAL,
                 agents: Mutex::new(HashMap::new()),
                 graphs: Mutex::new(HashMap::new()),
                 active: Mutex::new(HashSet::new()),
                 handles: Mutex::new(HashMap::new()),
                 client_runs: Mutex::new(HashMap::new()),
                 client_lease_ttl: Duration::from_secs(60),
+                unwakeable_warned: Mutex::new(HashSet::new()),
             }),
         }
     }
@@ -304,6 +332,21 @@ impl AppState {
         self
     }
 
+    /// Sets how often the wake sweeper looks for runs whose durable timer has
+    /// come due (default [`DEFAULT_WAKE_INTERVAL`]). `Duration::ZERO` turns the
+    /// sweeper off entirely, for a host that wakes runs some other way.
+    ///
+    /// Same shape as [`with_poll_interval`](Self::with_poll_interval), and a
+    /// test shortens it for the same reason: to make a sweep observable without
+    /// waiting on a wall clock.
+    #[must_use]
+    pub fn with_wake_interval(mut self, interval: Duration) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("with_wake_interval is called before the state is shared")
+            .wake_interval = interval;
+        self
+    }
+
     /// The event store every request reads from and writes through.
     #[must_use]
     pub fn store(&self) -> Arc<dyn EventStore> {
@@ -320,6 +363,13 @@ impl AppState {
     #[must_use]
     pub fn poll_interval(&self) -> Duration {
         self.inner.poll_interval
+    }
+
+    /// How often the wake sweeper looks for due timers. `Duration::ZERO` means
+    /// no sweeper runs on this server.
+    #[must_use]
+    pub fn wake_interval(&self) -> Duration {
+        self.inner.wake_interval
     }
 
     /// The injected model executor, if a host wired one. `None` means the
@@ -596,6 +646,54 @@ impl AppState {
             .lock()
             .expect("client runs lock")
             .contains_key(&run_id)
+    }
+
+    /// Records that the wake sweeper has warned about this run being
+    /// unwakeable here. Returns `true` the first time (the caller logs at
+    /// WARN) and `false` on every later call for the same run while the
+    /// record stands (the caller logs the same fields at DEBUG instead).
+    pub fn mark_unwakeable_warned(&self, run_id: RunId) -> bool {
+        self.inner
+            .unwakeable_warned
+            .lock()
+            .expect("unwakeable warned lock")
+            .insert(run_id)
+    }
+
+    /// Whether the sweeper has already warned about this run. Read-only,
+    /// unlike [`mark_unwakeable_warned`](Self::mark_unwakeable_warned), which
+    /// always records a sighting; a test uses this to check the record
+    /// without flipping it.
+    #[must_use]
+    pub fn unwakeable_warned(&self, run_id: RunId) -> bool {
+        self.inner
+            .unwakeable_warned
+            .lock()
+            .expect("unwakeable warned lock")
+            .contains(&run_id)
+    }
+
+    /// Clears a run's unwakeable-warned record: it woke, so the next time it
+    /// naps and cannot be rebuilt here is a fresh first sighting.
+    pub fn clear_unwakeable_warned(&self, run_id: RunId) {
+        self.inner
+            .unwakeable_warned
+            .lock()
+            .expect("unwakeable warned lock")
+            .remove(&run_id);
+    }
+
+    /// Drops every unwakeable-warned record for a run not in `still_due`.
+    /// Called once per sweep pass before processing, so a run that leaves the
+    /// due set some other way than being driven (the only other way its
+    /// record could go stale) does not carry a warning into a future nap that
+    /// has nothing to do with this one.
+    pub fn prune_unwakeable_warned(&self, still_due: &HashSet<RunId>) {
+        self.inner
+            .unwakeable_warned
+            .lock()
+            .expect("unwakeable warned lock")
+            .retain(|run_id| still_due.contains(run_id));
     }
 
     /// Aborts every in-flight driver task. Durability is unaffected: each event

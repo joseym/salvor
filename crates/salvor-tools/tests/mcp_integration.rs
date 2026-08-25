@@ -13,11 +13,13 @@
 use async_trait::async_trait;
 use salvor_tools::mcp::{EffectOverrides, IdempotencyKeys, McpServer};
 use salvor_tools::{
-    DynTool, Effect, HandlerError, Tool, ToolCtx, ToolError, ToolHandler, ToolOutcome, ToolSet,
+    DynTool, Effect, HandlerError, SuspensionKind, Tool, ToolCtx, ToolError, ToolHandler,
+    ToolOutcome, ToolSet,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use time::{Duration, OffsetDateTime};
 use tokio::process::Command;
 
 /// A fresh command that launches the fixture server. Each connection spawns its
@@ -172,7 +174,144 @@ async fn a_tool_call_round_trips_the_result() {
                 "the server's result carried the input back, got: {rendered}"
             );
         }
-        ToolOutcome::Suspend(_) => panic!("an MCP tool never suspends"),
+        ToolOutcome::Suspend(_) | ToolOutcome::Sleep(_) => {
+            panic!("append_note asks for no park, so its result is plain output")
+        }
+    }
+
+    // Byte-for-byte what this call recorded before `_meta` meant anything: the
+    // whole `CallToolResult`, with no `_meta` key on it at all. A server that
+    // says nothing to salvor is not touched on the way through.
+    let outcome = append
+        .call_json(&ToolCtx::new(None), json!({ "line": "echo-me" }))
+        .await
+        .expect("the call succeeds");
+    assert_eq!(
+        outcome,
+        ToolOutcome::Output(json!({
+            "content": [{"type": "text", "text": "appended: echo-me"}],
+            "isError": false,
+        })),
+        "a result with no `_meta.salvor` records exactly as it always did"
+    );
+
+    server.close().await.expect("clean shutdown");
+}
+
+// --- Criterion 3b: parking through `_meta.salvor` ------------------------
+
+/// A server that cannot finish yet says when to come back, and the call
+/// resolves to the same [`ToolOutcome::Sleep`] a native tool returns. The
+/// instant is the server's, read once, which is what makes it replayable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tool_can_ask_the_run_to_sleep() {
+    let server = connect().await;
+    let before = OffsetDateTime::now_utc();
+
+    let outcome = find(&server, "nap")
+        .call_json(&ToolCtx::new(None), json!({ "seconds": 3600 }))
+        .await
+        .expect("the call succeeds");
+
+    match outcome {
+        ToolOutcome::Sleep(sleep) => {
+            // The fixture asked for an hour off its own clock, so the deadline
+            // is an hour ahead of the moment before the call and no more than
+            // an hour ahead of the moment after it.
+            assert!(
+                sleep.wake_at >= before + Duration::hours(1)
+                    && sleep.wake_at <= OffsetDateTime::now_utc() + Duration::hours(1),
+                "the deadline is the server's own clock plus an hour, got {}",
+                sleep.wake_at
+            );
+        }
+        other => panic!("expected a sleep request, got {other:?}"),
+    }
+
+    server.close().await.expect("clean shutdown");
+}
+
+/// A server waiting on a webhook says so, and the suspension carries the
+/// discriminator that keeps the run out of an approval inbox.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tool_can_ask_the_run_to_wait_for_a_signal() {
+    let server = connect().await;
+
+    let outcome = find(&server, "await_signal")
+        .call_json(&ToolCtx::new(None), json!({}))
+        .await
+        .expect("the call succeeds");
+
+    match outcome {
+        ToolOutcome::Suspend(suspension) => {
+            assert_eq!(suspension.kind, Some(SuspensionKind::Signal));
+            assert_eq!(suspension.reason, "waiting on the settlement webhook");
+            assert_eq!(
+                suspension.input_schema["properties"]["paid"]["type"],
+                json!("boolean"),
+                "the schema a resume is validated against is the server's own, got: {}",
+                suspension.input_schema
+            );
+        }
+        other => panic!("expected a suspension, got {other:?}"),
+    }
+
+    // The same shape with no `kind` is the human gate, exactly as an unnamed
+    // kind means everywhere else.
+    let gate = find(&server, "await_person")
+        .call_json(&ToolCtx::new(None), json!({}))
+        .await
+        .expect("the call succeeds");
+    match gate {
+        ToolOutcome::Suspend(suspension) => assert_eq!(suspension.kind, None),
+        other => panic!("expected a suspension, got {other:?}"),
+    }
+
+    server.close().await.expect("clean shutdown");
+}
+
+/// Every way a park request can be wrong fails the call with a message naming
+/// `_meta.salvor`. None of them is quietly handed back as output, which is the
+/// bug this contract exists to make impossible.
+///
+/// The variant matters as much as the failure. `MalformedResult` is the one
+/// the runtime loop never retries, so a park the server spelled wrong costs
+/// one execution on a `Read` exactly as it does on a `Write`. A `Handler`
+/// here would buy two more calls to the same server and the same misspelling.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_malformed_park_request_fails_the_call() {
+    let server = connect().await;
+    let bad = find(&server, "bad_park");
+
+    for shape in [
+        "not_an_object",
+        "both",
+        "unknown_key",
+        "bad_timestamp",
+        "no_reason",
+        "error_and_park",
+    ] {
+        let error = bad
+            .call_json(&ToolCtx::new(None), json!({ "shape": shape }))
+            .await
+            .expect_err("a malformed park request never resolves to an outcome");
+        // Read before the destructure, because this is what the runtime
+        // records: the error's own text, with the refusal inside it.
+        let rendered = error.to_string();
+        let ToolError::MalformedResult { tool, detail } = error else {
+            panic!(
+                "a malformed `{shape}` park is an unreadable result, never a retryable handler failure"
+            );
+        };
+        assert_eq!(tool, "bad_park");
+        assert!(
+            detail.contains("`_meta.salvor"),
+            "the `{shape}` refusal names the key, got: {detail}"
+        );
+        assert!(
+            rendered.contains(&detail),
+            "the refusal reaches the log verbatim, got: {rendered}"
+        );
     }
 
     server.close().await.expect("clean shutdown");

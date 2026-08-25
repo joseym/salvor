@@ -21,9 +21,10 @@
 //! the fold refuses to guess, and so must everything built on it.
 
 use serde_json::Value;
+use time::OffsetDateTime;
 
 use crate::effect::Effect;
-use crate::event::{Budget, Event, EventEnvelope, UnresolvedWrite};
+use crate::event::{Budget, Event, EventEnvelope, SuspensionKind, UnresolvedWrite};
 use crate::id::SequenceNumber;
 
 /// Token usage accumulated across every completed model call in a log.
@@ -85,12 +86,36 @@ pub enum RunStatus {
     /// recorded key).
     AwaitingTool,
     /// The run parked awaiting input. Carries what a resume needs: why it
-    /// parked and the schema the input must satisfy.
+    /// parked, the schema the input must satisfy, and who owes the answer.
     Suspended {
         /// The recorded suspension reason.
         reason: String,
         /// The JSON Schema the resume input is validated against.
         input_schema: Value,
+        /// What the run is waiting on, read straight off the recorded
+        /// [`Event::Suspended`].
+        ///
+        /// `None` is the human gate, which is what every suspension recorded
+        /// before the discriminator existed meant, so an old log folds to the
+        /// status it always folded to. A [`SuspensionKind`] narrows it to a
+        /// wait no operator can answer, which is the difference an inbox has
+        /// to see.
+        kind: Option<SuspensionKind>,
+    },
+    /// The run parked on a durable timer and may continue at `wake_at`.
+    ///
+    /// Its own status rather than a reuse of [`RunStatus::Suspended`], because
+    /// every surface reads `Suspended` as awaiting a human: it lands in the
+    /// approval inbox and is resumable by hand with an arbitrary payload. A
+    /// sleeping run is waiting for a moment to arrive, not for anyone to
+    /// decide anything, and the two must not be confused for each other in a
+    /// listing, an inbox, or a resume.
+    Sleeping {
+        /// The recorded instant the run may continue at, read straight off
+        /// [`Event::SleepStarted`]. Nothing here compares it against the
+        /// current time; that comparison needs a clock and belongs at the IO
+        /// edge.
+        wake_at: OffsetDateTime,
     },
     /// A declared budget was crossed and the run parked. A human can raise
     /// the limit and resume.
@@ -217,16 +242,37 @@ pub fn derive_state(log: &[EventEnvelope]) -> RunState {
             // Deterministic-context observations change no run status; they
             // only exist so replay can hand the same values back.
             Event::NowObserved { .. } | Event::RandomObserved { .. } => {}
+            // The recorded `kind` is carried onto the status rather than
+            // dropped. It does not change what state the run is in: a run
+            // waiting on a signal is parked, not running, and resumable only
+            // by input the recorded schema accepts, exactly as a gate is. It
+            // changes who owes the answer, and every surface that lists work
+            // reads the run through this fold and nowhere else, so a
+            // discriminator the fold drops is a discriminator no listing can
+            // act on. Absent stays absent: an old log has no `kind` and folds
+            // to `None`, which is the human gate it always meant.
             Event::Suspended {
                 reason,
                 input_schema,
+                kind,
             } => {
                 state.status = RunStatus::Suspended {
                     reason: reason.clone(),
                     input_schema: input_schema.clone(),
+                    kind: *kind,
                 };
             }
             Event::Resumed { .. } => {
+                state.status = RunStatus::Running;
+            }
+            // The durable-timer pair. A sleep parks the run under its own
+            // status carrying the recorded instant, never `Suspended`: nothing
+            // is waiting on a human here. The completion returns the run to
+            // `Running`, exactly as a resume does for a suspension.
+            Event::SleepStarted { wake_at } => {
+                state.status = RunStatus::Sleeping { wake_at: *wake_at };
+            }
+            Event::SleepCompleted {} => {
                 state.status = RunStatus::Running;
             }
             Event::BudgetExceeded { budget, observed } => {
@@ -472,6 +518,7 @@ mod tests {
             Event::Suspended {
                 reason: "awaiting approval".into(),
                 input_schema: schema.clone(),
+                kind: None,
             },
         ]));
         assert_eq!(
@@ -479,6 +526,50 @@ mod tests {
             RunStatus::Suspended {
                 reason: "awaiting approval".into(),
                 input_schema: schema,
+                kind: None,
+            }
+        );
+    }
+
+    /// The discriminator survives the fold. A gate suspension (no recorded
+    /// `kind`, which is also every suspension written before the field
+    /// existed) derives to `None`, and a signal suspension derives to
+    /// `Some(Signal)`, so a surface reading the status can route a webhook
+    /// wait away from an approval inbox without going back to the log.
+    #[test]
+    fn a_suspension_carries_what_it_waits_on() {
+        let schema = serde_json::json!({"type": "object"});
+        let gate = derive_state(&log(vec![
+            started(),
+            Event::Suspended {
+                reason: "awaiting approval".into(),
+                input_schema: schema.clone(),
+                kind: None,
+            },
+        ]));
+        assert_eq!(
+            gate.status,
+            RunStatus::Suspended {
+                reason: "awaiting approval".into(),
+                input_schema: schema.clone(),
+                kind: None,
+            }
+        );
+
+        let signal = derive_state(&log(vec![
+            started(),
+            Event::Suspended {
+                reason: "awaiting the payment webhook".into(),
+                input_schema: schema.clone(),
+                kind: Some(SuspensionKind::Signal),
+            },
+        ]));
+        assert_eq!(
+            signal.status,
+            RunStatus::Suspended {
+                reason: "awaiting the payment webhook".into(),
+                input_schema: schema,
+                kind: Some(SuspensionKind::Signal),
             }
         );
     }
@@ -491,12 +582,95 @@ mod tests {
             Event::Suspended {
                 reason: "awaiting approval".into(),
                 input_schema: serde_json::json!({"type": "object"}),
+                kind: None,
             },
             Event::Resumed {
                 input: serde_json::json!({"approved": true}),
             },
         ]));
         assert_eq!(state.status, RunStatus::Running);
+    }
+
+    /// A log ending at a started sleep derives to sleeping, carrying the
+    /// recorded wake instant a caller needs in order to know when the run may
+    /// be driven again.
+    #[test]
+    fn sleep_without_completion_derives_sleeping() {
+        let wake_at = datetime!(2026-07-16 12:00:00.123456789 UTC);
+        let state = derive_state(&log(vec![started(), Event::SleepStarted { wake_at }]));
+        assert_eq!(state.status, RunStatus::Sleeping { wake_at });
+    }
+
+    /// A recorded sleep completion puts the run back in running, exactly as a
+    /// resume does for a suspension.
+    #[test]
+    fn sleep_completion_derives_running() {
+        let state = derive_state(&log(vec![
+            started(),
+            Event::SleepStarted {
+                wake_at: datetime!(2026-07-16 12:00:00 UTC),
+            },
+            Event::SleepCompleted {},
+        ]));
+        assert_eq!(state.status, RunStatus::Running);
+    }
+
+    /// A terminal after a sleep wins, like every other terminal: the sleeping
+    /// status is a resting point on the way somewhere, not a sticky one.
+    #[test]
+    fn a_terminal_after_a_sleep_derives_terminal() {
+        let state = derive_state(&log(vec![
+            started(),
+            Event::SleepStarted {
+                wake_at: datetime!(2026-07-16 12:00:00 UTC),
+            },
+            Event::SleepCompleted {},
+            Event::RunCompleted {
+                output: serde_json::json!({"summary": "slept on it"}),
+            },
+        ]));
+        assert_eq!(
+            state.status,
+            RunStatus::Completed {
+                output: serde_json::json!({"summary": "slept on it"}),
+            }
+        );
+    }
+
+    /// Sleeping is never suspended. A surface that reads `Suspended` as
+    /// "a human owes this run an answer" must not meet a sleeping run there,
+    /// so the fold keeps the two statuses apart at every position of a log
+    /// that holds both kinds of parking.
+    #[test]
+    fn sleeping_is_never_suspended() {
+        let events = vec![
+            started(),
+            Event::SleepStarted {
+                wake_at: datetime!(2026-07-16 12:00:00 UTC),
+            },
+            Event::SleepCompleted {},
+            Event::Suspended {
+                reason: "awaiting approval".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+                kind: None,
+            },
+        ];
+        let full = log(events);
+        for cut in 0..=full.len() {
+            let status = derive_state(&full[..cut]).status;
+            let is_sleeping = matches!(status, RunStatus::Sleeping { .. });
+            let is_suspended = matches!(status, RunStatus::Suspended { .. });
+            assert!(
+                !(is_sleeping && is_suspended),
+                "cut at {cut}: a status is one or the other, never both"
+            );
+            assert_eq!(is_sleeping, cut == 2, "cut at {cut}: only the sleep sleeps");
+            assert_eq!(
+                is_suspended,
+                cut == 4,
+                "cut at {cut}: only the suspension suspends"
+            );
+        }
     }
 
     /// A log ending at a budget crossing derives to budget-exceeded, parked

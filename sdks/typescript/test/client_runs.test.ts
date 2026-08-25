@@ -488,3 +488,73 @@ test("live model step records, returns, and never re-pays against salvor serve",
   strictEqual(providerHits(), before + 1, "retry paid nothing");
   strictEqual((await run.log()).length, 3, "no growth");
 });
+
+
+test("a sleep parks the run, refuses to wake early, and continues after the deadline", async (t) => {
+  if (!base) return t.skip("salvor serve not available");
+  // Three drives over one run: park, come back too soon, come back late. Each
+  // drive is a fresh driver re-opened on the same run id, which is what a later
+  // drive actually is: a process holding only the recorded log and its own
+  // clock. The second one is the point of the whole feature. It runs the
+  // identical code with a clock ten minutes on and appends nothing, because the
+  // deadline it compares against comes from the log rather than from how long
+  // this process has been awake.
+  const startedAt = new Date("2026-07-11T12:00:00.000Z");
+  const hour = 60 * 60 * 1000;
+
+  const first = await openClientRun(base);
+  first.clock = () => startedAt;
+  await first.append([first.envelope(0, "RunStarted", { agent_def_hash: "sha256:agent", input: {} })]);
+  const wakeAt = await first.sleepFor(1, hour);
+  strictEqual(wakeAt.getTime(), startedAt.getTime() + hour);
+  deepStrictEqual(
+    (await first.log()).map((e) => e.kind),
+    ["RunStarted", "NowObserved", "SleepStarted"],
+  );
+  const parked = await first.awaitWake(3);
+  strictEqual(parked.woken, false, "the deadline is an hour away");
+  strictEqual(parked.wakeAt?.getTime(), wakeAt.getTime());
+  strictEqual((await first.log()).length, 3, "asking appended nothing");
+
+  // Ten minutes later: the replayed instants are the recorded ones, so the
+  // deadline has not moved and the run stays asleep.
+  const early = await openClientRun(base, { runId: first.runId });
+  early.clock = () => new Date(startedAt.getTime() + 10 * 60 * 1000);
+  const replayed = await early.sleepFor(1, hour);
+  strictEqual(replayed.getTime(), wakeAt.getTime(), "the wake instant reproduces on replay");
+  strictEqual((await early.awaitWake(3)).woken, false, "driving early does not wake a run");
+  strictEqual((await early.log()).length, 3, "and appends nothing at all");
+
+  // Two hours later: the deadline has passed, so this drive closes the pair
+  // itself and the run carries on to its result.
+  const late = await openClientRun(base, { runId: first.runId });
+  late.clock = () => new Date(startedAt.getTime() + 2 * hour);
+  strictEqual((await late.sleepFor(1, hour)).getTime(), wakeAt.getTime());
+  const woken = await late.awaitWake(3);
+  strictEqual(woken.woken, true, "the deadline passed, so the sleep is over");
+  await late.append([late.envelope(4, "RunCompleted", { output: { slept: true } })]);
+  deepStrictEqual(
+    (await late.log()).map((e) => e.kind),
+    ["RunStarted", "NowObserved", "SleepStarted", "SleepCompleted", "RunCompleted"],
+  );
+
+  // A fourth drive replays the closed pair: the completion is recorded, so
+  // nothing appends however early this drive's clock reads.
+  const after = await openClientRun(base, { runId: first.runId });
+  after.clock = () => startedAt;
+  strictEqual((await after.awaitWake(3)).woken, true, "a recorded wake replays");
+  strictEqual((await after.log()).length, 5, "and the log did not grow");
+});
+
+test("a sleep completion with no sleep started is refused", async (t) => {
+  if (!base) return t.skip("salvor serve not available");
+  // The server checks the pair order, so a driver that closes a sleep it never
+  // opened is told so rather than writing a log that lies.
+  const run = await openClientRun(base);
+  await run.append([run.envelope(0, "RunStarted", { agent_def_hash: "sha256:agent", input: {} })]);
+  await rejects(
+    () => run.append([run.envelope(1, "SleepCompleted")]),
+    (error: unknown) => error instanceof DivergenceError,
+  );
+  strictEqual((await run.log()).length, 1, "the refusal wrote nothing");
+});

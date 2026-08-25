@@ -272,8 +272,32 @@ class FoldNode:
         return {"kind": "fold", "payload": payload}
 
 
-# Any of the six node dataclasses.
-NodeSpec = Union[AgentNode, ToolNode, GateNode, BranchNode, MapNode, FoldNode]
+@dataclass
+class DelayNode:
+    """A ``delay`` node: a durable wait that parks the run, then continues.
+
+    The wait is a DURATION, never an absolute instant. A graph document is
+    content-addressed and run any number of times, so a baked-in wake time
+    would be correct on the first run and already past on the second; a
+    duration says the thing that stays true. The engine resolves the instant
+    when the walk reaches the node, from a clock reading it records first, so
+    the wake instant is durable and replays identically.
+    """
+
+    id: str
+    seconds: int
+    name: Optional[str] = None
+
+    def to_node(self) -> Json:
+        payload: Json = {"id": self.id}
+        if self.name is not None:
+            payload["name"] = self.name
+        payload["seconds"] = self.seconds
+        return {"kind": "delay", "payload": payload}
+
+
+# Any of the seven node dataclasses.
+NodeSpec = Union[AgentNode, ToolNode, GateNode, BranchNode, MapNode, FoldNode, DelayNode]
 
 
 @dataclass
@@ -471,6 +495,22 @@ class GraphBuilder:
                 on_bound,
             ).to_node()
         )
+        return self
+
+    def delay(
+        self,
+        id: str,
+        seconds: int,
+        *,
+        name: Optional[str] = None,
+    ) -> "GraphBuilder":
+        """Adds a ``delay`` node: a durable wait of ``seconds`` before the walk
+        continues.
+
+        A duration and not an instant, deliberately: see :class:`DelayNode`.
+        The wait's positivity is checked by ``salvor graph validate``, not here.
+        """
+        self._nodes.append(DelayNode(id, seconds, name).to_node())
         return self
 
     def edge(

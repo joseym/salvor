@@ -4,8 +4,9 @@ Worked examples, one per directory. Each shows Salvor from a different entry
 point: the smallest fixture there is, the no-key local-model path, the CLI
 over real MCP-backed agents, the durability guarantees on their own, the two
 library tiers, the polyglot control plane over HTTP in both its server-driven
-and client-driven modes, and the v0.4 graph authoring surface driven from the
-CLI and from application code. The ones marked "no key" run for free against a
+and client-driven modes, the v0.4 graph authoring surface driven from the
+CLI and from application code, and the durable timer a run parks on while
+holding no process at all. The ones marked "no key" run for free against a
 local or scripted model.
 
 | Directory | Shows | Run it |
@@ -29,6 +30,7 @@ local or scripted model.
 | [`graph-clients/`](graph-clients/) | The same refund desk as `graph-service/`, driven by application code instead of the CLI, against a stock `salvor serve` with no flags. Python and TypeScript drive it over HTTP through their SDKs; Rust embeds the engine in process and speaks no HTTP at all. It has no tool nodes, deliberately: over HTTP a tool node can only reach tools compiled into the server binary, so the side effects live in agent nodes where real MCP tools are reachable. | `bash examples/graph-clients/run.sh`; no key |
 | [`refine/`](refine/) | A draft loop as a graph, and the convergence proof: a `fold` runs one agent up to four times over a payroll correction notice, each pass folding over the last, stopping the moment a draft clears the desk threshold. The recorded `FoldConverged` names the winning pass, a `kill -9` mid-pass re-drives exactly the one interrupted model call, and `on_bound: fail` refuses to call four failed passes a convergence. | `bash examples/refine/run.sh`; no key |
 | [`payroll/`](payroll/) | A payroll run as a graph, and the fan-out proof: a `map` pays each employee on the roster, a crash lands `kill -9` part way through the batch, and the recovery finishes it with every employee paid exactly once, never twice and never skipped. A `branch` routes a roster with flagged amounts through a human `gate` that amends them; a clean roster routes past the gate with no human in the loop. | `bash examples/payroll/run.sh`; no key |
+| [`follow-up/`](follow-up/) | A durable wait as a graph, and the proof that nothing holds it: an accounts desk sends an invoice reminder, a `delay` node parks the run `sleeping` with the deadline in its log and no process anywhere, an early `resume` is refused with the time remaining and records nothing, and `salvor wake` finds nothing before the deadline and drives the run to completion after it. The same document runs twice, and a payment landing during the nap flips the branch, because a delay records an instant and carries no copy of the world across the wait. | `bash examples/follow-up/run.sh`; no key |
 
 Every command above calls the binary as `salvor`, which is right once it is
 installed (`npm install -g @salvor-run/cli`, `cargo install salvor-cli`, or the

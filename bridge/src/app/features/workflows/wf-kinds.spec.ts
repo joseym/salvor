@@ -34,7 +34,7 @@ describe('the palette is the format s own set of kinds', () => {
 
   it('keeps the entries and the list in step, in the format s own order', () => {
     expect(WF_KIND_LIST).toEqual(Object.keys(WF_KINDS));
-    expect(WF_KIND_LIST).toEqual(['agent', 'tool', 'gate', 'branch', 'map', 'fold']);
+    expect(WF_KIND_LIST).toEqual(['agent', 'tool', 'gate', 'branch', 'map', 'fold', 'delay']);
   });
 
   it('seeds a node of the kind it is filed under, under the id it was asked for', () => {
@@ -92,6 +92,8 @@ describe('a seeded node is a document node, structurally', () => {
       // a body names a node of this document, and a one-node document has no other node to name
       map: ['dangling_body'],
       fold: ['dangling_body'],
+      // a 1-second wait is legal as seeded; nothing else for an author to decide
+      delay: [],
     });
   });
 });

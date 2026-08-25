@@ -260,6 +260,7 @@ async fn resolve_refuses_every_non_reconciliation_state() {
         Event::Suspended {
             reason: "awaiting approval".into(),
             input_schema: json!({"type": "object"}),
+            kind: None,
         },
     ])
     .await;

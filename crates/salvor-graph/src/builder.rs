@@ -10,9 +10,10 @@
 //! # What the types buy you
 //!
 //! Each node kind has its own spec type ([`AgentSpec`], [`ToolSpec`],
-//! [`GateSpec`], [`BranchSpec`], [`MapSpec`], [`FoldSpec`]) whose constructor demands the
-//! fields that kind cannot do without: an agent needs its hash, a tool needs its
-//! name, a gate needs its approval schema. A field that belongs to one kind is
+//! [`GateSpec`], [`BranchSpec`], [`MapSpec`], [`FoldSpec`], [`DelaySpec`]) whose
+//! constructor demands the fields that kind cannot do without: an agent needs
+//! its hash, a tool needs its name, a gate needs its approval schema, a delay
+//! needs its wait. A field that belongs to one kind is
 //! not reachable on another, so "a gate with an agent_hash" is not a runtime
 //! error, it is a shape you cannot write. The optional fields are chained
 //! methods, present only where the model allows them. The result is that a
@@ -79,8 +80,8 @@
 use serde_json::Value;
 
 use crate::document::{
-    AgentNode, BranchCase, BranchCondition, BranchNode, Edge, FoldBody, FoldJoin, FoldNode,
-    GateNode, Graph, MapBody, MapNode, Node, OnBound, SCHEMA_VERSION, ToolNode,
+    AgentNode, BranchCase, BranchCondition, BranchNode, DelayNode, Edge, FoldBody, FoldJoin,
+    FoldNode, GateNode, Graph, MapBody, MapNode, Node, OnBound, SCHEMA_VERSION, ToolNode,
 };
 
 /// Accumulates nodes and edges, then freezes them into a [`Graph`].
@@ -140,6 +141,13 @@ impl GraphBuilder {
     /// Adds a `fold` node from its [`FoldSpec`].
     #[must_use]
     pub fn fold(mut self, spec: FoldSpec) -> Self {
+        self.nodes.push(spec.into_node());
+        self
+    }
+
+    /// Adds a `delay` node from its [`DelaySpec`].
+    #[must_use]
+    pub fn delay(mut self, spec: DelaySpec) -> Self {
         self.nodes.push(spec.into_node());
         self
     }
@@ -586,6 +594,48 @@ impl FoldSpec {
     }
 }
 
+/// The spec for a `delay` node: a durable wait that parks the run, then
+/// continues the walk.
+#[derive(Clone, Debug)]
+pub struct DelaySpec {
+    id: String,
+    name: Option<String>,
+    seconds: u64,
+}
+
+impl DelaySpec {
+    /// Starts a delay spec with its required fields: the node id and how long
+    /// the run waits, in whole seconds. A duration rather than an instant, so
+    /// the document stays runnable more than once; see [`DelayNode`]. The
+    /// wait's positivity is checked by [`crate::validate`], not here.
+    pub fn new(id: impl Into<String>, seconds: u64) -> Self {
+        Self {
+            id: id.into(),
+            name: None,
+            seconds,
+        }
+    }
+
+    /// Sets a short display label for this node. Bounds (a 64-character cap,
+    /// not empty or all whitespace) are checked by [`crate::validate`], not
+    /// here; see [`crate::document`]'s "The optional node display name"
+    /// section for why this field, unlike an agent's own `name`, is part of
+    /// the graph's content hash.
+    #[must_use]
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    fn into_node(self) -> Node {
+        Node::Delay(DelayNode {
+            id: self.id,
+            name: self.name,
+            seconds: self.seconds,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -692,6 +742,39 @@ mod tests {
             built, canonical,
             "builder output must match the fold fixture exactly"
         );
+    }
+
+    /// Builds the exact assess -> cooloff -> publish flow the cross-language
+    /// `delay-then-publish` fixture records, so the Rust, TypeScript, and
+    /// Python delay builders all reduce to one canonical document.
+    fn delay_flow() -> Graph {
+        GraphBuilder::new()
+            .tool(ToolSpec::new("assess", "assess"))
+            .delay(DelaySpec::new("cooloff", 3600).name("Cool off before publishing"))
+            .tool(ToolSpec::new("publish", "http_post"))
+            .edge("assess", "cooloff")
+            .edge("cooloff", "publish")
+            .build()
+    }
+
+    /// The builder emits a delay document structurally equal to the shared
+    /// delay-then-publish fixture that keeps all three language builders
+    /// honest, and the document validates.
+    #[test]
+    fn builds_the_delay_document() {
+        let built = serde_json::to_value(delay_flow()).expect("serialize built graph");
+        let canonical: Value = serde_json::from_str(include_str!(
+            "../../../examples/graphs/delay-then-publish.json"
+        ))
+        .expect("parse delay fixture");
+        assert_eq!(
+            built, canonical,
+            "builder output must match the delay fixture exactly"
+        );
+
+        let summary = crate::validate(&delay_flow()).expect("the delay flow is valid");
+        assert_eq!(summary.entry_nodes, ["assess"]);
+        assert_eq!(summary.terminal_nodes, ["publish"]);
     }
 
     /// Builds the exact research -> assess -> route -> {approve -> publish,
@@ -909,6 +992,7 @@ mod tests {
                     .name("Notify each watcher"),
             )
             .edge("research", "publish")
+            .labeled_edge("route", "fanout", "high")
             .build();
 
         let summary = crate::validate(&graph).expect("named nodes still validate");

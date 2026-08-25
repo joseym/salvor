@@ -53,6 +53,10 @@ pub enum Command {
     Run(RunArgs),
     /// Continue an existing run: resume a parked one, or recover a crashed one.
     Resume(ResumeArgs),
+    /// Wake every run whose durable timer has come due, then exit. Nothing
+    /// wakes a sleeping run on its own, so run this from cron when no server
+    /// is doing it.
+    Wake(WakeArgs),
     /// Fork a graph run from a node boundary into a NEW run, refusing to
     /// re-execute a recorded write the operator has not acknowledged.
     Fork(ForkArgs),
@@ -321,6 +325,35 @@ pub struct ResumeArgs {
     /// Ignored (with a warning) when recovering a crashed run.
     #[arg(long, value_name = "JSON|@FILE")]
     pub input: Option<String>,
+}
+
+/// Arguments to `wake`.
+///
+/// The definition flags are `resume`'s, with the same meanings and the same
+/// validation, because waking a run IS resuming it: every due run is re-driven
+/// through `salvor resume`'s own path, so whatever that verb needs to rebuild a
+/// run, this verb needs too. One sweep can therefore only cover runs the files
+/// given here describe; a due run this invocation cannot rebuild is reported
+/// and left asleep, still due for the next sweep.
+#[derive(Debug, Args)]
+pub struct WakeArgs {
+    /// Path to an agent definition (TOML) a due run may need to rebuild its
+    /// agent. Repeatable, exactly as on `resume`: an agent run is woken under
+    /// exactly one, and a graph run under the files its `agent` nodes
+    /// reference.
+    #[arg(long = "agent", value_name = "FILE")]
+    pub agents: Vec<PathBuf>,
+    /// Path to the graph document (JSON), needed to wake a GRAPH run, whose
+    /// log records only the graph's hash. Its hash must match the one the run
+    /// recorded. Omit when no due run is a graph run.
+    #[arg(long, value_name = "FILE")]
+    pub graph: Option<PathBuf>,
+    /// Print which runs are due, what each one recorded, and whether the files
+    /// given would wake it, then exit without driving anything. Exits 1 when a
+    /// due run could not be woken with these files, so a crontab line can be
+    /// checked before it is saved.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// Arguments to `fork`.
@@ -719,6 +752,17 @@ pub struct ServeArgs {
     /// installed `salvor` embeds is prebuilt and does not hot-reload.
     #[arg(long)]
     pub dev: bool,
+    /// How often, in seconds, to look for runs whose durable timer has come
+    /// due and re-drive them. Default 60.
+    ///
+    /// The sweeper is ON by default: a sleeping run wakes only when something
+    /// re-drives it, so a server that held the store and let its timers pass
+    /// would be silently wrong. `0` turns it off, for an operator who wakes
+    /// runs from cron with `salvor wake` instead and does not want two things
+    /// reaching for the same run. Each sweep folds every run's log (status is
+    /// not a stored column), so the shorter this is, the more that costs.
+    #[arg(long, value_name = "SECS", default_value_t = 60)]
+    pub wake_interval: u64,
     /// Register a small set of deterministic demo tools (`lookup_invoice`
     /// read, `issue_refund` write, `send_email` idempotent) instead of the
     /// stock empty tool registry.

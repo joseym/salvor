@@ -67,7 +67,9 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
 use async_trait::async_trait;
-use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
+use rusqlite::{
+    Connection, ErrorCode, OptionalExtension, Transaction, TransactionBehavior, params,
+};
 use salvor_core::{EventEnvelope, RunId, SequenceNumber};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -141,6 +143,32 @@ const DROP_GUARDS: &str = "DROP TRIGGER IF EXISTS events_refuse_update;
 ///
 /// See the module documentation for the blocking posture: the `async` methods
 /// run their SQLite work inline.
+///
+/// # Every transaction that writes begins IMMEDIATE
+///
+/// A transaction here takes its write lock at `BEGIN` rather than upgrading
+/// into one partway through. That is a rule of SQLite's, not a taste of ours.
+/// A busy timeout makes a waiting writer wait, but a transaction that has
+/// already READ cannot be made to wait for the write lock: it holds a snapshot
+/// the other writer is about to invalidate, so waiting could only end in a
+/// deadlock or a lie. SQLite refuses the upgrade at once with `database is
+/// locked`, the busy handler never consulted.
+///
+/// Every write path in this file reads before it writes, which is exactly the
+/// shape that refusal catches: an append reads the run's chain head, a claim
+/// reads back the row it may not have inserted, a settling append does both,
+/// and the migration reads the schema. Left DEFERRED, each of them fails
+/// instantly against a concurrent writer instead of taking its turn a beat
+/// later. That is not a corner case: two `salvor wake` sweeps at one due run
+/// are ordinary operation, and the loser is supposed to lose the append race
+/// on its merits (a [`StoreError::Conflict`] naming the position that was
+/// already taken), not to be turned away at the door.
+///
+/// What it costs is that concurrent writers serialize from `BEGIN` instead of
+/// from their first write statement. For a store whose writes are single-row
+/// appends inside short transactions, that is microseconds of lock held
+/// earlier, in exchange for the one behavior a durable log has to have when
+/// two processes reach for it at once.
 pub struct SqliteStore {
     conn: Mutex<Connection>,
 }
@@ -148,10 +176,45 @@ pub struct SqliteStore {
 impl SqliteStore {
     /// Opens (or creates) a file-backed store at `path`.
     ///
-    /// Enables WAL journaling for concurrent readers and crash safety, sets
-    /// `synchronous=FULL` so a committed append has reached durable storage
-    /// before `Ok` (the durability half of the trait contract), and sets a
-    /// busy timeout so a briefly locked database waits rather than failing.
+    /// Sets a busy timeout so a briefly locked database waits rather than
+    /// failing, enables WAL journaling for concurrent readers and crash
+    /// safety, and sets `synchronous=FULL` so a committed append has reached
+    /// durable storage before `Ok` (the durability half of the trait
+    /// contract).
+    ///
+    /// # Why the order is what it is, and why the mode is read first
+    ///
+    /// A second process opening a store another process is writing must WAIT,
+    /// not fail. Two `salvor wake` sweeps firing at one due run open the same
+    /// file milliseconds apart, and an open that gives up here reports a run
+    /// it never looked at.
+    ///
+    /// The busy timeout buys that waiting, and it applies from the moment it
+    /// is set and to nothing before it, so it goes first and covers every
+    /// statement below, the schema migration included.
+    ///
+    /// It does not cover a journal-mode CHANGE, though. Converting a file to
+    /// WAL needs the database to itself for an instant, and that lock is taken
+    /// below the layer the busy handler runs at: with another connection
+    /// holding a write transaction, `PRAGMA journal_mode=WAL` on a
+    /// rollback-mode file comes back `database is locked` at once, timeout or
+    /// no timeout. READING the mode contends with nothing (under WAL a reader
+    /// never blocks on a writer, and under a rollback journal a writer's
+    /// RESERVED lock still admits readers), and setting WAL on a file that is
+    /// already in WAL asks for no lock at all.
+    ///
+    /// So the mode is read first and written only when it has to change. Every
+    /// open but the first then skips the one statement here that cannot wait,
+    /// and the open that does convert is the one that created the file (or
+    /// upgraded a store written before WAL), which has nothing to contend
+    /// with.
+    ///
+    /// `synchronous` is a per-connection setting and takes no lock at all, so
+    /// it goes last and never enters into any of this.
+    ///
+    /// The other half of opening concurrently is in `migrate` below, which
+    /// writes on every open and has its own reason for the transaction it
+    /// uses.
     ///
     /// # Errors
     ///
@@ -159,12 +222,17 @@ impl SqliteStore {
     /// configured, or initialized.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let conn = Connection::open(path).map_err(backend)?;
-        conn.execute_batch(
-            "PRAGMA journal_mode=WAL;\n\
-             PRAGMA synchronous=FULL;\n\
-             PRAGMA busy_timeout=5000;",
-        )
-        .map_err(backend)?;
+        conn.execute_batch("PRAGMA busy_timeout=5000;")
+            .map_err(backend)?;
+        let journal_mode: String = conn
+            .query_row("PRAGMA journal_mode", params![], |row| row.get(0))
+            .map_err(backend)?;
+        if !journal_mode.eq_ignore_ascii_case("wal") {
+            conn.execute_batch("PRAGMA journal_mode=WAL;")
+                .map_err(backend)?;
+        }
+        conn.execute_batch("PRAGMA synchronous=FULL;")
+            .map_err(backend)?;
         Self::init(conn)
     }
 
@@ -237,11 +305,19 @@ impl SqliteStore {
     /// carrying placeholder hashes that no later open would recognize as
     /// unfinished, and the log would read as tampered with forever. All of it
     /// commits or none of it does.
+    ///
+    /// The transaction is IMMEDIATE for the reason every write transaction
+    /// here is (see [`SqliteStore`]), and this is the one that made it matter:
+    /// every open runs this, every open rewrites the `store_meta` row below,
+    /// and the schema statements above read first, so DEFERRED had a second
+    /// `salvor wake` failing with `database is locked` milliseconds after the
+    /// first one started.
     fn migrate(conn: &Connection) -> Result<(), StoreError> {
         let legacy = Self::table_exists(conn, "events")?
             && !Self::column_exists(conn, "events", "chain_idx")?;
 
-        let tx = conn.unchecked_transaction().map_err(backend)?;
+        let tx =
+            Transaction::new_unchecked(conn, TransactionBehavior::Immediate).map_err(backend)?;
 
         if legacy {
             tx.execute_batch(DROP_GUARDS).map_err(backend)?;
@@ -484,7 +560,11 @@ impl EventStore for SqliteStore {
         // The row and the run's new chain head move together or not at all: a
         // committed row whose head was left behind would read back as a
         // tampered log, so this is one transaction rather than two statements.
-        let tx = guard.transaction().map_err(backend)?;
+        // IMMEDIATE because it reads that head before it writes; see the type's
+        // docs.
+        let tx = guard
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(backend)?;
         Self::write_row(&tx, envelope)?;
         tx.commit().map_err(backend)?;
         Ok(())
@@ -502,10 +582,22 @@ impl EventStore for SqliteStore {
     async fn read_log(&self, run_id: RunId) -> Result<Vec<EventEnvelope>, StoreError> {
         let run_id_text = run_id.as_uuid().to_string();
 
-        let guard = self.conn()?;
+        let mut guard = self.conn()?;
+        // The rows and the head move together under `append`'s one
+        // transaction, so reading them apart is reading two different
+        // moments: a concurrent append committed between the two SELECTs
+        // makes this read see N rows against the head for N+1, and
+        // `chain::verify` below reports a perfectly sound log as tampered.
+        // One transaction gives both SELECTs the same snapshot instead.
+        // DEFERRED, unlike the writers documented on this type: this
+        // transaction only reads, so it never needs to upgrade to a write
+        // lock and never blocks a concurrent writer's IMMEDIATE one.
+        let tx = guard
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(backend)?;
         let mut stored: Vec<(SequenceNumber, String, String, String)> = Vec::new();
         {
-            let mut stmt = guard
+            let mut stmt = tx
                 .prepare(
                     "SELECT seq, envelope, prev_hash, row_hash FROM events
                      WHERE run_id = ?1 ORDER BY chain_idx ASC",
@@ -532,7 +624,7 @@ impl EventStore for SqliteStore {
             }
         }
 
-        let recorded_head: Option<(i64, String)> = guard
+        let recorded_head: Option<(i64, String)> = tx
             .query_row(
                 "SELECT chain_len, head_hash FROM chain_heads WHERE run_id = ?1",
                 params![run_id_text],
@@ -540,6 +632,9 @@ impl EventStore for SqliteStore {
             )
             .optional()
             .map_err(backend)?;
+        // Dropped unwritten: this transaction never wrote anything, so there
+        // is nothing to commit, only the snapshot to release.
+        drop(tx);
 
         let rows: Vec<ChainRow<'_>> = stored
             .iter()
@@ -630,7 +725,11 @@ impl EventStore for SqliteStore {
             .map_err(|_| StoreError::Backend("intent sequence exceeds i64 range".to_owned()))?;
 
         let mut guard = self.conn()?;
-        let tx = guard.transaction().map_err(backend)?;
+        // IMMEDIATE: the losing insert reads the holder back below, so this
+        // transaction reads and writes; see the type's docs.
+        let tx = guard
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(backend)?;
 
         let inserted = tx
             .execute(
@@ -698,7 +797,10 @@ impl EventStore for SqliteStore {
             .map_err(|_| StoreError::Backend("sequence number exceeds i64 range".to_owned()))?;
 
         let mut guard = self.conn()?;
-        let tx = guard.transaction().map_err(backend)?;
+        // IMMEDIATE, as every write transaction here is; see the type's docs.
+        let tx = guard
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(backend)?;
 
         Self::write_row(&tx, envelope)?;
 
@@ -757,4 +859,118 @@ fn parse_run_id(text: &str) -> Result<RunId, StoreError> {
 fn nanos_to_datetime(nanos: i64) -> Result<OffsetDateTime, StoreError> {
     OffsetDateTime::from_unix_timestamp_nanos(i128::from(nanos))
         .map_err(|e| StoreError::Backend(format!("stored timestamp out of range: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    use salvor_core::{Event, EventEnvelope, RunId, SequenceNumber};
+    use time::OffsetDateTime;
+
+    use super::SqliteStore;
+    use crate::store::EventStore;
+
+    /// Takes the write lock on `path` from another connection, holds it for
+    /// half a second, and hands back a handle to join. The caller does its
+    /// work in between: whatever it calls must WAIT for this lock rather than
+    /// be refused by it.
+    ///
+    /// Half a second is far inside the store's five-second busy timeout, so a
+    /// passing test costs a fraction of a second. A regression does not run
+    /// long, it fails at once, which is the whole distinction being drawn.
+    fn hold_the_write_lock(path: &std::path::Path) -> thread::JoinHandle<()> {
+        let (locked, holding) = mpsc::channel();
+        let held = path.to_owned();
+        let holder = thread::spawn(move || {
+            let conn = rusqlite::Connection::open(&held).expect("a second connection opens");
+            conn.execute_batch("BEGIN IMMEDIATE;")
+                .expect("the write lock is taken");
+            locked.send(()).expect("the test is listening");
+            thread::sleep(Duration::from_millis(500));
+            conn.execute_batch("COMMIT;")
+                .expect("the write lock is released");
+        });
+        holding.recv().expect("the write lock was taken");
+        holder
+    }
+
+    /// The cheapest event that can be appended, at the head of a fresh run.
+    fn envelope() -> EventEnvelope {
+        EventEnvelope::new(
+            RunId::new(),
+            SequenceNumber::new(0),
+            OffsetDateTime::from_unix_timestamp(1_000_000).expect("timestamp in range"),
+            Event::RunFailed {
+                error: "tag".to_owned(),
+            },
+        )
+    }
+
+    /// Opening a store while another connection holds the write lock waits for
+    /// that lock instead of being refused.
+    ///
+    /// This is the two-waker race as an operator meets it: `salvor wake` fires
+    /// twice at one due run, and the second process opens the same file
+    /// milliseconds behind the first. It used to come back `database is
+    /// locked` at once, and the sweep reported a run it had never looked at.
+    ///
+    /// Opening has two places that can refuse instead of wait, and both are
+    /// covered here because both run on every open of an existing store: the
+    /// pragmas (see [`SqliteStore::open`], where the busy timeout must precede
+    /// everything and a journal-mode change must not be attempted at all) and
+    /// the migration's write (see `migrate`, which must take its write lock up
+    /// front rather than upgrade into one).
+    /// A regression in either reads the same from out here, and this test is
+    /// what says so.
+    ///
+    /// The lock is held for well under the timeout, so a passing run costs a
+    /// fraction of a second; a regression fails fast rather than sitting out
+    /// the five-second wait, because it does not wait at all.
+    #[test]
+    fn opening_a_store_waits_for_another_connection_holding_the_write_lock() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("salvor.db");
+        // Created the way a real store is, so what follows is the second open
+        // of an existing file: exactly the losing waker's situation.
+        drop(SqliteStore::open(&path).expect("the first open creates the store"));
+
+        let holder = hold_the_write_lock(&path);
+        let opened = SqliteStore::open(&path);
+        holder.join().expect("the holding thread joins");
+        assert!(
+            opened.is_ok(),
+            "a locked database is waited out, not refused: {:?}",
+            opened.err()
+        );
+    }
+
+    /// The same waiting, one layer in: an append while another connection
+    /// holds the write lock.
+    ///
+    /// Opening is only half of what a second waker does. It then drives the
+    /// run, and driving means appending, which is the transaction that reads
+    /// the run's chain head before it writes the row. Refused rather than
+    /// waited out, that append surfaces as `database is locked` mid-drive and
+    /// the sweep tells an operator to re-drive a run another process is
+    /// finishing. What is supposed to happen is that both writers get their
+    /// turn and the loser loses on the merits, at the position it tried to
+    /// take.
+    #[tokio::test]
+    async fn appending_waits_for_another_connection_holding_the_write_lock() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("salvor.db");
+        let store = SqliteStore::open(&path).expect("the store opens");
+
+        let holder = hold_the_write_lock(&path);
+        let appended = store.append(&envelope()).await;
+        holder.join().expect("the holding thread joins");
+        assert!(
+            appended.is_ok(),
+            "a locked database is waited out, not refused: {:?}",
+            appended.err()
+        );
+    }
 }

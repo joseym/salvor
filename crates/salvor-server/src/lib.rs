@@ -26,6 +26,8 @@
 //! - The handler modules ([`agents`](crate::agents), [`runs`](crate::runs),
 //!   [`sse`](crate::sse)) own their endpoints; [`error::ApiError`] is the one
 //!   error envelope they all return.
+//! - [`wake`] is the background sweeper that re-drives runs whose durable timer
+//!   has come due, through the same resume path a person's request takes.
 //!
 //! # Auth
 //!
@@ -51,6 +53,7 @@ pub mod state;
 pub mod tool_registry;
 #[cfg(feature = "ui")]
 pub mod ui;
+pub mod wake;
 
 use axum::Router;
 use axum::middleware::from_fn_with_state;
@@ -62,10 +65,11 @@ pub use dispatch::{Disposition, ResumeKind, classify};
 pub use error::ApiError;
 pub use executor::{LlmModelExecutor, ModelExecutor, ModelStream};
 pub use state::{
-    AgentDefinition, AgentFactory, AppState, BuildFuture, BuiltAgent, ClientRunLease, DefFormat,
-    RegisteredAgent,
+    AgentDefinition, AgentFactory, AppState, BuildFuture, BuiltAgent, ClientRunLease,
+    DEFAULT_WAKE_INTERVAL, DefFormat, RegisteredAgent,
 };
 pub use tool_registry::ToolRegistry;
+pub use wake::{Sweeper, spawn_sweeper, sweep};
 
 /// Builds the control-plane router over `state`, with the bearer-auth layer in
 /// front of every route.
@@ -172,5 +176,8 @@ async fn capabilities() -> axum::response::Response {
 ///
 /// Propagates any error from the underlying `axum::serve`.
 pub async fn serve(listener: TcpListener, state: AppState) -> std::io::Result<()> {
+    // Held for exactly as long as this future lives, so a server that is
+    // dropped or aborted takes its sweeper with it. See [`wake::Sweeper`].
+    let _sweeper = wake::spawn_sweeper(state.clone());
     axum::serve(listener, build_router(state)).await
 }

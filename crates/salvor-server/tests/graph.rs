@@ -309,6 +309,122 @@ async fn submit_is_strict_and_idempotent() {
     assert_eq!(entry["entry_nodes"], json!(["approve"]));
 }
 
+/// A branch case with no outbound edge realizing it is refused with
+/// `400 invalid_graph`, naming both the branch node and the unrouted case, so a
+/// misspelled edge label (`lst` for the case `lost`) is caught at submit rather
+/// than silently skipping the intended route at run time.
+#[tokio::test]
+async fn submit_rejects_a_branch_case_with_no_matching_edge() {
+    let server = TestServer::spawn(graph_state(
+        agent_factory(
+            String::new(),
+            "unused",
+            Effect::Read,
+            common::CountBehavior::Record,
+            counter(),
+        ),
+        ToolRegistry::new(),
+    ))
+    .await;
+    let client = reqwest::Client::new();
+    let document = json!({
+        "schema_version": 1,
+        "nodes": [
+            { "kind": "tool", "payload": { "id": "assess", "tool": "assess" } },
+            { "kind": "branch", "payload": { "id": "route", "on": "assess.outcome", "cases": [
+                { "name": "won", "when": { "kind": "expression", "value": "outcome == \"won\"" } },
+                { "name": "lost", "when": { "kind": "expression", "value": "outcome == \"lost\"" } }
+              ] } },
+            { "kind": "tool", "payload": { "id": "celebrate", "tool": "notify" } }
+        ],
+        "edges": [
+            { "from": "assess", "to": "route" },
+            { "from": "route", "to": "celebrate", "label": "won" },
+            { "from": "route", "to": "celebrate", "label": "lst" }
+        ]
+    });
+
+    let (status, body) = post_json(
+        &client,
+        &format!("{}/v1/graphs", server.base),
+        document,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_graph");
+    let errors = body["error"]["details"]["errors"]
+        .as_array()
+        .expect("error list");
+    assert!(
+        errors
+            .iter()
+            .any(|e| e["code"] == "branch_case_without_edge"
+                && e["node"] == "route"
+                && e["case"] == "lost"),
+        "the unrouted case is named node/case-precise: {errors:?}"
+    );
+}
+
+/// An outbound edge from a branch labeled with a name no case declares is
+/// refused with `400 invalid_graph`, naming both the branch node and the
+/// offending label: the mirror of
+/// `submit_rejects_a_branch_case_with_no_matching_edge`, from the edge's side
+/// of the same typo (`lst` for the case `lost`).
+#[tokio::test]
+async fn submit_rejects_a_branch_edge_labeled_with_no_matching_case() {
+    let server = TestServer::spawn(graph_state(
+        agent_factory(
+            String::new(),
+            "unused",
+            Effect::Read,
+            common::CountBehavior::Record,
+            counter(),
+        ),
+        ToolRegistry::new(),
+    ))
+    .await;
+    let client = reqwest::Client::new();
+    let document = json!({
+        "schema_version": 1,
+        "nodes": [
+            { "kind": "tool", "payload": { "id": "assess", "tool": "assess" } },
+            { "kind": "branch", "payload": { "id": "route", "on": "assess.outcome", "cases": [
+                { "name": "lost", "when": { "kind": "expression", "value": "outcome == \"lost\"" } },
+                { "name": "paid", "when": { "kind": "expression", "value": "outcome == \"paid\"" } }
+              ] } },
+            { "kind": "tool", "payload": { "id": "close", "tool": "notify" } },
+            { "kind": "tool", "payload": { "id": "celebrate", "tool": "notify" } }
+        ],
+        "edges": [
+            { "from": "assess", "to": "route" },
+            { "from": "route", "to": "close", "label": "lst" },
+            { "from": "route", "to": "celebrate", "label": "paid" }
+        ]
+    });
+
+    let (status, body) = post_json(
+        &client,
+        &format!("{}/v1/graphs", server.base),
+        document,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_graph");
+    let errors = body["error"]["details"]["errors"]
+        .as_array()
+        .expect("error list");
+    assert!(
+        errors
+            .iter()
+            .any(|e| e["code"] == "branch_edge_without_case"
+                && e["node"] == "route"
+                && e["label"] == "lst"),
+        "the mislabeled edge is named node/label-precise: {errors:?}"
+    );
+}
+
 /// A document with a dangling edge is refused with `400 invalid_graph` carrying
 /// the complete, node/edge-precise error list.
 #[tokio::test]

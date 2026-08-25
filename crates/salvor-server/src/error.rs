@@ -42,6 +42,17 @@ pub enum ApiError {
     /// A verb was applied to a run in the wrong state (resuming a finished
     /// run, resolving a run that has no dangling write). HTTP 409.
     WrongState(String),
+    /// The server-driven resume endpoint was called on a run opened through
+    /// `/v1/client-runs`. HTTP 409. That run's client holds the single-writer
+    /// drive token and is the only legal driver of it; resuming it here, even
+    /// when the agent it recorded happens to be registered on this server,
+    /// would start a second writer racing the client's lease for the same
+    /// positions. Checked before any state-dependent dispatch, so it also
+    /// pre-empts the still-sleeping and reconciliation refusals: a
+    /// client-driven run is refused this way regardless of what its log folds
+    /// to. Nothing is recorded and no driver task is spawned. The message
+    /// names `/v1/client-runs`, the surface that does resume it.
+    ClientDrivenRun(String),
     /// A client-driven append arrived with no drive token. HTTP 401. The drive
     /// token is the per-run single-writer lease; every append must present it.
     MissingDriveToken(String),
@@ -164,6 +175,24 @@ pub enum ApiError {
         /// recorded time), so the caller sees exactly what to reconcile.
         intent: Value,
     },
+    /// A run parked on a durable timer was resumed before its instant. HTTP
+    /// 409, the same state conflict a reconciliation refusal is: the verb is
+    /// right and the run is simply not in a state to take it yet. Carries the
+    /// deadline and how long is left, so a caller can schedule its retry
+    /// instead of polling.
+    ///
+    /// Nothing is recorded and no driver is spawned, so the run is exactly as
+    /// asleep as it was. A run whose instant HAS arrived never reaches this
+    /// variant: it re-drives like any other recoverable run, which is what
+    /// makes the wake sweeper need no endpoint of its own.
+    StillSleeping {
+        /// The human sentence.
+        message: String,
+        /// The recorded instant the run may continue at, RFC 3339.
+        wake_at: String,
+        /// Whole seconds between now and that instant.
+        remaining_seconds: i64,
+    },
     /// An unexpected internal failure (a store read, an agent build). HTTP
     /// 500. The message is safe to surface: it names the layer, not a secret.
     Internal(String),
@@ -179,6 +208,7 @@ impl ApiError {
             ApiError::UnknownAgent(_) => (StatusCode::NOT_FOUND, "unknown_agent"),
             ApiError::RunExists(_) => (StatusCode::CONFLICT, "run_exists"),
             ApiError::WrongState(_) => (StatusCode::CONFLICT, "wrong_state"),
+            ApiError::ClientDrivenRun(_) => (StatusCode::CONFLICT, "client_driven_run"),
             ApiError::InvalidGraph { .. } => (StatusCode::BAD_REQUEST, "invalid_graph"),
             ApiError::ApprovalSchemaViolation { .. } => {
                 (StatusCode::BAD_REQUEST, "approval_schema_violation")
@@ -191,6 +221,7 @@ impl ApiError {
             }
             ApiError::WriteReplayHazard { .. } => (StatusCode::CONFLICT, "write_replay_hazard"),
             ApiError::NeedsReconciliation { .. } => (StatusCode::CONFLICT, "needs_reconciliation"),
+            ApiError::StillSleeping { .. } => (StatusCode::CONFLICT, "still_sleeping"),
             ApiError::MissingDriveToken(_) => (StatusCode::UNAUTHORIZED, "missing_drive_token"),
             ApiError::InvalidDriveToken(_) => (StatusCode::FORBIDDEN, "invalid_drive_token"),
             ApiError::UnsupportedEventKind(_) => {
@@ -223,6 +254,7 @@ impl ApiError {
             | ApiError::UnknownAgent(m)
             | ApiError::RunExists(m)
             | ApiError::WrongState(m)
+            | ApiError::ClientDrivenRun(m)
             | ApiError::Internal(m)
             | ApiError::MissingDriveToken(m)
             | ApiError::InvalidDriveToken(m)
@@ -242,7 +274,8 @@ impl ApiError {
             | ApiError::ApprovalSchemaViolation { message: m, .. }
             | ApiError::OriginNeedsReconciliation { message: m, .. }
             | ApiError::WriteReplayHazard { message: m, .. }
-            | ApiError::NeedsReconciliation { message: m, .. } => m.clone(),
+            | ApiError::NeedsReconciliation { message: m, .. }
+            | ApiError::StillSleeping { message: m, .. } => m.clone(),
             ApiError::Unauthorized => "missing or invalid bearer token".to_owned(),
         }
     }
@@ -268,6 +301,14 @@ impl IntoResponse for ApiError {
                 node, violations, ..
             } => {
                 error["details"] = json!({ "node": node, "violations": violations });
+            }
+            ApiError::StillSleeping {
+                wake_at,
+                remaining_seconds,
+                ..
+            } => {
+                error["details"] =
+                    json!({ "wake_at": wake_at, "remaining_seconds": remaining_seconds });
             }
             _ => {}
         }

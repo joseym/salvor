@@ -4,7 +4,8 @@
 //! A graph is a declarative CONTROL document: authored once, submitted, hashed
 //! into a run, and then frozen. It coordinates nodes the runtime already knows
 //! how to execute (a full `agent` loop, a single `tool` call, a human `gate`, a
-//! `branch`, a `map` fan-out, and a `fold` bounded-iteration loop) and the typed
+//! `branch`, a `map` fan-out, a `fold` bounded-iteration loop, and a `delay`
+//! durable wait) and the typed
 //! edges between them. This crate owns four things and no more:
 //!
 //! - the [`document`] model: [`Graph`], [`Node`], the payloads, and [`Edge`],
@@ -47,10 +48,12 @@ pub mod document;
 pub mod expr;
 pub mod validate;
 
-pub use builder::{AgentSpec, BranchSpec, FoldSpec, GateSpec, GraphBuilder, MapSpec, ToolSpec};
+pub use builder::{
+    AgentSpec, BranchSpec, DelaySpec, FoldSpec, GateSpec, GraphBuilder, MapSpec, ToolSpec,
+};
 pub use document::{
-    AgentNode, BranchCase, BranchCondition, BranchNode, Edge, FoldBody, FoldJoin, FoldNode,
-    GateNode, Graph, MapBody, MapNode, Node, OnBound, SCHEMA_VERSION, ToolNode,
+    AgentNode, BranchCase, BranchCondition, BranchNode, DelayNode, Edge, FoldBody, FoldJoin,
+    FoldNode, GateNode, Graph, MapBody, MapNode, Node, OnBound, SCHEMA_VERSION, ToolNode,
 };
 pub use expr::{Expr, ExprError, MAX_EXPRESSION_LEN, Segment, parse as parse_expression};
 pub use validate::{GraphError, GraphSummary, MAX_NODE_NAME_LEN, validate};

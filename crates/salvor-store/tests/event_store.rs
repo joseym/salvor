@@ -365,6 +365,66 @@ async fn a_missing_chain_head_is_refused() {
     }
 }
 
+/// A read never sees a run's rows and its recorded head as if they came from
+/// two different moments: a concurrent append landing between what used to be
+/// two independent `SELECT`s must not make a read see fewer rows than the
+/// head it reads back claims.
+///
+/// This is the two-`salvor wake`-processes race as an operator actually hit
+/// it: one process appends a run's log while another reads it, both against
+/// the same file. Before the fix, a read that landed between `read_log`'s row
+/// `SELECT` and its head `SELECT` could see the row count from before the
+/// append and the head from after it, and `chain::verify` cannot tell that
+/// apart from a genuinely shortened log, so it refused a perfectly sound read
+/// with `TamperEvident`.
+///
+/// This needs two real connections to one file to reproduce: every call
+/// through one `SqliteStore` is already serialized on its own
+/// `Mutex<Connection>`, so no race is possible through a single store, and the
+/// conformance kit hands each check exactly one fresh store (see
+/// `salvor_store_conformance::run_all`). That is why this lives here, as a
+/// `salvor-store`-local test, rather than as a conformance check.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_read_never_sees_rows_without_their_head() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("events.db");
+    let writer = SqliteStore::open(&path).expect("open writer store");
+    let reader = SqliteStore::open(&path).expect("open reader store");
+
+    let run = RunId::new();
+    const EVENTS: u64 = 300;
+
+    let appender = tokio::spawn(async move {
+        for seq in 1..=EVENTS {
+            writer
+                .append(&envelope(run, seq, fail(&format!("e{seq}"))))
+                .await
+                .expect("append");
+        }
+    });
+
+    let mut reads = 0usize;
+    while !appender.is_finished() {
+        reader
+            .read_log(run)
+            .await
+            .expect("a read must never see a torn snapshot of the log");
+        reads += 1;
+    }
+    appender.await.expect("appender task joined");
+    // One more read once the appender is done, so the fully-written log is
+    // checked too, not just the ones raced during the append.
+    reader
+        .read_log(run)
+        .await
+        .expect("a read after the appender finishes still verifies");
+
+    assert!(
+        reads > 0,
+        "the read loop should have raced the appender at least once"
+    );
+}
+
 /// A database written by the previous binary, which had no chain at all, opens
 /// without losing anything: every event reads back, the chain is backfilled
 /// deterministically, appends continue the chain from there, and a forgery

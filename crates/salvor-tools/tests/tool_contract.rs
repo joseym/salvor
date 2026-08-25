@@ -116,10 +116,10 @@ impl ToolHandler for RequestApproval {
         _ctx: &ToolCtx,
         _input: TicketRequest,
     ) -> Result<ToolOutcome<TicketRef>, HandlerError> {
-        Ok(ToolOutcome::Suspend(Suspension {
-            reason: "manager approval required".to_owned(),
-            input_schema: json!({ "type": "object", "properties": { "approved": { "type": "boolean" } } }),
-        }))
+        Ok(ToolOutcome::Suspend(Suspension::new(
+            "manager approval required",
+            json!({ "type": "object", "properties": { "approved": { "type": "boolean" } } }),
+        )))
     }
 }
 
@@ -172,7 +172,7 @@ async fn typed_call_produces_typed_output() {
             assert_eq!(ticket.id, "JIRA-9");
             assert_eq!(ticket.idempotency_key.as_deref(), Some("attempt-1"));
         }
-        ToolOutcome::Suspend(_) => panic!("expected an output, not a suspension"),
+        ToolOutcome::Suspend(_) | ToolOutcome::Sleep(_) => panic!("expected an output, not a park"),
     }
 }
 
@@ -193,7 +193,7 @@ async fn erased_call_roundtrips_through_json() {
                 json!({ "id": "JIRA-9", "idempotency_key": "attempt-7" })
             );
         }
-        ToolOutcome::Suspend(_) => panic!("expected an output, not a suspension"),
+        ToolOutcome::Suspend(_) | ToolOutcome::Sleep(_) => panic!("expected an output, not a park"),
     }
 }
 
@@ -306,6 +306,7 @@ async fn suspension_propagates_as_outcome_not_error() {
         ToolOutcome::Suspend(Suspension {
             reason,
             input_schema,
+            ..
         }) => {
             assert_eq!(reason, "manager approval required");
             assert_eq!(
@@ -313,7 +314,7 @@ async fn suspension_propagates_as_outcome_not_error() {
                 json!({ "type": "object", "properties": { "approved": { "type": "boolean" } } })
             );
         }
-        ToolOutcome::Output(_) => panic!("expected a suspension"),
+        ToolOutcome::Output(_) | ToolOutcome::Sleep(_) => panic!("expected a suspension"),
     }
 }
 

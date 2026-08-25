@@ -122,7 +122,7 @@ export function parseQuery(s: string): Term[] {
  */
 export const FIELDS: Readonly<Record<string, (r: RunRow, names?: NameMap) => string | number>> = {
   status: (r) => r.status,
-  group: (r) => groupOf(r.status),
+  group: (r) => groupOf(r.status, r.waitingOn),
   events: (r) => r.eventCount,
   hour: (r) => hourKey(r.last),
   agent: (r, names = NO_NAMES) => `${agentIdentity(r, names).text} ${r.agentDefHash ?? ''}`,

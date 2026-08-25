@@ -28,12 +28,15 @@ export interface WfFix {
   readonly kind:
     | 'rename_dupe'
     | 'set_concurrency'
+    | 'set_seconds'
     | 'repoint'
     | 'repoint_body'
     | 'drop_label'
+    | 'relabel_case'
     | 'drop_edge'
     | 'complete_hash'
     | 'attach_agent'
+    | 'realize_case'
     | 'truncate_name'
     | 'clear_name';
   readonly id?: string;
@@ -43,6 +46,10 @@ export interface WfFix {
   /** The donor agent hash an `attach_agent` fix reuses: always a hash already present on some
    * other node in the same document, never invented. */
   readonly hash?: string;
+  /** The case name a `realize_case` fix draws its new edge's label from (the same case the
+   * `unrealized_case` error names), or the case name a `relabel_case` fix rewrites an existing
+   * edge's `label` to. */
+  readonly case?: string;
 }
 
 export interface WfError {
@@ -50,6 +57,7 @@ export interface WfError {
     | 'duplicate_id'
     | 'bad_agent_hash'
     | 'bad_concurrency'
+    | 'bad_seconds'
     | 'bad_effect'
     | 'unrealized_case'
     | 'model_decision_without_agent'
@@ -146,6 +154,17 @@ export function validateGraph(g: WfGraph): WfError[] {
         fix: { label: 'Set concurrency to 1', kind: 'set_concurrency', id: n.id },
       });
     }
+    // Aligned to the server's own rule (`salvor_graph::validate::NonPositiveDelay`): a zero (or
+    // negative) wait would still park nothing and record a clock reading nobody asked for, so the
+    // floor is the same "at least 1" the map worker count and fold iteration bound already hold.
+    if (n.kind === 'delay' && !((n.seconds ?? 0) > 0)) {
+      errs.push({
+        code: 'bad_seconds',
+        node: n.id,
+        msg: `${n.id} waits ${n.seconds} seconds. A durable wait needs at least one second.`,
+        fix: { label: 'Set seconds to 1', kind: 'set_seconds', id: n.id },
+      });
+    }
     // A map's or fold's body names a node in THIS document (the format's other form, an embedded
     // subgraph, names no id and so has nothing to dangle). The server checks this at submit
     // (`dangling_map_body`, `dangling_fold_body`), so a client that did not would call a document
@@ -172,13 +191,25 @@ export function validateGraph(g: WfGraph): WfError[] {
     }
     if (n.kind === 'branch') {
       const realized = new Set(g.edges.filter((e) => e.from === n.id).map((e) => e.label));
+      // Aligned to the server's own rule (`salvor_graph::validate::BranchCaseWithoutEdge`): the
+      // engine picks a branch's live edge by matching the fired case's name against an edge
+      // label, so a case with none can still fire, find nowhere to go, and skip every node past
+      // it while the run finishes looking healthy. A terminal node (one with no outbound edge of
+      // its own) is the one-click target when the graph has one: the same node the server's own
+      // message points an author at when the case is meant to end the run, and pointing a new
+      // edge at it can never create a cycle.
+      const terminal = ids.find((id) => id !== n.id && !g.edges.some((e) => e.from === id));
       (n.cases ?? [])
         .filter((c) => !realized.has(c))
         .forEach((c) =>
           errs.push({
             code: 'unrealized_case',
             node: n.id,
-            msg: `${n.id} declares the case "${c}" but no edge realizes it.`,
+            case: c,
+            msg: `${n.id} declares the case "${c}" but no edge realizes it. Point it at a node, or at a terminal node if the case should end the run.`,
+            ...(terminal
+              ? { fix: { label: `Route "${c}" to ${terminal}`, kind: 'realize_case', id: n.id, case: c, to: terminal } }
+              : {}),
           }),
         );
 
@@ -247,10 +278,25 @@ export function validateGraph(g: WfGraph): WfError[] {
           msg: `An edge out of the branch ${src.id} carries no case. Every branch edge names the case it realizes.`,
         });
       } else if (!(src.cases ?? []).includes(e.label)) {
+        // Aligned to the server's own rule (`salvor_graph::validate::BranchEdgeWithoutCase`), the
+        // mirror of `unrealized_case`: the engine only ever takes a branch's edge by matching the
+        // fired case's name against the label, so a label naming nothing can never fire and the
+        // edge is dead. Almost always this is the OTHER half of the exact same typo
+        // `unrealized_case` catches (the case spelled one way, the edge meant to realize it spelled
+        // another), so when exactly one of the branch's declared cases has no edge realizing it,
+        // that is the one candidate the typo was probably reaching for; with zero or more than one,
+        // there is nothing unambiguous to offer.
+        const casesWithNoEdge = (src.cases ?? []).filter(
+          (c) => !g.edges.some((other) => other.from === src.id && other.label === c),
+        );
+        const target = casesWithNoEdge.length === 1 ? casesWithNoEdge[0] : undefined;
         errs.push({
           code: 'edge_type',
           edge: i,
           msg: `The branch ${src.id} has no case "${e.label}". Its cases are: ${(src.cases ?? []).join(', ')}.`,
+          ...(target
+            ? { fix: { label: `Relabel to "${target}"`, kind: 'relabel_case', edge: i, case: target } }
+            : {}),
         });
       }
     } else if (src && e.label) {
@@ -327,6 +373,11 @@ export function applyFix(g: WfGraph, fix: WfFix): WfGraph {
           n.id === fix.id ? withDocFields({ ...n, concurrency: 1 }, { concurrency: 1 }) : n,
         ),
       };
+    case 'set_seconds':
+      return {
+        ...g,
+        nodes: g.nodes.map((n) => (n.id === fix.id ? withDocFields({ ...n, seconds: 1 }, { seconds: 1 }) : n)),
+      };
     case 'repoint':
       return {
         ...g,
@@ -345,6 +396,11 @@ export function applyFix(g: WfGraph, fix: WfFix): WfGraph {
               )
             : n,
         ),
+      };
+    case 'relabel_case':
+      return {
+        ...g,
+        edges: g.edges.map((e, i) => (i === fix.edge && fix.case !== undefined ? { ...e, label: fix.case } : e)),
       };
     case 'drop_label':
       return {
@@ -378,6 +434,12 @@ export function applyFix(g: WfGraph, fix: WfFix): WfGraph {
             : n,
         ),
       };
+    case 'realize_case':
+      // The one fix in this file that draws a brand new edge rather than editing an existing
+      // field: there is nothing to repoint when the case never had an edge at all.
+      return fix.id !== undefined && fix.to !== undefined && fix.case !== undefined
+        ? { ...g, edges: [...g.edges, { from: fix.id, to: fix.to, label: fix.case }] }
+        : g;
     case 'truncate_name':
       return {
         ...g,

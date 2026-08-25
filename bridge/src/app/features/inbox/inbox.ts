@@ -5,7 +5,7 @@ import { RunsService, SALVOR_CLIENT, errorMessage } from '../../core/api';
 import { FirstReceiptsService } from '../../core/first-receipts';
 import { focusWhenRendered } from '../../core/focus';
 import { ViewService } from '../../core/view';
-import { derivedStatus, labelOf } from '../runs/run-model';
+import { derivedStatus, labelOf, waitingOnOf } from '../runs/run-model';
 import { BudgetCard } from './budget-card';
 import { shortId } from './inbox-model';
 import { jsonHi } from '../../shared/json-hi';
@@ -45,10 +45,18 @@ import { SuspensionCard } from './suspension-card';
  */
 export type CardKind = 'suspension' | 'budget' | 'reconcile';
 
-function cardKindOf(state: string): CardKind | undefined {
+/**
+ * `suspended` maps to a card only when it is a HUMAN GATE. A `suspended` run parked on an
+ * external signal (`waitingOn === 'signal'`, read off the server's `kind` discriminator; absent
+ * means a gate, which is what every suspension recorded before the discriminator existed means)
+ * owes nobody an action, so it is never routed to a card: the Inbox is a to-do list, and a run
+ * nobody can act on does not belong on it. It still reads as `progress`, never `waiting`, in
+ * `run-model.ts`'s grouping, the same call `sleeping` makes.
+ */
+function cardKindOf(state: string, waitingOn?: 'signal'): CardKind | undefined {
   switch (state) {
     case 'suspended':
-      return 'suspension';
+      return waitingOn === 'signal' ? undefined : 'suspension';
     case 'budget_exceeded':
       return 'budget';
     case 'needs_reconciliation':
@@ -110,7 +118,9 @@ export class Inbox {
     const now = Date.now();
     const rows = this.runsService.runs();
     const byId = new Map(rows.map((r) => [r.run, r] as const));
-    const live = rows.filter((r) => derivedStatus(r.status.state, r.driver, r.lastRecordedAt, now) === 'stalled');
+    const live = rows.filter(
+      (r) => derivedStatus(r.status.state, r.driver, r.lastRecordedAt, now, waitingOnOf(r.status)) === 'stalled',
+    );
     const seen = new Set(live.map((r) => r.run));
     for (const id of this.abandonPinned()) {
       if (seen.has(id)) continue;
@@ -200,7 +210,7 @@ export class Inbox {
       const rows = this.runsService.runs();
       const additions = new Map<string, CardKind>();
       for (const r of rows) {
-        const kind = cardKindOf(r.status.state);
+        const kind = cardKindOf(r.status.state, waitingOnOf(r.status));
         if (kind && !this.shownCards().has(r.run)) additions.set(r.run, kind);
       }
       if (additions.size === 0) return;

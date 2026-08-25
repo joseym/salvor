@@ -346,7 +346,7 @@ mod tests {
                     "watchers": ["alice@example.com", "bob@example.com"],
                 })
             ),
-            ToolOutcome::Suspend(_) => panic!("expected an output"),
+            ToolOutcome::Suspend(_) | ToolOutcome::Sleep(_) => panic!("expected an output"),
         }
     }
 
@@ -389,7 +389,7 @@ mod tests {
                 assert_eq!(value["amount_usd"], 128.5);
                 assert!(value["refund_id"].as_str().unwrap().starts_with("rfnd_"));
             }
-            ToolOutcome::Suspend(_) => panic!("expected an output"),
+            ToolOutcome::Suspend(_) | ToolOutcome::Sleep(_) => panic!("expected an output"),
         }
         let written = std::fs::read_to_string(&ledger).expect("ledger written");
         assert_eq!(

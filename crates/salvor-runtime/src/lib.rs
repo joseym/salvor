@@ -50,10 +50,11 @@
 //!
 //! # Recorded wire shapes this crate defines
 //!
-//! On top of the core event vocabulary, three shapes are contracts here:
-//! the suspension sentinel and the structured tool-error object recorded in
-//! tool-call completions (module docs of [`wire`], exported constants
-//! [`SUSPEND_SENTINEL_KEY`] / [`ERROR_SENTINEL_KEY`]), and the
+//! On top of the core event vocabulary, four shapes are contracts here:
+//! the suspension sentinel, the sleep sentinel, and the structured tool-error
+//! object recorded in tool-call completions (module docs of [`wire`], exported
+//! constants [`SUSPEND_SENTINEL_KEY`] / [`SLEEP_SENTINEL_KEY`] /
+//! [`ERROR_SENTINEL_KEY`]), and the
 //! budget-extension resume input (module docs of [`budgets`]). Error
 //! compaction, what a failed tool call puts into the model's context, is
 //! specified and exported in [`compact`].
@@ -75,6 +76,7 @@ mod model;
 mod progress;
 mod runtime;
 mod validate;
+mod wake;
 mod wire;
 
 pub use agent::{Agent, AgentBuildError, AgentBuilder, DEFAULT_MAX_RESPONSE_TOKENS};
@@ -88,7 +90,7 @@ pub use compact::{
     compact_error_message,
 };
 pub use ctx::{
-    ClockFn, MAX_TOOL_ATTEMPTS, ModelTurn, RandomFn, Resumption, RunCtx, ToolCallResult,
+    ClockFn, MAX_TOOL_ATTEMPTS, ModelTurn, RandomFn, Resumption, RunCtx, ToolCallResult, Waking,
 };
 pub use driver::{ANSWER_TOOL, LoopOutcome, drive_loop, drive_loop_structured};
 pub use error::RuntimeError;
@@ -102,7 +104,9 @@ pub use salvor_core::{
     validate_extension_input,
 };
 pub use validate::validate_against_schema;
+pub use wake::{DueRun, due_runs};
 pub use wire::{
-    ERROR_SENTINEL_KEY, SUSPEND_SENTINEL_KEY, ToolFailure, ToolFailureKind, content_string,
-    decode_failure, decode_suspension, encode_failure, encode_suspension, error_chain,
+    ERROR_SENTINEL_KEY, SLEEP_SENTINEL_KEY, SUSPEND_SENTINEL_KEY, ToolFailure, ToolFailureKind,
+    content_string, decode_failure, decode_sleep, decode_suspension, encode_failure, encode_sleep,
+    encode_suspension, error_chain, slept_output,
 };

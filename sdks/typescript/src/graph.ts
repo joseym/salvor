@@ -165,7 +165,26 @@ export interface FoldPayload {
 }
 
 /**
- * One node: exactly one of the six kinds, adjacently tagged as
+ * The `delay` node payload: a durable wait that parks the run, then continues
+ * the walk.
+ *
+ * The wait is a DURATION, never an absolute instant. A graph document is
+ * content-addressed and run any number of times, so a baked-in wake time would
+ * be correct on the first run and already past on the second; a duration says
+ * the thing that stays true. The engine resolves the instant when the walk
+ * reaches the node, from a clock reading it records first, so the wake instant
+ * is durable and replays identically.
+ */
+export interface DelayPayload {
+  id: string;
+  /** Optional short display label. See the module docs' "The optional node display name" note. */
+  name?: string;
+  /** How long the run waits, in whole seconds. Must be at least 1. */
+  seconds: number;
+}
+
+/**
+ * One node: exactly one of the seven kinds, adjacently tagged as
  * `{ kind, payload }`, mirroring the Rust enum's wire shape.
  */
 export type GraphNode =
@@ -174,7 +193,8 @@ export type GraphNode =
   | { kind: "gate"; payload: GatePayload }
   | { kind: "branch"; payload: BranchPayload }
   | { kind: "map"; payload: MapPayload }
-  | { kind: "fold"; payload: FoldPayload };
+  | { kind: "fold"; payload: FoldPayload }
+  | { kind: "delay"; payload: DelayPayload };
 
 /** A directed edge. An optional label names a branch case an edge realizes. */
 export interface Edge {
@@ -225,6 +245,11 @@ export interface BranchOptions {
 export interface MapOptions {
   name?: string;
   outputSchema?: JsonValue;
+}
+
+/** The optional fields a delay node may declare. */
+export interface DelayOptions {
+  name?: string;
 }
 
 /** The optional fields a fold node may declare. */
@@ -365,6 +390,19 @@ export class GraphBuilder {
     if (options.accumulatorSchema !== undefined)
       payload.accumulator_schema = options.accumulatorSchema;
     this.nodes.push({ kind: "fold", payload });
+    return this;
+  }
+
+  /**
+   * Adds a `delay` node: a durable wait of `seconds` before the walk continues.
+   *
+   * A duration and not an instant, deliberately: see {@link DelayPayload}. The
+   * wait's positivity is checked by `salvor graph validate`, not here.
+   */
+  delay(id: string, seconds: number, options: DelayOptions = {}): this {
+    const payload: DelayPayload = { id, seconds };
+    if (options.name !== undefined) payload.name = options.name;
+    this.nodes.push({ kind: "delay", payload });
     return this;
   }
 

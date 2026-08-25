@@ -6,7 +6,8 @@
       "client_tools": [],
       "demo_tools": true,
       "dev": true,
-      "verb": "serve"
+      "verb": "serve",
+      "wake_interval": 60
     },
     "store": "./salvor.db"
   },

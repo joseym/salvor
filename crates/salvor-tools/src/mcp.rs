@@ -26,6 +26,9 @@
 //!   [`DynTool`](crate::DynTool) directly. Its name, description, and JSON
 //!   schema are the server's own; its [`Effect`] is decided by the mapping
 //!   below.
+//! - The `park` submodule decodes the park request a server may put under
+//!   `_meta.salvor` on its result, and owns every refusal a malformed one
+//!   gets. See the section below.
 //! - [`EffectOverrides`] and [`effect_for`] decide a tool's [`Effect`] from the
 //!   server's annotation hints, subject to per-tool operator overrides.
 //! - [`IdempotencyKeys`] carries the operator's per-tool declaration of which
@@ -51,12 +54,55 @@
 //! trust decision to make: they are asserting "I know this server's `delete`
 //! tool is a write regardless of what it claims," and the runtime honors it.
 //!
-//! # Suspension does not apply
+//! # Parking the run, through `_meta`
 //!
-//! MCP has no concept of suspending a call to await a human. An [`McpTool`]
-//! therefore never returns [`ToolOutcome::Suspend`](crate::ToolOutcome::Suspend);
-//! its [`call_json`](crate::DynTool::call_json) resolves to an output or an
-//! error, never a parked run. Human-in-the-loop lives on native tools.
+//! MCP has no field for "park the run that called me," and it does not need
+//! one: it has `_meta`, the extension point the specification reserves on
+//! every result for metadata a particular client understands. A server that
+//! wants to park puts the request under `_meta.salvor`, and a host that is not
+//! salvor sees an ordinary tool result carrying an unfamiliar metadata key,
+//! which is exactly what `_meta` is for.
+//!
+//! An [`McpTool`] decodes that after the call returns and yields
+//! [`ToolOutcome::Suspend`](crate::ToolOutcome::Suspend) or
+//! [`ToolOutcome::Sleep`](crate::ToolOutcome::Sleep), the same values a native
+//! tool returns. Nothing above this module distinguishes them, which is the
+//! property that keeps the runtime out of it: the completion is recorded
+//! first and the park after, claims settle before the wait, and a replayed
+//! park never reaches the server again.
+//!
+//! ```json
+//! {"_meta": {"salvor": {"suspend": {
+//!    "reason": "the claimant must confirm the payout account",
+//!    "input_schema": {"type": "object", "properties": {"paid": {"type": "boolean"}}},
+//!    "kind": "signal"
+//! }}}}
+//! ```
+//!
+//! ```json
+//! {"_meta": {"salvor": {"sleep_until": "2026-08-14T09:00:00Z"}}}
+//! ```
+//!
+//! `kind` is optional and its only value is `"signal"`, an external system
+//! owing the run a payload; absent, the run waits on a person. `sleep_until`
+//! is an RFC 3339 instant, never a duration, because the runtime records the
+//! instant and replay has to reproduce it.
+//!
+//! A request that is malformed, contradictory (both keys, or either key
+//! alongside `isError: true`), or spelled with a key this client does not
+//! know is a **tool failure** naming `_meta.salvor` and the problem. It is
+//! never quietly passed through as output: a server author who asked for a
+//! park and silently got a plain result has no way to see what went wrong.
+//! A result with no `_meta.salvor` is untouched and records exactly as it
+//! always did.
+//!
+//! Such a failure is
+//! [`ToolError::MalformedResult`](crate::ToolError::MalformedResult), and it
+//! costs exactly one execution whatever the tool's effect. A `Read` is
+//! otherwise re-run on a failure, but the request that could not be read is
+//! already in hand, and calling the same server again produces the same
+//! misspelling. Retrying would turn one clear failure into three and delay
+//! the only thing the author needs, which is the message.
 //!
 //! # Client-side input validation is structural only
 //!
@@ -72,6 +118,7 @@
 //! [`ToolError::Handler`](crate::ToolError::Handler). See [`McpTool`] for the
 //! exact contract.
 
+mod park;
 mod server;
 mod tool;
 

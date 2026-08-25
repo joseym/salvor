@@ -1,6 +1,15 @@
 import type { SalvorEvent } from '@salvor-run/client';
 
-import { GROUP, LABEL, groupOf, labelOf } from '../runs/run-model';
+import {
+  GROUP,
+  LABEL,
+  type Group,
+  type Overdue,
+  durationLabel,
+  groupOf,
+  labelOf,
+  overdueSince,
+} from '../runs/run-model';
 import { esc } from '../../shared/json-hi';
 import { type CompletedCall, type CostTotal, costOf, int } from './pricing';
 import type { RunStateJson, RunStatusJson } from './wasm-fold';
@@ -28,6 +37,8 @@ export function statusStateOf(status: RunStatusJson): string {
       return 'awaiting_tool';
     case 'Suspended':
       return 'suspended';
+    case 'Sleeping':
+      return 'sleeping';
     case 'BudgetExceeded':
       return 'budget_exceeded';
     case 'NeedsReconciliation':
@@ -53,6 +64,60 @@ export function isWaitingState(state: string): boolean {
 }
 export function isTerminalState(state: string): boolean {
   return groupOf(state) === 'terminal';
+}
+
+/**
+ * The `waiting_on` discriminator when a wasm status is `Suspended`, else `undefined`: the one
+ * place Inspector code unpacks the tag, so every `groupOf`/`derivedStatus` call downstream reads
+ * it without repeating the `kind === 'Suspended'` check by hand. `'signal'` means an external
+ * system, not a person, is expected to resume the run; absent means a human gate (what every
+ * suspension folded before the discriminator existed means). Mirrors `run-model.ts#waitingOnOf`,
+ * which reads the same fact off the server's raw JSON instead of the wasm's tagged union.
+ */
+export function waitingOnOfStatus(status: RunStatusJson): 'signal' | undefined {
+  return status.kind === 'Suspended' ? status.waiting_on : undefined;
+}
+
+/** Whether a wasm status is parked on an external signal rather than a person. */
+export function isSignalWait(status: RunStatusJson): boolean {
+  return waitingOnOfStatus(status) === 'signal';
+}
+
+/**
+ * Overdue-ness for a `Sleeping` wasm status: whether its `wake_at` has passed `now`, and for how
+ * long. Purely clock-derived, and the ONLY way the Inspector can tell: the wasm fold has no clock
+ * of its own (it only ever sees the recorded log; see `wasm-fold.ts`), unlike the server-fed runs
+ * list, which prefers the server's own computed field when one is present ({@link overdueOf} in
+ * `run-model.ts`). `undefined` for every status but `Sleeping`.
+ */
+export function overdueOfStatus(status: RunStatusJson, now: number = Date.now()): Overdue | undefined {
+  return status.kind === 'Sleeping' ? overdueSince(status.wake_at, now) : undefined;
+}
+
+/**
+ * The sleeping band's inner sentence, as HTML: calm before the deadline ("Sleeping. Wakes at
+ * ..."), an attention-toned statement of fact once `wake_at` has passed with nothing having woken
+ * the run ("Overdue. Was due at ..., ...ago, and nothing has woken it."), plus the one thing an
+ * operator can do about it: wake it by hand. `wakeClock` is the caller's already-formatted,
+ * already-escaped wake time (see `event-model.ts#clock`): kept a plain string parameter, not a raw
+ * ISO instant, so this stays a pure function with no clock-formatting or escaping of its own for
+ * `state-model.spec.ts` to exercise directly.
+ */
+export function sleepingBandHtml(wakeClock: string, overdue: Overdue): string {
+  if (overdue.overdue) {
+    const ago = overdue.overdueSeconds !== undefined ? `${durationLabel(overdue.overdueSeconds)} ago` : 'and counting';
+    return `<b>Overdue.</b> Was due at <span class="mono">${wakeClock}</span>, ${ago}, and nothing has woken it. Wake it by hand with <span class="mono">salvor wake</span>.`;
+  }
+  return `<b>Sleeping.</b> Wakes at <span class="mono">${wakeClock}</span>; nothing to do until then. The run continues on its own once the instant passes.`;
+}
+
+/**
+ * The group a wasm status belongs to: `groupOf` (run-model.ts) extended to see the status's own
+ * `waiting_on` discriminator, so a signal wait folds to `progress` here exactly as it does for the
+ * server-driven Runs ledger, without the caller unpacking the tag itself.
+ */
+export function groupOfStatus(status: RunStatusJson): Group {
+  return groupOf(statusStateOf(status), waitingOnOfStatus(status));
 }
 
 /** Extract the completed model calls from a log prefix, for {@link costOf}. */

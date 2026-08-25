@@ -260,8 +260,10 @@ async fn compliance_flow(
                         return Ok(Flow::Completed(json!({"status": "failed", "error": error})));
                     }
                     // An Effect::Write tool that only ever returns output never
-                    // reaches here; the arm keeps the match total.
-                    ToolCallResult::Suspended(_) => unreachable!("issue_refund does not suspend"),
+                    // reaches here; the arms keep the match total.
+                    ToolCallResult::Suspended(_) | ToolCallResult::Sleeping(_) => {
+                        unreachable!("issue_refund neither suspends nor sleeps")
+                    }
                 };
                 let output = json!({
                     "status": "refund_issued",

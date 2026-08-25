@@ -31,7 +31,7 @@ pub use salvor_replay::{
     Effect, Emitted, Event, EventEnvelope, ForkOrigin, GraphBeginPermit, LogValidator, LoggedStep,
     ModelCallPermit, ModelReply, NowPermit, Outcome, ParkReason, Parked, PendingCall, Performer,
     Pricing, RandomPermit, ReplayCursor, ReplayError, RequestedStep, RunId, RunState, RunStatus,
-    RunSummary, SCHEMA_VERSION, SequenceNumber, TokenTotals, TokenUsage, ToolCallPermit,
-    UnresolvedWrite, ValidationError, budget_extensions, budget_observations, derive_state,
-    event_detail, event_kind, validate_extension_input, validate_next,
+    RunSummary, SCHEMA_VERSION, SequenceNumber, SuspensionKind, TokenTotals, TokenUsage,
+    ToolCallPermit, UnresolvedWrite, ValidationError, budget_extensions, budget_observations,
+    derive_state, event_detail, event_kind, validate_extension_input, validate_next,
 };

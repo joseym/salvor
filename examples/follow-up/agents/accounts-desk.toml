@@ -1,0 +1,62 @@
+# The accounts-desk agent: no node in this graph ever walks it.
+#
+# This file exists to CARRY THE MCP SERVER. `salvor graph run` has no standalone
+# tool inventory, so a `tool` node's name resolves against the tools the supplied
+# `--agent` files carry, and `invoice-follow-up.json` is four tool nodes, a
+# delay, and a branch. Handing the run this one file is what makes
+# `send_reminder`, `check_payment`, `close_invoice`, and `escalate` resolvable.
+#
+# The graph has no `agent` node at all, so it references no agent by hash and the
+# `model` below is never called: nothing in this example reaches a model, an API
+# key, or a network. The fields are still here, in the shape every other example
+# uses, because the same file has to work the day somebody adds an `agent` node
+# to write the escalation letter. If you do add one, learn its hash with:
+#     salvor agent hash examples/follow-up/agents/accounts-desk.toml
+# and put that hash in the node, because a graph references an agent by content
+# hash and never by path.
+#
+# Paths below are relative to the DIRECTORY SALVOR IS INVOKED FROM, not to this
+# file, so run everything from the repository root (`run.sh` does).
+
+name = "accounts-desk"
+
+model = "claude-opus-4-8"
+
+system_prompt = """
+You are the accounts-desk writer on an invoice follow-up desk.
+
+Nothing in this example calls you: the graph is tool nodes, a durable wait, and
+a branch, and every decision it makes is made by the document rather than by a
+model. If a future node does call you, write one short plain paragraph and stop.
+
+Never call `close_invoice` and never call `escalate`. Those are the graph's
+calls to make, not yours.
+"""
+
+[llm]
+# SALVOR_DEMO_BASE_URL, when exported and non-empty, overrides the endpoint;
+# unset means the public Anthropic endpoint. The API key is read from
+# ANTHROPIC_API_KEY and is optional, which is why this file loads cleanly with
+# neither variable set, which is exactly how `run.sh` runs it.
+base_url_env = "SALVOR_DEMO_BASE_URL"
+
+[budgets]
+# A rail for the agent node that does not exist yet. A budget in Salvor suspends
+# a run rather than killing it, so crossing this costs nothing already recorded.
+steps = 10
+tokens = 100000
+
+[[mcp_servers]]
+# The accounts-desk tools. All four tool nodes in the graph resolve here, and
+# `salvor graph run` spawns this process itself as a child, over stdio. It dies
+# with the run that spawned it, which is why a run parked at the delay holds no
+# process of any kind: the CLI returns at the park and takes the server with it.
+command = "python3"
+args = ["examples/follow-up/server.py"]
+# `check_payment` carries an honest `readOnlyHint` and needs no override. The
+# other three carry no annotation at all, so the conservative default already
+# reads each as a Write; pinning them records the operator's own determination
+# rather than inheriting one. A reminder, a closure, and an escalation are each
+# a thing a customer sees, and an interrupted one surfaces for a human to
+# reconcile rather than being retried blind.
+effect_overrides = { send_reminder = "write", close_invoice = "write", escalate = "write" }

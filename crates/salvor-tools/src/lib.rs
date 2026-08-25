@@ -67,11 +67,17 @@ pub use salvor_tools_macros::Tool;
 /// [`ToolMeta::EFFECT`] and the [`Tool`] derive name it through here.
 pub use salvor_core::Effect;
 
+/// What a suspension is waiting on when it is not a person, re-exported from
+/// `salvor_core` for the same reason [`Effect`] is: a tool that parks a run on
+/// a webhook names this on its [`Suspension`], and it should not have to take
+/// a dependency on the event crate to do it.
+pub use salvor_core::SuspensionKind;
+
 pub use context::ToolCtx;
 pub use erased::{DynTool, ToolDescriptor, TypedTool};
 pub use error::{HandlerError, ToolError};
 pub use handler::{ToolHandler, ToolMeta};
 pub use idempotency::{IdempotencyPath, IdempotencyPathError};
-pub use outcome::{Suspension, ToolOutcome};
+pub use outcome::{Sleep, Suspension, ToolOutcome};
 pub use registry::{RegistryError, ToolSet};
 pub use retry::RetryPolicy;

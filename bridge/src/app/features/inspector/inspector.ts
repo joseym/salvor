@@ -15,6 +15,7 @@ import {
   GraphRunService,
   RunEventsService,
   SALVOR_CLIENT,
+  errorMessage,
   type ForkListEntry,
   type ForkOrigin,
   type RunEventsChannel,
@@ -33,13 +34,18 @@ import { type CostTotal, int, usd } from './pricing';
 import {
   agentOf,
   costOfPrefix,
+  groupOfStatus,
   isHash,
+  isSignalWait,
   isTerminalState,
   isWaitingState,
+  overdueOfStatus,
   pendingLabel,
+  sleepingBandHtml,
   statusHtml,
   statusStateOf,
   stepsOf,
+  waitingOnOfStatus,
 } from './state-model';
 import { FoldService, type RunStateJson, toWireLog } from './wasm-fold';
 
@@ -50,6 +56,12 @@ const WARN_ICO = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" str
 const FAIL_ICO = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="8" cy="8" r="6.4"/><path d="M5.6 5.6l4.8 4.8M10.4 5.6l-4.8 4.8"/></svg>`;
 // A hollow-slash mark (matching the muted `⊘` on the abandoned pill): a terminal, non-error close.
 const ABANDON_ICO = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="8" cy="8" r="6.4"/><path d="M3.6 3.6l8.8 8.8"/></svg>`;
+// A clock face: sleeping is a wait on an INSTANT, not on a person, so the icon names time, never
+// alarm (this is not an attention band).
+const SLEEP_ICO = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="8" cy="8" r="6.4"/><path d="M8 4.6v3.6l2.6 1.6"/></svg>`;
+// Concentric arcs: a signal wait is on an external SYSTEM, not a clock or a person, so the icon
+// names a broadcast rather than time passing or an alarm.
+const SIGNAL_ICO = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="8" cy="8" r="1.6" fill="currentColor" stroke="none"/><path d="M5.4 5.4a3.7 3.7 0 0 1 5.2 0M3.2 3.2a6.8 6.8 0 0 1 9.6 0"/></svg>`;
 
 function info(why: string): string {
   return `<button class="info" type="button" title="${esc(why)}" aria-label="${esc(why)}">i</button>`;
@@ -117,6 +129,15 @@ export class Inspector implements AfterViewInit {
   readonly allOpen = signal(false);
   readonly panelOpen = signal(true);
 
+  /** The signal-wait band's own RESUME-BY-HAND affordance (an operator standing in for the
+   *  webhook): local form state, reset per run in `loadRun`. This run never has an Inbox card (see
+   *  `inbox.ts#cardKindOf`), so the Inspector is the only place left to resume it by hand; the form
+   *  is deliberately small (a raw-JSON textarea, no generated schema fields) since the affordance
+   *  exists for the rare stand-in case, not as the primary resume path a human gate offers. */
+  readonly signalResumeSubmitting = signal(false);
+  readonly signalResumeError = signal<string | undefined>(undefined);
+  readonly signalResumeDone = signal(false);
+
   /** A graph run's `graph_hash`, fetched from GET /v1/runs/{id}/graph (it is never on the log or
    * the list row). Undefined until the projection loads; the AGENT card shows the honest "graph
    * run" identity with no fabricated hash until then. */
@@ -136,8 +157,9 @@ export class Inspector implements AfterViewInit {
   readonly stalled = computed<boolean>(() => {
     const rest = this.restingState();
     const live = this.runLiveness();
-    if (!rest || groupOf(rest) !== 'progress' || !live) return false;
-    return derivedStatus(rest, live.driver, live.last) === 'stalled';
+    const waitingOn = this.restingWaitingOn();
+    if (!rest || groupOf(rest, waitingOn) !== 'progress' || !live) return false;
+    return derivedStatus(rest, live.driver, live.last, Date.now(), waitingOn) === 'stalled';
   });
 
   /** The relative age of the last recorded event, for the "last event 10m ago" phrasing. */
@@ -168,7 +190,7 @@ export class Inspector implements AfterViewInit {
   readonly headGroup = computed<string | null>(() => {
     if (!this.foldReady() || this.events().length === 0) return null;
     const st = this.foldSafe(this.events().length);
-    return st ? groupOf(statusStateOf(st.status)) : null;
+    return st ? groupOfStatus(st.status) : null;
   });
 
   /** A graph run by construction: its log opens with `GraphRunStarted`, not the `RunStarted` every
@@ -183,6 +205,16 @@ export class Inspector implements AfterViewInit {
     if (!this.foldReady() || this.events().length === 0) return null;
     const st = this.foldSafe(this.events().length);
     return st ? statusStateOf(st.status) : null;
+  });
+
+  /** The `waiting_on` discriminator on the run's TRUE resting status, when it is `Suspended`:
+   *  undefined for every other resting state, and for a suspension recorded before the
+   *  discriminator existed (a human gate). Read alongside {@link restingState} so `stalled` and
+   *  the band can both honor a signal wait's carve-out, the same way `sleeping`'s already does. */
+  readonly restingWaitingOn = computed<'signal' | undefined>(() => {
+    if (!this.foldReady() || this.events().length === 0) return undefined;
+    const st = this.foldSafe(this.events().length);
+    return st ? waitingOnOfStatus(st.status) : undefined;
   });
 
   readonly logCountLabel = computed(() => {
@@ -313,6 +345,16 @@ export class Inspector implements AfterViewInit {
       this.renderLineage();
     });
 
+    // (4e) the signal-wait band's own resume-by-hand form state: re-render just the band, not the
+    // whole header, so typing/submitting never disturbs the timeline or the strip mid-scroll.
+    effect(() => {
+      this.signalResumeSubmitting();
+      this.signalResumeError();
+      this.signalResumeDone();
+      if (!this.hasRun()) return;
+      this.renderBand();
+    });
+
     // (5) scrub-only render (derived panel, dim/cut, playhead, ticks, fork offer). Also re-runs
     // when the capability probe answers: the fork offer is gated on it, and the probe resolves
     // after the first paint.
@@ -364,6 +406,9 @@ export class Inspector implements AfterViewInit {
     this.forkedFrom.set(undefined);
     this.forks.set(undefined);
     this.runLiveness.set(undefined); // and its liveness evidence, re-fetched below
+    this.signalResumeSubmitting.set(false); // and the signal-wait resume-by-hand form's own state
+    this.signalResumeError.set(undefined);
+    this.signalResumeDone.set(false);
 
     if (!id) {
       this.channelSig.set(undefined);
@@ -440,7 +485,20 @@ export class Inspector implements AfterViewInit {
       <div class="stat"><dt>Duration</dt>
         <dd class="figure">${dur}<span class="sub">${clock(first)} → ${clock(last)}</span></dd></div>`;
 
-    if (this.bandEl) this.bandEl.nativeElement.innerHTML = this.bandHtml(st, state);
+    this.renderBand();
+  }
+
+  /** The attention band, factored out of {@link renderHeader} so the signal-wait resume-by-hand
+   *  form's own local state (submitting/error/done) can re-render just the band, without redoing
+   *  the whole header, whenever that state changes (see effect 4e). */
+  private renderBand(): void {
+    if (!this.bandEl) return;
+    const evs = this.events();
+    if (evs.length === 0) return;
+    const st = this.foldSafe(evs.length);
+    if (!st) return;
+    const state = statusStateOf(st.status);
+    this.bandEl.nativeElement.innerHTML = this.bandHtml(st, state);
   }
 
   /** The fork lineage rail (`#run-lineage`), both directions, from the server's derived surfaces:
@@ -544,6 +602,47 @@ export class Inspector implements AfterViewInit {
         <span><b>Stalled.</b> <span class="mono">${esc(labelOf(state))}</span>: last event ${esc(this.lastEventAge())} ago, no driver attached. No task is driving this run and no client lease is current; restart the driver that owns it, or resolve/abandon.</span>
         <button class="link-btn" type="button" data-goto="inbox">See in inbox</button></div>`;
     }
+    // SLEEPING: a run parked on a durable timer, PROGRESS not waiting (see
+    // `run-model.ts` GROUP, mirroring the CLI's `status_group`): nothing here asks the operator
+    // for anything, so this reads neutral like `is-abandoned`, never the amber attention family
+    // or a fail band, and renders no action button. It moves on its own once its instant passes.
+    // UNLESS it's OVERDUE: `wake_at` has passed and nothing has woken it, which is no longer calm
+    // (something anticipated didn't happen), so that case borrows the STALLED band's own amber
+    // attention colour (base `.band`, never `is-sleeping`'s muted override) and its warning icon,
+    // and states the one thing an operator can do: wake it by hand.
+    if (state === 'sleeping') {
+      const wakeAt = st.status.kind === 'Sleeping' ? st.status.wake_at : undefined;
+      const overdue = overdueOfStatus(st.status) ?? { overdue: false };
+      const wakeClock = wakeAt ? esc(clock(wakeAt)) : '-';
+      const cls = overdue.overdue ? 'is-overdue' : 'is-sleeping';
+      const icon = overdue.overdue ? WARN_ICO : SLEEP_ICO;
+      return `<div class="band ${cls}">${icon}
+        <span>${sleepingBandHtml(wakeClock, overdue)}</span></div>`;
+    }
+    // SIGNAL WAIT: a suspension parked on an external system, not a person (see
+    // `run-model.ts` GROUP, the same PROGRESS call `sleeping` makes): plain words, no jargon, and
+    // NO "…in inbox" pointer, because this run is never an Inbox card (see `inbox.ts#cardKindOf`).
+    // An operator can still stand in for the missing webhook: the raw-JSON resume form below is
+    // the one resume-by-hand path left for this run, kept deliberately small (this is the rare
+    // stand-in case, not the primary path a human gate offers via its generated Inbox form).
+    if (state === 'suspended' && isSignalWait(st.status)) {
+      const reason = st.status.kind === 'Suspended' ? st.status.reason : '';
+      if (this.signalResumeDone()) {
+        return `<div class="band is-signal">${SIGNAL_ICO}
+          <span><b>Resumed by hand.</b> The appended input should be picked up the next time this run's driver runs it.</span></div>`;
+      }
+      const err = this.signalResumeError();
+      return `<div class="band is-signal" data-signal-band>${SIGNAL_ICO}
+        <div class="signal-body">
+          <span><b>Awaiting a signal.</b>${reason ? ` ${esc(reason)}` : ''} An external system is expected to resume this run; there is nothing for a person to do until it arrives.</span>
+          <form class="signal-form" data-signal-form>
+            <label class="sr" for="signal-resume-input">Resume input, as JSON</label>
+            <textarea id="signal-resume-input" data-signal-resume-input rows="2" placeholder="Standing in for the signal by hand? Paste the resume input as JSON."></textarea>
+            ${err ? `<p class="signal-err">${esc(err)}</p>` : ''}
+            <button class="link-btn" type="submit" ${this.signalResumeSubmitting() ? 'disabled' : ''}>${this.signalResumeSubmitting() ? 'Resuming…' : 'Resume by hand'}</button>
+          </form>
+        </div></div>`;
+    }
     if (!isWaitingState(state)) return '';
     const action: Record<string, [string, string]> = {
       needs_reconciliation: [
@@ -567,6 +666,38 @@ export class Inspector implements AfterViewInit {
     return `<div class="band">${WARN_ICO}
       <span><b>${esc(labelOf(state))}.</b> ${a[1]}</span>
       <button class="link-btn" type="button" data-goto="inbox">${a[0]}</button></div>`;
+  }
+
+  /** The signal-wait band's resume-by-hand submit: an empty textarea resumes with no input
+   *  (a signal wait's `input_schema` often describes a payload nobody types by hand), a non-empty
+   *  one must parse as JSON. Posts straight to `POST /v1/runs/{id}/resume`, the same endpoint the
+   *  Inbox's generated form calls, then flips to the done state; the run's own event stream (this
+   *  Inspector is already subscribed to it) picks up the appended `Resumed` event as it would any
+   *  live append, so the header/band re-fold on their own once it arrives. */
+  private async onSignalResumeSubmit(): Promise<void> {
+    const runId = this.viewService.runId();
+    if (!runId || this.signalResumeSubmitting()) return;
+    const textarea = this.bandEl?.nativeElement.querySelector<HTMLTextAreaElement>('[data-signal-resume-input]');
+    const text = (textarea?.value ?? '').trim();
+    let input: unknown;
+    if (text) {
+      try {
+        input = JSON.parse(text);
+      } catch (ex) {
+        this.signalResumeError.set(`Not valid JSON: ${errorMessage(ex)}`);
+        return;
+      }
+    }
+    this.signalResumeError.set(undefined);
+    this.signalResumeSubmitting.set(true);
+    try {
+      await this.client.resume(runId, input);
+      this.signalResumeDone.set(true);
+    } catch (ex) {
+      this.signalResumeError.set(errorMessage(ex));
+    } finally {
+      this.signalResumeSubmitting.set(false);
+    }
   }
 
   // ── timeline ──────────────────────────────────────────────────────────────
@@ -637,7 +768,7 @@ export class Inspector implements AfterViewInit {
       derived.innerHTML = `
         ${banner}
         <div class="drow"><dt>status</dt><dd>${statusDd}</dd></div>
-        <div class="drow"><dt>group</dt><dd>${groupOf(state)}</dd></div>
+        <div class="drow"><dt>group</dt><dd>${groupOfStatus(st.status)}</dd></div>
         <div class="drow"><dt>next_seq</dt><dd>${st.next_seq}</dd></div>
         <div class="drow"><dt>usage.input</dt><dd>${int(st.usage.input_tokens)}</dd></div>
         <div class="drow"><dt>usage.output</dt><dd>${int(st.usage.output_tokens)}</dd></div>
@@ -918,6 +1049,13 @@ export class Inspector implements AfterViewInit {
     this.bandEl?.nativeElement.addEventListener('click', (e) => {
       const b = (e.target as HTMLElement).closest<HTMLElement>('[data-goto]');
       if (b) this.viewService.go('inbox');
+    });
+    // the signal-wait band's resume-by-hand form: delegated so it survives renderBand()'s innerHTML
+    // replacement (the same reason the "…in inbox" link above is wired the same way)
+    this.bandEl?.nativeElement.addEventListener('submit', (e) => {
+      if (!(e.target as HTMLElement).closest('[data-signal-form]')) return;
+      e.preventDefault();
+      void this.onSignalResumeSubmit();
     });
     // the time-travel preview banner's "Jump to live": folds back to the head of the log
     this.derivedEl?.nativeElement.addEventListener('click', (e) => {

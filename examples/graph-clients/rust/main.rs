@@ -480,6 +480,7 @@ async fn main() -> Result<()> {
     let ParkReason::Suspended {
         reason,
         input_schema,
+        ..
     } = reason
     else {
         bail!("the escalated run parked at `{node}`, but on a budget rather than the gate");

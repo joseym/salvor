@@ -47,6 +47,8 @@ export interface WfNode {
   readonly maxIterations?: number;
   readonly stopWhen?: string;
   readonly join?: string;
+  /** Delay-specific payload: how long the run waits, in whole seconds, before the walk continues. */
+  readonly seconds?: number;
   /**
    * THE DOCUMENT PAYLOAD this node is a reading of, carried verbatim.
    *
@@ -101,6 +103,8 @@ export function nodeDoes(n: WfNode): string {
       return `fans out over a list, ${n.concurrency ?? 0} at a time`;
     case 'fold':
       return `iterates up to ${n.maxIterations ?? 0} times, then ${n.join ?? 'joins'}`;
+    case 'delay':
+      return `waits ${n.seconds ?? 0}s, then continues`;
   }
 }
 
@@ -160,6 +164,8 @@ export function documentNode(n: GraphNode): WfNode {
         join: joinLabel(n.payload.join),
         body: n.payload.body.kind === 'node' ? { node: n.payload.body.value } : {},
       };
+    case 'delay':
+      return { ...base, seconds: n.payload.seconds };
   }
 }
 
@@ -350,6 +356,10 @@ function requiredPayload(n: WfNode): Record<string, unknown> {
         stop_when: n.stopWhen ?? 'false',
         join: { kind: 'last' },
       };
+    case 'delay':
+      // 1 second: the smallest wait the validator accepts, the same floor `map`'s worker count
+      // and `fold`'s iteration bound start at above.
+      return { id: n.id, seconds: n.seconds ?? 1 };
   }
 }
 

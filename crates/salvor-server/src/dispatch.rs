@@ -7,6 +7,9 @@
 //! - a **parked** run (suspended, or budget-exceeded) resumes with input;
 //! - a **crashed** run (running, or interrupted mid model or tool step)
 //!   recovers with no input;
+//! - a **sleeping** run carries its deadline, and the caller decides against
+//!   its own clock: due, it re-drives like a crashed one; early, it is
+//!   refused and the instant is the evidence;
 //! - a run that **needs reconciliation** is refused, and its recorded write
 //!   intent is the evidence a human resolves it with;
 //! - a **finished** run (completed, failed, or operator-abandoned) is reported
@@ -19,6 +22,7 @@
 //! status and a JSON body for the server).
 
 use salvor_core::{PendingCall, RunState, RunStatus, UnresolvedWrite};
+use time::OffsetDateTime;
 
 /// Whether a resume should validate and expect an input, or run with none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +42,23 @@ pub enum Disposition {
     Resume(ResumeKind),
     /// The run crashed mid-step and recovers with no input.
     Recover,
+    /// The run is parked on a durable timer. Carries the recorded wake instant,
+    /// which is both the evidence a refusal names and the value the caller
+    /// tests its clock against.
+    ///
+    /// The clock is not read here, and the disposition is not "recover" or
+    /// "refuse" on its own, because this module holds no clock and must not:
+    /// the same state means "drive it" to a waker whose sweep found the run
+    /// due and "refuse" to a person resuming it an hour early, and only the
+    /// caller knows which it is. Both surfaces compare `wake_at` against the
+    /// clock they already drive with, so neither can decide differently from
+    /// the [`RunCtx::await_wake`](salvor_runtime::RunCtx::await_wake) that
+    /// enforces the deadline inside the run.
+    Sleeping {
+        /// The instant the run's recorded `SleepStarted` said it may continue
+        /// at.
+        wake_at: OffsetDateTime,
+    },
     /// The run needs human reconciliation. Carries the dangling write intent
     /// so the caller can show it as evidence.
     Reconcile(PendingCall),
@@ -67,6 +88,17 @@ pub fn classify(state: &RunState) -> Disposition {
         RunStatus::Running | RunStatus::AwaitingModel | RunStatus::AwaitingTool => {
             Disposition::Recover
         }
+        // A sleeping run continues by being driven with no input, which is
+        // mechanically a recovery, so waking still needs no verb: both wakers
+        // (`salvor wake`, the server's sweeper) re-drive a due run through the
+        // ordinary path. What this arm will not do is answer for a caller that
+        // is early. Driving early was always harmless (`RunCtx::await_wake`
+        // reads the clock, records nothing, and leaves the run asleep) but it
+        // was also silent, and a person who typed `salvor resume` deserves to
+        // be told the run is on a timer and how long is left rather than to
+        // watch a no-op. So the deadline travels out of here and the caller
+        // decides.
+        RunStatus::Sleeping { wake_at } => Disposition::Sleeping { wake_at: *wake_at },
         RunStatus::NeedsReconciliation => {
             // A needs-reconciliation state always carries the pending write
             // intent whose completion is missing; if it somehow did not, there

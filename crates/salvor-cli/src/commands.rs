@@ -28,6 +28,7 @@
 //! `salvor history`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::error::Error as StdError;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -37,7 +38,7 @@ use salvor_engine::{
     EngineError, ForkError, GraphOutcome, ToolResolver, WriteHazard, graph_hash, plan_fork,
     run_graph,
 };
-use salvor_graph::{Graph, Node};
+use salvor_graph::{Graph, Node, ToolNode};
 use salvor_runtime::{
     Agent, ParkReason, RunCtx, RunOutcome, Runtime, RuntimeError, validate_labels,
 };
@@ -46,10 +47,11 @@ use salvor_server::{
     AgentDefinition, AgentFactory, AppState, BuiltAgent, ClientToolDecl, ClientToolRegistry,
     DefFormat, LlmModelExecutor, ToolRegistry,
 };
-use salvor_store::{EventStore, SqliteStore};
+use salvor_store::{EventStore, SqliteStore, StoreError};
 use salvor_tools::DynTool;
 use salvor_tools::mcp::McpServer;
 use serde_json::Value;
+use time::OffsetDateTime;
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
@@ -58,7 +60,7 @@ use crate::checkout;
 use crate::cli::{
     AbandonArgs, AgentHashArgs, AgentValidateArgs, BuildArgs, CompletionsArgs, ForkArgs,
     GraphRunArgs, GraphValidateArgs, HistoryArgs, ListArgs, ReplayArgs, ResolveArgs, ResumeArgs,
-    RunArgs, ServeArgs,
+    RunArgs, ServeArgs, WakeArgs,
 };
 use crate::dev_server::DevServer;
 use crate::render;
@@ -147,6 +149,7 @@ pub async fn run(store_path: &Path, args: RunArgs) -> Result<u8> {
         outcome.map_err(|error| contextualize_auth_error(error, &config))?,
         &uuid,
         &agent_path,
+        store_path,
     )
 }
 
@@ -248,6 +251,29 @@ pub async fn resume(store_path: &Path, args: ResumeArgs) -> Result<u8> {
             }
             return Ok(0);
         }
+        // A due run drives on through the recover path below, which is the
+        // whole of waking; `salvor wake` reaches it by calling this very
+        // function for each run its sweep found due. An early one is refused
+        // and told how long is left, because the drive would record nothing
+        // and a silent no-op reads like a bug.
+        Disposition::Sleeping { wake_at } => {
+            let now = OffsetDateTime::now_utc();
+            if now < wake_at {
+                print!(
+                    "{}",
+                    render::sleeping_report(
+                        &uuid,
+                        wake_at,
+                        wake_at - now,
+                        &args.agents,
+                        args.graph.as_deref(),
+                        Some(store_path),
+                        render::DEFAULT_REPORT_WIDTH,
+                    )
+                );
+                return Ok(1);
+            }
+        }
         Disposition::NotStarted => bail!("run {uuid} has no recorded events"),
         Disposition::Resume(_) | Disposition::Recover => {}
     }
@@ -257,7 +283,7 @@ pub async fn resume(store_path: &Path, args: ResumeArgs) -> Result<u8> {
     // only the re-drive differs, because the log records the graph's hash, not
     // the document. See `resume_graph`.
     if is_graph_run(&log) {
-        return resume_graph(store, run_id, &uuid, &log, &args, disposition).await;
+        return resume_graph(store, run_id, &uuid, &log, &args, disposition, store_path).await;
     }
 
     // An agent run rebuilds its one agent. Exactly one `--agent` is expected.
@@ -269,6 +295,11 @@ pub async fn resume(store_path: &Path, args: ResumeArgs) -> Result<u8> {
         runtime = runtime.with_labels(labels.clone());
     }
 
+    // A run woken on schedule and a run recovered after a crash both continue
+    // through `recover`, so the disposition is the only thing that can tell
+    // them apart in the log. It has to: a scheduled wake that logs a crash
+    // sends an operator hunting a fault that never happened.
+    let waking = matches!(disposition, Disposition::Sleeping { .. });
     let outcome = match disposition {
         Disposition::Resume(_) => {
             let raw = args.input.as_deref().context(
@@ -278,15 +309,27 @@ pub async fn resume(store_path: &Path, args: ResumeArgs) -> Result<u8> {
             tracing::info!(run_id = %uuid, "resuming parked run");
             runtime.resume(&agent, run_id, input).await
         }
-        // Recover: the process died mid-step (running or awaiting a step).
+        // Recover: the process died mid-step (running or awaiting a step), or
+        // its timer came due.
         _ => {
             if args.input.is_some() {
-                tracing::warn!(
-                    run_id = %uuid,
-                    "this run crashed mid-step; --input is ignored when recovering"
-                );
+                if waking {
+                    tracing::warn!(
+                        run_id = %uuid,
+                        "a sleeping run takes no input; --input is ignored when waking it"
+                    );
+                } else {
+                    tracing::warn!(
+                        run_id = %uuid,
+                        "this run crashed mid-step; --input is ignored when recovering"
+                    );
+                }
             }
-            tracing::info!(run_id = %uuid, "recovering crashed run");
+            if waking {
+                tracing::info!(run_id = %uuid, "waking sleeping run");
+            } else {
+                tracing::info!(run_id = %uuid, "recovering crashed run");
+            }
             runtime.recover(&agent, run_id).await
         }
     };
@@ -296,7 +339,629 @@ pub async fn resume(store_path: &Path, args: ResumeArgs) -> Result<u8> {
         outcome.map_err(|error| contextualize_auth_error(error, &config))?,
         &uuid,
         agent_path,
+        store_path,
     )
+}
+
+/// `salvor wake`: drive every run whose durable timer has come due, then exit.
+///
+/// Nothing wakes a sleeping run on its own. A run parked on a timer is passive
+/// data with the deadline recorded in its log, and it moves again only when
+/// something re-drives it; `salvor serve` has a sweeper doing that on an
+/// interval, and this verb is the same job for an operator with no long-lived
+/// server, one pass per invocation, cron-shaped.
+///
+/// It routes every due run through [`resume`], because waking a run IS resuming
+/// it: a sleeping run continues with no input supplied, which is exactly what
+/// `resume` already does for a run it classifies as recoverable, and
+/// [`RunCtx::await_wake`](salvor_runtime::RunCtx::await_wake) enforces the
+/// deadline itself against the clock. So this handler holds no drive loop of
+/// its own, and `--agent`/`--graph` are `resume`'s flags with `resume`'s
+/// validation: whatever that verb needs to rebuild a run, this one needs too.
+///
+/// # Exit code
+///
+/// `0` unless a drive genuinely failed. A run that woke and went straight back
+/// to sleep, or woke and parked at a gate, is ordinary operation and reported
+/// as such; a cron entry that alerted on either would alert on nothing being
+/// wrong. Nor is a run another driver got to first: two sweeps racing at the
+/// same due run is exactly what the exactly-once guarantee is for, and the
+/// loser's job was done for it. What does fail is a run this invocation could
+/// not drive at all: a missing `--agent` or `--graph`, a document whose hash
+/// does not match, a divergence. That exits `1`, but only after every other due
+/// run has still had its turn, so one unwakeable run never costs the rest their
+/// sweep.
+///
+/// A `--dry-run` follows the same rule against the same question asked without
+/// driving: `1` when a due run could not be woken with the files given, or when
+/// a file the operator gave could not itself be loaded even if no due run
+/// currently needs it (see [`check_wake_files`]), so the crontab line an
+/// operator is about to save can be smoke-tested by running it.
+pub async fn wake(store_path: &Path, args: WakeArgs) -> Result<u8> {
+    let store = open_store(store_path)?;
+    // The real clock, read once, so every run in this sweep is measured
+    // against one instant rather than against a time that drifts as the sweep
+    // works through the list.
+    let now = OffsetDateTime::now_utc();
+    let due = salvor_runtime::due_runs(store.as_ref(), now).await?;
+
+    if due.is_empty() {
+        match next_sleeping_deadline(store.as_ref()).await? {
+            Some(wake_at) => println!(
+                "nothing to wake: the next run in {} is due at {} (in {})",
+                store_path.display(),
+                render::format_ts(wake_at),
+                render::format_duration(wake_at - now)
+            ),
+            None => println!(
+                "nothing to wake: no run in {} is sleeping",
+                store_path.display()
+            ),
+        }
+        return Ok(0);
+    }
+
+    if args.dry_run {
+        let file_failures = check_wake_files(&args);
+        let previews = preview_due_runs(store.as_ref(), &due, &args).await?;
+        print!("{}", render_wake_preview(&file_failures, &previews, now));
+        let unwakeable = previews
+            .iter()
+            .filter(|preview| preview.readiness.is_blocked())
+            .count();
+        return Ok(u8::from(unwakeable > 0 || !file_failures.is_empty()));
+    }
+
+    println!(
+        "{} run(s) due as of {now}:",
+        due.len(),
+        now = render::format_ts(now)
+    );
+    let mut failures = 0_usize;
+    let mut taken = 0_usize;
+    for run in &due {
+        let uuid = run.run_id.as_uuid().to_string();
+        println!("\n{uuid} (due {})", render::format_ts(run.wake_at));
+        // The log as this sweep found it. A drive that fails reads the same
+        // whether nothing could drive the run or another driver had already
+        // driven it; what the run looked like before and what it reads as
+        // after is what tells those apart (see `classify_failed_wake`). A read
+        // that fails here is this run's own failure, not the whole sweep's: it
+        // is reported on this run's line and the sweep still moves on to the
+        // next due run, exactly as a drive failure does below.
+        let events_before = match store.read_log(run.run_id).await {
+            Ok(log) => log.len(),
+            Err(error) => {
+                failures += 1;
+                println!(
+                    "  {}",
+                    describe_unreadable(&uuid, ReadTiming::BeforeTheDrive, &error)
+                );
+                continue;
+            }
+        };
+        let outcome = resume(
+            store_path,
+            ResumeArgs {
+                run_id: uuid.clone(),
+                agents: args.agents.clone(),
+                graph: args.graph.clone(),
+                input: None,
+            },
+        )
+        .await;
+        // What the re-drive actually left behind, folded from the log it just
+        // wrote, so the report states the run's state rather than assuming the
+        // drive's own report covered it. This read can fail on its own, apart
+        // from whatever the drive itself did (a store hiccup between the drive
+        // and this read, the torn-read failure mode `salvor-store` is fixed
+        // against separately); when it does, this run's outcome cannot be
+        // told, so it is reported as unreadable rather than aborting every run
+        // still waiting for its turn.
+        let log = match store.read_log(run.run_id).await {
+            Ok(log) => log,
+            Err(error) => {
+                failures += 1;
+                println!(
+                    "  {}",
+                    describe_unreadable(&uuid, ReadTiming::AfterTheDrive, &error)
+                );
+                continue;
+            }
+        };
+        let status = derive_state(&log).status;
+        match outcome {
+            Ok(_) => println!("  {uuid} is now {}", render::status_label(&status)),
+            Err(error) => {
+                match classify_failed_wake(&error, run.wake_at, events_before, &status, log.len()) {
+                    FailedWake::TakenByAnotherDriver => {
+                        taken += 1;
+                        tracing::info!(
+                            run_id = %uuid,
+                            %error,
+                            "another driver moved this run while this drive was failing"
+                        );
+                        println!("  {uuid} {}", describe_taken(&status));
+                    }
+                    FailedWake::NotWoken => {
+                        failures += 1;
+                        println!("  {uuid} was not woken: {error:#}");
+                    }
+                }
+            }
+        }
+    }
+
+    if taken > 0 {
+        println!(
+            "\n{taken} of {} due run(s) were driven by something else while this sweep ran; \
+             exactly one driver wakes a run and it was not this one",
+            due.len()
+        );
+    }
+    if failures > 0 {
+        println!(
+            "\n{failures} of {} due run(s) could not be driven; every due run was tried, \
+             and each line above says what it needs",
+            due.len()
+        );
+        return Ok(1);
+    }
+    Ok(0)
+}
+
+/// The earliest wake instant among every run this store holds that folds to
+/// [`RunStatus::Sleeping`], or `None` when not one of its runs is sleeping at
+/// all.
+///
+/// Called only once a sweep already knows nothing is DUE, to answer the
+/// question that "nothing to wake" alone cannot: whether there are no timers
+/// in this store to begin with, or whether the nearest one simply has not
+/// come due yet. That distinction is exactly what `salvor list` already folds
+/// per run (see its handler above), so this walks every run's log the same
+/// way `list` does rather than inventing a second way to derive a status.
+async fn next_sleeping_deadline(store: &dyn EventStore) -> Result<Option<OffsetDateTime>> {
+    let summaries = store.list_runs().await?;
+    let mut earliest: Option<OffsetDateTime> = None;
+    for summary in summaries {
+        let log = store.read_log(summary.run_id).await?;
+        if let RunStatus::Sleeping { wake_at } = derive_state(&log).status {
+            earliest = Some(match earliest {
+                Some(current) if current <= wake_at => current,
+                _ => wake_at,
+            });
+        }
+    }
+    Ok(earliest)
+}
+
+/// What a sweep should say about one due run whose drive returned an error.
+///
+/// Two very different things arrive as the same `Err`. A run nothing could
+/// rebuild, or one whose drive broke partway, is a genuine failure of this
+/// invocation. A run another driver was waking at the same moment refuses this
+/// one at the store (`database is locked`), which is the exactly-once
+/// guarantee doing its job: the run is fine, the work happened, and this
+/// process simply lost the race. Reporting the second as the first tells an
+/// operator to re-drive a completed run and alerts a crontab on nothing being
+/// wrong.
+///
+/// Nothing here reads the error's text, which is a storage backend's wording
+/// and no contract of ours. Two typed signals decide it instead.
+///
+/// The first is [`StoreError::Conflict`] anywhere in the error's chain: the
+/// store refusing this drive's append because that position was already
+/// taken. Only another writer on the same run can produce it, so it names the
+/// race outright, whatever the run happens to read as at the instant this
+/// sweep looks (mid-drive, a winner's run reads `running`).
+///
+/// The second is the run's own state, for the loser that arrives late enough
+/// to find the work already done and never gets as far as an append. It rests
+/// on what a FAILED drive can leave behind: a drive that parked a run or
+/// finished it returns success, so a run found parked at a gate, out of
+/// budget, completed, abandoned, or asleep on a NEW deadline was driven there
+/// by something, and that something was not this failing drive. Every other
+/// state, this drive could have left itself (a half-driven run reads
+/// `running`, and a permanent refusal records `failed`), so it stays the
+/// failure it looks like rather than being explained away as someone else's
+/// work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailedWake {
+    /// The drive's error is the news: this sweep failed to do its job, whether
+    /// it left the run untouched or broke partway through it.
+    NotWoken,
+    /// Another driver moved the run while this drive was failing. The run's
+    /// own state is the news; the error describes this process, not the run.
+    TakenByAnotherDriver,
+}
+
+/// Which of the sweep's two reads of one due run's log failed to read at all:
+/// see [`describe_unreadable`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadTiming {
+    /// The read the sweep takes before driving the run, to learn how many
+    /// events it starts with (see `classify_failed_wake`'s `events_before`).
+    BeforeTheDrive,
+    /// The read the sweep takes after driving the run, to fold its resulting
+    /// status and report it.
+    AfterTheDrive,
+}
+
+/// What a sweep prints for one due run whose log this invocation could not
+/// read at all, before or after the drive.
+///
+/// A run in this state is not classified against [`classify_failed_wake`]:
+/// that decision needs the log this read failed to produce (a folded status,
+/// an event count), so there is nothing to classify against. It is reported
+/// plainly as not woken instead, the same as any other run this sweep failed
+/// to do its job for, and the sweep still moves on to the one after it.
+///
+/// Split out from the loop so the wording is a unit test rather than a rerun
+/// of the whole binary. Proving the sweep truly continues past a run in this
+/// state, rather than aborting, needs a store that fails one read mid-sweep;
+/// that is the same distance from a hermetic test as staging the real race
+/// [`classify_failed_wake`] is proven against, which this module's docs
+/// explain is left to a test that injects the failure directly rather than
+/// racing two real drivers.
+#[must_use]
+pub fn describe_unreadable(uuid: &str, when: ReadTiming, error: &StoreError) -> String {
+    match when {
+        ReadTiming::BeforeTheDrive => {
+            format!("{uuid} was not woken: could not read its log before driving it: {error}")
+        }
+        ReadTiming::AfterTheDrive => {
+            format!("{uuid} was not woken: could not re-read {uuid} after the drive: {error}")
+        }
+    }
+}
+
+/// What a sweep says about a run [`FailedWake::TakenByAnotherDriver`] was
+/// classified for, once the status folded from its log is in hand.
+///
+/// A folded status is only trustworthy news here when it is one a FINISHED or
+/// PARKED drive leaves behind: [`RunStatus::Completed`], [`RunStatus::Failed`],
+/// [`RunStatus::Abandoned`], [`RunStatus::Suspended`],
+/// [`RunStatus::BudgetExceeded`], or [`RunStatus::Sleeping`]. Naming the
+/// status is safe there because nothing but a driver that got all the way
+/// through could have left the run in one of those. Every other status this
+/// sweep might read (`Running`, `AwaitingModel`, `AwaitingTool`,
+/// `NeedsReconciliation`, `NotStarted`) is one the *other* driver's still-open
+/// write could leave behind while it is mid-drive, so naming it would read as
+/// a diagnosis (`needs-reconciliation`, say) of a run that is merely being
+/// worked on by someone else. That case gets a status-free sentence instead.
+#[must_use]
+pub fn describe_taken(status: &RunStatus) -> String {
+    if matches!(
+        status,
+        RunStatus::Completed { .. }
+            | RunStatus::Failed { .. }
+            | RunStatus::Abandoned { .. }
+            | RunStatus::Suspended { .. }
+            | RunStatus::BudgetExceeded { .. }
+            | RunStatus::Sleeping { .. }
+    ) {
+        format!(
+            "was picked up by another driver and is now {}",
+            render::status_label(status)
+        )
+    } else {
+        "was picked up by another driver, which is still driving it; this sweep recorded nothing"
+            .to_owned()
+    }
+}
+
+/// Decides which of the two a failed drive was, from the error it returned,
+/// the deadline the sweep found the run at, and the log before and after. See
+/// [`FailedWake`].
+#[must_use]
+pub fn classify_failed_wake(
+    error: &anyhow::Error,
+    due_at: OffsetDateTime,
+    events_before: usize,
+    status_after: &RunStatus,
+    events_after: usize,
+) -> FailedWake {
+    // The store arbitrating two writers on one run. It says what no reading of
+    // the run's state can say on its own: the winner may still be mid-drive,
+    // so the run reads `running` and looks for all the world like a run this
+    // sweep broke halfway through.
+    if lost_a_position_race(error) {
+        return FailedWake::TakenByAnotherDriver;
+    }
+    // Exactly as the sweep found it: nothing appended, still asleep on the
+    // deadline this sweep picked it up for. Nothing drove it, this one least
+    // of all.
+    let untouched = events_after == events_before
+        && matches!(status_after, RunStatus::Sleeping { wake_at } if *wake_at == due_at);
+    if untouched {
+        return FailedWake::NotWoken;
+    }
+    match status_after {
+        RunStatus::Completed { .. }
+        | RunStatus::Abandoned { .. }
+        | RunStatus::Suspended { .. }
+        | RunStatus::BudgetExceeded { .. } => FailedWake::TakenByAnotherDriver,
+        // A new deadline means a drive got past this timer and recorded the
+        // next one.
+        RunStatus::Sleeping { wake_at } if *wake_at != due_at => FailedWake::TakenByAnotherDriver,
+        _ => FailedWake::NotWoken,
+    }
+}
+
+/// Whether this one error IS the store refusing an append because that
+/// position was already taken.
+///
+/// Three shapes, because [`StoreError::Conflict`] reaches a caller wearing
+/// whichever coats the layers it passed through put on it: bare from the
+/// store, inside [`RuntimeError::Store`] from a persist, and inside
+/// [`EngineError::Runtime`] on top of that from a graph drive. None of the
+/// three is reachable by walking `source` alone. The runtime's variant carries
+/// the store error by value rather than as a `source`, and the engine's is
+/// `#[error(transparent)]`, which forwards `source` to the runtime error's own
+/// (`None`) and so hides the runtime error as a link too. Every coat has to be
+/// opened by name.
+fn is_position_conflict(cause: &(dyn StdError + 'static)) -> bool {
+    matches!(
+        cause.downcast_ref::<StoreError>(),
+        Some(StoreError::Conflict { .. })
+    ) || matches!(
+        cause.downcast_ref::<RuntimeError>(),
+        Some(RuntimeError::Store(StoreError::Conflict { .. }))
+    ) || matches!(
+        cause.downcast_ref::<EngineError>(),
+        Some(EngineError::Runtime(RuntimeError::Store(
+            StoreError::Conflict { .. }
+        )))
+    )
+}
+
+/// Whether anything in this error's chain is that refusal.
+fn lost_a_position_race(error: &anyhow::Error) -> bool {
+    error.chain().any(is_position_conflict)
+}
+
+/// The same question of a drive error that has not been wrapped in an
+/// [`anyhow::Error`] yet, walking its own `source` chain.
+fn drive_lost_a_position_race(error: &EngineError) -> bool {
+    let mut current: Option<&(dyn StdError + 'static)> = Some(error);
+    while let Some(cause) = current {
+        if is_position_conflict(cause) {
+            return true;
+        }
+        current = cause.source();
+    }
+    false
+}
+
+/// One due run as `--dry-run` reports it.
+struct WakePreview {
+    /// The run's id.
+    uuid: String,
+    /// The deadline its log recorded.
+    wake_at: OffsetDateTime,
+    /// What the log says the run is and what it recorded, ready to print:
+    /// `graph run, recorded document sha256:...`.
+    identity: String,
+    /// Whether the files this invocation was given would wake it.
+    readiness: WakeReadiness,
+}
+
+/// Whether waking one due run with the files given would get as far as a drive.
+enum WakeReadiness {
+    /// They would: `with` is the file the run would be rebuilt from.
+    Ready {
+        /// The `--agent` or `--graph` file that satisfies the run.
+        with: String,
+    },
+    /// They would not, and this is the refusal a real wake gives, verbatim,
+    /// because it comes from the same resolution the drive runs.
+    Blocked {
+        /// The refusal, already formatted with its context chain.
+        refusal: String,
+    },
+}
+
+impl WakeReadiness {
+    /// Whether this run could not be woken with the files given, which is what
+    /// decides a dry run's exit code.
+    fn is_blocked(&self) -> bool {
+        matches!(self, Self::Blocked { .. })
+    }
+}
+
+/// One `--agent` or `--graph` file the operator gave `wake --dry-run` that
+/// could not itself be loaded, checked independently of which run kind
+/// actually happens to be due today. See [`check_wake_files`].
+struct FileCheckFailure {
+    /// The flag and file, e.g. `--agent agents/writer.toml`.
+    what: String,
+    /// The load or parse error, already formatted with its context chain.
+    error: String,
+}
+
+/// Opens and parses every file the operator gave `wake --dry-run`, regardless
+/// of whether any due run actually needs it: every `--agent` file (through
+/// [`AgentConfig::load`], the same parse a real drive performs) and, when
+/// `--graph` is given, the graph document (through [`load_and_validate_graph`],
+/// the same strict parse `graph validate` runs).
+///
+/// This is what catches a typo in a flag no run *currently* due happens to
+/// need: [`preview_due_runs`]'s per-run readiness check only exercises the
+/// files a given run's kind actually asks for (an agent run never looks at
+/// `--graph`, a graph run never looks at `--agent`), so a crontab line with a
+/// bad path on the side it is not using today would otherwise preview clean
+/// and only fail once some other, currently-sleeping run needed it.
+fn check_wake_files(args: &WakeArgs) -> Vec<FileCheckFailure> {
+    let mut failures = Vec::new();
+    for path in &args.agents {
+        if let Err(error) = AgentConfig::load(path) {
+            failures.push(FileCheckFailure {
+                what: format!("--agent {}", path.display()),
+                error: format!("{error:#}"),
+            });
+        }
+    }
+    if let Some(graph_path) = &args.graph
+        && let Err(error) = load_and_validate_graph(graph_path)
+    {
+        failures.push(FileCheckFailure {
+            what: format!("--graph {}", graph_path.display()),
+            error: format!("{error:#}"),
+        });
+    }
+    failures
+}
+
+/// Asks of every due run what a real wake would ask of it, without driving
+/// anything: what kind of run it is, what it recorded, and whether the
+/// `--agent`/`--graph` files given satisfy it.
+///
+/// The refusals are the drive's own ([`resolve_graph_document`],
+/// [`single_agent`], the agent-file parse), so a dry run's answer is the real
+/// answer and a crontab line can be checked by running it with `--dry-run`
+/// before it is saved.
+///
+/// What a preview deliberately does not do is build anything: no MCP server is
+/// spawned and no agent is constructed. So the definition-level checks that
+/// need a built agent (an agent run's recorded `agent_def_hash`, which covers
+/// the MCP tool schemas, and a graph's `agent` or `tool` nodes resolving to a
+/// tool some given agent actually carries) still happen at the drive, and a
+/// preview says only that the files are the right shape for the run, not that
+/// the run will find every tool it needs inside them.
+///
+/// One shape of that gap needs no built agent to see, though: a graph whose
+/// document has a `tool` node at all, with no `--agent` file given for the
+/// drive to ever check that tool name against. That is not a question of
+/// whether the right agent was supplied, only of whether any agent was, so
+/// this walks the resolved document's nodes and blocks on it directly,
+/// naming the tool node, rather than reporting the run "ready" and letting a
+/// real wake discover the same gap a step later.
+async fn preview_due_runs(
+    store: &dyn EventStore,
+    due: &[salvor_runtime::DueRun],
+    args: &WakeArgs,
+) -> Result<Vec<WakePreview>> {
+    let mut previews = Vec::with_capacity(due.len());
+    for run in due {
+        let uuid = run.run_id.as_uuid().to_string();
+        let log = store.read_log(run.run_id).await?;
+        let (identity, readiness) = if is_graph_run(&log) {
+            let recorded = recorded_graph_hash(&log)
+                .unwrap_or_else(|| "no document (its log has no GraphRunStarted event)".to_owned());
+            let readiness = match resolve_graph_document(args.graph.as_deref(), &log, &uuid) {
+                Ok((path, document)) => {
+                    match tool_node_without_any_agent(&document, &args.agents) {
+                        Some(tool) => WakeReadiness::Blocked {
+                            refusal: format!(
+                                "tool node `{}` names tool `{}`; a graph with tool nodes needs \
+                                 at least one --agent file to carry them, and none was given",
+                                tool.id, tool.tool
+                            ),
+                        },
+                        None => WakeReadiness::Ready {
+                            with: path.display().to_string(),
+                        },
+                    }
+                }
+                Err(error) => WakeReadiness::Blocked {
+                    refusal: format!("{error:#}"),
+                },
+            };
+            (
+                format!("graph run, recorded document {recorded}"),
+                readiness,
+            )
+        } else {
+            let recorded = recorded_agent_def_hash(&log)
+                .unwrap_or_else(|| "no definition (its log has no RunStarted event)".to_owned());
+            let readiness = match single_agent(&args.agents)
+                .and_then(|path| AgentConfig::load(path).map(|_| path))
+            {
+                Ok(path) => WakeReadiness::Ready {
+                    with: path.display().to_string(),
+                },
+                Err(error) => WakeReadiness::Blocked {
+                    refusal: format!("{error:#}"),
+                },
+            };
+            (
+                format!("agent run, recorded definition {recorded}"),
+                readiness,
+            )
+        };
+        previews.push(WakePreview {
+            uuid,
+            wake_at: run.wake_at,
+            identity,
+            readiness,
+        });
+    }
+    Ok(previews)
+}
+
+/// The `--dry-run` listing: which files given could not even be loaded, which
+/// runs are due, how overdue each is, what each one is, and whether the files
+/// given would wake it. Prints and drives nothing, mirroring how `salvor fork
+/// --dry-run` previews a fork it does not create.
+///
+/// `file_failures` (see [`check_wake_files`]) is reported once, right under
+/// the header and ahead of the per-run listing, rather than against any one
+/// run: it is not any particular run's news, since it holds regardless of
+/// which run kind is actually due.
+fn render_wake_preview(
+    file_failures: &[FileCheckFailure],
+    previews: &[WakePreview],
+    now: OffsetDateTime,
+) -> String {
+    let mut out = format!(
+        "{} run(s) due as of {} (dry run):\n",
+        previews.len(),
+        render::format_ts(now)
+    );
+    for failure in file_failures {
+        out.push_str(&format!("  {}: {}\n", failure.what, failure.error));
+    }
+    let mut unwakeable = 0_usize;
+    for preview in previews {
+        out.push_str(&format!(
+            "  {} due {}, overdue by {}\n",
+            preview.uuid,
+            render::format_ts(preview.wake_at),
+            render::format_duration(now - preview.wake_at)
+        ));
+        out.push_str(&format!("    {}\n", preview.identity));
+        match &preview.readiness {
+            WakeReadiness::Ready { with } => {
+                out.push_str(&format!("    would wake with {with}\n"));
+            }
+            WakeReadiness::Blocked { refusal } => {
+                unwakeable += 1;
+                out.push_str(&format!(
+                    "    cannot be woken with these files: {refusal}\n"
+                ));
+            }
+        }
+    }
+    if unwakeable == 0 && file_failures.is_empty() {
+        out.push_str("nothing was driven. Drop --dry-run to wake these.\n");
+    } else {
+        out.push_str("nothing was driven.");
+        if unwakeable > 0 {
+            out.push_str(&format!(
+                " {unwakeable} of {} due run(s) could not be woken with the files given; pass \
+                 what each one names above.",
+                previews.len()
+            ));
+        }
+        if !file_failures.is_empty() {
+            out.push_str(&format!(
+                " {} file(s) given could not be loaded; see above.",
+                file_failures.len()
+            ));
+        }
+        out.push('\n');
+    }
+    out
 }
 
 /// `salvor fork`: fork a graph run from a node boundary into a NEW run, refusing
@@ -418,10 +1083,17 @@ pub async fn fork(store_path: &Path, args: ForkArgs) -> Result<u8> {
     let child_log = store.read_log(child_id).await?;
     let mut ctx = RunCtx::new(store, child_id, child_log)?;
     let outcome = run_graph(&mut ctx, &graph, &Value::Null, &agents, &tools).await;
-    let outcome =
-        settle_graph_drive(&mut ctx, &child_uuid, &args.graph, &args.agents, outcome).await;
+    let outcome = settle_graph_drive(
+        &mut ctx,
+        &child_uuid,
+        &args.graph,
+        &args.agents,
+        outcome,
+        store_path,
+    )
+    .await;
     close_servers(servers).await;
-    report_graph_outcome(outcome?, &child_uuid, &args.graph, &args.agents)
+    report_graph_outcome(outcome?, &child_uuid, &args.graph, &args.agents, store_path)
 }
 
 /// `salvor resolve`: record the completion of a dangling write by hand.
@@ -460,6 +1132,7 @@ pub async fn resolve(store_path: &Path, args: ResolveArgs) -> Result<u8> {
                     &args.agents,
                     args.graph.as_deref(),
                     graph_run,
+                    Some(store_path),
                     render::DEFAULT_REPORT_WIDTH
                 )
             );
@@ -569,6 +1242,12 @@ pub async fn list(store_path: &Path, args: ListArgs) -> Result<u8> {
         let log = store.read_log(summary.run_id).await?;
         let state = derive_state(&log);
         let status = render::status_label(&state.status).to_owned();
+        // Only a sleeping run has a wake instant; every other status leaves
+        // the WAKES AT column blank.
+        let wake_at = match &state.status {
+            RunStatus::Sleeping { wake_at } => Some(*wake_at),
+            _ => None,
+        };
 
         if !args.status.is_empty() && !args.status.iter().any(|s| s == &status) {
             continue;
@@ -585,7 +1264,7 @@ pub async fn list(store_path: &Path, args: ListArgs) -> Result<u8> {
                 continue;
             }
         }
-        rows.push((summary, status));
+        rows.push((summary, status, wake_at));
     }
 
     // The tail, not the head: a limit exists to show the runs that matter now, and the newest sit
@@ -769,7 +1448,10 @@ pub async fn serve(store_path: &Path, args: ServeArgs) -> Result<u8> {
     let mut state = AppState::new(store, factory)
         .with_model_executor(Arc::new(LlmModelExecutor::new(model_client)))
         .with_tool_registry(Arc::new(tool_registry))
-        .with_client_tools(Arc::new(client_tools));
+        .with_client_tools(Arc::new(client_tools))
+        // The wake sweeper's interval, on by default at 60s; `0` turns it off
+        // for an operator who wakes runs from cron with `salvor wake`.
+        .with_wake_interval(std::time::Duration::from_secs(args.wake_interval));
     // The client-driven-run lease TTL: how long a client run reports an attached
     // driver after its last guarded operation. Default 60s (set in AppState);
     // `SALVOR_CLIENT_LEASE_TTL_SECS`, when a positive integer, shortens it so a
@@ -1145,9 +1827,17 @@ pub async fn graph_run(store_path: &Path, args: GraphRunArgs) -> Result<u8> {
         ctx = ctx.with_labels(labels);
     }
     let outcome = run_graph(&mut ctx, &graph, &input, &agents, &tools).await;
-    let outcome = settle_graph_drive(&mut ctx, &uuid, &args.graph, &args.agents, outcome).await;
+    let outcome = settle_graph_drive(
+        &mut ctx,
+        &uuid,
+        &args.graph,
+        &args.agents,
+        outcome,
+        store_path,
+    )
+    .await;
     close_servers(servers).await;
-    report_graph_outcome(outcome?, &uuid, &args.graph, &args.agents)
+    report_graph_outcome(outcome?, &uuid, &args.graph, &args.agents, store_path)
 }
 
 /// Re-drives a parked or crashed GRAPH run, for [`resume`]'s graph branch.
@@ -1165,22 +1855,13 @@ async fn resume_graph(
     log: &[EventEnvelope],
     args: &ResumeArgs,
     disposition: Disposition,
+    store_path: &Path,
 ) -> Result<u8> {
-    let graph_path = args.graph.as_deref().context(
-        "this is a graph run; pass --graph <graph.json> (its hash must match the recorded run) to \
-         re-drive it, alongside the --agent files its agent nodes reference",
-    )?;
-    let graph = load_and_validate_graph(graph_path)?;
-    let hash = graph_hash(&graph)?;
-    let recorded =
-        recorded_graph_hash(log).context("this graph run's log has no GraphRunStarted event")?;
-    if hash != recorded {
-        bail!(
-            "the graph in {} hashes to {hash}, but run {uuid} recorded {recorded}; resume needs the \
-             SAME document the run started with (submit the changed graph as a new run instead)",
-            graph_path.display()
-        );
-    }
+    let (graph_path, graph) = resolve_graph_document(args.graph.as_deref(), log, uuid)?;
+    // See the agent branch of `resume`: waking a due run and recovering a
+    // crashed one take the same path, and only the disposition can keep the
+    // log honest about which one happened.
+    let waking = matches!(disposition, Disposition::Sleeping { .. });
     let (agents, servers) = build_graph_agents(&args.agents).await?;
     if let Err(error) = check_graph_resolvable(&graph, &agents) {
         close_servers(servers).await;
@@ -1210,19 +1891,38 @@ async fn resume_graph(
         }
         _ => {
             if args.input.is_some() {
-                tracing::warn!(
-                    run_id = %uuid,
-                    "this graph run crashed mid-step; --input is ignored when recovering"
-                );
+                if waking {
+                    tracing::warn!(
+                        run_id = %uuid,
+                        "a sleeping run takes no input; --input is ignored when waking it"
+                    );
+                } else {
+                    tracing::warn!(
+                        run_id = %uuid,
+                        "this graph run crashed mid-step; --input is ignored when recovering"
+                    );
+                }
             }
-            tracing::info!(run_id = %uuid, "recovering crashed graph run");
+            if waking {
+                tracing::info!(run_id = %uuid, "waking sleeping graph run");
+            } else {
+                tracing::info!(run_id = %uuid, "recovering crashed graph run");
+            }
         }
     }
     // The recorded input wins on replay, so a bare null is fine here.
     let outcome = run_graph(&mut ctx, &graph, &Value::Null, &agents, &tools).await;
-    let outcome = settle_graph_drive(&mut ctx, uuid, graph_path, &args.agents, outcome).await;
+    let outcome = settle_graph_drive(
+        &mut ctx,
+        uuid,
+        graph_path,
+        &args.agents,
+        outcome,
+        store_path,
+    )
+    .await;
     close_servers(servers).await;
-    report_graph_outcome(outcome?, uuid, graph_path, &args.agents)
+    report_graph_outcome(outcome?, uuid, graph_path, &args.agents, store_path)
 }
 
 /// Refuses a `--input` that does not satisfy the `approval_schema` of the gate
@@ -1267,6 +1967,38 @@ impl ToolResolver for AgentTools<'_> {
     fn resolve_tool(&self, name: &str) -> Option<&dyn DynTool> {
         self.0.values().find_map(|agent| agent.tools().get(name))
     }
+}
+
+/// The document a graph run's re-drive needs: the `--graph` file, validated,
+/// and hash-checked against the head its log recorded.
+///
+/// One function, because two verbs ask the same question. [`resume_graph`]
+/// asks it to drive the run; `wake --dry-run` asks it to say whether the files
+/// an operator is about to put in a crontab would wake the run at all. A
+/// preview that phrased these refusals in its own words would be a second
+/// contract to learn, and the whole worth of a dry run is that what it says is
+/// what the real thing will say.
+fn resolve_graph_document<'a>(
+    graph: Option<&'a Path>,
+    log: &[EventEnvelope],
+    uuid: &str,
+) -> Result<(&'a Path, Graph)> {
+    let graph_path = graph.context(
+        "this is a graph run; pass --graph <graph.json> (its hash must match the recorded run) to \
+         re-drive it, alongside the --agent files its agent nodes reference",
+    )?;
+    let graph = load_and_validate_graph(graph_path)?;
+    let hash = graph_hash(&graph)?;
+    let recorded =
+        recorded_graph_hash(log).context("this graph run's log has no GraphRunStarted event")?;
+    if hash != recorded {
+        bail!(
+            "the graph in {} hashes to {hash}, but run {uuid} recorded {recorded}; resume needs the \
+             SAME document the run started with (submit the changed graph as a new run instead)",
+            graph_path.display()
+        );
+    }
+    Ok((graph_path, graph))
 }
 
 /// Reads and strictly validates a graph document, refusing an invalid one with a
@@ -1319,6 +2051,28 @@ async fn build_graph_agents(paths: &[PathBuf]) -> Result<(HashMap<String, Agent>
     Ok((agents, servers))
 }
 
+/// The first `tool` node in `graph`, when `agents` (the raw `--agent` paths, not
+/// yet built) is empty; `None` when at least one `--agent` was given, whatever
+/// the graph contains.
+///
+/// This is coarser than [`check_graph_resolvable`]'s own tool check: that one
+/// asks whether some BUILT agent carries the exact tool a node names, which
+/// needs a live [`Agent`] with its tool set populated. This one asks the
+/// question a preview can still answer with nothing built at all: whether
+/// there is any agent to ask in the first place. A `tool` node has no model of
+/// its own to fall back on, so with zero `--agent` files given, every `tool`
+/// node in the document is unreachable regardless of which one it names, and
+/// `wake --dry-run` can say so directly instead of reporting the run "ready".
+fn tool_node_without_any_agent<'a>(graph: &'a Graph, agents: &[PathBuf]) -> Option<&'a ToolNode> {
+    if !agents.is_empty() {
+        return None;
+    }
+    graph.nodes.iter().find_map(|node| match node {
+        Node::Tool(tool) => Some(tool),
+        _ => None,
+    })
+}
+
 /// Checks every agent and tool the graph references resolves from what was
 /// provided, before any run head is written. An `agent` node (or a
 /// model-decision `branch`) whose hash matches no provided `--agent` fails with
@@ -1356,9 +2110,11 @@ fn check_graph_resolvable(graph: &Graph, agents: &HashMap<String, Agent>) -> Res
                 .any(|agent| agent.tools().get(&tool.tool).is_some())
         {
             bail!(
-                "tool node `{}` names tool `{}`, which none of the provided agents carry",
-                tool.id,
-                tool.tool
+                "the document names tool `{}` in node `{}`, which none of the provided agents carry; \
+                 every tool node must resolve before a graph run drives, so pass --agent with an \
+                 agent file whose tools include it",
+                tool.tool,
+                tool.id
             );
         }
     }
@@ -1396,6 +2152,14 @@ fn is_graph_run(log: &[EventEnvelope]) -> bool {
 fn recorded_graph_hash(log: &[EventEnvelope]) -> Option<String> {
     log.iter().find_map(|envelope| match &envelope.event {
         Event::GraphRunStarted { graph_hash, .. } => Some(graph_hash.clone()),
+        _ => None,
+    })
+}
+
+/// The `agent_def_hash` recorded in an agent run's `RunStarted` head.
+fn recorded_agent_def_hash(log: &[EventEnvelope]) -> Option<String> {
+    log.iter().find_map(|envelope| match &envelope.event {
+        Event::RunStarted { agent_def_hash, .. } => Some(agent_def_hash.clone()),
         _ => None,
     })
 }
@@ -1562,6 +2326,7 @@ async fn settle_graph_drive(
     graph_path: &Path,
     agents: &[PathBuf],
     outcome: Result<GraphOutcome, EngineError>,
+    store_path: &Path,
 ) -> Result<GraphOutcome> {
     let error = match outcome {
         Ok(outcome) => return Ok(outcome),
@@ -1576,10 +2341,18 @@ async fn settle_graph_drive(
              log, so re-driving reproduces it exactly; run {uuid} is recorded as failed, and \
              `salvor list` shows it as failed."
         )),
+        // A position conflict is the store arbitrating two writers on one run,
+        // so the triage below is the wrong advice twice over: the run is not
+        // waiting for anyone to re-drive it, and another driver is on it right
+        // now. It also cannot survive being formatted into a message, and a
+        // caller that has to tell a lost race from a broken drive (see
+        // `classify_failed_wake`) has nothing but the type to tell it by, so
+        // this one travels up whole.
+        Ok(false) if drive_lost_a_position_race(&error) => Err(error.into()),
         Ok(false) if has_head => Err(anyhow::anyhow!(
             "{error}\n\nrun {uuid} is recorded and resumable: every step it completed is durable, \
              and nothing was recorded past this failure. Re-drive it with:\n  {}",
-            graph_resume_command(uuid, graph_path, agents)
+            graph_resume_command(uuid, graph_path, agents, store_path)
         )),
         Ok(false) => Err(error.into()),
         Err(recording) => {
@@ -1594,19 +2367,34 @@ async fn settle_graph_drive(
 }
 
 /// The `salvor resume` command line that re-drives one graph run: the id, the
-/// document, and every `--agent` file the caller supplied, in the order they
-/// were given. One place, so the parked report and the transient-failure triage
-/// can never drift into telling an operator two different commands for the same
-/// run.
-fn graph_resume_command(uuid: &str, graph_path: &Path, agents: &[PathBuf]) -> String {
-    let agent_flags: String = agents
+/// store it lives in, the document, and every `--agent` file the caller
+/// supplied, in the order they were given. One place, so the parked report and
+/// the transient-failure triage can never drift into telling an operator two
+/// different commands for the same run. `--store` sits right after the id,
+/// matching the form [`render::parked_report`] and its siblings already print
+/// for an agent run, so the two verbs read as one convention rather than two.
+fn graph_resume_command(
+    uuid: &str,
+    graph_path: &Path,
+    agents: &[PathBuf],
+    store_path: &Path,
+) -> String {
+    format!(
+        "salvor resume {uuid} --store {} --graph {}{}",
+        store_path.display(),
+        graph_path.display(),
+        agent_flags(agents)
+    )
+}
+
+/// Every `--agent` file the caller supplied, in the order they were given, as
+/// command-line flags. Shared by the two commands a parked graph run is told to
+/// type: the `resume` above, and the `wake` a timer park needs instead.
+fn agent_flags(agents: &[PathBuf]) -> String {
+    agents
         .iter()
         .map(|path| format!(" --agent {}", path.display()))
-        .collect();
-    format!(
-        "salvor resume {uuid} --graph {}{agent_flags}",
-        graph_path.display()
-    )
+        .collect()
 }
 
 /// Prints the result of a graph drive: the final output on completion, or a
@@ -1617,6 +2405,7 @@ fn report_graph_outcome(
     uuid: &str,
     graph_path: &Path,
     agents: &[PathBuf],
+    store_path: &Path,
 ) -> Result<u8> {
     match outcome {
         GraphOutcome::Completed { output } => {
@@ -1630,10 +2419,27 @@ fn report_graph_outcome(
                 ParkReason::BudgetExceeded { budget, observed } => {
                     println!("  budget crossed: {budget:?} (observed {observed})");
                 }
+                ParkReason::Sleeping { wake_at } => {
+                    println!("  sleeping until: {}", render::format_ts(*wake_at));
+                }
+            }
+            // A timer park takes no input and is not resumed by hand: it is
+            // driven again once its deadline passes, which is what `wake`
+            // does for every run that is due. `--store` sits right after the
+            // verb here, matching how `render::parked_report`'s own sleeping
+            // hint places it after `salvor wake`.
+            if let ParkReason::Sleeping { .. } = reason {
+                println!(
+                    "it continues once the deadline passes:\n  salvor wake --store {} --graph {}{}",
+                    store_path.display(),
+                    graph_path.display(),
+                    agent_flags(agents)
+                );
+                return Ok(0);
             }
             println!(
                 "resume it with:\n  {} --input <json>",
-                graph_resume_command(uuid, graph_path, agents)
+                graph_resume_command(uuid, graph_path, agents, store_path)
             );
             Ok(0)
         }
@@ -1662,8 +2468,16 @@ async fn build_from_definition(definition: AgentDefinition) -> Result<BuiltAgent
 }
 
 /// Prints the final result of a completed run, or the parked report of a
-/// suspended one. Both are exit code 0.
-fn report_outcome(outcome: RunOutcome, uuid: &str, agent_path: &Path) -> Result<u8> {
+/// suspended one. Both are exit code 0. `store_path` is the store this
+/// command resolved (flag, then `SALVOR_STORE`, then the default), printed
+/// into the parked report's resume/wake hint so it is the real command to
+/// type.
+fn report_outcome(
+    outcome: RunOutcome,
+    uuid: &str,
+    agent_path: &Path,
+    store_path: &Path,
+) -> Result<u8> {
     match outcome {
         RunOutcome::Completed { output, .. } => {
             println!("{}", render::pretty_json(&output));
@@ -1672,7 +2486,13 @@ fn report_outcome(outcome: RunOutcome, uuid: &str, agent_path: &Path) -> Result<
         RunOutcome::Parked { reason, .. } => {
             print!(
                 "{}",
-                render::parked_report(uuid, &reason, agent_path, render::DEFAULT_REPORT_WIDTH)
+                render::parked_report(
+                    uuid,
+                    &reason,
+                    agent_path,
+                    Some(store_path),
+                    render::DEFAULT_REPORT_WIDTH
+                )
             );
             Ok(0)
         }

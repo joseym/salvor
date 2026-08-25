@@ -11,10 +11,19 @@ the one legal next event.
 The generic append carries only the control and deterministic-context events the
 client emits itself, which hold no secret and no side effect (``RunStarted``,
 ``NowObserved``, ``RandomObserved``, ``Suspended``, ``Resumed``,
-``BudgetExceeded``, ``RunCompleted``, ``RunFailed``). The side-effecting steps,
-which the server must perform because it holds the key or the binary, have their
-own methods: :meth:`~ClientRunDriver.model_step` and
-:meth:`~ClientRunDriver.tool_step`.
+``SleepStarted``, ``SleepCompleted``, ``BudgetExceeded``, ``RunCompleted``,
+``RunFailed``). The side-effecting steps, which the server must perform because
+it holds the key or the binary, have their own methods:
+:meth:`~ClientRunDriver.model_step` and :meth:`~ClientRunDriver.tool_step`.
+
+A client-driven run may park on a durable timer, and the client is what wakes
+it. Nothing on the server waits for the deadline: the wake sweeper leaves every
+client-driven run alone, because re-driving one there would be a second writer
+racing this driver's lease. So :meth:`~ClientRunDriver.sleep_for` and
+:meth:`~ClientRunDriver.sleep_until` record the park, and
+:meth:`~ClientRunDriver.await_wake` on a later drive reads the clock and either
+stops (still asleep, nothing appended) or closes the pair and carries on. The
+methods carry the runtime's names because they carry the runtime's rules.
 
     from salvor import Client
 
@@ -37,7 +46,8 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Iterator, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, Iterator, Optional
 
 import httpx
 
@@ -100,6 +110,27 @@ class ClientToolIntentResult:
         )
 
 
+@dataclass
+class Waking:
+    """What a check on a durable timer found.
+
+    ``woken`` is ``True`` when the sleep is over: either the log already held
+    the ``SleepCompleted`` (a replay) or the deadline had passed and this call
+    recorded it. ``False`` means the run is still asleep and nothing was
+    appended; stop driving and come back later.
+
+    ``wake_at`` is the deadline this drive measured against, which is the
+    instant :meth:`~ClientRunDriver.sleep_until` or
+    :meth:`~ClientRunDriver.sleep_for` recorded earlier in the same drive. It is
+    ``None`` when this drive set no deadline at all, which is also why such a
+    drive always reports still asleep: a wake nobody asked for has not arrived,
+    and no clock reading will make it so.
+    """
+
+    woken: bool
+    wake_at: Optional[datetime] = None
+
+
 class ModelStepStream:
     """The live ticker of a streaming model step.
 
@@ -152,6 +183,15 @@ class ClientRunDriver:
         #: The envelopes returned when this run was opened. Empty for a fresh
         #: run; the full recorded log for a re-open, ready to rebuild a cursor.
         self.log_envelopes = log
+        #: The clock the durable-timer methods read, returning a timezone-aware
+        #: datetime. Replaceable, the way the runtime injects its own clock, so
+        #: a test can drive a deadline past without waiting for it.
+        self.clock: Callable[[], datetime] = _utc_now
+        # The deadline set earlier in THIS drive, live or replayed. The runtime
+        # keeps the same one on its context, and for the same reason: what
+        # `await_wake` compares against is the instant the log recorded, never
+        # a duration or a fresh reading.
+        self._sleeping_until: Optional[datetime] = None
 
     # -- construction ---------------------------------------------------------
 
@@ -460,6 +500,105 @@ class ClientRunDriver:
         )
         self._json(resp)
 
+    # -- durable timers --------------------------------------------------------
+
+    def now(self, seq: int) -> datetime:
+        """Observe the clock at ``seq``, recording the reading the first time.
+
+        Returns the recorded reading when ``seq`` already holds a
+        ``NowObserved``, so a later drive replays the identical instant, and
+        otherwise reads :attr:`clock`, appends it, and returns it. This is the
+        one way a client-driven run gets time into its log: a reading taken
+        outside the log means nothing to a replay, which has no clock of its
+        own to interpret it against.
+        """
+        recorded = self._event_at(seq)
+        if recorded is not None and recorded.kind == "NowObserved":
+            return _parse_rfc3339(recorded.payload["now"])
+        reading = self.clock()
+        self.append([self.envelope(seq, "NowObserved", now=_rfc3339(reading))])
+        return reading
+
+    def sleep_until(self, seq: int, wake_at: datetime) -> datetime:
+        """Park the run on a durable timer at ``seq``, returning ``wake_at``.
+
+        ``wake_at`` must be derived from recorded data, because a later drive
+        presents it again and it has to be the same instant: derive it from an
+        observed :meth:`now` (which :meth:`sleep_for` does for you), never from
+        a clock read outside the log. A position already holding this exact
+        park is a replay: nothing is appended. A position holding a DIFFERENT
+        one is submitted anyway, so the server refuses it as the divergence it
+        is rather than this driver quietly preferring one of the two instants.
+
+        Follow it with :meth:`await_wake`. Never park between a write tool's
+        intent and its completion: the run holds that call's claim for the whole
+        sleep, which for a durable timer is hours or weeks.
+        """
+        recorded = self._event_at(seq)
+        if recorded is not None and recorded.kind == "SleepStarted":
+            already = _parse_rfc3339(recorded.payload["wake_at"])
+            if already == wake_at:
+                self._sleeping_until = already
+                return already
+        self.append([self.envelope(seq, "SleepStarted", wake_at=_rfc3339(wake_at))])
+        self._sleeping_until = wake_at
+        return wake_at
+
+    def sleep_for(self, seq: int, duration: timedelta) -> datetime:
+        """Sleep for ``duration`` from a recorded reading of the clock, and
+        return the wake instant it recorded.
+
+        Exactly ``now() + duration``, recorded: the reading goes into the log at
+        ``seq`` as a ``NowObserved`` before the park is derived from it, and the
+        park lands at ``seq + 1``. So every later drive replays the identical
+        reading and derives the identical instant, which is what a duration
+        alone can never do. Carries every rule :meth:`sleep_until` does.
+        """
+        return self.sleep_until(seq + 1, self.now(seq) + duration)
+
+    def await_wake(self, seq: int) -> Waking:
+        """Ask whether the sleep is over, closing the pair at ``seq`` if it is.
+
+        The log decides first: a ``SleepCompleted`` already recorded at ``seq``
+        means the sleep ended on an earlier drive, so this replays it and
+        appends nothing. Otherwise :attr:`clock` decides, against the deadline
+        :meth:`sleep_until` or :meth:`sleep_for` recorded earlier in this same
+        drive. At or past it the completion is appended and the run carries on;
+        before it, nothing is appended and the returned
+        :class:`Waking` reports the run still asleep, which is the signal to
+        stop driving and come back later.
+
+        Nothing here can wake a run early, and that is deliberate: a driver that
+        comes back too soon simply finds it still asleep, exactly as the server
+        wakes nothing before its instant.
+        """
+        recorded = self._event_at(seq)
+        if recorded is not None and recorded.kind == "SleepCompleted":
+            wake_at = self._sleeping_until
+            self._sleeping_until = None
+            return Waking(True, wake_at)
+        # A drive that set no deadline has none that could have arrived, so it
+        # stays asleep, mirroring the runtime's stand-in for the same case.
+        if self._sleeping_until is None or self.clock() < self._sleeping_until:
+            return Waking(False, self._sleeping_until)
+        self.append([self.envelope(seq, "SleepCompleted")])
+        wake_at = self._sleeping_until
+        self._sleeping_until = None
+        return Waking(True, wake_at)
+
+    def _event_at(self, seq: int) -> Optional[Event]:
+        """The recorded event at ``seq``, or ``None`` when the log has not
+        reached that position yet.
+
+        One log read, deliberately: the durable-timer methods are called once
+        per drive apiece, and a driver that has been away for a week cannot
+        trust anything it cached before it left.
+        """
+        tail = self.log(from_seq=seq)
+        if tail and tail[0].seq == seq:
+            return tail[0]
+        return None
+
     # -- resolve --------------------------------------------------------------
 
     def resolve(self, output: Any) -> None:
@@ -490,6 +629,51 @@ class ClientRunDriver:
         if not resp.content:
             return {}
         return resp.json()
+
+
+def _utc_now() -> datetime:
+    """The default clock the durable-timer methods read: the current instant,
+    timezone-aware and in UTC, which is the only form the log records."""
+    return datetime.now(timezone.utc)
+
+
+def _rfc3339(instant: datetime) -> str:
+    """Format an instant the way every recorded timestamp on the wire is
+    formatted: UTC, RFC 3339, with the ``Z`` suffix.
+
+    A naive datetime is refused rather than assumed to be UTC. Guessing an
+    offset here would put an instant in the log that is wrong by hours, and a
+    recorded instant is the one thing a later drive cannot re-derive.
+    """
+    if instant.tzinfo is None:
+        raise ValueError(
+            "a recorded instant must be timezone-aware; pass a UTC datetime "
+            "(datetime.now(timezone.utc)) rather than a naive one"
+        )
+    return instant.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _parse_rfc3339(text: str) -> datetime:
+    """Decode a recorded RFC 3339 instant.
+
+    Tolerates the two things the server writes that Python's own parser has not
+    always taken: the ``Z`` suffix, and more fractional digits than microsecond
+    precision holds. Extra digits are truncated rather than rejected, because a
+    reading this driver recorded at microsecond precision comes back at the
+    precision the store kept it.
+    """
+    value = text.strip()
+    if value.endswith(("Z", "z")):
+        value = value[:-1] + "+00:00"
+    head, dot, tail = value.partition(".")
+    if dot:
+        digits = ""
+        for char in tail:
+            if not char.isdigit():
+                break
+            digits += char
+        value = f"{head}.{digits[:6].ljust(6, '0')}{tail[len(digits):]}"
+    return datetime.fromisoformat(value)
 
 
 def _sse_frames(lines: Iterator[str]) -> Iterator[tuple[str, str]]:

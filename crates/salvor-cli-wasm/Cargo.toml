@@ -45,6 +45,13 @@ clap.workspace = true
 anstream = { version = "1", default-features = false }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# `OffsetDateTime` for a `list` row's `wake_at`, and the `rfc3339` serde codec
+# that reads and writes it the same way `RunSummary`'s own two timestamp
+# fields already do. A regular dependency, not dev-only: `ListRow` lives in
+# `src/lib.rs`, so this is needed by the shipped cdylib itself, the same
+# reason `salvor-replay-wasm` (a real wasm crate) depends on `time` directly
+# rather than only through a dev-dependency.
+time = { workspace = true }
 # The wasm boundary. wasm-bindgen compiles on native targets too (the generated
 # glue is inert off wasm32), so this crate is a normal workspace member that
 # `cargo build/test --workspace` builds natively without a wasm toolchain.
@@ -54,5 +61,4 @@ wasm-bindgen = "0.2"
 # The same-render proof's native side builds the reference rows, which needs
 # fixed run ids and timestamps. Dev-only: the shipped cdylib never touches them.
 serde_json = { workspace = true }
-time = { workspace = true }
 uuid = { workspace = true }

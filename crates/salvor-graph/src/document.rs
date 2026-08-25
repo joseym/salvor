@@ -1,4 +1,4 @@
-//! The graph document format: the `Graph` envelope, the six node kinds, the
+//! The graph document format: the `Graph` envelope, the seven node kinds, the
 //! edges that connect them, and the small payload types a node carries.
 //!
 //! Everything here is pure data. No type reads the clock, draws randomness, or
@@ -102,7 +102,7 @@ pub struct Graph {
     pub edges: Vec<Edge>,
 }
 
-/// One node in a graph: exactly one of the six kinds the runtime knows how to
+/// One node in a graph: exactly one of the seven kinds the runtime knows how to
 /// execute.
 ///
 /// Adjacently tagged like the event enum: each node serializes as `{"kind":
@@ -146,6 +146,9 @@ pub enum Node {
     /// fold exists in the format, the validator, the projection, and the
     /// canvas; the engine records a typed refusal for it.
     Fold(FoldNode),
+    /// A durable wait: parks the run on a timer, then continues the walk. It
+    /// transforms nothing, so its output is its input verbatim.
+    Delay(DelayNode),
 }
 
 impl Node {
@@ -159,6 +162,7 @@ impl Node {
             Node::Branch(n) => &n.id,
             Node::Map(n) => &n.id,
             Node::Fold(n) => &n.id,
+            Node::Delay(n) => &n.id,
         }
     }
 
@@ -172,6 +176,7 @@ impl Node {
             Node::Branch(_) => "branch",
             Node::Map(_) => "map",
             Node::Fold(_) => "fold",
+            Node::Delay(_) => "delay",
         }
     }
 
@@ -186,6 +191,7 @@ impl Node {
             Node::Branch(n) => n.name.as_deref(),
             Node::Map(n) => n.name.as_deref(),
             Node::Fold(n) => n.name.as_deref(),
+            Node::Delay(n) => n.name.as_deref(),
         }
     }
 
@@ -197,12 +203,12 @@ impl Node {
         match self {
             Node::Agent(n) => n.input_schema.as_ref(),
             Node::Tool(n) => n.input_schema.as_ref(),
-            // Gate, branch, map, and fold do not declare a consumed type;
-            // they pass typed payloads through untyped. A fold's
+            // Gate, branch, map, fold, and delay do not declare a consumed
+            // type; they pass typed payloads through untyped. A fold's
             // `accumulator_schema` is data only, deliberately not wired into
             // the edge type-compatibility check while its execution is not
             // implemented.
-            Node::Gate(_) | Node::Branch(_) | Node::Map(_) | Node::Fold(_) => None,
+            Node::Gate(_) | Node::Branch(_) | Node::Map(_) | Node::Fold(_) | Node::Delay(_) => None,
         }
     }
 
@@ -217,8 +223,13 @@ impl Node {
             Node::Map(n) => n.output_schema.as_ref(),
             // A fold's produced-value type is not implemented with its
             // execution: its `accumulator_schema` is data only and does not
-            // gate outbound edges.
-            Node::Gate(_) | Node::Branch(_) | Node::Fold(_) => None,
+            // gate outbound edges. A delay declares no type in either
+            // direction: it produces exactly what it consumed, and the format
+            // has no vocabulary for "whatever came in", so declaring the
+            // pass-through would mean copying a schema an author would then
+            // have to keep in step with the node upstream. The same reasoning
+            // a branch, which is also a pure pass-through, already rests on.
+            Node::Gate(_) | Node::Branch(_) | Node::Fold(_) | Node::Delay(_) => None,
         }
     }
 }
@@ -624,6 +635,49 @@ pub enum OnBound {
     Fail,
 }
 
+/// A `delay` node: a durable wait that parks the run, then continues the walk.
+///
+/// # Why the wait is a DURATION and not an instant
+///
+/// A graph document is authored once, content-addressed, and then run any
+/// number of times: the hash IS the identity, and the same document backs
+/// `salvor graph run`, `POST /v1/graph-runs`, and every fork of every run that
+/// referenced it. An absolute wake instant baked into the document would make
+/// it a single-use artifact: correct on the first run and already in the past
+/// on the second, where every delay would fall through instantly and the
+/// document would silently mean something else than it did the day it was
+/// written.
+///
+/// A duration says the thing that stays true across runs ("hold this for an
+/// hour"), and it is what every other author-time number in this format
+/// already is: a `map`'s `concurrency`, a `fold`'s `max_iterations`. Nothing in
+/// a graph document is a value belonging to one particular run, and this field
+/// keeps it that way. The instant is resolved at EXECUTION, by
+/// `salvor_runtime::RunCtx::sleep_for`, which observes the clock into the log
+/// first and derives `wake_at` from that recorded reading, so the wake instant
+/// is recorded once and replays identically forever.
+///
+/// There is deliberately no second, absolute spelling. Two ways to say a wait
+/// would need a mutual-exclusion rule in the validator and would leave authors
+/// choosing between one form that composes and one that expires; a format with
+/// one answer is the smaller thing to keep true.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DelayNode {
+    /// The node's stable id, unique within the document.
+    pub id: String,
+    /// Optional short display label for this node. See the module docs' "The
+    /// optional node display name" section for the bound and the deliberate
+    /// hash-inclusion contrast with the agent `name` field. Additive: absent
+    /// on the wire when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// How long the run waits, in whole seconds, measured from the clock
+    /// reading the engine records on entering the node. Must be at least 1;
+    /// `crate::validate` reports a zero wait by node id.
+    pub seconds: u64,
+}
+
 /// A directed edge: a typed payload flows from one node to another.
 ///
 /// Edges are the single source of graph topology. Referential integrity, the
@@ -835,6 +889,65 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&FoldJoin::All).expect("serialize"),
             r#"{"kind":"all"}"#
+        );
+    }
+
+    /// A delay node serializes with the adjacent kind/payload shape, carries
+    /// its wait as a bare number of seconds, and round-trips. An unset `name`
+    /// stays off the wire.
+    #[test]
+    fn delay_node_serializes_with_its_wait_in_seconds() {
+        let node = Node::Delay(DelayNode {
+            id: "cooloff".into(),
+            name: None,
+            seconds: 3600,
+        });
+        let json = serde_json::to_string(&node).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"kind":"delay","payload":{"id":"cooloff","seconds":3600}}"#
+        );
+        let restored: Node = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(node, restored, "delay round trip changed the value: {json}");
+
+        let named = Node::Delay(DelayNode {
+            id: "cooloff".into(),
+            name: Some("Cool off before publishing".into()),
+            seconds: 3600,
+        });
+        assert_eq!(
+            serde_json::to_string(&named).expect("serialize"),
+            r#"{"kind":"delay","payload":{"id":"cooloff","name":"Cool off before publishing","seconds":3600}}"#
+        );
+    }
+
+    /// A `delay` payload is strict like every other: a stray key is refused,
+    /// and so is an absolute-instant spelling the format deliberately does not
+    /// have. An author who reaches for one gets told, not quietly ignored.
+    #[test]
+    fn delay_payload_rejects_a_key_it_does_not_have() {
+        let text =
+            r#"{"kind":"delay","payload":{"id":"cooloff","wake_at":"2026-08-14T09:00:00Z"}}"#;
+        let error = serde_json::from_str::<Node>(text).expect_err("must reject");
+        assert!(
+            error.to_string().contains("wake_at"),
+            "error should name the stray field: {error}"
+        );
+    }
+
+    /// A document written before the `delay` kind existed serializes to exactly
+    /// the bytes it always did. Adding a node kind adds a variant nothing
+    /// already recorded uses, which is why it is additive rather than a bump of
+    /// `SCHEMA_VERSION`.
+    #[test]
+    fn an_existing_document_is_unchanged_by_the_delay_kind() {
+        let text = r#"{"schema_version":1,"nodes":[{"kind":"agent","payload":{"id":"research","agent_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","output_schema":{"type":"object"}}},{"kind":"gate","payload":{"id":"approve","prompt":"Approve publication?","approval_schema":{"type":"object"}}}],"edges":[{"from":"research","to":"approve"}]}"#;
+        let graph: Graph = serde_json::from_str(text).expect("deserialize");
+        assert_eq!(graph, sample(), "the pinned document parses to the sample");
+        assert_eq!(
+            serde_json::to_string(&graph).expect("serialize"),
+            text,
+            "an existing document must serialize byte for byte as before"
         );
     }
 

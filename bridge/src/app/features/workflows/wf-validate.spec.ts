@@ -64,6 +64,86 @@ describe('validateGraph', () => {
     expect(codes).toContain('unrealized_case');
   });
 
+  // Aligned to the server's own rule (`salvor_graph::validate::BranchEdgeWithoutCase`), the mirror
+  // of `unrealized_case`: the edge itself carries the typo this time (`lst` for the case `lost`),
+  // not the case. Relabeling to the one declared case with no edge of its own is unambiguous, so
+  // it is offered as a one-click fix.
+  it('a branch edge naming an undeclared case offers to relabel it, when exactly one case has none', () => {
+    const g: WfGraph = {
+      ...CLEAN,
+      nodes: [...CLEAN.nodes, { id: 'br', kind: 'branch', name: 'br', cases: ['lost', 'paid'] }],
+      edges: [
+        { from: 'a', to: 'br' },
+        { from: 'br', to: 'b', label: 'lst' }, // meant to realize "lost"
+        { from: 'br', to: 'b', label: 'paid' },
+      ],
+    };
+    const err = validateGraph(g).find((e) => e.code === 'edge_type' && e.msg.includes('lst'));
+    expect(err?.fix).toMatchObject({ kind: 'relabel_case', case: 'lost' });
+
+    const fixed = applyFix(g, err!.fix!);
+    expect(fixed.edges).toContainEqual({ from: 'br', to: 'b', label: 'lost' });
+    expect(validateGraph(fixed).some((e) => e.code === 'edge_type')).toBe(false);
+    expect(validateGraph(fixed).some((e) => e.code === 'unrealized_case')).toBe(false);
+  });
+
+  it('a branch edge naming an undeclared case offers no fix when more than one case has none', () => {
+    // Neither "x" nor "y" has a realizing edge, so there is nothing unambiguous to relabel to.
+    const g: WfGraph = {
+      ...CLEAN,
+      nodes: [...CLEAN.nodes, { id: 'br', kind: 'branch', name: 'br', cases: ['x', 'y'] }],
+      edges: [
+        { from: 'a', to: 'br' },
+        { from: 'br', to: 'b', label: 'zzz' },
+      ],
+    };
+    const err = validateGraph(g).find((e) => e.code === 'edge_type');
+    expect(err?.fix).toBeUndefined();
+  });
+
+  // Aligned to the server's own rule (`salvor_graph::validate::BranchCaseWithoutEdge`): a case
+  // with no matching edge label is node/case-precise, exactly like the server's error, and offers
+  // a one-click route to a terminal node (one with no outbound edge of its own) when the graph
+  // has one, the same node the server's message points an author at for a case meant to end the
+  // run. This is exactly the misspelled-label mistake (`lst` for `lost`) the rule exists to catch.
+  it('an unrealized branch case is case-precise and offers to route it to a terminal node', () => {
+    const g: WfGraph = {
+      ...CLEAN,
+      nodes: [...CLEAN.nodes, { id: 'br', kind: 'branch', name: 'br', cases: ['won', 'lost'] }],
+      edges: [
+        { from: 'a', to: 'br' },
+        { from: 'br', to: 'b', label: 'won' },
+        { from: 'br', to: 'b', label: 'lst' }, // meant to realize "lost"
+      ],
+    };
+    const err = validateGraph(g).find((e) => e.code === 'unrealized_case');
+    expect(err?.node).toBe('br');
+    expect(err?.case).toBe('lost');
+    // 'b' is the graph's only terminal node: no edge leaves it
+    expect(err?.fix).toMatchObject({ kind: 'realize_case', id: 'br', case: 'lost', to: 'b' });
+
+    const fixed = applyFix(g, err!.fix!);
+    expect(fixed.edges).toContainEqual({ from: 'br', to: 'b', label: 'lost' });
+    expect(validateGraph(fixed).some((e) => e.code === 'unrealized_case')).toBe(false);
+  });
+
+  it('an unrealized case offers no fix when the graph has no terminal node to route it to', () => {
+    // Every node here already has an outbound edge, including a cycle back to "br" itself:
+    // there is nowhere unambiguous to point a new edge.
+    const g: WfGraph = {
+      ...CLEAN,
+      nodes: [...CLEAN.nodes, { id: 'br', kind: 'branch', name: 'br', cases: ['x'] }],
+      edges: [
+        { from: 'a', to: 'b' },
+        { from: 'b', to: 'br' },
+        { from: 'br', to: 'a', label: 'zzz' },
+      ],
+    };
+    const err = validateGraph(g).find((e) => e.code === 'unrealized_case');
+    expect(err?.case).toBe('x');
+    expect(err?.fix).toBeUndefined();
+  });
+
   // sync-ledger item 4: the server's rule is the full 64-hex form, not this app's own old 16-hex
   // short form: a hash that used to pass must now fail, node/edge-precise as ever.
   it('a well-formed-but-short hash (the old 16-hex tolerance) is now malformed', () => {
@@ -132,6 +212,30 @@ describe('validateGraph', () => {
     const fixedBlank = applyFix(blank, empty!.fix!);
     expect(fixedBlank.nodes.find((n) => n.id === 'a')?.name).toBe('a'); // reverts to the id
     expect(validateGraph(fixedBlank).some((e) => e.code === 'name_empty')).toBe(false);
+  });
+
+  // Aligned to the server's own rule (`salvor_graph::validate::NonPositiveDelay`): a zero-second
+  // wait is refused the same way a zero-worker fan-out is, one-click fixable to the same floor (1).
+  it('a delay of zero (or unset) seconds is reported, with a one-click fix to 1', () => {
+    const g: WfGraph = {
+      ...CLEAN,
+      nodes: [...CLEAN.nodes, { id: 'd', kind: 'delay', name: 'd', seconds: 0 }],
+    };
+    const err = validateGraph(g).find((e) => e.code === 'bad_seconds');
+    expect(err?.node).toBe('d');
+    expect(err?.fix).toMatchObject({ kind: 'set_seconds', id: 'd' });
+
+    const fixed = applyFix(g, err!.fix!);
+    expect(fixed.nodes.find((n) => n.id === 'd')?.seconds).toBe(1);
+    expect(validateGraph(fixed).some((e) => e.code === 'bad_seconds')).toBe(false);
+  });
+
+  it('a positive delay is unreported', () => {
+    const g: WfGraph = {
+      ...CLEAN,
+      nodes: [...CLEAN.nodes, { id: 'd', kind: 'delay', name: 'd', seconds: 60 }],
+    };
+    expect(validateGraph(g).some((e) => e.code === 'bad_seconds')).toBe(false);
   });
 });
 

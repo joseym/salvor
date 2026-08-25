@@ -38,6 +38,15 @@
 //! envelope, head, terminal, and no-dangling-completion rules. Over-tightening
 //! would reject a log the cursor itself accepts.
 //!
+//! The durable-timer pair (`SleepStarted` and `SleepCompleted`) is lenient for
+//! the identical reason: nothing requires a `SleepCompleted` to follow a
+//! `SleepStarted`, because a run that is still asleep has recorded only the
+//! start, and closing the pair is orchestration's job exactly as answering a
+//! suspension is. So both are free-standing context events here too.
+//! `SleepCompleted` is not a completion in the correlated sense the rules
+//! above use: it names no intent and carries no correlation seq, so the
+//! no-dangling-completion rule has nothing to say about it.
+//!
 //! # Purity
 //!
 //! Like the rest of this crate, nothing here performs IO, reads a clock, or
@@ -344,6 +353,8 @@ fn kind_name(event: &Event) -> &'static str {
         Event::RandomObserved { .. } => "RandomObserved",
         Event::Suspended { .. } => "Suspended",
         Event::Resumed { .. } => "Resumed",
+        Event::SleepStarted { .. } => "SleepStarted",
+        Event::SleepCompleted {} => "SleepCompleted",
         Event::BudgetExceeded { .. } => "BudgetExceeded",
         Event::RunCompleted { .. } => "RunCompleted",
         Event::RunFailed { .. } => "RunFailed",
@@ -445,6 +456,7 @@ mod tests {
             Event::Suspended {
                 reason: "approval".into(),
                 input_schema: serde_json::json!({"type": "object"}),
+                kind: None,
             },
             Event::Resumed {
                 input: serde_json::json!({"approved": true}),
@@ -466,6 +478,93 @@ mod tests {
                 .push(env(seq as u64, event))
                 .expect("each event is the legal next one");
         }
+    }
+
+    /// The durable-timer pair validates as free-standing context events, in
+    /// either arrangement a real log can hold: a sleep that ends and a run that
+    /// continues, and a sleep that is still open when the log stops. The guard
+    /// mirrors the cursor's leniency about the pairing rather than inventing a
+    /// shape rule the cursor does not enforce.
+    #[test]
+    fn the_sleep_pair_validates_as_free_standing_events() {
+        let mut v = LogValidator::new(vec![]);
+        v.push(env(0, started())).unwrap();
+        v.push(env(1, Event::NowObserved { now: ts() }))
+            .expect("an observation precedes the sleep, as a live run records it");
+        v.push(env(
+            2,
+            Event::SleepStarted {
+                wake_at: datetime!(2026-07-18 12:00:00 UTC),
+            },
+        ))
+        .expect("a sleep start is a legal free-standing event");
+        v.push(env(3, Event::SleepCompleted {}))
+            .expect("a sleep completion is a legal free-standing event");
+        v.push(env(4, model_intent(4)))
+            .expect("the woken run continues with an ordinary intent");
+
+        // And the open case: a log that stops at the sleep start is a
+        // well-formed log, so a candidate after it is judged on its own merits.
+        let parked = vec![
+            env(0, started()),
+            env(
+                1,
+                Event::SleepStarted {
+                    wake_at: datetime!(2026-07-18 12:00:00 UTC),
+                },
+            ),
+        ];
+        validate_next(&parked, &env(2, Event::SleepCompleted {}))
+            .expect("closing an open sleep is legal");
+        validate_next(&parked, &env(2, Event::NowObserved { now: ts() }))
+            .expect("the guard never demands the completion, exactly as for a suspension");
+    }
+
+    /// Nothing about the sleep events loosens the correlation rules: a
+    /// completion still needs a pending intent, and a sleep event is not one.
+    #[test]
+    fn a_completion_after_a_sleep_is_still_uncorrelated() {
+        let log = vec![
+            env(0, started()),
+            env(
+                1,
+                Event::SleepStarted {
+                    wake_at: datetime!(2026-07-18 12:00:00 UTC),
+                },
+            ),
+            env(2, Event::SleepCompleted {}),
+        ];
+        let err = validate_next(&log, &env(3, model_done(1))).unwrap_err();
+        assert_eq!(
+            err,
+            ValidationError::UncorrelatedCompletion {
+                found: "ModelCallCompleted"
+            }
+        );
+    }
+
+    /// A sleep event cannot step past a dangling intent either: the completion
+    /// comes first, exactly as for any other context event.
+    #[test]
+    fn sleep_after_intent_is_rejected() {
+        let log = vec![env(0, started()), env(1, model_intent(1))];
+        let err = validate_next(
+            &log,
+            &env(
+                2,
+                Event::SleepStarted {
+                    wake_at: datetime!(2026-07-18 12:00:00 UTC),
+                },
+            ),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            ValidationError::ExpectedCompletion {
+                intent_seq: SequenceNumber::new(1),
+                found: "SleepStarted",
+            }
+        );
     }
 
     /// A dangling model intent is completed by its correlated completion, and

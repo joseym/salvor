@@ -746,7 +746,9 @@ input_schema = '{{"type":"object"}}'
         salvor_tools::ToolOutcome::Output(value) => {
             assert_eq!(value, serde_json::json!({ "words": 3, "chars": 5 }));
         }
-        salvor_tools::ToolOutcome::Suspend(_) => panic!("wasm tools cannot suspend"),
+        salvor_tools::ToolOutcome::Suspend(_) | salvor_tools::ToolOutcome::Sleep(_) => {
+            panic!("a wasm tool has no way to ask for a park")
+        }
     }
 
     for server in servers {
@@ -804,7 +806,9 @@ async fn wasm_tools_example_guest_runs() {
             assert_eq!(value["lines"], 1);
             assert_eq!(value["longest_word"], "counting");
         }
-        salvor_tools::ToolOutcome::Suspend(_) => panic!("wasm tools cannot suspend"),
+        salvor_tools::ToolOutcome::Suspend(_) | salvor_tools::ToolOutcome::Sleep(_) => {
+            panic!("a wasm tool has no way to ask for a park")
+        }
     }
 }
 

@@ -18,10 +18,32 @@
 //! This surface carries only the control and deterministic-context events the
 //! client's cursor emits itself and that hold no secret and no side effect:
 //! `RunStarted`, `NowObserved`, `RandomObserved`, `Suspended`, `Resumed`,
-//! `BudgetExceeded`, `RunCompleted`, `RunFailed`. The side-effecting steps (the
-//! model call and the tool call, which the server must perform because it holds
-//! the key or the binary) are not supported here, so a model or tool event is
-//! refused with a clear error.
+//! `SleepStarted`, `SleepCompleted`, `BudgetExceeded`, `RunCompleted`,
+//! `RunFailed`. The side-effecting steps (the model call and the tool call,
+//! which the server must perform because it holds the key or the binary) are
+//! not supported here, so a model or tool event is refused with a clear error.
+//!
+//! # A client-driven run may sleep, and its client wakes it
+//!
+//! The durable-timer pair belongs on that list for the same reason the
+//! suspension pair does: both halves are recorded facts the client's own
+//! cursor produces, neither holds a secret, and neither has an effect outside
+//! the log. What differs is who ends the wait. Nothing in this process waits
+//! for a client-driven run's deadline: the wake sweeper skips every run a
+//! client holds a lease on, because re-driving one here would be a second
+//! writer racing the client's drive token for the same positions. So the
+//! client wakes its own run, the way the runtime does. On a later drive it
+//! replays its log, finds a `SleepStarted` with no `SleepCompleted` after it,
+//! compares the recorded `wake_at` against a clock reading it records as a
+//! `NowObserved`, and either stops (still asleep, nothing appended) or appends
+//! the `SleepCompleted` and carries on.
+//!
+//! This surface enforces only what it can see. The order of the pair is one
+//! such thing: a `SleepCompleted` may close only a sleep this log has open
+//! (see [`is_sleeping`]). The deadline itself is not, and deliberately so.
+//! `wake_at` is the client's own recorded instant and the clock that decides
+//! it has arrived is the client's; a server that re-judged it against its own
+//! clock would be making a determinism claim about a run it does not drive.
 //!
 //! # The single-writer lease
 //!
@@ -288,7 +310,9 @@ pub async fn get_log(
 /// a `200` no-op (a safe retry after a network blip); different bytes there, or
 /// an illegal next event, is a `409`. Model and tool events are refused: they
 /// belong to the server-performed model-step and tool-step endpoints, not to
-/// this generic append. The whole batch is validated
+/// this generic append. A `SleepCompleted` that would close a sleep the log
+/// never started is a `409` too, the one pair-ordering rule this surface adds
+/// on top of the guard (see [`is_sleeping`]). The whole batch is validated
 /// before anything is written, so a batch that turns illegal appends nothing.
 ///
 /// Every envelope's `recorded_at` is overwritten with [`AppState::now`] before
@@ -366,6 +390,17 @@ pub async fn append(
             }
             return Err(ApiError::Divergence(format!(
                 "different bytes submitted at the already-recorded seq {}",
+                candidate.seq.get()
+            )));
+        }
+
+        // The durable-timer pair's order is this surface's to check, because
+        // the shared append-guard deliberately does not (see [`is_sleeping`]).
+        // The working log, not the stored one, is what a batch carrying both
+        // halves at once must be judged against.
+        if matches!(candidate.event, Event::SleepCompleted {}) && !is_sleeping(validator.log()) {
+            return Err(ApiError::Divergence(format!(
+                "the SleepCompleted at seq {} would close a sleep this run has not started",
                 candidate.seq.get()
             )));
         }
@@ -905,6 +940,15 @@ pub async fn tool_step(
                     return Err(ApiError::ToolExecution(format!(
                         "tool `{tool_name}` suspended, which a server-performed tool step does \
                          not support; no completion recorded"
+                    )));
+                }
+                // Refused for the same reason a suspension is: a step endpoint
+                // performs one call and answers with its output. Parking the
+                // run belongs to a driver, and the client owns the loop here.
+                ToolOutcome::Sleep(_) => {
+                    return Err(ApiError::ToolExecution(format!(
+                        "tool `{tool_name}` asked to sleep, which a server-performed tool step \
+                         does not support; no completion recorded"
                     )));
                 }
             };
@@ -1482,6 +1526,27 @@ fn reject_side_effecting_kind(candidate: &EventEnvelope) -> Result<(), ApiError>
         "the generic append accepts control and context events only; `{kind}` is recorded through \
          the model-step or tool-step endpoint"
     )))
+}
+
+/// Whether `log` leaves the run asleep: the last durable-timer event it holds
+/// is a `SleepStarted` that no `SleepCompleted` has closed.
+///
+/// The pure append-guard is lenient about the pair on purpose, mirroring the
+/// cursor: a run that is still asleep has recorded only the start, so nothing
+/// may demand the completion. That leniency leaves one shape it cannot refuse,
+/// a `SleepCompleted` for a run that was never asleep, and on this surface that
+/// is a real mistake a driver can make, since here the client hand-appends both
+/// halves itself. Checking it at the endpoint keeps the pair ordered without
+/// teaching the shared guard a rule the runtime's own cursor does not enforce.
+fn is_sleeping(log: &[EventEnvelope]) -> bool {
+    log.iter()
+        .rev()
+        .find_map(|envelope| match &envelope.event {
+            Event::SleepStarted { .. } => Some(true),
+            Event::SleepCompleted {} => Some(false),
+            _ => None,
+        })
+        .unwrap_or(false)
 }
 
 /// The per-run lease gate shared by every driving endpoint: the run must be a

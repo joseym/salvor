@@ -17,8 +17,11 @@
 //! log rows with one parser. The frame's `id` is the event's sequence number.
 //! Envelope frames carry no `event:` field, so a browser `EventSource` receives
 //! them through `onmessage`. When the run reaches a resting point (completed,
-//! failed, suspended, budget-exceeded, or needs-reconciliation) the stream
-//! sends one final `event: end` frame carrying the final status, then closes.
+//! failed, abandoned, suspended, sleeping, budget-exceeded, or
+//! needs-reconciliation) the stream sends one final `event: end` frame carrying
+//! the status it rested at, then closes. A sleeping run's frame carries its
+//! `wake_at`, so a client learns when the run may continue and opens a fresh
+//! stream then rather than holding this one open for the length of the nap.
 //!
 //! # Replay then live tail
 //!
@@ -158,7 +161,7 @@ async fn produce(
         if is_resting(&status) {
             let frame = Event::default()
                 .event("end")
-                .data(json!({ "status": json::status(&status) }).to_string());
+                .data(json!({ "status": json::status(&status, state.now()) }).to_string());
             let _ = tx.send(Ok(frame)).await;
             return;
         }
@@ -168,9 +171,10 @@ async fn produce(
         // End the stream so the client does not wait forever; recovering the run
         // opens a fresh stream that tails the continuation.
         if !log.is_empty() && !state.is_run_active(run_id) {
-            let frame = Event::default()
-                .event("end")
-                .data(json!({ "status": json::status(&status), "detached": true }).to_string());
+            let frame = Event::default().event("end").data(
+                json!({ "status": json::status(&status, state.now()), "detached": true })
+                    .to_string(),
+            );
             let _ = tx.send(Ok(frame)).await;
             return;
         }
@@ -180,6 +184,15 @@ async fn produce(
 }
 
 /// Whether a status is a resting point at which driving has stopped.
+///
+/// `Sleeping` is one of them. A run on a durable timer is passive data with
+/// nothing driving it, and its deadline is measured in hours or weeks, so a
+/// stream that kept polling for one would hold a connection open for the whole
+/// nap and report nothing the end frame does not already carry: that frame's
+/// status is `{"state": "sleeping", "wake_at": ...}`, which tells a client both
+/// that the run stopped and exactly when to open a fresh stream. Waking is not
+/// a continuation of this stream in any case; it is a new drive, and the events
+/// it records are read by the stream a client opens then.
 fn is_resting(status: &RunStatus) -> bool {
     matches!(
         status,
@@ -187,6 +200,7 @@ fn is_resting(status: &RunStatus) -> bool {
             | RunStatus::Failed { .. }
             | RunStatus::Abandoned { .. }
             | RunStatus::Suspended { .. }
+            | RunStatus::Sleeping { .. }
             | RunStatus::BudgetExceeded { .. }
             | RunStatus::NeedsReconciliation
     )

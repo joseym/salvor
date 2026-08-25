@@ -1,3 +1,3 @@
-RUN ID                                STATUS                EVENTS  STARTED               LAST ACTIVITY       
-00000000-0000-4000-8000-0000000000b0  needs-reconciliation  1234567  2025-07-15 08:00:00Z  2026-07-15 08:00:00Z
-00000000-0000-4000-8000-0000000000b1  not-started                0  2025-07-15 08:01:00Z  2025-07-15 08:01:00Z
+RUN ID                                STATUS                EVENTS  STARTED               LAST ACTIVITY         WAKES AT            
+00000000-0000-4000-8000-0000000000b0  needs-reconciliation  1234567  2025-07-15 08:00:00Z  2026-07-15 08:00:00Z                      
+00000000-0000-4000-8000-0000000000b1  not-started                0  2025-07-15 08:01:00Z  2025-07-15 08:01:00Z                      

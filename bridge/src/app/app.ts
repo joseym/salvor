@@ -18,7 +18,7 @@ import { FirstReceiptsService } from './core/first-receipts';
 import { FirstReceipts } from './features/onboarding/first-receipts';
 import { Inbox } from './features/inbox/inbox';
 import { Inspector } from './features/inspector/inspector';
-import { groupOf, labelOf } from './features/runs/run-model';
+import { groupOf, labelOf, waitingOnOf } from './features/runs/run-model';
 import { Runs } from './features/runs/runs';
 import { Spend } from './features/spend/spend';
 import { shortHash } from './features/workflows/wf-model';
@@ -114,7 +114,9 @@ export class App implements AfterViewInit {
   /** The Inbox badge is the count of runs waiting on a human, the same fold the health strip and
    * chips read, so the number can never disagree. */
   readonly inboxCount = computed(
-    () => this.runsService.runs().filter((r) => groupOf(r.status.state) === 'waiting').length,
+    () =>
+      this.runsService.runs().filter((r) => groupOf(r.status.state, waitingOnOf(r.status)) === 'waiting')
+        .length,
   );
 
   constructor() {

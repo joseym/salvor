@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "nodes": [
+    {
+      "kind": "tool",
+      "payload": {
+        "id": "send_reminder",
+        "tool": "send_reminder"
+      }
+    },
+    {
+      "kind": "delay",
+      "payload": {
+        "id": "cool_off",
+        "name": "Cool off before chasing again",
+        "seconds": 20
+      }
+    },
+    {
+      "kind": "tool",
+      "payload": {
+        "id": "check_payment",
+        "tool": "check_payment"
+      }
+    },
+    {
+      "kind": "branch",
+      "payload": {
+        "id": "route",
+        "cases": [
+          {
+            "name": "paid",
+            "when": {
+              "kind": "expression",
+              "value": "structuredContent.paid == true"
+            }
+          },
+          {
+            "name": "unpaid",
+            "when": {
+              "kind": "expression",
+              "value": "structuredContent.paid == false"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "tool",
+      "payload": {
+        "id": "close_invoice",
+        "tool": "close_invoice"
+      }
+    },
+    {
+      "kind": "tool",
+      "payload": {
+        "id": "escalate",
+        "tool": "escalate"
+      }
+    }
+  ],
+  "edges": [
+    { "from": "send_reminder", "to": "cool_off" },
+    { "from": "cool_off", "to": "check_payment" },
+    { "from": "check_payment", "to": "route" },
+    { "from": "route", "to": "close_invoice", "label": "paid" },
+    { "from": "route", "to": "escalate", "label": "unpaid" }
+  ]
+}

@@ -234,6 +234,94 @@ them are worth a retry: treat it as an integrity incident and go back
 to a backup that reads clean. Restoring a store whose chain does not
 verify puts a log into service that `read_log` will keep refusing.
 
+## Waking sleeping runs
+
+A run parked on a durable timer (`sleeping`, with a `wake_at`) does not wake
+itself. `salvor serve` sweeps for due timers every 60 seconds by default;
+`--wake-interval SECS` changes that cadence, and `--wake-interval 0` turns
+the sweep off, no task spawned.
+
+A graph's `delay` node, a native Rust tool, or an MCP tool result carrying
+`_meta.salvor.suspend` or `_meta.salvor.sleep_until` can each put a run to
+sleep or suspend it; the runtime turns any of the three into the same
+recorded pair, so an MCP-only setup is no longer limited to the `delay` node
+for parking.
+
+A sleeping run whose `wake_at` has passed and that nothing has woken reports
+`overdue: true` and `overdue_seconds` alongside `sleeping` on
+`GET /v1/runs/{id}`; the state word stays `sleeping`. The sweeper warns once
+per unwakeable run and logs later passes at debug, so a quiet log does not
+mean the run woke.
+
+The sweeper only wakes what it can rebuild from what this server already
+holds, by the hash the run recorded, regardless of what process started it:
+an agent run wakes once the agent under that hash is registered with
+`POST /v1/agents`, MCP tools and all, because the server rebuilds the agent
+from that same definition. A graph run wakes once its document is submitted
+with `POST /v1/graphs`, and, if it carries `tool` nodes, only once every one
+of them names a tool this server's own registry holds (empty by default;
+`--demo-tools` populates it with a fixed demo set, and an embedding host can
+wire its own): over HTTP a `tool` node resolves only against that registry,
+never against an agent's own MCP servers, submitted graph or not
+(pre-existing; see
+[`examples/graph-clients/README.md`](../examples/graph-clients/README.md#why-there-are-no-tool-nodes)).
+So two things leave a run asleep: its agent or graph hash is not registered
+here at all (typically a run started from the CLI against a store this
+server never saw), or a graph run has a `tool` node this registry does not
+hold. The sweeper warns why once per run, then logs the same fields at debug
+on every later pass, until an operator wakes it the other way: `salvor wake`
+with the same `--agent`/`--graph` files the run was
+started with. A sleeping graph run outlives the server's memory of its
+document (see [`README.md#graphs`](../README.md#graphs) on the in-memory
+registry a restart drops), so keep the submitted document on disk; after a
+restart either resubmit it with `POST /v1/graphs` or wake the run with
+`salvor wake --graph <file>` directly.
+
+For a store no running server is watching, cron does the sweeping instead.
+`salvor wake` finds every run whose `wake_at` has passed, drives each one,
+and exits, so it drops straight into a crontab line:
+
+```
+* * * * * salvor wake --store /var/lib/salvor/salvor.db --agent /etc/salvor/agents/reminder.toml
+```
+
+A store gets one waker, not both: the server's sweep, or cron running
+`salvor wake` with the server started at `--wake-interval 0`, because the
+sweep only skips runs it is already driving itself and has no way to know
+about a second drive cron started on the same run. Running both against the
+same due run still records it once: exactly-once holds, one write completes
+the run, and the loser's drive fails on the store lock and reports the run
+as taken by another driver; nothing is recorded twice. A client-driven run
+that records a sleep is the client's to wake; the server's sweeper leaves
+client-driven runs alone.
+
+`wake` takes the same `--agent` (repeatable) and `--graph` a `resume` would
+need, and for the same reason: the log records an agent run by its agent's
+content hash and a graph run by the document's hash, never the definition
+itself, so waking a run rebuilds it from the same files its author last ran
+it with. `--dry-run` prints which runs are due and what waking each would
+need, without driving anything.
+
+A sleeping run holds no lock, no idempotency claim, and no process.
+`SleepStarted` is recorded only after whatever came before it has already
+settled, whether that is a tool's completion and its idempotency claim or a
+graph node's own entry, so a sleeping run has nothing outstanding for a
+restart or a backup to catch mid-flight. Restarting the server or backing up
+the store while a run sleeps is exactly as safe as doing either while a run
+sits idle between steps.
+
+Sweeps select on the recorded deadline, not on when they happen to run: a
+sweep only ever picks up a run whose `wake_at` has already passed, so firing
+one early, from a short `--wake-interval` or an off-cadence cron line, finds
+nothing and drives nothing. A run that has woken is no longer `sleeping`, so
+an overlapping sweep, whether a second cron line or an overlapping server
+sweep, does not see it as due either. A sweep can run early or run twice
+without waking anything early or twice. The one path that can arrive before
+the deadline is a person: `salvor resume` and `POST /v1/runs/{id}/resume`
+both reach the run directly, and both are refused rather than silently
+ignored, with the time remaining on the CLI and `409 still_sleeping` over
+HTTP.
+
 ## Retention
 
 Salvor has no retention. There is no pruning, rotation, expiry, or

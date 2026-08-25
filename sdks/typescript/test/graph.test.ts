@@ -84,6 +84,23 @@ test("builder emits the canonical fold document", () => {
   deepStrictEqual(built, canonical);
 });
 
+function buildDelayFlow() {
+  return new GraphBuilder()
+    .tool("assess", "assess")
+    .delay("cooloff", 3600, { name: "Cool off before publishing" })
+    .tool("publish", "http_post")
+    .edge("assess", "cooloff")
+    .edge("cooloff", "publish")
+    .build();
+}
+
+test("builder emits the canonical delay document", () => {
+  const built = JSON.parse(JSON.stringify(buildDelayFlow()));
+  const fixturePath = resolve(process.cwd(), "../../examples/graphs/delay-then-publish.json");
+  const canonical = JSON.parse(readFileSync(fixturePath, "utf8"));
+  deepStrictEqual(built, canonical);
+});
+
 function buildBranchModelDecisionFlow() {
   return new GraphBuilder()
     .agent("research", `sha256:${"1".repeat(64)}`)
@@ -166,6 +183,7 @@ test("every node kind accepts an optional display name, present only when set", 
     .map("fanout", "route.items", 2, { kind: "node", value: "research" }, {
       name: "Notify each watcher",
     })
+    .delay("cooloff", 3600, { name: "Cool off before publishing" })
     .edge("research", "publish")
     .build();
 
@@ -177,6 +195,7 @@ test("every node kind accepts an optional display name, present only when set", 
       "Approve the draft",
       "Route on confidence",
       "Notify each watcher",
+      "Cool off before publishing",
     ],
   );
 

@@ -39,6 +39,7 @@ import sys
 import threading
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -290,6 +291,88 @@ class ClientRunLoopRealServer(unittest.TestCase):
         self.assertEqual(deltas, [], "a replayed step has no live deltas")
         self.assertEqual(stream.completion.response, result.response)
         self.assertEqual(self.provider_hits(), before + 1, "streaming replay paid nothing")
+
+    def test_sleep_parks_the_run_and_only_the_deadline_wakes_it(self) -> None:
+        """Three drives over one run: park, come back too soon, come back late.
+
+        Each drive is a fresh :class:`ClientRunDriver` re-opened on the same run
+        id, which is what a later drive actually is: a process holding only the
+        recorded log and its own clock. The second one is the point of the whole
+        feature. It runs the identical code with a clock ten minutes on, and
+        appends nothing, because the deadline it compares against comes from the
+        log rather than from how long this process has been awake.
+        """
+        started_at = datetime(2026, 7, 11, 12, 0, tzinfo=timezone.utc)
+
+        # Drive one: park on a timer an hour out, derived from a recorded
+        # reading of this drive's clock.
+        first = ClientRunDriver.open(self.base)
+        self.addCleanup(first.close)
+        first.clock = lambda: started_at
+        first.append([self.started(first, 0)])
+        wake_at = first.sleep_for(1, timedelta(hours=1))
+        self.assertEqual(wake_at, started_at + timedelta(hours=1))
+        self.assertEqual(
+            [e.kind for e in first.log()],
+            ["RunStarted", "NowObserved", "SleepStarted"],
+        )
+        # The same drive asks whether it may continue, and may not.
+        parked = first.await_wake(3)
+        self.assertFalse(parked.woken, "the deadline is an hour away")
+        self.assertEqual(parked.wake_at, wake_at)
+        self.assertEqual(len(first.log()), 3, "asking appended nothing")
+
+        run_id = first.run_id
+
+        # Drive two, ten minutes later: the replayed instants are the recorded
+        # ones, so the deadline has not moved and the run stays asleep.
+        early = ClientRunDriver.open(self.base, run_id=run_id)
+        self.addCleanup(early.close)
+        early.clock = lambda: started_at + timedelta(minutes=10)
+        replayed = early.sleep_for(1, timedelta(hours=1))
+        self.assertEqual(replayed, wake_at, "the wake instant reproduces on replay")
+        still_asleep = early.await_wake(3)
+        self.assertFalse(still_asleep.woken, "driving early does not wake a run")
+        self.assertEqual(len(early.log()), 3, "and appends nothing at all")
+
+        # Drive three, two hours later: the deadline has passed, so this drive
+        # closes the pair itself and the run carries on to its result.
+        late = ClientRunDriver.open(self.base, run_id=run_id)
+        self.addCleanup(late.close)
+        late.clock = lambda: started_at + timedelta(hours=2)
+        self.assertEqual(late.sleep_for(1, timedelta(hours=1)), wake_at)
+        woken = late.await_wake(3)
+        self.assertTrue(woken.woken, "the deadline passed, so the sleep is over")
+        self.assertEqual(woken.wake_at, wake_at)
+        late.append([late.envelope(4, "RunCompleted", output={"slept": True})])
+        self.assertEqual(
+            [e.kind for e in late.log()],
+            [
+                "RunStarted",
+                "NowObserved",
+                "SleepStarted",
+                "SleepCompleted",
+                "RunCompleted",
+            ],
+        )
+
+        # A fourth drive replays the closed pair: the completion is recorded, so
+        # nothing appends however early this drive's clock reads.
+        after = ClientRunDriver.open(self.base, run_id=run_id)
+        self.addCleanup(after.close)
+        after.clock = lambda: started_at
+        self.assertTrue(after.await_wake(3).woken, "a recorded wake replays")
+        self.assertEqual(len(after.log()), 5, "and the log did not grow")
+
+    def test_a_sleep_completion_with_no_sleep_is_refused(self) -> None:
+        """The server checks the pair order, so a driver that closes a sleep it
+        never opened is told so rather than writing a log that lies."""
+        run = ClientRunDriver.open(self.base)
+        self.addCleanup(run.close)
+        run.append([self.started(run, 0)])
+        with self.assertRaises(DivergenceError):
+            run.append([run.envelope(1, "SleepCompleted")])
+        self.assertEqual(len(run.log()), 1, "the refusal wrote nothing")
 
 
 def sse_frame(event: str, data: dict) -> str:

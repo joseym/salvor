@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "nodes": [
+    {
+      "kind": "tool",
+      "payload": {
+        "id": "assess",
+        "tool": "assess"
+      }
+    },
+    {
+      "kind": "delay",
+      "payload": {
+        "id": "cooloff",
+        "name": "Cool off before publishing",
+        "seconds": 3600
+      }
+    },
+    {
+      "kind": "tool",
+      "payload": {
+        "id": "publish",
+        "tool": "http_post"
+      }
+    }
+  ],
+  "edges": [
+    { "from": "assess", "to": "cooloff" },
+    { "from": "cooloff", "to": "publish" }
+  ]
+}

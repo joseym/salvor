@@ -55,6 +55,28 @@
 //!   the item list is a pure function of a recorded resume input rather than of
 //!   the graph document alone.
 //!
+//! # Why there is no `delay` shape, and where the delay's sweep lives instead
+//!
+//! A `delay` node parks on a durable timer, and this harness cannot drive one
+//! to completion. Every shape here runs on the same [`fixed_clock`]: a CONSTANT
+//! clock is what makes the control log and each of its continuations comparable
+//! byte for byte, since every envelope timestamp comes from it. A timer needs
+//! the opposite. Its deadline has to ARRIVE, so the clock must move, and it must
+//! move at the same point in every one of a shape's boundary continuations or
+//! the timestamps stop matching. On top of that, [`drive_to_completion`]'s
+//! dispatch has no action for a sleeping run: it is not resumed with an input
+//! and not recovered from a crash, it is simply driven again LATER, which is
+//! time passing rather than an operator acting.
+//!
+//! Threading a settable clock and a wait-for-the-deadline action through the
+//! harness would change how all five shapes drive in order to serve one, and
+//! the thing it would be proving (that a cut inside a sleep recovers) is not
+//! about the clock at all. So the delay's kill-at-every-boundary sweep is its
+//! own test, `delay_graph.rs`, which makes the identical two-part claim (a
+//! byte-identical recovered log, exactly-once tool execution) over a run
+//! containing a delay, and moves the clock exactly between the two phases such a
+//! run has.
+//!
 //! # What `map` and `fold` running inline bound the claim to
 //!
 //! A map's iterations and a fold's passes both run inline and sequentially in

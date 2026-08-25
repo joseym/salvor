@@ -13,6 +13,8 @@ use crate::error::{HandlerError, ToolError};
 use crate::idempotency::IdempotencyPath;
 use crate::outcome::ToolOutcome;
 
+use super::park::{ParkRequest, park_request};
+
 /// A single MCP-server tool, dispatched through the runtime like any native
 /// tool.
 ///
@@ -34,11 +36,25 @@ use crate::outcome::ToolOutcome;
 /// is what makes respawn-on-resume clean: a fresh [`McpServer`](super::McpServer)
 /// hands out fresh tools, and the old ones simply stop working.
 ///
-/// # Never suspends
+/// # Parking the run it was called from
 ///
-/// MCP has no suspension concept, so [`call_json`](DynTool::call_json) never
-/// returns [`ToolOutcome::Suspend`]. It resolves to
-/// [`ToolOutcome::Output`] or an error.
+/// A server can ask the run to park by putting the request under `_meta` on
+/// its `CallToolResult`, in the `salvor` namespace. The decode happens after
+/// the call returns, in [`call_json`](DynTool::call_json), and yields
+/// [`ToolOutcome::Suspend`] or [`ToolOutcome::Sleep`] exactly as a native tool
+/// would return it, so nothing downstream of this method learns that the park
+/// came off a wire. The `park` submodule holds both shapes and every refusal;
+/// the [module docs](super) state the wire contract.
+///
+/// A refusal is [`ToolError::MalformedResult`], which no effect class retries.
+/// The server's request is on the wire already and reading it again cannot
+/// reach a different answer.
+///
+/// The ordinary content stays the tool's output for a result that asks for
+/// nothing. For one that does park, the runtime records its own sentinel as
+/// the completion's output (that is what carries the reason, schema, or
+/// instant into the log), so the content beside the request is not recorded.
+/// A server with something to say about a park says it in `reason`.
 ///
 /// # The declared idempotency key
 ///
@@ -184,6 +200,25 @@ impl DynTool for McpTool {
                 source: HandlerError::new(source),
             })?;
 
+        // The park request, before the error flag is read, because one of the
+        // things this decode refuses is a park flagged `isError`, and that
+        // refusal has to beat the plain error report or the contradiction
+        // would be swallowed by it.
+        //
+        // A malformed request is `MalformedResult` rather than `Handler`, and
+        // the difference is one of retries. A handler failure is the world
+        // saying no, which a second attempt can change; a `_meta.salvor` this
+        // client cannot read is the server author's own bug, and re-running a
+        // read or an idempotent tool two more times decodes the identical
+        // bytes to the identical refusal. So the call fails once, on every
+        // effect class, and the message says what to fix. Nothing here is ever
+        // fed back to the model as an argument correction; the model did not
+        // write the `_meta`.
+        let park = park_request(&result).map_err(|detail| ToolError::MalformedResult {
+            tool: self.name.clone(),
+            detail,
+        })?;
+
         // A tool-reported error (`isError == true`) is the MCP way of saying
         // "the tool ran and failed." That is precisely Handler semantics: the
         // work executed and returned a failure, distinct from the model sending
@@ -194,6 +229,17 @@ impl DynTool for McpTool {
                 tool: self.name.clone(),
                 source: HandlerError::message(message),
             });
+        }
+
+        // The park, if the server asked for one. It leaves here as the same
+        // value a native tool returns, which is what lets the runtime stay
+        // ignorant of where a suspension or a sleep came from.
+        match park {
+            Some(ParkRequest::Suspend(suspension)) => {
+                return Ok(ToolOutcome::Suspend(suspension));
+            }
+            Some(ParkRequest::Sleep(sleep)) => return Ok(ToolOutcome::Sleep(sleep)),
+            None => {}
         }
 
         // Success: hand back the whole tool result serialized to JSON. The
