@@ -26,10 +26,11 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import { createServer as netServer } from "node:net";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
-import { existsSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 
 // Imports the built output: the driver's source uses `.js` NodeNext specifiers
 // for its sibling modules, which Node's type stripping does not resolve to
@@ -354,6 +355,13 @@ test("append surfaces divergence as DivergenceError", async () => {
 let model: ChildProcess | undefined;
 let serve: ChildProcess | undefined;
 let base: string | undefined;
+/**
+ * This layer's own directory under the system temp dir, holding its store.
+ * Made with `mkdtemp` and removed whole in `after`, pass or fail: a store named
+ * after a port is world-readable, outlives the run, and leaves one more triple
+ * of files behind every time the suite is run.
+ */
+let storeDir: string | undefined;
 // The demo model logs one line per request to stderr; accumulating it is what
 // lets the retry test count provider hits (the no-re-pay proof).
 let modelLog = "";
@@ -361,6 +369,7 @@ const providerHits = () => (modelLog.match(/request #/g) ?? []).length;
 
 before(async () => {
   if (!existsSync(SALVOR) || !existsSync(DEMO_MODEL)) return;
+  storeDir = mkdtempSync(join(tmpdir(), "salvor-ts-"));
   const modelPort = await freePort();
   const servePort = await freePort();
   base = `http://127.0.0.1:${servePort}`;
@@ -370,7 +379,7 @@ before(async () => {
   model.stderr?.on("data", (chunk: Buffer) => {
     modelLog += chunk.toString("utf8");
   });
-  serve = spawn(SALVOR, ["--store", `/tmp/salvor-ts-driver-${servePort}.db`, "serve", "--bind", `127.0.0.1:${servePort}`], {
+  serve = spawn(SALVOR, ["--store", join(storeDir, "driver.db"), "serve", "--bind", `127.0.0.1:${servePort}`], {
     stdio: "ignore",
     env: {
       PATH: "/usr/bin:/bin",
@@ -397,6 +406,7 @@ before(async () => {
 after(() => {
   serve?.kill();
   model?.kill();
+  if (storeDir) rmSync(storeDir, { recursive: true, force: true });
 });
 
 test("full control loop, re-open, idempotency and divergence against salvor serve", async (t) => {

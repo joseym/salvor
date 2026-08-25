@@ -28,9 +28,28 @@
  * cannot be appended to is a log ending at an intent with no completion, and
  * that case is refused by name: an unfinished call is exactly what a person has
  * to settle before the run means anything again.
+ *
+ * A fork is remembered rather than only acted on. `forkedAt` holds the seq the
+ * tape walked off the recorded path at, and `announceFork` hands out exactly
+ * one permit to say so, so the middleware can mark every message it returns
+ * afterwards and warn once instead of forking in silence.
+ *
+ * ## The lease
+ *
+ * Every write this tape makes presents the drive token the run was opened
+ * with, and that token stops working the moment anything else opens the same
+ * run: another instance of the app on the same thread, or the same app after a
+ * salvor restart. The lease is therefore not something an invoke may assume it
+ * keeps for its own lifetime. `lease()` wraps each guarded step: a refusal that
+ * says the presented token is not the run's current one re-opens the run once,
+ * re-reads the log, and retries the step where it stood. A second refusal is
+ * something else entirely, and is refused by name, because two processes
+ * trading a lease back and forth would record each other's calls in an order
+ * neither of them asked for.
  */
 
 import type { ClientRunDriver } from "../client_runs.js";
+import { SalvorApiError } from "../errors.js";
 import type { SalvorEvent, Usage } from "../types.js";
 import { SalvorMiddlewareError } from "./errors.js";
 import { canonicalJson } from "./hash.js";
@@ -67,6 +86,23 @@ export interface TurnPosition {
   total: number;
 }
 
+/**
+ * How a tape reaches its run: which thread it stands for, what it records, and
+ * how to take the run up again when the lease it holds stops being the run's.
+ */
+export interface RunTapeOptions {
+  /** The LangGraph thread this run is the record of, for errors that name it. */
+  threadId: string;
+  /** Record each model request's body on its intent. */
+  recordPrompts: boolean;
+  /**
+   * Open the run again and hand back a driver holding a fresh lease. Called
+   * only when the server refuses a step because this tape's drive token is no
+   * longer the run's current one; see `lease`.
+   */
+  reopen: () => Promise<ClientRunDriver>;
+}
+
 /** One AI message's tool calls, as `noteTurn` recorded them. */
 interface NotedTurn {
   turn: string;
@@ -90,15 +126,23 @@ const ZERO_USAGE: Usage = { inputTokens: 0, outputTokens: 0 };
 /** Drives one thread's run for the length of one agent invocation. */
 export class RunTape {
   readonly runId: string;
-  private readonly driver: ClientRunDriver;
+  /** The LangGraph thread this run is the record of. */
+  readonly threadId: string;
+  /** Replaced, not fixed: a lost lease is taken up again by re-opening. */
+  private driver: ClientRunDriver;
   private readonly recordPrompts: boolean;
-  /** The recorded log at the moment this invoke opened the run, keyed by seq. */
-  private readonly recorded: Map<number, SalvorEvent>;
-  private readonly recordedLength: number;
+  private readonly reopenRun: () => Promise<ClientRunDriver>;
+  /** The recorded log as of the last time this tape opened the run, keyed by seq. */
+  private recorded: Map<number, SalvorEvent>;
+  private recordedLength: number;
   /** The next free position; every step takes this one and the one after it. */
   private cursor = 1;
   /** False once this invoke has asked for something the log does not hold. */
   private replaying: boolean;
+  /** The seq this invoke walked off the recorded path at, if it did. */
+  private forked: number | undefined;
+  /** Whether the one fork warning this invoke gets has been handed out. */
+  private forkAnnounced = false;
   /** The turnstile: one open intent at a time. */
   private queue: Promise<unknown> = Promise.resolve();
   /** The last model turn `noteTurn` recorded, for `positionOf` to read ranks from. */
@@ -106,10 +150,12 @@ export class RunTape {
   /** Per-turn admission state, keyed by `TurnPosition.turn`. */
   private turns = new Map<string, TurnGate>();
 
-  private constructor(driver: ClientRunDriver, recordPrompts: boolean) {
+  private constructor(driver: ClientRunDriver, options: RunTapeOptions) {
     this.driver = driver;
     this.runId = driver.runId;
-    this.recordPrompts = recordPrompts;
+    this.threadId = options.threadId;
+    this.recordPrompts = options.recordPrompts;
+    this.reopenRun = options.reopen;
     this.recorded = new Map(driver.logEnvelopes.map((event) => [event.seq, event]));
     this.recordedLength = driver.logEnvelopes.length;
     this.replaying = this.recordedLength > 0;
@@ -126,17 +172,46 @@ export class RunTape {
   static async open(
     driver: ClientRunDriver,
     started: Record<string, unknown>,
-    recordPrompts: boolean,
+    options: RunTapeOptions,
   ): Promise<RunTape> {
+    const tape = new RunTape(driver, options);
     if (driver.logEnvelopes.length === 0) {
-      await driver.append([driver.envelope(0, "RunStarted", started)]);
+      // Through the tape rather than the driver, so the very first write of a
+      // run is under the same lease rule as every write after it: a run opened
+      // and taken away before its `RunStarted` landed is the same fact as one
+      // taken away halfway through, and deserves the same one retry.
+      await tape.lease(() =>
+        tape.driver.append([tape.driver.envelope(0, "RunStarted", started)]),
+      );
     }
-    return new RunTape(driver, recordPrompts);
+    return tape;
   }
 
   /** The driver underneath, for a caller that wants the log or the lease. */
   get run(): ClientRunDriver {
     return this.driver;
+  }
+
+  /**
+   * The seq this invoke left the recorded path at, or undefined while it is
+   * still on it. Set once and never cleared: everything after a fork is off
+   * the recorded path too, which is why the middleware can mark every later
+   * message from this one field.
+   */
+  get forkedAt(): number | undefined {
+    return this.forked;
+  }
+
+  /**
+   * The one permit this invoke gets to say it forked: true the first time it
+   * is called after a fork, false every time after. A fork is one event in the
+   * life of an invoke, not one per step taken after it, and a warning repeated
+   * per step is a warning nobody reads.
+   */
+  announceFork(): boolean {
+    if (this.forked === undefined || this.forkAnnounced) return false;
+    this.forkAnnounced = true;
+    return true;
   }
 
   /**
@@ -159,10 +234,8 @@ export class RunTape {
           event.kind === "ModelCallRequested" && event.payload.request_hash === hash,
         "a model call",
       );
-      const opened = await this.driver.clientModelIntent(
-        seq,
-        hash,
-        this.recordPrompts ? body : undefined,
+      const opened = await this.lease(() =>
+        this.driver.clientModelIntent(seq, hash, this.recordPrompts ? body : undefined),
       );
       if (opened.settled) {
         return {
@@ -173,7 +246,9 @@ export class RunTape {
         };
       }
       const answered = await perform();
-      await this.driver.clientModelCompletion(seq, answered.response, answered.usage);
+      await this.lease(() =>
+        this.driver.clientModelCompletion(seq, answered.response, answered.usage),
+      );
       return { seq, replayed: false, ...answered };
     });
   }
@@ -212,7 +287,9 @@ export class RunTape {
             canonicalJson(event.payload.input) === wanted,
           `a call to the tool \`${tool}\``,
         );
-        const opened = await this.driver.clientToolIntent(seq, tool, input);
+        const opened = await this.lease(() =>
+          this.driver.clientToolIntent(seq, tool, input),
+        );
         if (opened.settled) {
           return {
             seq,
@@ -223,7 +300,7 @@ export class RunTape {
           };
         }
         const output = await perform({ seq, idempotencyKey: opened.idempotencyKey });
-        await this.driver.clientToolCompletion(seq, output);
+        await this.lease(() => this.driver.clientToolCompletion(seq, output));
         return {
           seq,
           replayed: false,
@@ -348,6 +425,69 @@ export class RunTape {
     }
   }
 
+  // -- the lease -------------------------------------------------------------
+
+  /**
+   * Run one guarded step, taking the run up again if the lease it presented is
+   * no longer the run's current one.
+   *
+   * `step` reads `this.driver` itself rather than closing over one, because the
+   * retry has to go through the driver the re-open handed back, not the one
+   * whose token was just refused.
+   *
+   * Twice is the limit, and the second refusal is refused by name. A lease
+   * taken once is a restart or a redeploy, which is exactly what this middleware
+   * exists to survive; a lease taken twice inside one invoke is another driver
+   * actively working the same thread, and there is no order in which two of them
+   * can both be right about what comes next.
+   */
+  private async lease<T>(step: () => Promise<T>): Promise<T> {
+    try {
+      return await step();
+    } catch (error) {
+      if (!lostLease(error)) throw error;
+      await this.reopen(error);
+      try {
+        return await step();
+      } catch (again) {
+        if (!lostLease(again)) throw again;
+        throw new SalvorMiddlewareError(
+          `run ${this.runId} (thread \`${this.threadId}\`) was taken from this ` +
+            "invoke twice: it re-opened the run once and something opened it again " +
+            "before the step could be retried. One driver per thread at a time. " +
+            "Invoke a given thread id from one process at a time, and give work " +
+            "that must run alongside it a thread id of its own.",
+        );
+      }
+    }
+  }
+
+  /**
+   * Open the run again, and rebuild what this tape knows of the log from what
+   * comes back. The cursor is deliberately left where it is: the step that was
+   * refused still belongs at the position it was given, and re-opening changes
+   * who holds the lease, not where this invoke had got to.
+   */
+  private async reopen(cause: unknown): Promise<void> {
+    let driver: ClientRunDriver;
+    try {
+      driver = await this.reopenRun();
+    } catch (error) {
+      const why = error instanceof SalvorApiError ? error.message : String(error);
+      throw new SalvorMiddlewareError(
+        `run ${this.runId} (thread \`${this.threadId}\`) refused this invoke's drive ` +
+          `token (${describe(cause)}), and re-opening the run was refused too: ` +
+          `${why}. A salvor server holds its client-driven leases in memory, so a ` +
+          "server that restarted no longer knows this run and will not adopt the log " +
+          "it already holds. The recorded log is intact; drive the thread from the " +
+          "server that opened it.",
+      );
+    }
+    this.driver = driver;
+    this.recorded = new Map(driver.logEnvelopes.map((event) => [event.seq, event]));
+    this.recordedLength = driver.logEnvelopes.length;
+  }
+
   // -- the cursor ------------------------------------------------------------
 
   /**
@@ -375,6 +515,7 @@ export class RunTape {
               `endpoint) and invoke again.`,
           );
         }
+        this.forked = this.cursor;
         this.cursor = this.recordedLength;
       }
     }
@@ -391,7 +532,7 @@ export class RunTape {
   private async recordedOutput(seq: number): Promise<unknown> {
     const known = this.recorded.get(seq);
     if (known?.kind === "ToolCallCompleted") return known.payload.output;
-    const tail = await this.driver.log(seq);
+    const tail = await this.lease(() => this.driver.log(seq));
     const completion = tail[0];
     if (completion?.seq !== seq || completion.kind !== "ToolCallCompleted") {
       throw new SalvorMiddlewareError(
@@ -401,4 +542,26 @@ export class RunTape {
     }
     return completion.payload.output;
   }
+}
+
+/**
+ * Whether the server refused this step because the lease it presented is not
+ * the run's.
+ *
+ * Two codes, one meaning. `invalid_drive_token` is a lease superseded by
+ * something else opening the same run. `unknown_run` on a run this tape opened
+ * itself is the same fact from the other side: the server has forgotten every
+ * client-driven run it was holding, which is what a restart looks like. Both
+ * are worth one attempt at taking the run up again; nothing else is.
+ */
+function lostLease(error: unknown): boolean {
+  return (
+    error instanceof SalvorApiError &&
+    (error.code === "invalid_drive_token" || error.code === "unknown_run")
+  );
+}
+
+/** The refusal's own token, for an error message that quotes what was said. */
+function describe(error: unknown): string {
+  return error instanceof SalvorApiError ? error.code : String(error);
 }

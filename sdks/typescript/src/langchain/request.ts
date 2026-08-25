@@ -82,9 +82,10 @@ function systemText(request: HashableModelRequest): string {
  */
 function canonicalMessage(message: BaseMessage): Record<string, unknown> {
   const anyMessage = message as unknown as Record<string, unknown>;
+  const role = message.getType();
   const value: Record<string, unknown> = {
-    role: message.getType(),
-    content: plain(message.content),
+    role,
+    content: role === "tool" ? toolContent(message.content) : plain(message.content),
   };
   if (message.name) value.name = message.name;
   const toolCalls = anyMessage.tool_calls as
@@ -108,6 +109,29 @@ function canonicalMessage(message: BaseMessage): Record<string, unknown> {
   // whatever this middleware chose to rebuild it with, and the two would never
   // agree. The result itself, which is what the model reads, is in `content`.
   return value;
+}
+
+/**
+ * A tool result's content as a VALUE where it is one, and as its string
+ * otherwise.
+ *
+ * A tool that returns an object reaches the model as JSON text, and the order
+ * of that text's keys is nobody's decision: LangChain writes them in the order
+ * the tool's own object had them, and salvor hands the recorded result back
+ * with them sorted, because the log stores JSON objects as maps. Hashing the
+ * text would therefore key the next model call on a key order that survives
+ * nothing, and every resumed thread whose tools return objects would fork at
+ * the first model call after a tool call. Hashing the parsed value instead
+ * makes the key say what the result IS, which is the only part of it either
+ * side agrees on. Content that is not JSON is exactly the string it is.
+ */
+function toolContent(content: unknown): unknown {
+  if (typeof content !== "string") return plain(content);
+  try {
+    return JSON.parse(content) as unknown;
+  } catch {
+    return content;
+  }
 }
 
 /**

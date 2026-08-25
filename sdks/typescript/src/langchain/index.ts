@@ -58,7 +58,7 @@ import { SalvorApiError } from "../errors.js";
 import type { Usage } from "../types.js";
 import { runWithToolCall } from "./current_call.js";
 import { SalvorMiddlewareError } from "./errors.js";
-import { hashValue, runIdForThread } from "./hash.js";
+import { canonicalJson, hashValue, runIdForThread } from "./hash.js";
 import { ReplayChatModel } from "./replay_model.js";
 import { canonicalRequest, requestHash } from "./request.js";
 import { RunTape } from "./tape.js";
@@ -72,7 +72,7 @@ export { canonicalJson, hashValue, isUuid, runIdForThread } from "./hash.js";
 export { ReplayChatModel } from "./replay_model.js";
 export { canonicalRequest, requestHash } from "./request.js";
 export { RunTape } from "./tape.js";
-export type { ModelOutcome, ToolOutcome, TurnPosition } from "./tape.js";
+export type { ModelOutcome, RunTapeOptions, ToolOutcome, TurnPosition } from "./tape.js";
 
 /** How this middleware is wired to a control plane. */
 export interface SalvorMiddlewareOptions {
@@ -91,6 +91,28 @@ export interface SalvorMiddlewareOptions {
    * Replay never reads it: the correlation key is the request hash alone.
    */
   recordPrompts?: boolean;
+  /**
+   * Called once, at most, per invoke that leaves its recorded path.
+   *
+   * The default warns on `console`. Replace it to route the notice wherever
+   * this application's other operational surprises go, or pass a no-op to
+   * silence it; the marker on the messages themselves (see
+   * {@link SalvorForkMark}) is there either way, so silencing the warning
+   * loses the announcement and not the evidence.
+   */
+  onFork?: (notice: SalvorForkNotice) => void;
+}
+
+/** What the middleware reports when an invoke leaves its recorded path. */
+export interface SalvorForkNotice {
+  /** The log position the invoke asked for something the log does not hold at. */
+  at: number;
+  /** The LangGraph thread it happened on. */
+  thread: string;
+  /** The run behind that thread. */
+  run: string;
+  /** The sentence the default handler warns with. */
+  message: string;
 }
 
 /** The marker a replayed message carries on its `response_metadata`. */
@@ -104,6 +126,43 @@ export interface SalvorReplayMark {
 }
 
 /**
+ * The marker a message this invoke actually performed carries, while the
+ * invoke is still on its recorded path. It exists so that the absence of a
+ * marker never has to be interpreted: a message from this middleware always
+ * says which of the three things it is.
+ */
+export interface SalvorLiveMark {
+  /** Always true: this call was performed now, not read back. */
+  live: true;
+  /** The log position it was recorded at. */
+  seq: number;
+  /** The run it was recorded in. */
+  run: string;
+}
+
+/**
+ * The marker every message carries after its invoke left the recorded path.
+ *
+ * `at` is the seq the tape asked for something the log does not hold at, which
+ * is the position to look at when working out why. Everything after it is a
+ * live call appended past the recorded history, so the marker stays on every
+ * later message of the invoke rather than only the first.
+ */
+export interface SalvorForkMark {
+  forked: {
+    /** The log position the invoke diverged at. */
+    at: number;
+    /** The LangGraph thread it diverged on. */
+    thread: string;
+    /** The run behind that thread. */
+    run: string;
+  };
+}
+
+/** What `response_metadata.salvor` holds on a message this middleware returned. */
+export type SalvorMark = SalvorReplayMark | SalvorLiveMark | SalvorForkMark;
+
+/**
  * A LangChain middleware that records this agent's model and tool calls in a
  * salvor run, and replays them on a re-invoke of the same thread.
  *
@@ -115,6 +174,8 @@ export interface SalvorReplayMark {
 export function salvorMiddleware(options: SalvorMiddlewareOptions) {
   const { client, recordPrompts = false } = options;
   const toRunId = options.threadIdToRunId ?? runIdForThread;
+  const onFork =
+    options.onFork ?? ((notice: SalvorForkNotice) => console.warn(notice.message));
 
   /** One tape per live invocation, keyed by run id. */
   const tapes = new Map<string, RunTape>();
@@ -158,7 +219,16 @@ export function salvorMiddleware(options: SalvorMiddlewareOptions) {
         }),
         input: { thread_id: threadId },
       },
-      recordPrompts,
+      {
+        threadId,
+        recordPrompts,
+        // A lease is not a thing an invoke owns for its own lifetime: a salvor
+        // restart or a second instance of this app on the same thread mints a
+        // new one and this driver's stops working mid-invoke. Re-opening with
+        // the same run id returns the recorded state and a fresh lease, which
+        // is all the tape needs to carry on from where it stood.
+        reopen: () => client.openClientRun({ runId, recordPrompts }),
+      },
     );
   }
 
@@ -224,9 +294,13 @@ export function salvorMiddleware(options: SalvorMiddlewareOptions) {
           return { response: answer.toDict(), usage: usageOf(answer) };
         },
       );
+      announceFork(tape, onFork);
       if (!outcome.replayed && live) {
         tape.noteTurn(live);
-        return live;
+        // Marked only now, after the answer was recorded: what the log holds is
+        // the model's own message, and the provenance of a message is this
+        // middleware's note to the reader, not part of the recorded answer.
+        return mark(live, markFor(tape, outcome.seq, false));
       }
       // The recorded answer goes back through LangChain's own handler, with a
       // stand-in model in the provider's place, so a streaming caller sees the
@@ -234,8 +308,7 @@ export function salvorMiddleware(options: SalvorMiddlewareOptions) {
       // `replay_model.ts` for why that indirection is worth having.
       const recorded = mark(
         storedToAiMessage(outcome.response, tape.runId),
-        outcome.seq,
-        tape.runId,
+        markFor(tape, outcome.seq, true),
       );
       tape.noteTurn(recorded);
       return handler({ ...request, model: new ReplayChatModel(recorded) });
@@ -288,28 +361,115 @@ export function salvorMiddleware(options: SalvorMiddlewareOptions) {
           throw undeclaredToolError(error, name);
         });
 
+      announceFork(tape, onFork);
+      // One serialisation, used by both branches on purpose. The model reads a
+      // tool result as text, and the text a replay produces is the text the
+      // live call produced, byte for byte, or the next model call's request
+      // hash misses and the thread forks on nothing but key order. See
+      // `toolContent`.
+      const content = toolContent(outcome.output);
+      const marker = markFor(tape, outcome.seq, outcome.replayed);
       if (!outcome.replayed && live) {
-        return live;
+        return mark(canonicalize(live, content), marker);
       }
-      const content = outcome.output;
       return mark(
         new ToolMessage({
-          content: typeof content === "string" ? content : JSON.stringify(content),
+          content,
           tool_call_id: request.toolCall.id ?? "",
           name,
           // A recorded completion is, by construction, a call that reported a
           // result: salvor refuses to record one any other way.
           status: "success",
         }),
-        outcome.seq,
-        tape.runId,
+        marker,
       );
     },
   });
 }
 
 /**
- * Put the replay marker on a message. It goes on `response_metadata`, which is
+ * Which of the three things this message is.
+ *
+ * A fork wins over "live", because after a fork "live" is no longer the
+ * interesting fact about a call: everything is live once the recorded path is
+ * behind you, and what a reader needs to know is that the thread stopped
+ * matching its own history and where.
+ */
+function markFor(tape: RunTape, seq: number, replayed: boolean): SalvorMark {
+  if (replayed) return { replayed: true, seq, run: tape.runId };
+  const at = tape.forkedAt;
+  if (at !== undefined) {
+    return { forked: { at, thread: tape.threadId, run: tape.runId } };
+  }
+  return { live: true, seq, run: tape.runId };
+}
+
+/**
+ * Say once, per invoke, that this one left its recorded path.
+ *
+ * A fork is not an error: the run carries on, appended past its recorded
+ * history, and everything from here is performed for real. It is worth saying
+ * out loud all the same, because the usual cause is something the operator can
+ * fix and would otherwise never see: a tool whose result is not the same twice,
+ * or a graph that branches on the clock. The middleware cannot tell which, so
+ * it names the position and the two things to look at.
+ */
+function announceFork(tape: RunTape, onFork: (notice: SalvorForkNotice) => void): void {
+  if (!tape.announceFork()) return;
+  const at = tape.forkedAt as number;
+  onFork({
+    at,
+    thread: tape.threadId,
+    run: tape.runId,
+    message:
+      `salvor: thread \`${tape.threadId}\` (run ${tape.runId}) left its recorded ` +
+      `path at seq ${at}. Nothing from there replays: every model call and every ` +
+      "tool call for the rest of this invoke is being performed and recorded " +
+      "afresh, and the messages carry `response_metadata.salvor.forked` saying so. " +
+      "If this thread was meant to resume, look for a tool whose result differs " +
+      "between invokes, or a graph that branches on the clock or on randomness.",
+  });
+}
+
+/**
+ * A tool result as the text the model reads, the same text on both paths.
+ *
+ * The live call and the replay have to produce identical bytes here, and there
+ * is only one serialisation both of them can reach: the canonical one. Salvor
+ * stores a recorded output as JSON with its object keys sorted, so a tool that
+ * returned `{ tracking_number, status, eta }` comes back `{ eta, status,
+ * tracking_number }`, and a live message built from the tool's own key order
+ * would not match the replayed one. The next model call hashes the tool result
+ * it was given, so that mismatch is a thread that forks at the first model call
+ * after a tool call and re-runs every write after it, on every invoke, forever.
+ * A result that is not JSON is a string, and stays the string it is.
+ */
+function toolContent(output: unknown): string {
+  return typeof output === "string" ? output : canonicalJson(output);
+}
+
+/**
+ * The live tool message, carrying the canonical text rather than LangChain's
+ * own stringification of the tool's return value. The serialization form is
+ * rewritten too, for the same reason `mark` rewrites it: a message LangGraph
+ * checkpoints and reads back is rebuilt from `lc_kwargs`, and content that
+ * only half the message carried would come back as the half that forks.
+ *
+ * A message whose content is not text at all is left exactly as it is. That is
+ * a tool that returned content blocks rather than a value, and rewriting those
+ * into a JSON string would change what the model is shown in order to fix a
+ * hash, which is the wrong way round.
+ */
+function canonicalize(message: ToolMessage, content: string): ToolMessage {
+  if (typeof message.content !== "string") return message;
+  message.content = content;
+  const kwargs = (message as { lc_kwargs?: Record<string, unknown> }).lc_kwargs;
+  if (kwargs) kwargs.content = content;
+  return message;
+}
+
+/**
+ * Put the salvor marker on a message. It goes on `response_metadata`, which is
  * the one place a message carries provenance rather than content, and it is
  * deliberately excluded from the request hash so that a replayed message fed
  * back into the next model call hashes exactly as the live one did.
@@ -320,10 +480,8 @@ export function salvorMiddleware(options: SalvorMiddlewareOptions) {
  */
 function mark<T extends { response_metadata?: Record<string, unknown> }>(
   message: T,
-  seq: number,
-  run: string,
+  salvor: SalvorMark,
 ): T {
-  const salvor: SalvorReplayMark = { replayed: true, seq, run };
   const metadata = { ...(message.response_metadata ?? {}), salvor };
   message.response_metadata = metadata;
   // The serialization form is written too, not just the field. A message that

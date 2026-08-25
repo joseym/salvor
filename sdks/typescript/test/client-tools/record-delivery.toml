@@ -1,0 +1,40 @@
+# The write half of the key-order pair: a keyed call whose result's keys are
+# also out of alphabetical order.
+#
+# It is a `write` so that its idempotency key is the thing a second invoke must
+# not change. A thread that forks after its first tool call re-runs every write
+# behind the fork under a fresh key on every invoke, which is the damage the
+# key-order bug actually did; the recorded key of this call, compared across
+# two invokes, is what shows it is gone.
+
+name = "record_delivery"
+
+effect = "write"
+
+trust_completion = true
+
+require_equal = ["tracking_number"]
+
+[input_schema]
+type = "object"
+required = ["tracking_number", "signed_by"]
+description = "Record that a parcel was delivered."
+
+[input_schema.properties.tracking_number]
+type = "string"
+
+[input_schema.properties.signed_by]
+type = "string"
+
+[output_schema]
+type = "object"
+required = ["tracking_number", "entry_id", "recorded_at"]
+
+[output_schema.properties.tracking_number]
+type = "string"
+
+[output_schema.properties.entry_id]
+type = "string"
+
+[output_schema.properties.recorded_at]
+type = "string"

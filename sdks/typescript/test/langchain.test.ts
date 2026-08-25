@@ -11,6 +11,16 @@
  * a tool's intent and its completion leaves the log saying exactly that, and the
  * next invoke picks the call up where it stopped, under the same derived key.
  *
+ * Three of the cases here are about what a resume gets wrong when nobody looks.
+ * A tool result whose keys are not in alphabetical order has to reach the model
+ * as the same text live and replayed, or the model call that reads it forks the
+ * thread on key order alone. A fork, when one does happen, has to be visible:
+ * every message from it carries a marker saying so, and the invoke says it once
+ * out loud. And the drive lease a run is opened with is not something an invoke
+ * owns for its own lifetime, so a run taken by another driver mid-invoke is
+ * taken back once, a run taken twice is refused by name, and a server that
+ * restarts under an invoke is reported rather than surfaced as a bare 404.
+ *
  * The model is a small `BaseChatModel` scripted turn by turn rather than one of
  * the fakes in `@langchain/core/utils/testing`. Those cannot script a
  * multi-turn tool-calling agent (`FakeStreamingChatModel` answers every turn
@@ -25,12 +35,14 @@
 
 import { deepStrictEqual, match, notStrictEqual, ok, rejects, strictEqual } from "node:assert";
 import { spawn, type ChildProcess } from "node:child_process";
+import { once } from "node:events";
 import { createServer as netServer } from "node:net";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
-import { existsSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 
 import { createAgent, createMiddleware, tool } from "langchain";
 import { AIMessage, type BaseMessage } from "@langchain/core/messages";
@@ -40,6 +52,7 @@ import { z } from "zod";
 
 import { SalvorClient } from "../dist/index.js";
 import {
+  type SalvorForkNotice,
   currentToolCall,
   finishThread,
   runIdForThread,
@@ -52,6 +65,8 @@ const SALVOR = resolve(repoRoot, "target", "debug", "salvor");
 const DECLS = [
   resolve(here, "client-tools", "lookup-order.toml"),
   resolve(here, "client-tools", "stamp-ledger.toml"),
+  resolve(here, "client-tools", "track-parcel.toml"),
+  resolve(here, "client-tools", "record-delivery.toml"),
 ];
 
 // -- the scripted model ------------------------------------------------------
@@ -112,11 +127,19 @@ class ScriptedModel extends BaseChatModel {
 // -- the tools ---------------------------------------------------------------
 
 /** How often each tool body actually ran, and how many ran at once. */
-const ran = { lookup: 0, stamp: 0, concurrent: 0, peakConcurrent: 0 };
+const ran = { lookup: 0, stamp: 0, track: 0, deliver: 0, concurrent: 0, peakConcurrent: 0 };
 /** Set to make the next `stamp_ledger` body throw, standing in for a crash. */
 let stampCrashes = false;
 /** What `currentToolCall()` reported the last time `lookup_order`'s body ran. */
 let capturedCall: ReturnType<typeof currentToolCall> | undefined;
+/**
+ * Run once, from inside the next `lookup_order` body, then cleared.
+ *
+ * This is how the lease cases reach in mid-invoke: a tool body runs while the
+ * tape holds an open intent, so whatever happens here happens between the
+ * intent and the completion, which is exactly where a lost lease hurts.
+ */
+let midToolCall: (() => Promise<void>) | undefined;
 
 function enter(): void {
   ran.concurrent += 1;
@@ -130,6 +153,9 @@ const lookupOrder = tool(
       capturedCall = currentToolCall();
       await new Promise((r) => setTimeout(r, 15));
       ran.lookup += 1;
+      const interrupt = midToolCall;
+      midToolCall = undefined;
+      if (interrupt) await interrupt();
       return { order_id, status: "paid", total_cents: 4200 };
     } finally {
       ran.concurrent -= 1;
@@ -166,6 +192,45 @@ const sendEmail = tool(async () => ({ sent: true }), {
   schema: z.object({ to: z.string() }),
 });
 
+/**
+ * A read whose result's keys are NOT in alphabetical order.
+ *
+ * The order matters and is the whole point: LangChain turns this object into
+ * the tool message's text in the order written here, and salvor hands the same
+ * result back from the log with its keys sorted. A middleware that let those
+ * two texts differ would fork the thread at the model call that reads the
+ * result, which is precisely what two people reported and what neither the
+ * alphabetical `lookup_order` nor a single-tool script could ever show.
+ */
+const trackParcel = tool(
+  async ({ parcel_id }: { parcel_id: string }) => {
+    ran.track += 1;
+    return { tracking_number: `TRK-${parcel_id}`, status: "in_transit", eta: "2026-03-04" };
+  },
+  {
+    name: "track_parcel",
+    description: "Track a parcel that has already shipped.",
+    schema: z.object({ parcel_id: z.string() }),
+  },
+);
+
+/** The keyed write behind that read, its own result also out of order. */
+const recordDelivery = tool(
+  async ({ tracking_number, signed_by }: { tracking_number: string; signed_by: string }) => {
+    ran.deliver += 1;
+    return {
+      tracking_number,
+      entry_id: `entry-${signed_by.length}`,
+      recorded_at: "2026-03-04T09:00:00Z",
+    };
+  },
+  {
+    name: "record_delivery",
+    description: "Record that a parcel was delivered.",
+    schema: z.object({ tracking_number: z.string(), signed_by: z.string() }),
+  },
+);
+
 // -- the server --------------------------------------------------------------
 
 function freePort(): Promise<number> {
@@ -181,16 +246,28 @@ function freePort(): Promise<number> {
 let serve: ChildProcess | undefined;
 let base: string | undefined;
 let client: SalvorClient | undefined;
+let port = 0;
+/**
+ * The suite's own directory under the system temp dir, holding the one store
+ * every case shares. It is made with `mkdtemp` and removed whole in `after`,
+ * pass or fail, so a suite that ran leaves nothing behind: a store file named
+ * after a port is world-readable, outlives the run, and accumulates one triple
+ * (db, wal, shm) per invocation forever.
+ */
+let storeDir: string | undefined;
 
-before(async () => {
-  if (!existsSync(SALVOR)) return;
-  const port = await freePort();
-  base = `http://127.0.0.1:${port}`;
-  serve = spawn(
+/**
+ * Start `salvor serve` on this suite's port and store, and wait until it
+ * answers. Separate from `before` because the restart case starts it again:
+ * the same port, the same store, a new process, which is the shape of a
+ * redeploy and of a crash-and-restart alike.
+ */
+async function startServe(): Promise<ChildProcess> {
+  const child = spawn(
     SALVOR,
     [
       "--store",
-      `/tmp/salvor-ts-langchain-${port}.db`,
+      join(storeDir!, "langchain.db"),
       "serve",
       "--bind",
       `127.0.0.1:${port}`,
@@ -201,30 +278,63 @@ before(async () => {
   const deadline = Date.now() + 15000;
   while (Date.now() < deadline) {
     try {
-      const resp = await fetch(`${base}/v1/client-tools`);
-      if (resp.ok) {
-        client = new SalvorClient(base);
-        return;
-      }
+      const resp = await fetch(`http://127.0.0.1:${port}/v1/client-tools`);
+      if (resp.ok) return child;
     } catch {
       /* not up yet */
     }
     await new Promise((r) => setTimeout(r, 100));
   }
-  base = undefined;
+  child.kill();
+  throw new Error("salvor serve did not come up");
+}
+
+/**
+ * Kill the running server and bring a fresh one up on the same port and store.
+ *
+ * The wait on `exit` is not politeness: the new process binds the same port,
+ * and starting it before the old one has released it is a race the suite would
+ * lose intermittently.
+ */
+async function restartServe(): Promise<void> {
+  const old = serve;
+  serve = undefined;
+  if (old) {
+    old.kill("SIGKILL");
+    await once(old, "exit");
+  }
+  serve = await startServe();
+}
+
+before(async () => {
+  if (!existsSync(SALVOR)) return;
+  storeDir = mkdtempSync(join(tmpdir(), "salvor-ts-"));
+  port = await freePort();
+  base = `http://127.0.0.1:${port}`;
+  try {
+    serve = await startServe();
+  } catch {
+    base = undefined;
+    return;
+  }
+  client = new SalvorClient(base);
 });
 
 after(() => {
   serve?.kill();
+  if (storeDir) rmSync(storeDir, { recursive: true, force: true });
 });
 
 function reset(): void {
   ran.lookup = 0;
   ran.stamp = 0;
+  ran.track = 0;
+  ran.deliver = 0;
   ran.concurrent = 0;
   ran.peakConcurrent = 0;
   stampCrashes = false;
   capturedCall = undefined;
+  midToolCall = undefined;
 }
 
 async function kindsOf(threadId: string): Promise<string[]> {
@@ -235,14 +345,34 @@ async function kindsOf(threadId: string): Promise<string[]> {
 function agentFor(
   turns: Turn[],
   tools: unknown[] = [lookupOrder, stampLedger],
+  options: Partial<Parameters<typeof salvorMiddleware>[0]> = {},
 ): { agent: ReturnType<typeof createAgent>; model: ScriptedModel } {
   const model = new ScriptedModel(turns);
   const agent = createAgent({
     model: model as never,
     tools: tools as never,
-    middleware: [salvorMiddleware({ client: client! })],
+    middleware: [salvorMiddleware({ client: client!, ...options })],
   });
   return { agent, model };
+}
+
+/** Every recorded event of a thread's run, by kind, read straight from the log. */
+async function eventsOf(threadId: string): Promise<
+  { kind: string; seq: number; payload: Record<string, unknown> }[]
+> {
+  const run = await client!.openClientRun({ runId: await runIdForThread(threadId) });
+  return run.logEnvelopes.map((event) => ({
+    kind: event.kind,
+    seq: event.seq,
+    payload: event.payload,
+  }));
+}
+
+/** What `response_metadata.salvor` says about a message, whatever it says. */
+function markerOf(message: BaseMessage): Record<string, any> | undefined {
+  return (message as AIMessage).response_metadata?.salvor as
+    | Record<string, any>
+    | undefined;
 }
 
 function textOf(message: BaseMessage): string {
@@ -288,6 +418,17 @@ test("a run records one model call and one tool call, and a second invoke replay
   const finalMessage = answer.messages.at(-1)!;
   strictEqual(textOf(finalMessage), "Order ORD-7781 is paid, 4200 cents.");
 
+  // A live message says it is live. Without this the absence of a marker would
+  // have to be read as "live, probably", and a middleware that silently stopped
+  // marking anything would look exactly the same.
+  const runId = await runIdForThread(threadId);
+  deepStrictEqual(markerOf(finalMessage), { live: true, seq: 5, run: runId });
+  deepStrictEqual(markerOf(answer.messages.find((m) => m.getType() === "tool")!), {
+    live: true,
+    seq: 3,
+    run: runId,
+  });
+
   // (b) The second invoke of the same thread pays for nothing at all.
   reset();
   const second = agentFor(ONE_TOOL_SCRIPT);
@@ -309,6 +450,112 @@ test("a run records one model call and one tool call, and a second invoke replay
   strictEqual(marker.replayed, true);
   strictEqual(marker.seq, 5, "the second model call sat at seq 5");
   strictEqual((await kindsOf(threadId)).length, 7, "the replay wrote nothing");
+});
+
+// -- (b2) a tool result whose keys are not in alphabetical order --------------
+
+/**
+ * read, then model, then keyed write, then model: the shortest chain in which
+ * a tool result's key order can fork a thread.
+ *
+ * The tool message a live call produces is LangChain's stringification of the
+ * tool's own object, keys in the order the tool wrote them. The tool message a
+ * replay produces is built from the log, and salvor stores an output as a map,
+ * so its keys come back sorted. The next model call hashes the messages it is
+ * given, tool results included, so if those two texts differ the second invoke
+ * misses at that model call, forks, and appends everything after it again,
+ * `record_delivery` included, under a fresh key, on every invoke forever.
+ *
+ * Nothing in the older cases could catch it: `lookup_order` returns
+ * `{ order_id, status, total_cents }`, which is already alphabetical, and no
+ * script chained a tool, a model call and another tool.
+ */
+const PARCEL_SCRIPT: Turn[] = [
+  {
+    content: "tracking it",
+    toolCalls: [{ name: "track_parcel", args: { parcel_id: "PCL-31" }, id: "call-track" }],
+  },
+  {
+    content: "recording the delivery",
+    toolCalls: [
+      {
+        name: "record_delivery",
+        args: { tracking_number: "TRK-PCL-31", signed_by: "R. Diaz" },
+        id: "call-deliver",
+      },
+    ],
+  },
+  { content: "Parcel PCL-31 is delivered." },
+];
+
+test("a tool whose result keys are not alphabetical replays through a following model call and a following write", async (t) => {
+  if (!base) return t.skip("salvor serve not available (build with cargo build)");
+  reset();
+  const threadId = "thread-key-order";
+  const tools = [trackParcel, recordDelivery];
+  const input = { messages: [{ role: "user", content: "where is PCL-31?" }] };
+
+  const first = agentFor(PARCEL_SCRIPT, tools);
+  const answer = await first.agent.invoke(input, {
+    configurable: { thread_id: threadId },
+  });
+  strictEqual(first.model.calls.count, 3, "three model calls: track, record, answer");
+  strictEqual(ran.track, 1);
+  strictEqual(ran.deliver, 1);
+  strictEqual(textOf(answer.messages.at(-1)!), "Parcel PCL-31 is delivered.");
+
+  // The live tool message carries the same text the log will hand back: keys
+  // sorted, no spaces. Without this the next model call's hash is taken over
+  // bytes no replay can reproduce.
+  const liveToolMessage = answer.messages.find((m) => m.getType() === "tool")!;
+  strictEqual(
+    textOf(liveToolMessage),
+    '{"eta":"2026-03-04","status":"in_transit","tracking_number":"TRK-PCL-31"}',
+    "the live tool message is the canonical serialisation, not the tool's key order",
+  );
+
+  const before = await eventsOf(threadId);
+  const writeKey = before.find(
+    (event) =>
+      event.kind === "ToolCallRequested" && event.payload.tool === "record_delivery",
+  )!.payload.idempotency_key;
+  ok(writeKey, "the write's key was derived and recorded");
+
+  // The second invoke pays for nothing and runs nothing, which is only true if
+  // the model call after the tool call re-derived the identical request hash.
+  reset();
+  const second = agentFor(PARCEL_SCRIPT, tools);
+  const again = await second.agent.invoke(input, {
+    configurable: { thread_id: threadId },
+  });
+  strictEqual(second.model.calls.count, 0, "zero model calls on the replay");
+  strictEqual(ran.track, 0, "zero tool runs on the replay");
+  strictEqual(ran.deliver, 0, "the write did not run a second time");
+  strictEqual(textOf(again.messages.at(-1)!), "Parcel PCL-31 is delivered.");
+  deepStrictEqual(markerOf(again.messages.at(-1)!), {
+    replayed: true,
+    seq: 9,
+    run: await runIdForThread(threadId),
+  });
+
+  const after = await eventsOf(threadId);
+  strictEqual(after.length, before.length, "the replay appended nothing");
+  strictEqual(
+    after.filter(
+      (event) =>
+        event.kind === "ToolCallRequested" && event.payload.tool === "record_delivery",
+    ).length,
+    1,
+    "one recorded write, not one per invoke",
+  );
+  strictEqual(
+    after.find(
+      (event) =>
+        event.kind === "ToolCallRequested" && event.payload.tool === "record_delivery",
+    )!.payload.idempotency_key,
+    writeKey,
+    "the write's recorded key is identical across invokes",
+  );
 });
 
 // -- (c) a crash between a tool's intent and its completion ------------------
@@ -620,15 +867,123 @@ test("an invoke that asks for something the log does not hold appends instead of
 
   // A different question down the same thread is a different first model call,
   // so nothing at the recorded positions applies. The run carries on at the end
-  // of its log rather than pretending the old answers are still answers.
+  // of its log rather than pretending the old answers are still answers, and it
+  // says out loud that it did.
   reset();
-  const second = agentFor([{ content: "ORD-9999 is not one of ours." }]);
+  const notices: SalvorForkNotice[] = [];
+  const second = agentFor([{ content: "ORD-9999 is not one of ours." }], undefined, {
+    onFork: (notice) => notices.push(notice),
+  });
   const answer = await second.agent.invoke(
     { messages: [{ role: "user", content: "how is ORD-9999?" }] },
     { configurable: { thread_id: threadId } },
   );
   strictEqual(second.model.calls.count, 1, "the new question was asked for real");
   strictEqual(textOf(answer.messages.at(-1)!), "ORD-9999 is not one of ours.");
+  deepStrictEqual((await kindsOf(threadId)).slice(7), [
+    "ModelCallRequested",
+    "ModelCallCompleted",
+  ]);
+  strictEqual(notices.length, 1, "one notice for the invoke, not one per step");
+  strictEqual(notices[0].at, 1, "it diverged at the very first model call");
+  deepStrictEqual(markerOf(answer.messages.at(-1)!), {
+    forked: { at: 1, thread: threadId, run: await runIdForThread(threadId) },
+  });
+});
+
+// -- a fork after the recorded path was walked partway -----------------------
+
+/**
+ * A middleware that stamps a per-invoke nonce into the system prompt of every
+ * model call that has a tool result to read.
+ *
+ * This is a graph branching on something outside the log, which is the honest
+ * cause of most forks and the one the warning tells an operator to look for.
+ * It is applied only to the model call AFTER a tool call so that the fork lands
+ * partway down a recorded path rather than at its first step: the messages
+ * before it replay, the messages after it do not, and a marker that only
+ * appeared on the first message after a fork would be caught here.
+ */
+function stampAfterTools(nonce: string) {
+  return createMiddleware({
+    name: "StampMiddleware",
+    wrapModelCall: async (request: any, handler: any) => {
+      const readsATool = request.messages.some(
+        (message: BaseMessage) => message.getType() === "tool",
+      );
+      if (!readsATool) return handler(request);
+      return handler({ ...request, systemPrompt: `stamped ${nonce}` });
+    },
+  });
+}
+
+test("an invoke that forks partway marks every later message and warns exactly once", async (t) => {
+  if (!base) return t.skip("salvor serve not available");
+  reset();
+  const threadId = "thread-fork-partway";
+  const input = { messages: [{ role: "user", content: "how is ORD-7781?" }] };
+  const runId = await runIdForThread(threadId);
+
+  function agentStamped(turns: Turn[], nonce: string, onFork: (n: SalvorForkNotice) => void) {
+    const model = new ScriptedModel(turns);
+    const agent = createAgent({
+      model: model as never,
+      tools: [lookupOrder, stampLedger] as never,
+      middleware: [
+        stampAfterTools(nonce),
+        salvorMiddleware({ client: client!, onFork }),
+      ] as never,
+    });
+    return { agent, model };
+  }
+
+  const first = agentStamped(ONE_TOOL_SCRIPT, "one", () => {
+    throw new Error("the first invoke has no recorded path to leave");
+  });
+  await first.agent.invoke(input, { configurable: { thread_id: threadId } });
+  strictEqual(first.model.calls.count, 2);
+  strictEqual((await kindsOf(threadId)).length, 7);
+
+  // The same question, the same tool result, a different stamp on the second
+  // model call, and a model that now answers something else.
+  reset();
+  const notices: SalvorForkNotice[] = [];
+  const second = agentStamped(
+    [ONE_TOOL_SCRIPT[0], { content: "Order ORD-7781 was refunded after all." }],
+    "two",
+    (notice) => notices.push(notice),
+  );
+  const answer = await second.agent.invoke(input, {
+    configurable: { thread_id: threadId },
+  });
+
+  strictEqual(second.model.calls.count, 1, "only the diverged model call was live");
+  strictEqual(ran.lookup, 0, "the tool call before the fork still replayed");
+  strictEqual(textOf(answer.messages.at(-1)!), "Order ORD-7781 was refunded after all.");
+
+  // One warning for the invoke, naming where it happened and what to look at.
+  strictEqual(notices.length, 1, "exactly one warning per invoke");
+  strictEqual(notices[0].at, 5, "the fork is at the second model call's position");
+  strictEqual(notices[0].thread, threadId);
+  strictEqual(notices[0].run, runId);
+  match(notices[0].message, new RegExp(threadId), "the message names the thread");
+  match(notices[0].message, new RegExp(runId), "and the run");
+  match(notices[0].message, /seq 5/, "and the seq");
+  match(notices[0].message, /branches on the clock/, "and what to check");
+
+  // Everything before the fork still says it was replayed; everything from the
+  // fork on says it forked, and where.
+  const ai = answer.messages.filter((m) => m.getType() === "ai");
+  deepStrictEqual(markerOf(ai[0]), { replayed: true, seq: 1, run: runId });
+  deepStrictEqual(markerOf(answer.messages.find((m) => m.getType() === "tool")!), {
+    replayed: true,
+    seq: 3,
+    run: runId,
+  });
+  deepStrictEqual(markerOf(ai.at(-1)!), { forked: { at: 5, thread: threadId, run: runId } });
+
+  // The fork was appended, not lost: the recorded path is still there, with the
+  // new answer after it.
   deepStrictEqual((await kindsOf(threadId)).slice(7), [
     "ModelCallRequested",
     "ModelCallCompleted",
@@ -769,6 +1124,182 @@ test("finishThread on a thread whose log ends at an open intent is refused, nami
     ["ToolCallRequested"],
     "finishThread wrote nothing",
   );
+});
+
+// -- the lease ---------------------------------------------------------------
+
+/**
+ * A stand-in for a second instance of this application: it opens the same run,
+ * which mints a fresh lease and stops the middleware's own token working.
+ *
+ * Nothing about it is exotic. Opening a client-driven run is the only way to
+ * drive one, so any second process that invokes the same thread does exactly
+ * this, and the first process finds out the next time it writes.
+ */
+async function anotherDriverOpens(threadId: string): Promise<void> {
+  await client!.openClientRun({ runId: await runIdForThread(threadId) });
+}
+
+test("a lease taken by another driver mid-invoke is taken back once, and the invoke finishes", async (t) => {
+  if (!base) return t.skip("salvor serve not available");
+  reset();
+  const threadId = "thread-lease-retaken";
+
+  // The takeover happens inside the tool body, which is to say between the tool
+  // call's intent and its completion: the tape holds an open intent, and the
+  // very next thing it does is a write it no longer has the lease for.
+  midToolCall = () => anotherDriverOpens(threadId);
+
+  const { agent, model } = agentFor(ONE_TOOL_SCRIPT);
+  const answer = await agent.invoke(
+    { messages: [{ role: "user", content: "how is ORD-7781?" }] },
+    { configurable: { thread_id: threadId } },
+  );
+
+  strictEqual(model.calls.count, 2, "both model calls happened");
+  strictEqual(ran.lookup, 1, "the tool body ran once, not once per lease");
+  strictEqual(textOf(answer.messages.at(-1)!), "Order ORD-7781 is paid, 4200 cents.");
+
+  // The retry re-posted the completion; it did not re-perform the call. One
+  // intent, one completion, nothing doubled.
+  deepStrictEqual(await kindsOf(threadId), [
+    "RunStarted",
+    "ModelCallRequested",
+    "ModelCallCompleted",
+    "ToolCallRequested",
+    "ToolCallCompleted",
+    "ModelCallRequested",
+    "ModelCallCompleted",
+  ]);
+
+  // And the thread still replays afterwards: taking the lease back left the
+  // cursor where it stood rather than restarting the walk.
+  reset();
+  const second = agentFor(ONE_TOOL_SCRIPT);
+  await second.agent.invoke(
+    { messages: [{ role: "user", content: "how is ORD-7781?" }] },
+    { configurable: { thread_id: threadId } },
+  );
+  strictEqual(second.model.calls.count, 0);
+  strictEqual(ran.lookup, 0);
+});
+
+/**
+ * A client that lets something else open the run immediately after every open
+ * this middleware performs: an instance that is not going away, and will keep
+ * taking the thread back.
+ */
+function contestedClient(threadId: string): SalvorClient {
+  return new Proxy(client!, {
+    get(target, property) {
+      const value = Reflect.get(target, property) as unknown;
+      if (property !== "openClientRun") {
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+      return async (options: unknown) => {
+        const driver = await target.openClientRun(options as never);
+        await anotherDriverOpens(threadId);
+        return driver;
+      };
+    },
+  }) as SalvorClient;
+}
+
+test("a run taken twice inside one invoke is refused, naming the thread and the one-driver rule", async (t) => {
+  if (!base) return t.skip("salvor serve not available");
+  reset();
+  const threadId = "thread-lease-contested";
+  const input = { messages: [{ role: "user", content: "how is ORD-7781?" }] };
+  const runId = await runIdForThread(threadId);
+
+  // Record the thread once, normally, so the contested invoke below meets the
+  // takeover at a step in the middle of a walk rather than at `RunStarted`.
+  const first = agentFor(ONE_TOOL_SCRIPT);
+  await first.agent.invoke(input, { configurable: { thread_id: threadId } });
+  strictEqual((await kindsOf(threadId)).length, 7);
+
+  reset();
+  const model = new ScriptedModel(ONE_TOOL_SCRIPT);
+  const contested = createAgent({
+    model: model as never,
+    tools: [lookupOrder, stampLedger] as never,
+    middleware: [salvorMiddleware({ client: contestedClient(threadId) })],
+  });
+
+  await rejects(
+    () => contested.invoke(input, { configurable: { thread_id: threadId } }),
+    (error: unknown) => {
+      const text = String((error as Error).message ?? error);
+      match(text, new RegExp(threadId), "the error names the thread");
+      match(text, new RegExp(runId), "and the run");
+      match(text, /one driver per thread at a time/i, "and the rule");
+      return true;
+    },
+  );
+
+  // It gave up rather than fighting for the run: nothing new was recorded.
+  strictEqual((await kindsOf(threadId)).length, 7, "the refused invoke wrote nothing");
+});
+
+/**
+ * A salvor restart mid-invoke, and the honest limit of what the middleware can
+ * do about it.
+ *
+ * A server keeps its client-driven leases in memory and adopts nothing on
+ * startup: a restarted `salvor serve` answers every drive call for a run it
+ * used to hold with `unknown_run`, and refuses to re-open that run because its
+ * log is history the new process did not open. So the middleware does the one
+ * thing available to it and does it once: it tries to take the run up again,
+ * and when the server will not hand it back it says so by name, naming the
+ * thread, the run and why, instead of surfacing a bare 404 from inside
+ * somebody else's agent loop.
+ *
+ * What is NOT claimed here is that the invoke survives. It cannot, against a
+ * server built this way; adopting a client-driven run's recorded log after a
+ * restart is a change to `salvor serve`, not to this middleware. What the case
+ * does hold the middleware to is the part that is its own: the tool body ran
+ * exactly once, so a lost server is a stopped run and never a doubled write.
+ */
+test("a salvor restart mid-invoke is reported by name, and the interrupted call is not performed twice", async (t) => {
+  if (!base) return t.skip("salvor serve not available");
+  reset();
+  const threadId = "thread-server-restarted";
+  const runId = await runIdForThread(threadId);
+
+  // Between the tool call's intent and its completion, the server this invoke
+  // has been driving goes away and a fresh one comes up on the same port and
+  // the same store.
+  midToolCall = () => restartServe();
+
+  const { agent } = agentFor(ONE_TOOL_SCRIPT);
+  await rejects(
+    () =>
+      agent.invoke(
+        { messages: [{ role: "user", content: "how is ORD-7781?" }] },
+        { configurable: { thread_id: threadId } },
+      ),
+    (error: unknown) => {
+      const text = String((error as Error).message ?? error);
+      match(text, new RegExp(threadId), "the error names the thread");
+      match(text, new RegExp(runId), "and the run");
+      match(text, /re-opening the run was refused/, "and what it tried");
+      match(text, /restarted/, "and what happened");
+      return true;
+    },
+  );
+  strictEqual(ran.lookup, 1, "the tool body ran once and was never retried");
+
+  // The store outlived the process, so the log is still readable through the
+  // run endpoints even though the run can no longer be driven. It ends at the
+  // intent of the call that was in flight: asked for, never reported.
+  const kinds: string[] = [];
+  for await (const event of client!.streamEvents(runId)) kinds.push(event.kind);
+  deepStrictEqual(kinds, [
+    "RunStarted",
+    "ModelCallRequested",
+    "ModelCallCompleted",
+    "ToolCallRequested",
+  ]);
 });
 
 // -- the thread-id rule ------------------------------------------------------
