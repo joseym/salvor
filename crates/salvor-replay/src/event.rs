@@ -65,6 +65,12 @@ use crate::id::{RunId, SequenceNumber};
 /// written before the field meant, and it omits the key entirely, so those
 /// logs replay byte for byte and the version stays 1.
 ///
+/// The optional `performed_by` on [`Event::ToolCallRequested`] is the fifth,
+/// and the same field on [`Event::ModelCallRequested`] is the sixth. Absent
+/// means salvor performed the call itself, which is what every call recorded
+/// before either field existed was, and the key is omitted entirely, so those
+/// logs serialize byte for byte as they did before and the version stays 1.
+///
 /// # Why the durable-timer events do not bump this
 ///
 /// [`Event::SleepStarted`] and [`Event::SleepCompleted`] are two more new
@@ -93,20 +99,26 @@ use crate::id::{RunId, SequenceNumber};
 /// forbids.
 pub const SCHEMA_VERSION: u32 = 1;
 
-/// Who performed a tool call: the trust distinction a reader of the log needs
-/// to tell "salvor witnessed this" apart from "the client says this happened".
+/// Who performed a call: the trust distinction a reader of the log needs to
+/// tell "salvor witnessed this" apart from "the client says this happened".
 ///
-/// A [`ToolCallRequested`](Event::ToolCallRequested) with no [`Performer`]
-/// recorded (the field is `None`) is the default and, until this variant's
-/// client side is wired to any endpoint, the only case that exists: salvor
-/// made the call itself, in its own process, so the log entry is direct
-/// evidence. A recorded [`Performer::Client`] is different in kind, not just
-/// in origin: it is the client's own claim that it ran the call in its
-/// process and is now telling salvor it happened. Salvor did not witness that
-/// execution; it is trusting the report. The log keeps that distinction
-/// explicit rather than flattening both into "a tool call happened", so a
-/// later reader (a human auditing the log, or code deciding how much to trust
-/// an entry) can tell a witnessed fact from an asserted one.
+/// A [`ToolCallRequested`](Event::ToolCallRequested) or a
+/// [`ModelCallRequested`](Event::ModelCallRequested) with no [`Performer`]
+/// recorded (the field is `None`) is the default and the overwhelmingly
+/// common case: salvor made the call itself, in its own process, so the log
+/// entry is direct evidence. A recorded [`Performer::Client`] is different in
+/// kind, not just in origin: it is the client's own claim that it ran the
+/// call in its process and is now telling salvor it happened. Salvor did not
+/// witness that execution; it is trusting the report. The log keeps that
+/// distinction explicit rather than flattening both into "a call happened",
+/// so a later reader (a human auditing the log, or code deciding how much to
+/// trust an entry) can tell a witnessed fact from an asserted one.
+///
+/// The distinction is recorded on both call kinds, and means the same thing on
+/// each. A client-performed tool call is code and secrets salvor does not
+/// hold; a client-performed model call is a provider called with the client's
+/// own key and model configuration. In both cases salvor records the report so
+/// a later replay reads the recorded answer rather than doing the work again.
 ///
 /// Serializes lowercase (`"server"`, `"client"`), matching the wire style
 /// [`Effect`] uses.
@@ -290,6 +302,35 @@ pub enum Event {
         // such transform exists today; recording is all-or-nothing.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_body: Option<serde_json::Value>,
+        /// Who performed this call: see [`Performer`] for what the
+        /// distinction means. Absent means salvor performed the call itself,
+        /// which is every [`Event::ModelCallRequested`] ever recorded before
+        /// this field existed.
+        ///
+        /// The trust question is the same one `performed_by` on
+        /// [`Event::ToolCallRequested`] answers, and the field is the same
+        /// shape for the same reason. What differs is what a client-performed
+        /// model call buys: the client called the provider with its own key
+        /// and its own model configuration, and the recorded response is what
+        /// it says came back. Salvor did not witness the call, but recording
+        /// it means a resume replays that answer instead of paying the
+        /// provider a second time for it.
+        ///
+        /// `#[serde(default, skip_serializing_if = "Option::is_none")]` under
+        /// the identical additive-optional contract `request_body` above sets
+        /// (see that field's doc and the [`SCHEMA_VERSION`] docs for the full
+        /// argument): with no performer recorded, the field is omitted from
+        /// the wire form entirely, so a server-performed call serializes byte
+        /// for byte as it did before this field existed, and a log written
+        /// before the field deserializes with it defaulted to `None`. The
+        /// pinned-JSON tests in this module's test suite check this directly.
+        ///
+        /// Replay never reads it. Correlation keys on `request_hash` alone, so
+        /// a call the client performed replays exactly as one salvor performed:
+        /// the pending call is pending, the completion closes it, and its
+        /// tokens count toward the run's budgets.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        performed_by: Option<Performer>,
     },
     /// A model call completed. This is the captured nondeterministic boundary:
     /// once recorded, replay reads the response from here and never calls the
@@ -862,11 +903,19 @@ mod tests {
             seq: SequenceNumber::new(1),
             request_hash: "sha256:req".into(),
             request_body: None,
+            performed_by: None,
         });
         assert_round_trips(Event::ModelCallRequested {
             seq: SequenceNumber::new(1),
             request_hash: "sha256:req".into(),
             request_body: Some(serde_json::json!({"model": "test", "messages": []})),
+            performed_by: None,
+        });
+        assert_round_trips(Event::ModelCallRequested {
+            seq: SequenceNumber::new(1),
+            request_hash: "sha256:req".into(),
+            request_body: None,
+            performed_by: Some(Performer::Client),
         });
         assert_round_trips(Event::ModelCallCompleted {
             seq: SequenceNumber::new(1),
@@ -1032,6 +1081,7 @@ mod tests {
             seq: SequenceNumber::new(2),
             request_hash: "sha256:req".into(),
             request_body: None,
+            performed_by: None,
         });
         let json = serde_json::to_string(&env).expect("serialize");
         assert_eq!(
@@ -1042,6 +1092,10 @@ mod tests {
             !json.contains("request_body"),
             "recording-off must not emit the key: {json}"
         );
+        assert!(
+            !json.contains("performed_by"),
+            "a server-performed call must not emit the key: {json}"
+        );
     }
 
     /// With recording on, the body rides alongside the hash under its own key.
@@ -1051,9 +1105,44 @@ mod tests {
             seq: SequenceNumber::new(2),
             request_hash: "sha256:req".into(),
             request_body: Some(serde_json::json!({"model": "m"})),
+            performed_by: None,
         });
         let json = serde_json::to_string(&env).expect("serialize");
         assert!(json.contains(r#""request_body":{"model":"m"}"#), "{json}");
+    }
+
+    /// A model call the CLIENT performed carries the performer after the hash,
+    /// with the same lowercase string [`Performer`] serializes to on a tool
+    /// call. This is the pin for the client-performed model surface's wire
+    /// form: the hash is the client's claim over its own request, and
+    /// `performed_by` is what says the claim is a claim.
+    #[test]
+    fn model_call_requested_with_client_performer_serializes_to_pinned_json() {
+        let env = envelope(Event::ModelCallRequested {
+            seq: SequenceNumber::new(2),
+            request_hash: "sha256:req".into(),
+            request_body: None,
+            performed_by: Some(Performer::Client),
+        });
+        let json = serde_json::to_string(&env).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"ModelCallRequested","payload":{"seq":2,"request_hash":"sha256:req","performed_by":"client"}}}"#
+        );
+    }
+
+    /// A `ModelCallRequested` JSON that predates `performed_by` (no such key
+    /// in the payload) deserializes with the field defaulted to `None`: the
+    /// backward-compatibility proof for every model call recorded before this
+    /// field existed, which is every one of them.
+    #[test]
+    fn model_call_requested_without_performer_key_deserializes_to_none() {
+        let json = r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"ModelCallRequested","payload":{"seq":2,"request_hash":"sha256:req"}}}"#;
+        let restored: EventEnvelope = serde_json::from_str(json).expect("deserialize");
+        let Event::ModelCallRequested { performed_by, .. } = restored.event else {
+            panic!("expected ModelCallRequested");
+        };
+        assert_eq!(performed_by, None);
     }
 
     /// With no performer recorded, `ToolCallRequested` serializes with no

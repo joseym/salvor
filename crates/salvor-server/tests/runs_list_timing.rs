@@ -57,6 +57,7 @@ async fn seed_run(store: &dyn EventStore, agent_def_hash: &str) {
                 seq: call_seq,
                 request_hash: format!("sha256:req{i}"),
                 request_body: None,
+                performed_by: None,
             },
         );
         store.append(&envelope).await.expect("append request");

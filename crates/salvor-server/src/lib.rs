@@ -118,6 +118,14 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/client-runs/{id}/client-tool-completion",
             post(client_runs::client_tool_completion),
         )
+        .route(
+            "/v1/client-runs/{id}/client-model-intent",
+            post(client_runs::client_model_intent),
+        )
+        .route(
+            "/v1/client-runs/{id}/client-model-completion",
+            post(client_runs::client_model_completion),
+        )
         .route("/v1/client-runs/{id}/resolve", post(client_runs::resolve))
         .layer(from_fn_with_state(state.clone(), auth::require_bearer));
 

@@ -340,6 +340,7 @@ async fn model_and_tool_kinds_are_rejected() {
             seq: SequenceNumber::new(1),
             request_hash: "sha256:req".into(),
             request_body: None,
+            performed_by: None,
         },
     );
     let (status, body) = append(

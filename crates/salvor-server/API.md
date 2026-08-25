@@ -103,6 +103,8 @@ codes:
 | POST | `/v1/client-runs/{id}/tool-step` | Perform and record a tool call (server-performed) |
 | POST | `/v1/client-runs/{id}/client-tool-intent` | Open a tool call the CLIENT performs, and derive its idempotency key |
 | POST | `/v1/client-runs/{id}/client-tool-completion` | Record what a client-performed tool call returned |
+| POST | `/v1/client-runs/{id}/client-model-intent` | Open a model call the CLIENT performs, or replay a recorded one |
+| POST | `/v1/client-runs/{id}/client-model-completion` | Record what a client-performed model call returned |
 | POST | `/v1/client-runs/{id}/resolve` | Record a dangling write's completion by hand (client-driven) |
 
 ### POST /v1/agents
@@ -962,7 +964,10 @@ client's cursor emits itself, which hold no secret and no side effect:
 `RunFailed`. The side-effecting steps, which the server must perform because it
 holds the key or the binary, have their own endpoints: the model call is the model-step endpoint and the tool call is the
 tool-step endpoint below, and a model or tool event is still refused on the
-generic append.
+generic append. A step the CLIENT performs in its own process, with its own
+secrets, has its own endpoint pair for the same reason: `client-tool-intent`
+with `client-tool-completion` for a tool, and `client-model-intent` with
+`client-model-completion` for a model call the client made with its own key.
 
 ### The drive token
 
@@ -1337,6 +1342,122 @@ files.
 The recorded `ToolCallRequested` carries `performed_by: "client"`, which is how
 a later reader tells a call salvor witnessed from a call it was told about. A
 server-performed intent omits the field entirely.
+
+### POST /v1/client-runs/{id}/client-model-intent
+
+Open a model call the CLIENT performs, in its own process, with its own key and
+its own model configuration. This server does not make the call and never sees
+the request; it records that the call was asked for, before it happens, exactly
+as the write-ahead rule demands of a call it performs itself. Requires the
+`X-Drive-Token` header.
+
+- Request:
+
+```json
+{ "seq": 3, "request_hash": "sha256:...", "request_body": <the request, optional> }
+```
+
+- Response `200`, an intent that still has to be performed:
+
+```json
+{ "seq": 3, "settled": false }
+```
+
+- Response `200`, an intent whose completion is already recorded:
+
+```json
+{ "seq": 3, "settled": true,
+  "response": <the recorded response>,
+  "usage": { "input_tokens": 10, "output_tokens": 5 } }
+```
+
+Notice what the request does NOT carry, compared with `model-step` above: no
+`request`. `model-step` recomputes `request_hash` from the request body it is
+handed, so a client cannot record a hash that does not match what was sent.
+Here it can. The request never reaches this server, because this server is not
+the one sending it, so the hash is the client's claim over its own request, and
+the response reported later is the client's claim about what came back. Salvor
+did not witness the call; it is trusting the report, exactly as it trusts a
+client-performed tool result.
+
+What the trust buys is the point of the endpoint: a resume replays the recorded
+answer instead of paying the provider for it a second time. The claim is also
+self-punishing rather than dangerous to anyone else, because the hash is a key
+into this run's own log: a client that hashes inconsistently diverges against
+its own history and nobody else's.
+
+`settled` is what a middleware short-circuits on. `false` means the call still
+has to be made; `true` means it is already recorded, and the recorded
+`response` and `usage` ride along so the caller can return them without a
+second request and without a separate log read.
+
+`request_body` is recorded on the intent only when the run was opened with
+`record_prompts: true`, the same rule the server-performed step reads off the
+run's lease. Sent to a run that does not record prompts, it is dropped and
+never written. It is informational either way: correlation is on `request_hash`
+alone.
+
+Refusals, each of which writes nothing:
+
+- a different `request_hash` at an already-recorded position: `409 divergence`;
+- a non-model event at that position: `409 divergence`;
+- an intent at that position that this SERVER performed: `409 divergence`. The
+  client's cursor and the log disagree about who owns that step;
+- a `seq` the log is not ready for: `409 divergence`.
+
+A re-post at a recorded position with the same hash is a `200` that writes
+nothing: the safe retry a dropped response leaves behind, and the replay a
+later drive is built on.
+
+The recorded `ModelCallRequested` carries `performed_by: "client"`, which is how
+a later reader tells a call salvor witnessed from a call it was told about. A
+server-performed intent omits the field entirely. The fold reads no performer at
+all, so a client-performed call moves a run exactly as a server-performed one
+does: `awaiting_model` while the intent is open, and its tokens counted toward
+every budget once the completion lands.
+
+For the same reason in the other direction, `model-step` refuses a position
+holding a client-performed intent with `409 divergence`, and calls no provider:
+performing it there would let this server witness a response for a call the log
+attributes to the client.
+
+### POST /v1/client-runs/{id}/client-model-completion
+
+Record what a client-performed model call returned. Requires the
+`X-Drive-Token` header.
+
+- Request:
+
+```json
+{ "seq": 3, "response": <what the client says the provider returned>,
+  "usage": { "input_tokens": 10, "output_tokens": 5 } }
+```
+
+- Response `200`:
+
+```json
+{ "seq": 3, "completed": true }
+```
+
+`usage` is required, not optional: it is what a token budget counts, and a
+completion that quietly reported none would under-count every budget the run is
+held to.
+
+Refusals, each of which records nothing:
+
+- the log does not end at a model intent, or ends at one whose `seq` is not the
+  one named: `409 divergence`;
+- the pending intent was performed by the SERVER: `403
+  client_completion_refused`. A client must not close a call salvor made, since
+  salvor holds the real response.
+
+That is the whole list, and it is shorter than `client-tool-completion`'s on
+purpose. The tool completion's remaining refusals all come from the operator's
+declaration (`trust_completion`, `output_schema`, `require_equal`), and a model
+call has no such declaration to check against: its response shape is the
+provider's, not an operator's. The response is recorded verbatim, and the
+recorded `ModelCallCompleted` is byte-identical to the one the server-performed
+step writes for the same response.
 
 ### POST /v1/client-runs/{id}/resolve
 

@@ -289,6 +289,7 @@ async fn dangling_intent_reissues_and_completes() {
             seq: SequenceNumber::new(1),
             request_hash: hash_value(&request),
             request_body: None,
+            performed_by: None,
         },
     );
     server

@@ -385,6 +385,7 @@ fn divergence_on_payload_mismatch() {
                 seq: SequenceNumber::new(3),
                 request_hash: "sha256:req-1".into(),
                 request_body: None,
+                performed_by: None,
             })),
             requested: Box::new(RequestedStep::ModelCall {
                 request_hash: "sha256:req-DIFFERENT".into(),
@@ -575,6 +576,7 @@ fn recorded_request_body_does_not_change_replay() {
                 seq: SequenceNumber::new(1),
                 request_hash: "sha256:req-1".into(),
                 request_body: body,
+                performed_by: None,
             },
             Event::ModelCallCompleted {
                 seq: SequenceNumber::new(1),

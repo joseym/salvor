@@ -19,9 +19,13 @@
 //! client's cursor emits itself and that hold no secret and no side effect:
 //! `RunStarted`, `NowObserved`, `RandomObserved`, `Suspended`, `Resumed`,
 //! `SleepStarted`, `SleepCompleted`, `BudgetExceeded`, `RunCompleted`,
-//! `RunFailed`. The side-effecting steps (the model call and the tool call,
-//! which the server must perform because it holds the key or the binary) are
+//! `RunFailed`. The side-effecting steps (the model call and the tool call) are
 //! not supported here, so a model or tool event is refused with a clear error.
+//! Each has its own endpoint pair instead: [`model_step`] and [`tool_step`] for
+//! a call this server performs because it holds the key or the binary, and
+//! [`client_tool_intent`]/[`client_tool_completion`] and
+//! [`client_model_intent`]/[`client_model_completion`] for a call the CLIENT
+//! performs in its own process and reports back.
 //!
 //! # A client-driven run may sleep, and its client wakes it
 //!
@@ -222,6 +226,43 @@ struct ClientToolCompletionRequest {
     /// What the client reports the call returned, checked against the declared
     /// `output_schema` before it is recorded.
     output: Value,
+}
+
+/// The body of `POST /v1/client-runs/{id}/client-model-intent`.
+///
+/// Notice what is NOT here, next to [`ModelStepRequest`]: no `request`. The
+/// server never sees the request, because it is not the one sending it; the
+/// client hashes its own request and reports the hash. Everything this struct
+/// carries is therefore the client's claim, which is exactly the trust posture
+/// a client-performed tool call already lives under.
+#[derive(Debug, Deserialize)]
+struct ClientModelIntentRequest {
+    /// The log position the client's cursor reserved for the model intent.
+    seq: u64,
+    /// The client's canonical hash of the request it is about to send. This is
+    /// the replay-correlation key, and salvor cannot recompute it: it never
+    /// holds the request. A client that hashes inconsistently diverges against
+    /// its own log and nobody else's.
+    request_hash: String,
+    /// The full request, recorded on the intent only when the run was opened
+    /// with `record_prompts: true`, exactly as on the server-performed step.
+    /// Informational: replay correlates on `request_hash` alone.
+    #[serde(default)]
+    request_body: Option<Value>,
+}
+
+/// The body of `POST /v1/client-runs/{id}/client-model-completion`.
+#[derive(Debug, Deserialize)]
+struct ClientModelCompletionRequest {
+    /// The intent's position, which must be the pending intent at the log's end.
+    seq: u64,
+    /// What the client reports the provider returned, recorded verbatim.
+    response: Value,
+    /// The token usage the client reports for the call, in the shape
+    /// [`Event::ModelCallCompleted`] records. Required, because it is what a
+    /// token budget counts, and a completion that quietly reported none would
+    /// under-count every budget the run is held to.
+    usage: TokenUsage,
 }
 
 /// The body of `POST /v1/client-runs/{id}/resolve`.
@@ -504,6 +545,11 @@ pub async fn model_step(
                         seq: SequenceNumber::new(seq),
                         request_hash: request_hash.clone(),
                         request_body,
+                        // This server is about to make the call itself, so the
+                        // performer stays unrecorded: absent means salvor
+                        // witnessed it, which is what every model intent
+                        // written before the field existed meant.
+                        performed_by: None,
                     },
                 );
                 let mut validator = LogValidator::new(log);
@@ -564,6 +610,7 @@ fn plan_model_step(
     let recorded = &log[seq as usize];
     let Event::ModelCallRequested {
         request_hash: recorded_hash,
+        performed_by,
         ..
     } = &recorded.event
     else {
@@ -571,6 +618,19 @@ fn plan_model_step(
             "seq {seq} already holds a non-model event; it is not a model-step position"
         )));
     };
+    // A call the CLIENT performed is not this endpoint's to re-issue or to
+    // answer. Re-issuing it would let this server witness and record a response
+    // for an intent the log attributes to the client, smearing the one
+    // distinction `performed_by` exists to keep; and a cursor that asks this
+    // server to perform a step its own log says the client performed has
+    // genuinely diverged from that log. Close it with client-model-completion.
+    if *performed_by == Some(Performer::Client) {
+        return Err(ApiError::Divergence(format!(
+            "the model intent at seq {seq} was performed by the client, so this server may not \
+             perform or answer it; record its result with POST \
+             /v1/client-runs/{{id}}/client-model-completion"
+        )));
+    }
     if recorded_hash != request_hash {
         return Err(ApiError::Divergence(format!(
             "model-step at seq {seq} carries a request hash that differs from the recorded intent"
@@ -1502,10 +1562,272 @@ pub async fn client_tool_completion(
     })))
 }
 
+/// `POST /v1/client-runs/{id}/client-model-intent`: open a model call the
+/// CLIENT performs.
+///
+/// The counterpart of [`model_step`] for a call this server does not make. The
+/// client is about to call the provider in its OWN process, with its own key
+/// and its own model configuration; this endpoint records that it is about to,
+/// so the intent is in the log before the call happens, exactly as the
+/// write-ahead rule demands of a call salvor performs itself. Requires the
+/// `X-Drive-Token` header, like every other driving endpoint.
+///
+/// # What salvor is trusting, and what it buys
+///
+/// [`model_step`] recomputes `request_hash` from the request body it was handed,
+/// so the client cannot record a hash that does not match what was sent. Here
+/// it cannot: the request never reaches this server, because this server is not
+/// the one sending it. The hash is the client's claim over its own request, and
+/// the recorded response is the client's claim about what came back, in exactly
+/// the sense a client-performed tool result is (see [`Performer`]). Salvor did
+/// not witness the call; it is trusting the report.
+///
+/// What the trust buys is the whole point of the feature: a resume replays the
+/// recorded answer instead of paying the provider for it a second time. The
+/// claim is also self-punishing rather than dangerous to anyone else, which is
+/// why it is safe to take: the hash is a key into this run's own log, so a
+/// client that hashes inconsistently diverges against its own history and
+/// nobody else's.
+///
+/// # Replay, mirroring [`client_tool_intent`] exactly
+///
+/// A recorded intent at this position whose `request_hash` matches is a replay:
+/// nothing is written, and the answer carries the recorded completion when one
+/// exists, so a middleware can short-circuit without a separate log read. A
+/// different hash there, a non-model event, or an intent the SERVER performed is
+/// `409 divergence` and nothing is written. A fresh position goes through the
+/// same [`LogValidator`] guard every other append on this surface uses.
+pub async fn client_model_intent(
+    State(state): State<AppState>,
+    Path(run_id_text): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<Value>, ApiError> {
+    let run_id = parse_run_id(&run_id_text)?;
+    let lease = authorize_drive(&state, run_id, &headers)?;
+
+    if body.len() > MAX_EVENTS_BODY {
+        return Err(ApiError::PayloadTooLarge(format!(
+            "client-model-intent body is {} bytes, over the {MAX_EVENTS_BODY}-byte cap",
+            body.len()
+        )));
+    }
+    let request: ClientModelIntentRequest = parse_body(&body)?;
+
+    let log = state.store().read_log(run_id).await.map_err(store_error)?;
+    if (request.seq as usize) < log.len() {
+        // An already-recorded position. Correlation is on the hash alone, the
+        // identical rule [`plan_model_step`] and `ReplayCursor::model_call`
+        // use: the body is informational and a log captured with bodies must
+        // replay the same as one captured without, so a re-post that omits the
+        // body it once sent is still the same call.
+        let recorded = &log[request.seq as usize];
+        let Event::ModelCallRequested {
+            request_hash: recorded_hash,
+            performed_by,
+            ..
+        } = &recorded.event
+        else {
+            return Err(ApiError::Divergence(format!(
+                "seq {} already holds a non-model event; it is not this client-model intent's \
+                 position",
+                request.seq
+            )));
+        };
+        if *performed_by != Some(Performer::Client) {
+            return Err(ApiError::Divergence(format!(
+                "the model intent at seq {} was performed by this server, not by the client",
+                request.seq
+            )));
+        }
+        if recorded_hash != &request.request_hash {
+            return Err(ApiError::Divergence(format!(
+                "the model intent at seq {} carries a request hash that differs from the recorded \
+                 one",
+                request.seq
+            )));
+        }
+        return Ok(Json(client_model_intent_body(
+            request.seq,
+            recorded_completion(&log, request.seq),
+        )));
+    }
+
+    // Recorded only when the run was opened with `record_prompts: true`, the
+    // same rule and the same `Option::then` shape the server-performed step
+    // reads off the lease. A body sent with recording off is dropped here and
+    // never written.
+    let request_body = lease
+        .record_prompts
+        .then_some(request.request_body)
+        .flatten();
+    let intent = EventEnvelope::new(
+        run_id,
+        SequenceNumber::new(request.seq),
+        state.now(),
+        Event::ModelCallRequested {
+            seq: SequenceNumber::new(request.seq),
+            request_hash: request.request_hash.clone(),
+            request_body,
+            // The whole point of the endpoint: the log says who performed this,
+            // so a later reader can tell a call salvor witnessed from a call it
+            // was told about.
+            performed_by: Some(Performer::Client),
+        },
+    );
+
+    let mut validator = LogValidator::new(log);
+    validator
+        .push(intent.clone())
+        .map_err(|error| ApiError::Divergence(error.to_string()))?;
+    state.store().append(&intent).await.map_err(append_error)?;
+    // A freshly-recorded intent can never already be settled: the append above
+    // just placed it at the log's new end, with nothing after it yet.
+    Ok(Json(client_model_intent_body(request.seq, None)))
+}
+
+/// The recorded `(response, usage)` for the model intent at `seq`, when its
+/// completion is already in `log`.
+///
+/// The append-guard only ever admits a completion for the same `seq`
+/// immediately after its intent, so it is enough to check the very next slot,
+/// the same way [`intent_is_settled`] checks a tool intent's.
+fn recorded_completion(log: &[EventEnvelope], seq: u64) -> Option<(&Value, TokenUsage)> {
+    match &log.get(seq as usize + 1)?.event {
+        Event::ModelCallCompleted {
+            seq: completed_seq,
+            response,
+            usage,
+        } if completed_seq.get() == seq => Some((response, *usage)),
+        _ => None,
+    }
+}
+
+/// The `200` client-model-intent body: the position, whether this position's
+/// completion is ALREADY recorded, and, when it is, that completion.
+///
+/// `settled` is the same flag [`intent_body`] carries for a tool intent, and it
+/// is here for a sharper version of the same reason. A middleware re-posting an
+/// intent it believes it already opened cannot otherwise tell "safe to call the
+/// provider" from "already called, do not pay for it again", and paying twice
+/// is precisely what recording the call was for. So the recorded completion
+/// rides along on a settled answer: the middleware short-circuits on the
+/// response it already has, with no second request.
+fn client_model_intent_body(seq: u64, completion: Option<(&Value, TokenUsage)>) -> Value {
+    match completion {
+        Some((response, usage)) => json!({
+            "seq": seq,
+            "settled": true,
+            "response": response,
+            "usage": usage,
+        }),
+        None => json!({ "seq": seq, "settled": false }),
+    }
+}
+
+/// `POST /v1/client-runs/{id}/client-model-completion`: record that a
+/// client-performed model call finished.
+///
+/// The client called the provider in its own process and is now reporting the
+/// response and what it cost. Requires the `X-Drive-Token` header.
+///
+/// It refuses, recording nothing, when:
+///
+/// - the log does not end at a model intent, or ends at one whose `seq` is not
+///   the one this request names (`409 divergence`);
+/// - the pending intent was performed by the SERVER (`403`): a client must not
+///   close a call salvor made, since salvor holds the real response.
+///
+/// That is the whole list, and it is shorter than [`client_tool_completion`]'s
+/// on purpose. The tool completion's remaining refusals all come from the
+/// operator's declaration (`trust_completion`, `output_schema`,
+/// `require_equal`), and a model call has no such declaration to check against:
+/// its response shape is the provider's, not an operator's. The response is
+/// recorded verbatim, as the server-performed step records its own.
+///
+/// Once recorded, the completion is byte-identical to a server-performed one
+/// (it goes through the same [`append_completion`] helper), so the fold treats
+/// the call exactly the same: pending while open, closed by this event, and its
+/// tokens counted toward every budget the run is held to.
+pub async fn client_model_completion(
+    State(state): State<AppState>,
+    Path(run_id_text): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<Value>, ApiError> {
+    let run_id = parse_run_id(&run_id_text)?;
+    authorize_drive(&state, run_id, &headers)?;
+
+    if body.len() > MAX_EVENTS_BODY {
+        return Err(ApiError::PayloadTooLarge(format!(
+            "client-model-completion body is {} bytes, over the {MAX_EVENTS_BODY}-byte cap",
+            body.len()
+        )));
+    }
+    let request: ClientModelCompletionRequest = parse_body(&body)?;
+
+    // A completion settles the log's LAST event, which must be the intent this
+    // request names. Anything else and the client and the log disagree about
+    // what is outstanding.
+    let log = state.store().read_log(run_id).await.map_err(store_error)?;
+    let pending = log.last().ok_or_else(|| {
+        ApiError::Divergence(format!(
+            "run {} has recorded nothing, so it has no client-performed model call to complete",
+            run_id.as_uuid()
+        ))
+    })?;
+    let Event::ModelCallRequested {
+        seq: intent_seq,
+        performed_by,
+        ..
+    } = &pending.event
+    else {
+        return Err(ApiError::Divergence(format!(
+            "run {} does not end at a model intent, so there is no model call to complete",
+            run_id.as_uuid()
+        )));
+    };
+    if intent_seq.get() != request.seq {
+        return Err(ApiError::Divergence(format!(
+            "the pending model intent is at seq {}, not the seq {} this completion names",
+            intent_seq.get(),
+            request.seq
+        )));
+    }
+    // A client may close only a call a client made. The server-performed
+    // model-step records its own completion from the response it saw, so a
+    // client completion there would be overwriting a witnessed fact with a
+    // claim.
+    if *performed_by != Some(Performer::Client) {
+        return Err(ApiError::ClientCompletionRefused(format!(
+            "the pending model call at seq {} was performed by this server, not by the client, so \
+             a client may not record its completion",
+            request.seq
+        )));
+    }
+
+    // The same guard and the same helper the server-performed model step
+    // records its own completion with, so the two surfaces write byte-identical
+    // `ModelCallCompleted` events.
+    append_completion(
+        &state,
+        run_id,
+        request.seq,
+        &request.response,
+        request.usage,
+    )
+    .await?;
+    Ok(Json(json!({
+        "seq": request.seq,
+        "completed": true,
+    })))
+}
+
 /// Refuses a model or tool event on the generic append: those are recorded
 /// through the server-performed model-step and tool-step endpoints, or, for a
 /// call the CLIENT performs in its own process, through the client-tool-intent
-/// and client-tool-completion endpoints. All four kinds stay refused here.
+/// and client-tool-completion endpoints, or the client-model-intent and
+/// client-model-completion pair. All four kinds stay refused here.
 ///
 /// A client-performed tool call is possible, in other words; it is just not
 /// possible by hand-appending an event. That is the same rule the server-
@@ -1513,6 +1835,14 @@ pub async fn client_tool_completion(
 /// input check, and the idempotency key are the server's to decide from an
 /// operator's declaration, and an event submitted whole would carry the caller's
 /// answers to all three.
+///
+/// A client-performed MODEL call is possible on the same terms, and stays
+/// refused here for a narrower reason: the endpoints are where `performed_by`
+/// is stamped, where prompt recording is read off the run's lease rather than
+/// taken from the request, and where a completion is checked against the intent
+/// it claims to close. An event submitted whole would carry the caller's
+/// answers to all three, including the ability to write `performed_by: null` on
+/// a call salvor never made and pass a claim off as a witnessed fact.
 fn reject_side_effecting_kind(candidate: &EventEnvelope) -> Result<(), ApiError> {
     use salvor_core::Event;
     let kind = match &candidate.event {
@@ -1524,7 +1854,8 @@ fn reject_side_effecting_kind(candidate: &EventEnvelope) -> Result<(), ApiError>
     };
     Err(ApiError::UnsupportedEventKind(format!(
         "the generic append accepts control and context events only; `{kind}` is recorded through \
-         the model-step or tool-step endpoint"
+         the model-step or tool-step endpoint, or, for a call the client performs itself, through \
+         the client-model or client-tool endpoint pair"
     )))
 }
 

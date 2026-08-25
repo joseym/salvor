@@ -856,6 +856,7 @@ fn reference_logs() -> Vec<(&'static str, Vec<EventEnvelope>)> {
                     "sha256:2b4d6f8a0c2e40628a4c6e80a2c4e6081b3d5f79a1c3e50729b4d6f8a0c2e406"
                         .to_owned(),
                 request_body: None,
+                performed_by: None,
             },
             Event::ModelCallCompleted {
                 seq: SequenceNumber::new(2),
@@ -885,6 +886,7 @@ fn reference_logs() -> Vec<(&'static str, Vec<EventEnvelope>)> {
                     "sha256:3c5e7a9b1d3f50729c4e6a8b0d2f4160a2c4e6081b3d5f79a1c3e50729b4d6f8"
                         .to_owned(),
                 request_body: None,
+                performed_by: None,
             },
             Event::ModelCallCompleted {
                 seq: SequenceNumber::new(8),

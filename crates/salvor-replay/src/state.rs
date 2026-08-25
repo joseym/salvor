@@ -406,6 +406,7 @@ mod tests {
                 seq: SequenceNumber::new(1),
                 request_hash: "sha256:req".into(),
                 request_body: None,
+                performed_by: None,
             },
         ]));
         assert_eq!(state.status, RunStatus::AwaitingModel);
@@ -877,6 +878,7 @@ mod tests {
                 seq: SequenceNumber::new(2),
                 request_hash: "sha256:req".into(),
                 request_body: None,
+                performed_by: None,
             },
         ]));
         assert_eq!(state.status, RunStatus::AwaitingModel);
@@ -898,6 +900,7 @@ mod tests {
                 seq: SequenceNumber::new(1),
                 request_hash: "sha256:a".into(),
                 request_body: None,
+                performed_by: None,
             },
             Event::ModelCallCompleted {
                 seq: SequenceNumber::new(1),
@@ -911,6 +914,7 @@ mod tests {
                 seq: SequenceNumber::new(3),
                 request_hash: "sha256:b".into(),
                 request_body: None,
+                performed_by: None,
             },
             Event::ModelCallCompleted {
                 seq: SequenceNumber::new(3),
