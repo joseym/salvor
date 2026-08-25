@@ -32,7 +32,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { existsSync } from "node:fs";
 
-import { createAgent, tool } from "langchain";
+import { createAgent, createMiddleware, tool } from "langchain";
 import { AIMessage, type BaseMessage } from "@langchain/core/messages";
 import { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import type { ChatResult } from "@langchain/core/outputs";
@@ -441,6 +441,95 @@ test("two tool calls in one model turn are serialised by the turnstile and both 
   );
   strictEqual(second.model.calls.count, 0);
   strictEqual(ran.lookup, 0);
+});
+
+// -- (d2) hook entry order is adversarial, but the model's order still wins --
+
+/**
+ * A middleware that sits ahead of salvor's in the list and, for one named
+ * tool call, awaits a macrotask before calling `handler`. Every other call
+ * passes straight through. Composed ahead of `salvorMiddleware`, this delays
+ * only when *that* call's turn reaches salvor's own `wrapToolCall`, so the
+ * calls behind it in `tool_calls` order are entered there first: the exact
+ * shape of the out-of-order arrival the Python port measured, forced instead
+ * of hoped for.
+ */
+function delayEntry(toolCallId: string, ms: number) {
+  return createMiddleware({
+    name: "DelayEntryMiddleware",
+    wrapToolCall: async (request: any, handler: any) => {
+      if (request.toolCall.id === toolCallId) {
+        await new Promise((r) => setTimeout(r, ms));
+      }
+      return handler(request);
+    },
+  });
+}
+
+test("three tool calls in one model turn are recorded in the model's order even when a middleware ahead of salvor's reorders hook entry", async (t) => {
+  if (!base) return t.skip("salvor serve not available");
+  reset();
+  const threadId = "thread-adversarial-entry-order";
+  const script: Turn[] = [
+    {
+      content: "looking all three up",
+      toolCalls: [
+        { name: "lookup_order", args: { order_id: "ORD-A" }, id: "call-a" },
+        { name: "lookup_order", args: { order_id: "ORD-B" }, id: "call-b" },
+        { name: "lookup_order", args: { order_id: "ORD-C" }, id: "call-c" },
+      ],
+    },
+    { content: "All three are paid." },
+  ];
+
+  async function recordedInputs(): Promise<string[]> {
+    const run = await client!.openClientRun({ runId: await runIdForThread(threadId) });
+    return run.logEnvelopes
+      .filter((event) => event.kind === "ToolCallRequested")
+      .map((event) => (event.payload.input as { order_id: string }).order_id);
+  }
+
+  // rank 0 (`call-a`) is entered into salvor's own `wrapToolCall` last, well
+  // after rank 1 and rank 2 have already been entered synchronously ahead of
+  // its timer firing. If the turnstile admitted on arrival, the log would
+  // read ORD-B, ORD-C, ORD-A instead of the model's own order.
+  const first = new ScriptedModel(script);
+  const firstAgent = createAgent({
+    model: first as never,
+    tools: [lookupOrder, stampLedger] as never,
+    middleware: [delayEntry("call-a", 30), salvorMiddleware({ client: client! })] as never,
+  });
+  await firstAgent.invoke(
+    { messages: [{ role: "user", content: "check all three" }] },
+    { configurable: { thread_id: threadId } },
+  );
+  strictEqual(first.calls.count, 2, "the tool turn and the answer turn");
+  strictEqual(ran.lookup, 3, "all three tool bodies executed");
+  strictEqual(ran.peakConcurrent, 1, "never two at once: the turnstile held the others");
+  deepStrictEqual(
+    await recordedInputs(),
+    ["ORD-A", "ORD-B", "ORD-C"],
+    "recorded in tool_calls order, not entry order",
+  );
+
+  // Two more invokes of the same thread replay the whole turn: same order,
+  // zero model calls, zero tool runs, on each of them.
+  for (let i = 0; i < 2; i += 1) {
+    reset();
+    const replay = new ScriptedModel(script);
+    const replayAgent = createAgent({
+      model: replay as never,
+      tools: [lookupOrder, stampLedger] as never,
+      middleware: [delayEntry("call-a", 30), salvorMiddleware({ client: client! })] as never,
+    });
+    await replayAgent.invoke(
+      { messages: [{ role: "user", content: "check all three" }] },
+      { configurable: { thread_id: threadId } },
+    );
+    strictEqual(replay.calls.count, 0, `replay ${i}: zero model calls`);
+    strictEqual(ran.lookup, 0, `replay ${i}: zero tool runs`);
+    deepStrictEqual(await recordedInputs(), ["ORD-A", "ORD-B", "ORD-C"], `replay ${i}: same order`);
+  }
 });
 
 // -- (e) a replayed answer under streaming -----------------------------------

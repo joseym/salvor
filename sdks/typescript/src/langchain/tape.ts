@@ -52,6 +52,39 @@ export interface ToolOutcome {
   idempotencyKey: string;
 }
 
+/**
+ * Where one tool call sits in the model turn that asked for it.
+ *
+ * `turn` identifies the turn (the AI message that listed the calls), `rank`
+ * is the call's index in that message's `tool_calls`, and `total` is how many
+ * calls the turn asked for. The tape uses it to admit a turn's calls in the
+ * model's order rather than in whatever order LangChain happens to enter
+ * `wrapToolCall` for them.
+ */
+export interface TurnPosition {
+  turn: string;
+  rank: number;
+  total: number;
+}
+
+/** One AI message's tool calls, as `noteTurn` recorded them. */
+interface NotedTurn {
+  turn: string;
+  ids: string[];
+}
+
+/** A message's tool calls, in the shape `noteTurn` needs. */
+interface ToolCallBearer {
+  id?: string | null;
+  tool_calls?: readonly { id?: string | null }[] | null;
+}
+
+/** One turn's admission state: which rank goes next, and who is waiting. */
+interface TurnGate {
+  next: number;
+  waiting: Map<number, () => void>;
+}
+
 const ZERO_USAGE: Usage = { inputTokens: 0, outputTokens: 0 };
 
 /** Drives one thread's run for the length of one agent invocation. */
@@ -66,8 +99,12 @@ export class RunTape {
   private cursor = 1;
   /** False once this invoke has asked for something the log does not hold. */
   private replaying: boolean;
-  /** The turnstile: one open intent at a time, admitted in arrival order. */
+  /** The turnstile: one open intent at a time. */
   private queue: Promise<unknown> = Promise.resolve();
+  /** The last model turn `noteTurn` recorded, for `positionOf` to read ranks from. */
+  private lastTurn: NotedTurn | undefined;
+  /** Per-turn admission state, keyed by `TurnPosition.turn`. */
+  private turns = new Map<string, TurnGate>();
 
   private constructor(driver: ClientRunDriver, recordPrompts: boolean) {
     this.driver = driver;
@@ -154,41 +191,98 @@ export class RunTape {
    * runs, not after, because the tool body it eventually calls is what needs
    * it: see `currentToolCall()` in `current_call.ts`, which is what makes the
    * key reachable there without changing the tool's own signature.
+   *
+   * `position` says where this call sits in the turn that asked for it (see
+   * `positionOf`), and is what makes a parallel turn replayable rather than
+   * merely serialized: see `admitRank`.
    */
   toolCall(
     tool: string,
     input: unknown,
     perform: (opened: { seq: number; idempotencyKey: string }) => Promise<unknown>,
+    position: TurnPosition,
   ): Promise<ToolOutcome> {
-    return this.turnstile(async () => {
-      const wanted = canonicalJson(input);
-      const seq = this.slot(
-        (event) =>
-          event.kind === "ToolCallRequested" &&
-          event.payload.tool === tool &&
-          canonicalJson(event.payload.input) === wanted,
-        `a call to the tool \`${tool}\``,
-      );
-      const opened = await this.driver.clientToolIntent(seq, tool, input);
-      if (opened.settled) {
+    return this.admitRank(position).then(() =>
+      this.turnstile(async () => {
+        const wanted = canonicalJson(input);
+        const seq = this.slot(
+          (event) =>
+            event.kind === "ToolCallRequested" &&
+            event.payload.tool === tool &&
+            canonicalJson(event.payload.input) === wanted,
+          `a call to the tool \`${tool}\``,
+        );
+        const opened = await this.driver.clientToolIntent(seq, tool, input);
+        if (opened.settled) {
+          return {
+            seq,
+            replayed: true,
+            output: await this.recordedOutput(seq + 1),
+            effect: opened.effect,
+            idempotencyKey: opened.idempotencyKey,
+          };
+        }
+        const output = await perform({ seq, idempotencyKey: opened.idempotencyKey });
+        await this.driver.clientToolCompletion(seq, output);
         return {
           seq,
-          replayed: true,
-          output: await this.recordedOutput(seq + 1),
+          replayed: false,
+          output,
           effect: opened.effect,
           idempotencyKey: opened.idempotencyKey,
         };
-      }
-      const output = await perform({ seq, idempotencyKey: opened.idempotencyKey });
-      await this.driver.clientToolCompletion(seq, output);
-      return {
-        seq,
-        replayed: false,
-        output,
-        effect: opened.effect,
-        idempotencyKey: opened.idempotencyKey,
-      };
-    });
+      }).finally(() => this.releaseRank(position)),
+    );
+  }
+
+  // -- turn positions ----------------------------------------------------------
+
+  /**
+   * Note the AI message a model call produced, so a later `positionOf` can
+   * answer for the tool calls it listed.
+   *
+   * Called from `wrapModelCall` for every model turn, live or replayed. A
+   * message with no tool calls, or one where any call is missing an id,
+   * clears the noted turn instead of recording it: a call cannot be ranked
+   * against a turn that cannot name its calls, and the next `positionOf`
+   * should say so rather than match the wrong (stale) turn.
+   */
+  noteTurn(message: ToolCallBearer): void {
+    const calls = message.tool_calls ?? [];
+    const ids = calls.map((call) => call.id ?? undefined);
+    if (ids.length === 0 || ids.some((id) => id === undefined)) {
+      this.lastTurn = undefined;
+      return;
+    }
+    this.lastTurn = {
+      turn: message.id ?? ids.join("|"),
+      ids: ids as string[],
+    };
+  }
+
+  /**
+   * Where `callId` sits in the last noted turn, or an error naming the call.
+   *
+   * The model's `tool_calls` order is the only order this middleware trusts
+   * (see `admitRank`), so a call whose id the last turn does not list is not
+   * admitted on arrival as a fallback: that would silently reintroduce the
+   * ordering `admitRank` exists to rule out. It is refused instead, because a
+   * call this cannot rank is a call `wrapModelCall` was not asked before, or a
+   * middleware wired ahead of this one that changed the call's id.
+   */
+  positionOf(callId: string, tool: string): TurnPosition {
+    const turn = this.lastTurn;
+    const rank = turn?.ids.indexOf(callId) ?? -1;
+    if (!turn || rank === -1) {
+      throw new SalvorMiddlewareError(
+        `run ${this.runId}: the call to \`${tool}\` (id \`${callId}\`) is not among ` +
+          "the tool calls in the last recorded model turn, so its position in the " +
+          "run cannot be pinned. This means either the model turn that asked for " +
+          "it was never recorded, or another middleware ahead of this one changed " +
+          "the call's id.",
+      );
+    }
+    return { turn: turn.turn, rank, total: turn.ids.length };
   }
 
   // -- the turnstile ---------------------------------------------------------
@@ -196,12 +290,10 @@ export class RunTape {
   /**
    * Run `work` with nothing else from this run in flight.
    *
-   * LangChain dispatches a turn's tool calls with one `Promise.all` over the
-   * model's `tool_calls` array, and every hook is entered synchronously in that
-   * array's order before any of them awaits. So arrival order here IS the
-   * model's order, and admitting in arrival order gives each tool call the same
-   * log position on every invoke. That is what makes a parallel turn replayable
-   * rather than merely serialized.
+   * Every model call, and every tool call once `admitRank` has let it
+   * through, joins this same queue: one open intent at a time, in the order
+   * work is added to it. Rank admission is what decides that order for a
+   * turn's tool calls; the queue itself just keeps two opens from racing.
    *
    * A step that throws still releases the turnstile: the next step will meet
    * whatever the failed one left in the log and be told about it there.
@@ -213,6 +305,47 @@ export class RunTape {
       () => undefined,
     );
     return next;
+  }
+
+  /**
+   * Wait until every earlier call in `position.turn` has left the turnstile.
+   *
+   * LangChain JS enters `wrapToolCall` for a turn's parallel calls
+   * synchronously, in `tool_calls` order, today; the Python runtime's port of
+   * this middleware found its equivalent hooks arriving out of order instead
+   * (see `salvor/langchain/tape.py`'s `_await_turn`). Rather than lean on a
+   * guarantee LangChain does not document for either language, both admit by
+   * rank: a call waits here until the rank before it has been admitted, so
+   * the recorded order is the model's `tool_calls` order regardless of which
+   * order the runtime happens to schedule the calls in.
+   *
+   * `releaseRank`, in the caller's `finally`, is what lets the next rank
+   * through; it runs whether this call's own turnstile step succeeded or
+   * threw, so one failed call in a turn does not strand the ranks after it.
+   */
+  private admitRank(position: TurnPosition): Promise<void> {
+    let gate = this.turns.get(position.turn);
+    if (!gate) {
+      gate = { next: 0, waiting: new Map() };
+      this.turns.set(position.turn, gate);
+    }
+    if (gate.next === position.rank) return Promise.resolve();
+    return new Promise((resolve) => gate!.waiting.set(position.rank, resolve));
+  }
+
+  /** Hand the turn on to the next rank, and forget a turn that is done. */
+  private releaseRank(position: TurnPosition): void {
+    const gate = this.turns.get(position.turn);
+    if (!gate) return;
+    gate.next = position.rank + 1;
+    const waiter = gate.waiting.get(gate.next);
+    if (waiter) {
+      gate.waiting.delete(gate.next);
+      waiter();
+    }
+    if (gate.next >= position.total) {
+      this.turns.delete(position.turn);
+    }
   }
 
   // -- the cursor ------------------------------------------------------------

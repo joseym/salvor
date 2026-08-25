@@ -314,9 +314,10 @@ performs that one call again under the same derived key, and records the
 completion. One intent, one completion, no second charge.
 
 Parallel tool calls in one model turn are serialised rather than refused. A
-turnstile inside the middleware admits one open intent per run at a time, in the
-order the model listed the calls, so both are recorded and both replay at the
-same positions on a later invoke.
+turnstile inside the middleware admits one open intent per run at a time,
+ranked by each call's position in the model's own `tool_calls`, never by the
+order the calls happen to arrive at the hook, so they are recorded in the
+model's order and replay at the same positions on a later invoke.
 
 ### Finishing a thread
 

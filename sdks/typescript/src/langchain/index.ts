@@ -72,7 +72,7 @@ export { canonicalJson, hashValue, isUuid, runIdForThread } from "./hash.js";
 export { ReplayChatModel } from "./replay_model.js";
 export { canonicalRequest, requestHash } from "./request.js";
 export { RunTape } from "./tape.js";
-export type { ModelOutcome, ToolOutcome } from "./tape.js";
+export type { ModelOutcome, ToolOutcome, TurnPosition } from "./tape.js";
 
 /** How this middleware is wired to a control plane. */
 export interface SalvorMiddlewareOptions {
@@ -224,7 +224,10 @@ export function salvorMiddleware(options: SalvorMiddlewareOptions) {
           return { response: answer.toDict(), usage: usageOf(answer) };
         },
       );
-      if (!outcome.replayed && live) return live;
+      if (!outcome.replayed && live) {
+        tape.noteTurn(live);
+        return live;
+      }
       // The recorded answer goes back through LangChain's own handler, with a
       // stand-in model in the provider's place, so a streaming caller sees the
       // replayed turn arrive whole instead of seeing nothing at all. See
@@ -234,6 +237,7 @@ export function salvorMiddleware(options: SalvorMiddlewareOptions) {
         outcome.seq,
         tape.runId,
       );
+      tape.noteTurn(recorded);
       return handler({ ...request, model: new ReplayChatModel(recorded) });
     },
 
@@ -243,31 +247,42 @@ export function salvorMiddleware(options: SalvorMiddlewareOptions) {
      * The intent goes in before the tool runs, which is the write-ahead rule:
      * a call that was asked for and never reported is visible in the log as
      * exactly that, rather than being indistinguishable from a call nobody
-     * made. The turnstile inside the tape is what lets a model turn ask for
-     * several tools at once: they are recorded one after another, in the order
-     * the model listed them, and none of them is refused.
+     * made. `tape.positionOf` finds this call's rank in the AI message that
+     * listed it, and the tape's turnstile admits a turn's calls in that rank
+     * order, so several tools asked for at once are recorded one after
+     * another in the order the model listed them, and none of them is
+     * refused.
      */
     wrapToolCall: async (request: any, handler: any) => {
       const tape = await tapeFor(request.runtime);
       const name: string = request.toolCall.name;
       const args = request.toolCall.args ?? {};
+      const callId: string = request.toolCall.id ?? "";
+      const position = tape.positionOf(callId, name);
       let live: ToolMessage | undefined;
 
       const outcome = await tape
-        .toolCall(name, args, async ({ seq, idempotencyKey }) =>
-          runWithToolCall({ key: idempotencyKey, seq, runId: tape.runId, tool: name }, async () => {
-            const result = await handler(request);
-            if (!ToolMessage.isInstance(result)) {
-              throw new SalvorMiddlewareError(
-                `the tool \`${name}\` returned a LangGraph Command rather than a ` +
-                  "tool message. A Command is graph control flow, not a recorded " +
-                  "result, so this middleware cannot put it in the log. Return a " +
-                  "value or a ToolMessage from tools you want recorded.",
-              );
-            }
-            live = result;
-            return toolOutput(result);
-          }),
+        .toolCall(
+          name,
+          args,
+          async ({ seq, idempotencyKey }) =>
+            runWithToolCall(
+              { key: idempotencyKey, seq, runId: tape.runId, tool: name },
+              async () => {
+                const result = await handler(request);
+                if (!ToolMessage.isInstance(result)) {
+                  throw new SalvorMiddlewareError(
+                    `the tool \`${name}\` returned a LangGraph Command rather than a ` +
+                      "tool message. A Command is graph control flow, not a recorded " +
+                      "result, so this middleware cannot put it in the log. Return a " +
+                      "value or a ToolMessage from tools you want recorded.",
+                  );
+                }
+                live = result;
+                return toolOutput(result);
+              },
+            ),
+          position,
         )
         .catch((error: unknown) => {
           throw undeclaredToolError(error, name);
