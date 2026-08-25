@@ -417,6 +417,109 @@ agent.invoke(
 )
 ```
 
+### Try it without a key
+
+The client-driven tool below needs a declaration before the model can call
+it: its effect class, its schemas and its idempotency key are the operator's,
+never the middleware's, and they come from a client-tool declaration the
+server was started with. Skip this and the first call fails with
+`unknown_tool: no client-performed tool named "lookup_order" is declared on
+this server`.
+
+```toml
+name = "lookup_order"
+effect = "read"
+trust_completion = true
+
+[input_schema]
+type = "object"
+required = ["order_id"]
+
+[input_schema.properties.order_id]
+type = "string"
+
+[output_schema]
+type = "object"
+required = ["order_id", "status", "total_cents"]
+```
+
+```sh
+salvor serve --client-tool lookup-order.toml
+```
+
+The rest below runs the same middleware end to end with no provider key and no
+network: a scripted model stands in for whatever provider your app actually
+uses.
+
+```python
+from langchain.agents import create_agent
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.tools import tool
+
+from salvor import Client
+from salvor.langchain import SalvorMiddleware
+
+
+class ScriptedModel(BaseChatModel):
+    """A hand-rolled model, not one of the fakes in
+    langchain_core.language_models.fake_chat_models: those cannot script a
+    multi-turn tool-calling agent, and a bind_tools that rebuilds the model
+    drops anything attached to the instance it replaces."""
+
+    script: list = [
+        {
+            "content": "looking that up",
+            "tool_calls": [
+                {"name": "lookup_order", "args": {"order_id": "ORD-7781"}, "id": "call-1"}
+            ],
+        },
+        {"content": "Order ORD-7781 is paid, 4200 cents."},
+    ]
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted"
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
+        turn = len([m for m in messages if m.type == "ai"])
+        step = self.script[min(turn, len(self.script) - 1)]
+        message = AIMessage(
+            content=step["content"],
+            tool_calls=[dict(call, type="tool_call") for call in step.get("tool_calls", [])],
+        )
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+@tool
+def lookup_order(order_id: str) -> dict:
+    """Look up an order that has already been placed."""
+    return {"order_id": order_id, "status": "paid", "total_cents": 4200}
+
+
+salvor = Client("http://127.0.0.1:8080")
+
+agent = create_agent(
+    model=ScriptedModel(),
+    tools=[lookup_order],
+    middleware=[SalvorMiddleware(salvor)],
+)
+
+answer = agent.invoke(
+    {"messages": [{"role": "user", "content": "how is ORD-7781?"}]},
+    {"configurable": {"thread_id": "order-7781"}},
+)
+
+print(answer["messages"][-1].content)
+```
+
+A real app replaces `ScriptedModel` with its provider model (`ChatAnthropic`,
+`ChatOpenAI`, and so on) and nothing else changes.
+
 Both ways of driving an agent work, and the client says which one this agent is
 driven by. A `Client` records under `agent.invoke` and `agent.stream`; an
 `AsyncClient` records under `await agent.ainvoke` and `agent.astream`:
@@ -458,6 +561,17 @@ attempt used and the provider collapses the duplicate. Pass
 `record_prompts=True` to store the request body on the intent as well, for an
 inspector to show; replay never reads it, because the correlation key is the
 hash alone.
+
+Model responses, tool arguments and tool results are always recorded,
+whatever `record_prompts` is set to; that flag only decides whether the
+request body joins them. What a recorded payload can hold, and what that
+means for personal data inside it, is spelled out in
+[SECURITY.md](../../SECURITY.md#what-the-event-log-records)'s "What the event
+log records". And because a thread's run stays open until `finish_thread`
+closes it, an open thread keeps every one of those payloads for as long as
+the store file exists: salvor has no retention of its own, which
+[docs/OPERATIONS.md](../../docs/OPERATIONS.md#retention)'s "Retention"
+section covers in full.
 
 A tool that talks to its own provider can read that derived key without changing
 its signature. `current_tool_call()` inside a tool body returns the
@@ -582,17 +696,39 @@ is, and an object schema will refuse it and say so.
 This is a recorded effect ledger with exactly-once writes and salvor's budgets,
 under LangGraph's orchestration. It is not replay of the graph. LangGraph still
 owns the clock, the randomness and the branch order, and salvor sees the calls
-rather than the decisions between them. A graph that branches on `time.time()`
-takes a different branch on the second invoke, and the middleware will meet a
-recorded position that does not match what it is being asked for. When that
-happens it stops replaying and appends the rest of the invoke at the end of the
-log, so the fork is recorded rather than lost. The one case it refuses is a log
-whose last event is a call that never completed: settle that first, then invoke
-again.
+rather than the decisions between them. A graph that branches on `time.time()`,
+a tool whose result differs between runs, or a genuinely new turn down an old
+thread all mean the log holds a recorded position that does not match what the
+invoke is actually doing this time. When that happens the middleware stops
+replaying and appends the rest of the invoke at the end of the log, so the fork
+is recorded rather than lost. Key order is no longer one of these causes: the
+middleware writes every tool result in canonical, sorted-key JSON, so the live
+bytes and the replayed bytes always match, and the model sees its tool results
+with sorted keys either way.
+
+Every AI message the middleware returns carries `response_metadata["salvor"]`,
+saying which of the three things happened to it: `{"replayed": True, "seq":
+...}` when the answer came from the log, `{"live": True, "seq": ...}` when it
+was a real call on a path the log still agrees with, and `{"forked": {"at":
+..., "thread": ..., "run": ...}}` on every message from the point the invoke
+actually forked onward. A fork also calls `on_fork` once per invoke, naming
+the thread, the run and the seq it forked at; by default it logs a warning,
+and you can pass your own callback to route that wherever your app already
+logs.
+
+The one case it refuses is a log whose last event is a call that never
+completed: settle that first, then invoke again.
 
 A thread is one task. Re-invoking it replays it; sending a genuinely new turn
 down the same thread is a fork by the rule above, and pays for the calls the new
 turn makes. Give a new task a new thread id.
+
+The run's lease lives in the server's memory, not on disk. If salvor itself
+restarts mid-invoke, the middleware notices its open run is gone, re-opens it
+once, and continues from the log as if the restart had not happened. If a
+second instance of your app invokes the same thread at the same time, the
+later one takes the lease and the earlier one fails, naming the thread: one
+driver per thread at a time, and the newest caller wins it.
 
 `wrap_tool_call` exists only inside `create_agent`. A hand-built `StateGraph`
 that calls tools from its own node has no hook for the middleware to sit in, so

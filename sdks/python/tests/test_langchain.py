@@ -48,8 +48,10 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import shutil
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 import unittest
@@ -66,8 +68,14 @@ except ImportError:  # pragma: no cover - the SDK's one dependency
 
 try:
     from langchain.agents import create_agent
+    from langchain.agents.middleware import AgentMiddleware
     from langchain_core.language_models.chat_models import BaseChatModel
-    from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+    from langchain_core.messages import (
+        AIMessage,
+        BaseMessage,
+        SystemMessage,
+        ToolMessage,
+    )
     from langchain_core.outputs import ChatGeneration, ChatResult
     from langchain_core.tools import StructuredTool
 except ImportError:  # pragma: no cover - depends on what is installed
@@ -80,6 +88,7 @@ from salvor import AsyncClient, Client
 from salvor.langchain import (
     SalvorMiddleware,
     SalvorMiddlewareError,
+    ToolNeedsResolution,
     canonical_request,
     current_tool_call,
     finish_thread,
@@ -94,6 +103,8 @@ SALVOR = REPO_ROOT / "target" / "debug" / "salvor"
 DECLS = [
     Path(__file__).resolve().parent / "client-tools" / "lookup-order.toml",
     Path(__file__).resolve().parent / "client-tools" / "stamp-ledger.toml",
+    Path(__file__).resolve().parent / "client-tools" / "track-shipment.toml",
+    Path(__file__).resolve().parent / "client-tools" / "wire-payout.toml",
 ]
 
 
@@ -209,10 +220,22 @@ class ScriptedModel(BaseChatModel):
 
 #: How often each tool body actually ran, and how many ran at once. Guarded,
 #: because the synchronous agent runs a turn's tool calls on a thread pool.
-ran = {"lookup": 0, "stamp": 0, "concurrent": 0, "peak_concurrent": 0}
+ran = {
+    "lookup": 0,
+    "stamp": 0,
+    "track": 0,
+    "payout": 0,
+    "concurrent": 0,
+    "peak_concurrent": 0,
+}
 counting = threading.Lock()
 #: Set to make the next `stamp_ledger` body raise, standing in for a crash.
 stamp_crashes = {"on": False}
+#: Something for a `lookup_order` body to do to the world while the middleware
+#: holds that call's intent open: take the run's lease from under this drive, or
+#: stop the server altogether. The cases that need one set it; every other case
+#: leaves it alone and nothing happens.
+meddling = {"do": None}  # type: Dict[str, Any]
 #: What `current_tool_call()` reported inside each `lookup_order` body that ran,
 #: with the thread it ran on: `call` is the last one, `calls` is all of them.
 captured = {"call": None, "calls": []}  # type: Dict[str, Any]
@@ -251,11 +274,20 @@ def capture_call(order_id: str) -> None:
         )
 
 
+def meddle() -> None:
+    """Do whatever this case wants done between a tool's intent and its
+    completion, which is where a lost lease actually hurts."""
+    interference = meddling["do"]
+    if interference is not None:
+        interference()
+
+
 def lookup_body(order_id: str) -> Dict[str, Any]:
     """Look up an order that has already been placed."""
     enter()
     try:
         capture_call(order_id)
+        meddle()
         time.sleep(0.015)
         count("lookup")
         return {"order_id": order_id, "status": "paid", "total_cents": 4200}
@@ -267,11 +299,32 @@ async def alookup_body(order_id: str) -> Dict[str, Any]:
     enter()
     try:
         capture_call(order_id)
+        meddle()
         await asyncio.sleep(0.015)
         count("lookup")
         return {"order_id": order_id, "status": "paid", "total_cents": 4200}
     finally:
         leave()
+
+
+def track_body(order_id: str) -> Dict[str, Any]:
+    """Track the shipment an order was sent on.
+
+    Answers with its keys in an order sorting would move, which is the whole
+    point of it: `tracking_number`, then `status`, then `eta`. What salvor hands
+    back is sorted, so a middleware that recorded one spelling and replayed
+    another would fork this thread on every invoke.
+    """
+    count("track")
+    return {
+        "tracking_number": "1Z-{order}".format(order=order_id),
+        "status": "in_transit",
+        "eta": "2026-08-27",
+    }
+
+
+async def atrack_body(order_id: str) -> Dict[str, Any]:
+    return track_body(order_id)
 
 
 def stamp_body(order_id: str, note: str) -> Dict[str, Any]:
@@ -288,6 +341,20 @@ def stamp_body(order_id: str, note: str) -> Dict[str, Any]:
 
 async def astamp_body(order_id: str, note: str) -> Dict[str, Any]:
     return stamp_body(order_id, note)
+
+
+def payout_body(order_id: str, amount_cents: int) -> Dict[str, Any]:
+    """Wire a payout for an order whose card refund is not available."""
+    count("payout")
+    return {
+        "provider_transfer_id": "wt-{order}".format(order=order_id),
+        "status": "succeeded",
+        "amount_cents": amount_cents,
+    }
+
+
+async def apayout_body(order_id: str, amount_cents: int) -> Dict[str, Any]:
+    return payout_body(order_id, amount_cents)
 
 
 def email_body(to: str) -> Dict[str, Any]:
@@ -310,14 +377,57 @@ def both_ways(func: Any, coroutine: Any, name: str) -> StructuredTool:
 
 lookup_order = both_ways(lookup_body, alookup_body, "lookup_order")
 stamp_ledger = both_ways(stamp_body, astamp_body, "stamp_ledger")
+track_shipment = both_ways(track_body, atrack_body, "track_shipment")
+wire_payout = both_ways(payout_body, apayout_body, "wire_payout")
 send_email = both_ways(email_body, aemail_body, "send_email")
 
 
 def reset() -> None:
-    ran.update({"lookup": 0, "stamp": 0, "concurrent": 0, "peak_concurrent": 0})
+    ran.update(
+        {
+            "lookup": 0,
+            "stamp": 0,
+            "track": 0,
+            "payout": 0,
+            "concurrent": 0,
+            "peak_concurrent": 0,
+        }
+    )
     stamp_crashes["on"] = False
+    meddling["do"] = None
     captured["call"] = None
     captured["calls"] = []
+
+
+class StampAfterTools(AgentMiddleware):
+    """Change the system message of every model call that follows a tool call.
+
+    A graph branching on something outside the log is the honest cause of most
+    forks, and this is the smallest one that can be written down. It is applied
+    only after a tool call so the fork lands partway down a recorded path rather
+    than at its first step: the messages before it still replay, the messages
+    after it do not, and a marker that only appeared on the first message after
+    a fork would be caught by the case that uses this.
+    """
+
+    def __init__(self, nonce: str) -> None:
+        super().__init__()
+        self._stamp = SystemMessage(content="stamped {nonce}".format(nonce=nonce))
+
+    @property
+    def name(self) -> str:
+        return "StampAfterTools"
+
+    def _stamped(self, request: Any) -> Any:
+        if not any(message.type == "tool" for message in request.messages):
+            return request
+        return request.override(system_message=self._stamp)
+
+    def wrap_model_call(self, request: Any, handler: Any) -> Any:
+        return handler(self._stamped(request))
+
+    async def awrap_model_call(self, request: Any, handler: Any) -> Any:
+        return await handler(self._stamped(request))
 
 
 # -- the server ----------------------------------------------------------------
@@ -327,6 +437,39 @@ def free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
+
+
+def serve(port: int, store: str) -> subprocess.Popen:
+    """One `salvor serve` on ``port`` over ``store``, with this suite's
+    client-tool declarations loaded."""
+    declarations = []  # type: List[str]
+    for path in DECLS:
+        declarations += ["--client-tool", str(path)]
+    return subprocess.Popen(
+        [
+            str(SALVOR),
+            "--store",
+            store,
+            "serve",
+            "--bind",
+            "127.0.0.1:{port}".format(port=port),
+        ]
+        + declarations,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env={"PATH": "/usr/bin:/bin"},
+    )
+
+
+def stop(proc: Optional[subprocess.Popen]) -> None:
+    """Stop a server this file started, hard if it will not stop gently."""
+    if proc is None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:  # pragma: no cover
+        proc.kill()
 
 
 def wait_until_up(base: str) -> bool:
@@ -386,6 +529,9 @@ class MiddlewareScenarios:
 
     proc: subprocess.Popen
     base: str
+    #: This class's own directory under the system temp dir, holding the store
+    #: the server writes and nothing else, removed however the class ends.
+    workspace: str
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -395,31 +541,22 @@ class MiddlewareScenarios:
             )
         port = free_port()
         cls.base = "http://127.0.0.1:{port}".format(port=port)
-        store = "/tmp/salvor-py-langchain-{port}.db".format(port=port)
-        Path(store).unlink(missing_ok=True)
-        declarations = []  # type: List[str]
-        for path in DECLS:
-            declarations += ["--client-tool", str(path)]
-        cls.proc = subprocess.Popen(
-            [str(SALVOR), "--store", store, "serve", "--bind", "127.0.0.1:{port}".format(port=port)]
-            + declarations,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            env={"PATH": "/usr/bin:/bin"},
-        )
+        cls.workspace = tempfile.mkdtemp(prefix="salvor-py-")
+        cls.proc = serve(port, str(Path(cls.workspace) / "langchain.db"))
         if not wait_until_up(cls.base):
             cls.tearDownClass()
             raise unittest.SkipTest("salvor serve did not come up")
 
     @classmethod
     def tearDownClass(cls) -> None:
-        proc = getattr(cls, "proc", None)
-        if proc is not None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:  # pragma: no cover
-                proc.kill()
+        stop(getattr(cls, "proc", None))
+        # However this class ended, including the failures that skipped it in
+        # `setUpClass`, its store goes with it: a suite that leaves databases
+        # behind in the system temp directory is a suite nobody can run twice
+        # on a small disk.
+        workspace = getattr(cls, "workspace", None)
+        if workspace is not None:
+            shutil.rmtree(workspace, ignore_errors=True)
 
     def setUp(self) -> None:
         reset()
@@ -442,12 +579,18 @@ class MiddlewareScenarios:
         """This class's way of streaming an agent's messages."""
         return getattr(agent, self.STREAM)(message_in, config, stream_mode="messages")
 
-    def agent_for(self, turns: List[Dict[str, Any]], client: Any, tools: Any = None):
+    def agent_for(
+        self,
+        turns: List[Dict[str, Any]],
+        client: Any,
+        tools: Any = None,
+        on_fork: Any = None,
+    ):
         model = ScriptedModel(turns=turns, calls={"count": 0})
         agent = create_agent(
             model=model,
             tools=list(tools if tools is not None else [lookup_order, stamp_ledger]),
-            middleware=[SalvorMiddleware(client)],
+            middleware=[SalvorMiddleware(client, on_fork=on_fork)],
         )
         return agent, model
 
@@ -751,11 +894,18 @@ class MiddlewareScenarios:
             second, model = self.agent_for(
                 [{"content": "ORD-9999 is not one of ours."}], client
             )
-            answer = await self.invoke(
-                second,
-                {"messages": [{"role": "user", "content": "how is ORD-9999?"}]},
-                self.thread(thread_id),
-            )
+            # Nobody passed an `on_fork`, so the default channel is what says
+            # the thread left its recorded path: one warning on the
+            # `salvor.langchain` logger, naming the thread and the position.
+            with self.assertLogs("salvor.langchain", "WARNING") as warned:
+                answer = await self.invoke(
+                    second,
+                    {"messages": [{"role": "user", "content": "how is ORD-9999?"}]},
+                    self.thread(thread_id),
+                )
+            self.assertEqual(len(warned.records), 1, "one warning, once per invoke")
+            self.assertIn(thread_id, warned.output[0])
+            self.assertIn("seq 1", warned.output[0])
             self.assertEqual(model.calls["count"], 1, "the new question was asked for real")
             self.assertEqual(
                 self.text_of(answer["messages"][-1]), "ORD-9999 is not one of ours."
@@ -764,6 +914,437 @@ class MiddlewareScenarios:
                 (await self.kinds_of(client, thread_id))[7:],
                 ["ModelCallRequested", "ModelCallCompleted"],
             )
+
+        self.drive(body)
+
+    # -- (j) a tool result whose keys sorting would move ----------------------
+
+    def test_a_tool_result_whose_keys_are_not_alphabetical_replays_for_nothing(
+        self,
+    ) -> None:
+        """The spelling of a tool result must not decide whether a thread replays.
+
+        Salvor stores what a tool returned as JSON and hands it back with its
+        keys sorted; a Python dictionary comes back in the order the tool built
+        it. If the live tool message carried one of those spellings and the
+        replayed one the other, the model call after it would hash to a
+        position the log does not hold: the thread would fork on every invoke,
+        the write below the fork would run again every time, and it would run
+        under a fresh key every time, which is the one thing an idempotency key
+        exists to prevent. So both tools in this case answer with keys sorting
+        would move, and the second invoke has to cost nothing at all.
+        """
+        thread_id = "thread-key-order"
+        tools = [track_shipment, stamp_ledger]
+        script = [
+            {
+                "content": "tracking it",
+                "tool_calls": [
+                    {
+                        "name": "track_shipment",
+                        "args": {"order_id": "ORD-5150"},
+                        "id": "call-track",
+                    }
+                ],
+            },
+            {
+                "content": "writing that down",
+                "tool_calls": [
+                    {
+                        "name": "stamp_ledger",
+                        "args": {"order_id": "ORD-5150", "note": "in transit"},
+                        "id": "call-stamp",
+                    }
+                ],
+            },
+            {"content": "ORD-5150 is in transit, and the ledger says so."},
+        ]
+        ask = {"messages": [{"role": "user", "content": "where is ORD-5150?"}]}
+
+        def tool_texts(answer: Any) -> List[str]:
+            return [
+                self.text_of(message)
+                for message in answer["messages"]
+                if message.type == "tool"
+            ]
+
+        async def body(client: Any) -> None:
+            agent, model = self.agent_for(script, client, tools=tools)
+            answer = await self.invoke(agent, ask, self.thread(thread_id))
+            self.assertEqual(model.calls["count"], 3, "two tool turns and the answer")
+            self.assertEqual(ran["track"], 1)
+            self.assertEqual(ran["stamp"], 1)
+            final = self.text_of(answer["messages"][-1])
+            self.assertEqual(len(await self.kinds_of(client, thread_id)), 11)
+
+            # The live tool message carries the log's spelling, keys sorted,
+            # which is the byte-for-byte thing a replayed one will carry.
+            self.assertEqual(
+                tool_texts(answer)[0],
+                '{"eta":"2026-08-27","status":"in_transit",'
+                '"tracking_number":"1Z-ORD-5150"}',
+            )
+            keys = [
+                intent.payload["idempotency_key"]
+                for intent in await self.intents_of(client, thread_id)
+            ]
+            self.assertEqual(len(keys), 2, "one intent per call, no more")
+
+            # And the second invoke pays for nothing, runs nothing, and writes
+            # nothing: the read replays, the write replays, and the write's
+            # recorded key is the one the first invoke performed under.
+            reset()
+            again_agent, again_model = self.agent_for(script, client, tools=tools)
+            again = await self.invoke(again_agent, ask, self.thread(thread_id))
+            self.assertEqual(again_model.calls["count"], 0, "zero model calls")
+            self.assertEqual(ran["track"], 0, "zero tool runs")
+            self.assertEqual(ran["stamp"], 0, "the write did not happen twice")
+            replayed = again["messages"][-1]
+            self.assertEqual(self.text_of(replayed), final, "the same final message")
+            self.assertIs(replayed.response_metadata["salvor"]["replayed"], True)
+            self.assertEqual(tool_texts(again), tool_texts(answer), "the same bytes")
+            self.assertEqual(
+                len(await self.kinds_of(client, thread_id)), 11, "nothing appended"
+            )
+            self.assertEqual(
+                [
+                    intent.payload["idempotency_key"]
+                    for intent in await self.intents_of(client, thread_id)
+                ],
+                keys,
+                "one recorded key per write, identical on both invokes",
+            )
+
+        self.drive(body)
+
+    # -- (k) a fork is marked and told about ----------------------------------
+
+    def test_a_fork_marks_every_answer_after_it_and_tells_the_app_once(self) -> None:
+        """Leaving the recorded path partway is marked, and said once.
+
+        The fork is forced the only way a fork can be forced: by asking
+        something the log does not hold at that position. A model's answer
+        cannot do it on its own, because a replayed invoke never asks the model
+        anything; what moves the tape off the path is the request at the cursor
+        no longer being the request recorded there. Here a middleware ahead of
+        salvor's stamps a different system message onto the model call that
+        follows the tool call, which is what a graph branching on the clock
+        looks like from the log's side.
+
+        Everything before the fork still replays and still says so. Everything
+        from the fork on says where the fork was, and the application has heard
+        about it exactly once.
+        """
+        thread_id = "thread-fork-partway"
+        run_id = run_id_for_thread(thread_id)
+
+        def agent_stamped(turns: List[Dict[str, Any]], nonce: str, on_fork: Any):
+            model = ScriptedModel(turns=turns, calls={"count": 0})
+            agent = create_agent(
+                model=model,
+                tools=[lookup_order, stamp_ledger],
+                middleware=[
+                    StampAfterTools(nonce),
+                    SalvorMiddleware(client_of[0], on_fork=on_fork),
+                ],
+            )
+            return agent, model
+
+        client_of = [None]  # type: List[Any]
+
+        def never(fork: Any) -> None:
+            raise AssertionError("the first invoke has no recorded path to leave")
+
+        async def body(client: Any) -> None:
+            client_of[0] = client
+            first, first_model = agent_stamped(ONE_TOOL_SCRIPT, "one", never)
+            answer = await self.invoke(first, ASK, self.thread(thread_id))
+            self.assertEqual(first_model.calls["count"], 2)
+            self.assertEqual(len(await self.kinds_of(client, thread_id)), 7)
+
+            # Nothing forked, so every message says what it was: live, at the
+            # position it was recorded at. Without this the absence of a marker
+            # would be the only thing distinguishing a live message, and an
+            # absence is not evidence of anything.
+            messages = answer["messages"]
+            self.assertEqual(
+                messages[-1].response_metadata["salvor"],
+                {"live": True, "seq": 5, "run": run_id},
+            )
+            tool_message = [m for m in messages if m.type == "tool"][0]
+            self.assertEqual(
+                tool_message.response_metadata["salvor"],
+                {"live": True, "seq": 3, "run": run_id},
+            )
+
+            # The same question, the same tool result, a different stamp on the
+            # model call after the tool call, and a model that answers something
+            # else when it is actually asked.
+            reset()
+            forks = []  # type: List[Any]
+            second, model = agent_stamped(
+                [ONE_TOOL_SCRIPT[0], {"content": "ORD-7781 was refunded after all."}],
+                "two",
+                forks.append,
+            )
+            forked = await self.invoke(second, ASK, self.thread(thread_id))
+            self.assertEqual(model.calls["count"], 1, "only the diverged call was live")
+            self.assertEqual(ran["lookup"], 0, "the tool call before the fork replayed")
+            self.assertEqual(
+                self.text_of(forked["messages"][-1]), "ORD-7781 was refunded after all."
+            )
+
+            self.assertEqual(len(forks), 1, "told once, however many steps followed")
+            self.assertEqual(forks[0].at, 5, "the second model call's position")
+            self.assertEqual(forks[0].thread, thread_id)
+            self.assertEqual(forks[0].run, run_id)
+            self.assertIn(thread_id, forks[0].message, "the sentence names the thread")
+            self.assertIn(run_id, forks[0].message, "and the run")
+            self.assertIn("seq 5", forks[0].message, "and the position")
+            self.assertIn("branches on the clock", forks[0].message, "and what to check")
+
+            # Before the fork, replayed and saying so; from the fork on, forked
+            # and saying where.
+            answers = [m for m in forked["messages"] if m.type == "ai"]
+            self.assertEqual(
+                answers[0].response_metadata["salvor"],
+                {"replayed": True, "seq": 1, "run": run_id},
+            )
+            self.assertEqual(
+                [m for m in forked["messages"] if m.type == "tool"][0]
+                .response_metadata["salvor"],
+                {"replayed": True, "seq": 3, "run": run_id},
+            )
+            self.assertEqual(
+                answers[-1].response_metadata["salvor"],
+                {"forked": {"at": 5, "thread": thread_id, "run": run_id}},
+            )
+
+            # The fork was appended, not lost.
+            self.assertEqual(
+                (await self.kinds_of(client, thread_id))[7:],
+                ["ModelCallRequested", "ModelCallCompleted"],
+            )
+
+        self.drive(body)
+
+    # -- (k2) a tool whose operator settles its calls by hand -----------------
+
+    def test_a_tool_the_operator_settles_by_hand_stops_and_says_who_settles_it(
+        self,
+    ) -> None:
+        """A write nobody may self-report stops for a person, and resumes for one.
+
+        A client-tool declaration with `trust_completion = false` is an operator
+        saying that the party performing this write does not get to decide it
+        succeeded. Salvor refuses such a completion, so a middleware that posted
+        one anyway would put a bare 403 in the middle of somebody's graph, after
+        the money moved. It performs the call, records nothing about how it
+        went, and says who settles it: the log ends at the intent, the result is
+        on the error, and the next invoke replays what the person recorded.
+        """
+        thread_id = "thread-needs-resolution"
+        run_id = run_id_for_thread(thread_id)
+        script = [
+            {
+                "content": "sending the payout",
+                "tool_calls": [
+                    {
+                        "name": "wire_payout",
+                        "args": {"order_id": "ORD-77", "amount_cents": 4200},
+                        "id": "call-wire",
+                    }
+                ],
+            },
+            {"content": "Payout wt-ORD-77 is confirmed."},
+        ]
+        ask = {"messages": [{"role": "user", "content": "pay ORD-77 out"}]}
+
+        async def body(client: Any) -> None:
+            agent, _ = self.agent_for(script, client, tools=[wire_payout])
+            with self.assertRaises(ToolNeedsResolution) as caught:
+                await self.invoke(agent, ask, self.thread(thread_id))
+            error = caught.exception
+
+            self.assertEqual(ran["payout"], 1, "the tool did run: the work is done")
+            self.assertEqual(error.tool, "wire_payout")
+            self.assertEqual(error.run_id, run_id)
+            self.assertEqual(error.thread_id, thread_id)
+            self.assertEqual(error.seq, 3, "the seq the call's intent landed at")
+            self.assertEqual(
+                error.output,
+                {
+                    "provider_transfer_id": "wt-ORD-77",
+                    "status": "succeeded",
+                    "amount_cents": 4200,
+                },
+                "what the tool returned, for the person who settles it",
+            )
+            self.assertEqual(
+                error.key,
+                (await self.intents_of(client, thread_id))[0].payload["idempotency_key"],
+                "the key the call was performed under, to look it up by",
+            )
+            text = str(error)
+            self.assertIn("wire_payout", text, "the error names the tool")
+            self.assertIn("trust_completion", text, "and the rule it broke")
+            self.assertIn("salvor resolve {run}".format(run=run_id), text, "and how")
+
+            self.assertEqual(
+                await self.kinds_of(client, thread_id),
+                [
+                    "RunStarted",
+                    "ModelCallRequested",
+                    "ModelCallCompleted",
+                    "ToolCallRequested",
+                ],
+                "the log ends at the intent: a write nobody has confirmed yet",
+            )
+
+            # A person confirms what the payout did and records it, which is the
+            # one way this run moves again.
+            run = await call(client.open_client_run, run_id=run_id)
+            await call(run.resolve, error.output)
+
+            reset()
+            again, model = self.agent_for(script, client, tools=[wire_payout])
+            answer = await self.invoke(again, ask, self.thread(thread_id))
+            self.assertEqual(ran["payout"], 0, "the payout did not happen twice")
+            self.assertEqual(model.calls["count"], 1, "only the answer turn was live")
+            settled = [m for m in answer["messages"] if m.type == "tool"][0]
+            self.assertEqual(
+                json.loads(self.text_of(settled)),
+                error.output,
+                "the model reads what the person recorded",
+            )
+            self.assertIs(settled.response_metadata["salvor"]["replayed"], True)
+            self.assertEqual(
+                self.text_of(answer["messages"][-1]), "Payout wt-ORD-77 is confirmed."
+            )
+
+        self.drive(body)
+
+    # -- (l) another driver takes the run's lease mid-invoke ------------------
+
+    def test_a_second_driver_mid_invoke_is_taken_back_once_and_then_refused(
+        self,
+    ) -> None:
+        """A lease belongs to a process, and losing it is not losing the work.
+
+        Another instance of the same app opening this thread's run takes the
+        lease out from under this invoke, and salvor then refuses its next
+        write. Once, that costs nothing: the run is taken up again (which
+        returns the recorded state and a fresh lease), the log is read again,
+        and the step is retried at the position it already reserved. Twice in
+        one invoke is two drivers taking turns, which no retry settles, so it
+        stops and says which rule was broken.
+        """
+        thread_id = "thread-two-drivers"
+        run_id = run_id_for_thread(thread_id)
+        script = [
+            {
+                "content": "looking both up",
+                "tool_calls": [
+                    {"name": "lookup_order", "args": {"order_id": "ORD-1"}, "id": "call-a"},
+                    {"name": "lookup_order", "args": {"order_id": "ORD-2"}, "id": "call-b"},
+                ],
+            },
+            {"content": "Both orders are paid."},
+        ]
+        ask = {"messages": [{"role": "user", "content": "check ORD-1 and ORD-2"}]}
+
+        def take_the_lease() -> None:
+            httpx.post(
+                "{base}/v1/client-runs".format(base=self.base),
+                json={"run_id": run_id},
+                timeout=10,
+            )
+
+        async def body(client: Any) -> None:
+            meddling["do"] = take_the_lease
+            agent, _ = self.agent_for(script, client)
+            with self.assertRaises(SalvorMiddlewareError) as caught:
+                await self.invoke(agent, ask, self.thread(thread_id))
+            meddling["do"] = None
+
+            text = str(caught.exception)
+            self.assertIn(thread_id, text, "the error names the thread")
+            self.assertIn(run_id, text, "and the run")
+            self.assertIn("one driver per thread", text, "and the rule")
+
+            self.assertEqual(ran["lookup"], 2, "each tool body ran once, not twice")
+            self.assertEqual(
+                await self.kinds_of(client, thread_id),
+                [
+                    "RunStarted",
+                    "ModelCallRequested",
+                    "ModelCallCompleted",
+                    "ToolCallRequested",
+                    "ToolCallCompleted",
+                    "ToolCallRequested",
+                ],
+                "the first call survived its lost lease; the second is where it stopped",
+            )
+
+        self.drive(body)
+
+    # -- (m) the server this run was opened on restarts mid-invoke ------------
+
+    def test_a_server_restart_mid_invoke_stops_and_says_the_lease_is_gone(
+        self,
+    ) -> None:
+        """A restarted salvor does not hand a run back, and the middleware says
+        so rather than retrying into the same refusal.
+
+        A server holds its client-driven leases in memory. The log is on disk
+        and reads back, but the lease does not survive the process, so a
+        restarted salvor does not recognise a run it opened before and refuses
+        to adopt one that already has recorded history (`run_exists`). Taking
+        the run up again is the right move when another driver took the lease,
+        and this is what happens when there is nothing to take it up from: the
+        invoke stops, naming the thread and the run, with the log intact behind
+        it and the tool having run exactly once.
+
+        Carrying on across a restart is not the client's to fix. It needs a
+        salvor that adopts a client-driven run it finds in its own store.
+        """
+        thread_id = "thread-server-restart"
+        run_id = run_id_for_thread(thread_id)
+        port = free_port()
+        base = "http://127.0.0.1:{port}".format(port=port)
+        workspace = tempfile.mkdtemp(prefix="salvor-py-")
+        self.addCleanup(shutil.rmtree, workspace, ignore_errors=True)
+        store = str(Path(workspace) / "restart.db")
+        serving = {"proc": serve(port, store)}
+        self.addCleanup(lambda: stop(serving["proc"]))
+        if not wait_until_up(base):
+            raise unittest.SkipTest("salvor serve did not come up")
+
+        def restart_the_server() -> None:
+            meddling["do"] = None  # once, in the middle of the one tool call
+            stop(serving["proc"])
+            serving["proc"] = serve(port, store)
+            wait_until_up(base)
+
+        async def body(_class_client: Any) -> None:
+            own = self.CLIENT(base)
+            try:
+                meddling["do"] = restart_the_server
+                agent, _ = self.agent_for(ONE_TOOL_SCRIPT, own)
+                with self.assertRaises(SalvorMiddlewareError) as caught:
+                    await self.invoke(agent, ASK, self.thread(thread_id))
+                text = str(caught.exception)
+                self.assertIn(thread_id, text, "the error names the thread")
+                self.assertIn(run_id, text, "and the run")
+                self.assertIn(
+                    "could not be taken up again",
+                    text,
+                    "and that the run itself is what could not be recovered",
+                )
+                self.assertEqual(ran["lookup"], 1, "the tool ran once and not again")
+            finally:
+                meddling["do"] = None
+                await call(own.close)
 
         self.drive(body)
 
@@ -1042,6 +1623,15 @@ class SharedVectors(unittest.TestCase):
     #: One canonical request, and the `sha256:` key `requestHash` gives it.
     #: The messages are the suite's own first turn, so the vector is a request
     #: this middleware could actually be asked to hash.
+    #:
+    #: The tool result here is deliberately prose rather than JSON. A tool
+    #: message whose content parses as JSON is hashed as the value it holds
+    #: rather than as one spelling of that value (see `_content` in
+    #: `salvor/langchain/request.py`), which is what stops a tool's own key
+    #: order forking a thread. Pinning a JSON result here would pin the
+    #: canonicalization of the parsed value instead, and the vector's job is to
+    #: pin the one thing the two SDKs must never disagree about: the bytes the
+    #: canonical writer produces. The TypeScript suite pins the same request.
     CANONICAL_REQUEST = {
         "messages": [
             {"content": "how is ORD-7781?", "role": "human"},
@@ -1053,7 +1643,7 @@ class SharedVectors(unittest.TestCase):
                 ],
             },
             {
-                "content": '{"order_id":"ORD-7781","status":"paid","total_cents":4200}',
+                "content": "ORD-7781 is paid, 4200 cents.",
                 "name": "lookup_order",
                 "role": "tool",
                 "tool_call_id": "call-1",
@@ -1067,13 +1657,12 @@ class SharedVectors(unittest.TestCase):
         '{"messages":[{"content":"how is ORD-7781?","role":"human"},'
         '{"content":"looking that up","role":"ai","tool_calls":'
         '[{"args":{"order_id":"ORD-7781"},"id":"call-1","name":"lookup_order"}]},'
-        '{"content":"{\\"order_id\\":\\"ORD-7781\\",\\"status\\":\\"paid\\",'
-        '\\"total_cents\\":4200}","name":"lookup_order","role":"tool",'
-        '"tool_call_id":"call-1"}],"model":{"model":"vector-model",'
+        '{"content":"ORD-7781 is paid, 4200 cents.","name":"lookup_order",'
+        '"role":"tool","tool_call_id":"call-1"}],"model":{"model":"vector-model",'
         '"temperature":0,"type":"scripted-fake"},"model_settings":{},'
         '"system":"You are a careful order assistant."}'
     )
-    REQUEST_HASH = "sha256:335c51f638395676943b95304ecfe69e00f1bf22c6c50737d86e29489a071215"
+    REQUEST_HASH = "sha256:3eb94c7b6f6bd64a0fbccce14ccd0eddba3fa3efb7ab72882e59f96635735178"
 
     def test_the_thread_id_vector_is_the_run_id_the_typescript_sdk_derives(self) -> None:
         from salvor.langchain.hash import canonical_json
@@ -1110,7 +1699,7 @@ class SharedVectors(unittest.TestCase):
                     ],
                 ),
                 ToolMessage(
-                    content='{"order_id":"ORD-7781","status":"paid","total_cents":4200}',
+                    content="ORD-7781 is paid, 4200 cents.",
                     name="lookup_order",
                     tool_call_id="call-1",
                 ),

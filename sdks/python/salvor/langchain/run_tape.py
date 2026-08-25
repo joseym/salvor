@@ -17,48 +17,64 @@ gave it.
 from __future__ import annotations
 
 import threading
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, TypeVar
 
 from ..client_runs import ClientRunDriver
+from ..errors import SalvorAPIError
 from .tape import (
+    Drive,
     ModelAnswer,
     ModelOutcome,
     OpenedCall,
     Tape,
     ToolOutcome,
     TurnPosition,
+    cannot_reopen,
+    lease_lost,
+    lease_taken,
     start_events,
     usage_payload,
 )
 
 __all__ = ["RunTape"]
 
+T = TypeVar("T")
+
 
 class RunTape:
     """Drives one thread's run for the length of one ``invoke`` or ``stream``."""
 
-    def __init__(self, driver: ClientRunDriver, record_prompts: bool) -> None:
+    def __init__(self, driver: ClientRunDriver, drive: Drive) -> None:
         self._driver = driver
+        self._drive = drive
         #: The run this tape is the cursor into.
         self.run_id = driver.run_id
-        self._tape = Tape(driver.run_id, driver.log_envelopes, record_prompts)
+        self._tape = Tape(driver.run_id, driver.log_envelopes, drive)
         #: The turnstile: one open intent at a time.
         self._gate = threading.Lock()
         #: Where a turn's later ranks wait for the rank before them.
         self._turn = threading.Condition()
+        #: True once this invoke has taken the run's lease back, which it may do
+        #: once. See :func:`salvor.langchain.tape.lease_taken`.
+        self._reopened = False
 
     @classmethod
     def open(
-        cls,
-        driver: ClientRunDriver,
-        started: Dict[str, Any],
-        record_prompts: bool,
+        cls, driver: ClientRunDriver, started: Dict[str, Any], drive: Drive
     ) -> "RunTape":
         """Open (or re-open) the run behind a thread and take up its cursor."""
+        tape = cls(driver, drive)
         events = start_events(driver, started)
         if events:
-            driver.append(events)
-        return cls(driver, record_prompts)
+            # A fresh run's first event is under the same lease rule as every
+            # write after it, so it goes through the same guard.
+            tape._guarded(lambda: tape._driver.append(events))
+        return tape
+
+    @property
+    def thread_id(self) -> str:
+        """The LangGraph thread this run is behind, for whoever has to name it."""
+        return self._drive.thread_id
 
     @property
     def run(self) -> ClientRunDriver:
@@ -81,13 +97,20 @@ class RunTape:
         """
         with self._gate:
             seq = self._tape.model_slot(request_hash)
-            opened = self._driver.client_model_intent(
-                seq, request_hash, self._tape.intent_body(body)
+            self._announce()
+            opened = self._guarded(
+                lambda: self._driver.client_model_intent(
+                    seq, request_hash, self._tape.intent_body(body)
+                )
             )
             if opened.settled:
                 return self._tape.model_replayed(seq, opened)
             response, usage = perform()
-            self._driver.client_model_completion(seq, response, usage_payload(usage))
+            self._guarded(
+                lambda: self._driver.client_model_completion(
+                    seq, response, usage_payload(usage)
+                )
+            )
             return self._tape.model_performed(seq, response, usage)
 
     def tool_call(
@@ -131,13 +154,16 @@ class RunTape:
     ) -> ToolOutcome:
         """One tool step, with the turnstile already held."""
         seq = self._tape.tool_slot(tool, tool_input)
-        opened = self._driver.client_tool_intent(seq, tool, tool_input)
+        self._announce()
+        opened = self._guarded(
+            lambda: self._driver.client_tool_intent(seq, tool, tool_input)
+        )
         if opened.settled:
             return self._tape.tool_replayed(
                 seq, opened, self._recorded_output(seq + 1)
             )
         output = perform(self._tape.opened_call(seq, opened))
-        self._driver.client_tool_completion(seq, output)
+        self._guarded(lambda: self._driver.client_tool_completion(seq, output))
         return self._tape.tool_performed(seq, opened, output)
 
     def _recorded_output(self, seq: int) -> Any:
@@ -146,7 +172,51 @@ class RunTape:
         known, output = self._tape.known_output(seq)
         if known:
             return output
-        return self._tape.output_from_tail(seq, self._driver.log(seq))
+        tail = self._guarded(lambda: self._driver.log(seq))
+        return self._tape.output_from_tail(seq, tail)
+
+    def _announce(self) -> None:
+        """Tell the application about a fork, the first time there is one."""
+        info = self._tape.unreported_fork()
+        if info is not None and self._drive.on_fork is not None:
+            self._drive.on_fork(info)
+
+    def _guarded(self, step: Callable[[], T]) -> T:
+        """One request to the control plane, through one lost lease.
+
+        The lease belongs to a process, so another instance of the app opening
+        this thread's run takes it and salvor refuses this drive's next write.
+        Losing it once costs nothing that a re-open cannot recover: taking the
+        run up again returns the recorded state and a fresh lease, the log is
+        read again in case the other driver wrote something, and the step is
+        retried at the position it already reserved, where it either meets its
+        own work already recorded or is still expected. Losing it twice in one
+        invoke is two drivers taking turns, which no retry settles, so it is
+        refused by name.
+        """
+        while True:
+            try:
+                return step()
+            except SalvorAPIError as error:
+                if not lease_lost(error):
+                    raise
+                if self._reopened or self._drive.reopen is None:
+                    raise lease_taken(
+                        self._drive.thread_id, self.run_id
+                    ) from error
+                self._take_the_run_back()
+
+    def _take_the_run_back(self) -> None:
+        """Re-open the run, once, and re-read what its log holds now."""
+        self._reopened = True
+        try:
+            driver = self._drive.reopen()  # type: ignore[misc]
+        except SalvorAPIError as refused:
+            raise cannot_reopen(
+                self._drive.thread_id, self.run_id, refused
+            ) from refused
+        self._driver = driver
+        self._tape.reread(driver.log_envelopes)
 
     def _enter_turn(self, position: TurnPosition) -> None:
         """Wait until every earlier call in this turn has been recorded.

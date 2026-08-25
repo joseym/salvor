@@ -26,8 +26,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 import unittest
@@ -164,6 +166,9 @@ class AsyncDriverRealServer(unittest.TestCase):
     proc: subprocess.Popen
     endpoint: ThreadingHTTPServer
     base: str
+    #: This class's own directory under the system temp dir, holding the store
+    #: and nothing else, removed however the class ends.
+    workspace: str
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -175,8 +180,8 @@ class AsyncDriverRealServer(unittest.TestCase):
         model_port = cls.endpoint.server_address[1]
         serve_port = free_port()
         cls.base = f"http://127.0.0.1:{serve_port}"
-        store = f"/tmp/salvor-async-driver-{serve_port}.db"
-        Path(store).unlink(missing_ok=True)
+        cls.workspace = tempfile.mkdtemp(prefix="salvor-py-")
+        store = str(Path(cls.workspace) / "async-driver.db")
         cls.proc = subprocess.Popen(
             [
                 str(SALVOR), "--store", store, "serve",
@@ -206,6 +211,9 @@ class AsyncDriverRealServer(unittest.TestCase):
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
+        workspace = getattr(cls, "workspace", None)
+        if workspace is not None:
+            shutil.rmtree(workspace, ignore_errors=True)
         endpoint = getattr(cls, "endpoint", None)
         if endpoint is not None:
             endpoint.shutdown()

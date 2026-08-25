@@ -10,7 +10,11 @@ does not.
 What is in: the model's identity and its answer-shaping settings, the system
 message, every message in order (role, content, tool calls, tool results), the
 tools offered with their schemas, the tool choice, the response format, and the
-per-request model settings.
+per-request model settings. A tool result that is JSON is in as the value it
+holds rather than as one spelling of that value, because the spelling is nobody's
+decision: LangChain writes a tool's own key order and salvor hands the recorded
+result back sorted, and keying a model call on that difference would fork a
+thread at the first model call after every tool call.
 
 What is deliberately out: message ids (LangGraph mints a fresh one for the
 human message on every invoke), ``additional_kwargs`` and ``response_metadata``
@@ -38,7 +42,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from .hash import hash_value, json_stringify
+from .hash import hash_value, json_stringify, parsed_json
 
 __all__ = ["canonical_request", "request_hash"]
 
@@ -104,7 +108,7 @@ def _canonical_message(message: Any) -> Dict[str, Any]:
     """
     value = {
         "role": getattr(message, "type", ""),
-        "content": plain(getattr(message, "content", None)),
+        "content": _content(message),
     }  # type: Dict[str, Any]
     name = getattr(message, "name", None)
     if name:
@@ -131,6 +135,30 @@ def _canonical_message(message: Any) -> Dict[str, Any]:
     # would never agree. The result itself, which is what the model reads, is
     # in `content`.
     return value
+
+
+def _content(message: Any) -> Any:
+    """What a message said, as the value it holds rather than as one spelling
+    of that value.
+
+    A tool message is the one place a message carries a value that was rendered
+    to text on the way in: LangChain builds it by stringifying whatever the tool
+    returned. The same result has more than one spelling (the order the tool's
+    own dictionary was built in, and the sorted order salvor hands back), and
+    hashing the spelling rather than the value would make a replayed tool result
+    hash to a different model call than the live one did, which forks the thread
+    on every invoke. So a tool result that is JSON is hashed as the value it is,
+    where key order cannot matter, and the spelling stops deciding anything.
+
+    Everything else, tool content that is not JSON included, is hashed as the
+    string it is. The TypeScript middleware reads a tool message the same way,
+    over the same canonical writer, so the two agree.
+    """
+    content = plain(getattr(message, "content", None))
+    if getattr(message, "type", "") != "tool" or not isinstance(content, str):
+        return content
+    is_json, parsed = parsed_json(content)
+    return parsed if is_json else content
 
 
 def _canonical_tool(tool: Any) -> Dict[str, Any]:

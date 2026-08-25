@@ -33,9 +33,11 @@ SDK's own dependency ``httpx``. Run it with
 from __future__ import annotations
 
 import json
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -91,6 +93,17 @@ def terminate(*procs: "subprocess.Popen | None") -> None:
                 proc.kill()
 
 
+def discard(workspace: "str | None") -> None:
+    """Remove a class's own temp directory, however the class ended.
+
+    Every file a case here writes (the store, the model's log) goes inside one
+    of these, so a run that failed halfway leaves nothing in the system temp
+    directory for the next one to trip over.
+    """
+    if workspace is not None:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
 class ClientRunLoopRealServer(unittest.TestCase):
     """The full loop, model step included, against the real control-plane binary."""
 
@@ -98,6 +111,7 @@ class ClientRunLoopRealServer(unittest.TestCase):
     model: subprocess.Popen
     base: str
     model_log: Path
+    workspace: str
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -108,12 +122,11 @@ class ClientRunLoopRealServer(unittest.TestCase):
         model_port = free_port()
         serve_port = free_port()
         cls.base = f"http://127.0.0.1:{serve_port}"
-        store = f"/tmp/salvor-driver-test-{serve_port}.db"
-        Path(store).unlink(missing_ok=True)
+        cls.workspace = tempfile.mkdtemp(prefix="salvor-py-")
+        store = str(Path(cls.workspace) / "driver.db")
         # The demo model logs one line per request to stderr; capturing it is
         # what lets the retry test count provider hits (the no-re-pay proof).
-        cls.model_log = Path(f"/tmp/salvor-driver-test-model-{model_port}.log")
-        cls.model_log.unlink(missing_ok=True)
+        cls.model_log = Path(cls.workspace) / "model.log"
         with cls.model_log.open("wb") as log:
             cls.model = subprocess.Popen(
                 [str(DEMO_MODEL), "--port", str(model_port), "--delay-ms", "0"],
@@ -141,6 +154,7 @@ class ClientRunLoopRealServer(unittest.TestCase):
     @classmethod
     def tearDownClass(cls) -> None:
         terminate(getattr(cls, "proc", None), getattr(cls, "model", None))
+        discard(getattr(cls, "workspace", None))
 
     def provider_hits(self) -> int:
         """How many model requests the scripted demo model has served."""
@@ -507,6 +521,7 @@ class StreamingModelStepRealServer(unittest.TestCase):
     proc: subprocess.Popen
     endpoint: ThreadingHTTPServer
     base: str
+    workspace: str
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -518,8 +533,8 @@ class StreamingModelStepRealServer(unittest.TestCase):
         model_port = cls.endpoint.server_address[1]
         serve_port = free_port()
         cls.base = f"http://127.0.0.1:{serve_port}"
-        store = f"/tmp/salvor-driver-sse-{serve_port}.db"
-        Path(store).unlink(missing_ok=True)
+        cls.workspace = tempfile.mkdtemp(prefix="salvor-py-")
+        store = str(Path(cls.workspace) / "driver-sse.db")
         cls.proc = subprocess.Popen(
             [str(SALVOR), "--store", store, "serve", "--bind", f"127.0.0.1:{serve_port}"],
             stdout=subprocess.DEVNULL,
@@ -536,6 +551,7 @@ class StreamingModelStepRealServer(unittest.TestCase):
     @classmethod
     def tearDownClass(cls) -> None:
         terminate(getattr(cls, "proc", None))
+        discard(getattr(cls, "workspace", None))
         endpoint = getattr(cls, "endpoint", None)
         if endpoint is not None:
             endpoint.shutdown()

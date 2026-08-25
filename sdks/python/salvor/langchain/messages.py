@@ -1,6 +1,6 @@
 """Turning LangChain messages into what a salvor log holds, and back.
 
-Three conversions live here, all of them shared between the middleware and
+The conversions live here, all of them shared between the middleware and
 :func:`~salvor.langchain.finish_thread`, and all of them chosen so that what
 goes into the log is LangChain's own storage form rather than something this
 package invented. A recorded answer read back a year from now is read back by
@@ -9,7 +9,6 @@ package invented. A recorded answer read back a year from now is read back by
 
 from __future__ import annotations
 
-import json
 from typing import Any, Dict, Optional, TypeVar
 
 from langchain_core.messages import (
@@ -21,10 +20,12 @@ from langchain_core.messages import (
 
 from ..models import Usage
 from .errors import SalvorMiddlewareError
+from .hash import canonical_json, parsed_json
 from .request import plain
 
 __all__ = [
     "as_tool_content",
+    "canonical_tool_message",
     "mark",
     "stored_ai_message",
     "stored_form",
@@ -72,20 +73,24 @@ def stored_ai_message(stored: Any, run: Optional[str] = None) -> AIMessage:
     return message
 
 
-def mark(message: MessageT, seq: int, run: str) -> MessageT:
-    """Put the replay marker on a message.
+def mark(message: MessageT, marker: Dict[str, Any]) -> MessageT:
+    """Put this invoke's marker on a message, and hand the message back.
 
     It goes on ``response_metadata``, which is the one place a message carries
     provenance rather than content, and it is deliberately excluded from the
-    request hash so that a replayed message fed back into the next model call
-    hashes exactly as the live one did.
+    request hash so that a message fed back into the next model call hashes
+    exactly whether it was replayed or paid for.
+
+    Every message this middleware returns carries one (``replayed``, ``live``
+    or ``forked``; see :meth:`salvor.langchain.tape.Tape.marker`), so a reader
+    never has to take the absence of a marker as evidence of anything.
 
     A replayed answer arrives whole. Under streaming that means one message
     event with the full content, not a re-tokenised imitation of the original
     stream: the tokens happened once, and nothing here pretends otherwise.
     """
     metadata = dict(getattr(message, "response_metadata", None) or {})
-    metadata["salvor"] = {"replayed": True, "seq": seq, "run": run}
+    metadata["salvor"] = marker
     message.response_metadata = metadata  # type: ignore[attr-defined]
     return message
 
@@ -120,32 +125,55 @@ def _count(source: Any, *names: str) -> int:
     return 0
 
 
+def canonical_tool_message(message: ToolMessage) -> ToolMessage:
+    """The live tool message, with a JSON result spelt the way the log spells it.
+
+    LangChain builds a tool message by stringifying whatever the tool returned,
+    and Python's stringification keeps the keys in the order the tool's own
+    dictionary was built in (and puts a space after every comma and colon).
+    The log does not keep that order: salvor stores the result as JSON and
+    hands it back with its keys sorted. So the same result would reach the next
+    model call as two different strings, one on the invoke that ran the tool
+    and another on the invoke that replayed it, that call would hash to
+    something the log does not hold, and the thread would fork every time,
+    running every write below it again under a fresh key.
+
+    Writing the canonical spelling onto the live message settles that: both
+    invokes send the model the same bytes, and those bytes are the ones the
+    TypeScript middleware sends too. A result that is not JSON is left exactly
+    as the tool wrote it, because there is nothing to canonicalize about a
+    sentence.
+    """
+    content = message.content
+    if not isinstance(content, str):
+        return message
+    is_json, parsed = parsed_json(content)
+    if not is_json:
+        return message
+    message.content = canonical_json(parsed)
+    return message
+
+
 def tool_output(message: ToolMessage) -> Any:
     """What a tool call returned, as the value the operator's ``output_schema``
     describes.
 
     LangChain turns a tool's result into a tool message by stringifying it, so
-    the result is recovered by parsing the content back when the parse round
-    trips exactly. When it does not, the content is recorded as the string it
-    is: better a completion the operator's schema refuses, and says so, than a
-    silently reshaped result that replays as different bytes than the live call
-    produced.
+    the result is recovered by parsing the content back. A content that is not
+    JSON is recorded as the string it is: better a completion the operator's
+    schema refuses, and says so, than a silently reshaped result.
 
-    "Exactly" is measured against :func:`as_tool_content`, which is the call
-    LangChain Python itself made to build the content
-    (``langchain_core.tools.base._stringify``). The TypeScript middleware
-    measures it against ``JSON.stringify``, and the two spell the same object
-    differently: Python puts a space after every comma and colon. Each one asks
-    the same question of its own runtime, which is the question that matters,
-    because the answer decides whether a replayed tool message carries the same
-    bytes the live one did and so hashes into the same next model call.
+    The round trip is measured against :func:`as_tool_content`, which is what a
+    replayed tool message will be built with. A live message that came through
+    :func:`canonical_tool_message` passes by construction, which is the point:
+    the value recorded here and the string rebuilt from it on the next invoke
+    are two spellings of one result that agree letter for letter.
     """
     content = message.content
     if not isinstance(content, str):
         return plain(content)
-    try:
-        parsed = json.loads(content)
-    except ValueError:
+    is_json, parsed = parsed_json(content)
+    if not is_json:
         return content  # not JSON; the content is the result
     if as_tool_content(parsed) == content:
         return parsed
@@ -155,13 +183,12 @@ def tool_output(message: ToolMessage) -> Any:
 def as_tool_content(output: Any) -> str:
     """A recorded tool result, back as the text a tool message carries.
 
-    The same call LangChain makes when it turns a tool's return value into a
-    tool message, so a replayed tool message is byte-for-byte the live one and
-    the next model call hashes to what the log recorded.
+    Canonical JSON, which is what the live tool message carries too (see
+    :func:`canonical_tool_message`), so a replayed tool message is byte for
+    byte the live one and the next model call hashes to what the log recorded.
+    A result that was a string is that string: a tool that answers in prose
+    answers in prose on both invokes.
     """
     if isinstance(output, str):
         return output
-    try:
-        return json.dumps(output, ensure_ascii=False)
-    except (TypeError, ValueError):
-        return str(output)
+    return canonical_json(plain(output))

@@ -42,15 +42,33 @@ them. A graph that branches on ``time.time()`` will take a different branch on
 the second invoke, and the middleware will honestly tell you so rather than
 pretend the recorded answers still apply.
 
+What a returned message says about itself
+----------------------------------------
+
+Every model answer and every tool result this middleware hands back carries a
+marker on ``response_metadata["salvor"]``: ``{"replayed": True, "seq": n,
+"run": ...}`` for one read out of the log, ``{"live": True, "seq": n, "run":
+...}`` for one this invoke paid for or performed, and ``{"forked": {"at": n,
+"thread": ..., "run": ...}}`` once the thread has left its recorded path. Every
+message carries one, so no marker is never a fact about a message. A fork is
+also said out loud once per invoke, through ``on_fork`` (the default writes one
+warning to the ``salvor.langchain`` logger), because the usual cause is a tool
+whose result differs between invokes or a graph branching on the clock, and
+neither shows up anywhere else.
+
 What the operator has to declare
 --------------------------------
 
-A tool's effect class, its input schema, its output schema and its idempotency
-key are the operator's, not this middleware's. They come from a client-tool
+A tool's effect class, its input schema, its output schema, its idempotency key
+and whether a client may report its own result are the operator's, not this
+middleware's. They come from a client-tool
 declaration loaded by the server (``salvor serve --client-tool <FILE>``; see
 ``examples/client-tools/refund-card.toml``). The middleware sends the tool's
 name and the model's arguments and nothing else, which is why a tool nobody
-declared is refused by name instead of quietly recorded as a harmless read.
+declared is refused by name instead of quietly recorded as a harmless read. A
+tool declared ``trust_completion = false`` is performed and then stops the
+invoke with :class:`ToolNeedsResolution`: its operator settles such a call by
+hand, and the next invoke replays what that person recorded.
 
 Installing
 ----------
@@ -66,11 +84,11 @@ from __future__ import annotations
 
 from .async_run_tape import AsyncRunTape
 from .current_call import ToolCallContext, current_tool_call
-from .errors import SalvorMiddlewareError
+from .errors import SalvorMiddlewareError, ToolNeedsResolution
 from .hash import canonical_json, hash_value, is_uuid, run_id_for_thread, sha256_hex
 from .request import canonical_request, request_hash
 from .run_tape import RunTape
-from .tape import ModelOutcome, ToolOutcome, TurnPosition
+from .tape import Drive, ForkInfo, ModelOutcome, ToolOutcome, TurnPosition
 
 # LangChain itself is reached only from here down. These are the modules that
 # import it, so a checkout without the extra installed fails here and is told
@@ -78,7 +96,7 @@ from .tape import ModelOutcome, ToolOutcome, TurnPosition
 # halfway through an agent run.
 try:
     from .finish import FinishedThread, finish_thread
-    from .middleware import SalvorMiddleware, salvor_middleware
+    from .middleware import SalvorMiddleware, salvor_middleware, warn_of_fork
     from .replay_model import ReplayChatModel
 except ImportError as missing:  # pragma: no cover - depends on what is installed
     raise ImportError(
@@ -89,13 +107,16 @@ except ImportError as missing:  # pragma: no cover - depends on what is installe
 
 __all__ = [
     "AsyncRunTape",
+    "Drive",
     "FinishedThread",
+    "ForkInfo",
     "ModelOutcome",
     "ReplayChatModel",
     "RunTape",
     "SalvorMiddleware",
     "SalvorMiddlewareError",
     "ToolCallContext",
+    "ToolNeedsResolution",
     "ToolOutcome",
     "TurnPosition",
     "canonical_json",
@@ -108,4 +129,5 @@ __all__ = [
     "run_id_for_thread",
     "salvor_middleware",
     "sha256_hex",
+    "warn_of_fork",
 ]

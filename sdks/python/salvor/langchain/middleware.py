@@ -17,6 +17,7 @@ recording nothing.
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
 
@@ -29,10 +30,11 @@ from ..errors import SalvorAPIError
 from ..models import Event
 from .async_run_tape import AsyncRunTape
 from .current_call import ToolCallContext, arun_with_tool_call, run_with_tool_call
-from .errors import SalvorMiddlewareError
+from .errors import SalvorMiddlewareError, ToolNeedsResolution
 from .hash import hash_value, run_id_for_thread
 from .messages import (
     as_tool_content,
+    canonical_tool_message,
     mark,
     stored_ai_message,
     stored_form,
@@ -42,9 +44,26 @@ from .messages import (
 from .replay_model import ReplayChatModel
 from .request import canonical_request, request_hash
 from .run_tape import RunTape
-from .tape import ModelAnswer, ModelOutcome, OpenedCall, ToolOutcome, TurnPosition
+from .tape import (
+    Drive,
+    ForkInfo,
+    ModelAnswer,
+    ModelOutcome,
+    OpenedCall,
+    ToolOutcome,
+    TurnPosition,
+)
 
-__all__ = ["SalvorMiddleware", "salvor_middleware"]
+__all__ = ["SalvorMiddleware", "salvor_middleware", "warn_of_fork"]
+
+#: Where a fork nobody asked to hear about is reported. A logger rather than
+#: `warnings.warn`: a fork is a runtime event in somebody else's agent loop, not
+#: a deprecation, so it belongs in the log an application already collects and
+#: already routes. `warnings.warn` would also be shown once per call site per
+#: process by the default filter, which would hide the second thread that forked
+#: today, and a library that turns into an exception under `-W error` is a
+#: library that decides an application's failure policy for it.
+LOG = logging.getLogger("salvor.langchain")
 
 #: What a run's `RunStarted` records as its agent definition. The middleware is
 #: the definition here: LangGraph owns the graph, and salvor is told only that
@@ -55,6 +74,16 @@ AGENT_DEF = {"middleware": "@salvor-run/client/langchain"}
 
 ThreadIdToRunId = Callable[[str], Union[str, Awaitable[str]]]
 AnyClient = Union[Client, AsyncClient]
+OnFork = Callable[[ForkInfo], None]
+
+
+def warn_of_fork(fork: ForkInfo) -> None:
+    """Say, once per invoke, that this thread has left what was recorded.
+
+    The default ``on_fork``, over the sentence the fork itself carries, which is
+    the sentence the TypeScript middleware warns with too.
+    """
+    LOG.warning("%s", fork.message)
 
 
 class SalvorMiddleware(AgentMiddleware):
@@ -102,6 +131,7 @@ class SalvorMiddleware(AgentMiddleware):
         *,
         thread_id_to_run_id: Optional[ThreadIdToRunId] = None,
         record_prompts: bool = False,
+        on_fork: Optional[OnFork] = None,
     ) -> None:
         """
         Args:
@@ -121,6 +151,13 @@ class SalvorMiddleware(AgentMiddleware):
                 an inspector can show the exact prompt. Off by default,
                 because the body carries user data. Replay never reads it: the
                 correlation key is the request hash alone.
+            on_fork: Told once per invocation, the first time the thread leaves
+                what its run recorded. The default writes one warning to the
+                ``salvor.langchain`` logger (:func:`warn_of_fork`); pass your
+                own to route it, and pass one that does nothing to silence it.
+                A fork is never fatal: the invoke carries on, appending to the
+                run, and every message it returns from there on says so in
+                ``response_metadata["salvor"]["forked"]``.
         """
         super().__init__()
         if not isinstance(client, (Client, AsyncClient)):
@@ -136,6 +173,7 @@ class SalvorMiddleware(AgentMiddleware):
         self._awaited = isinstance(client, AsyncClient)
         self._to_run_id = thread_id_to_run_id or run_id_for_thread
         self._record_prompts = record_prompts
+        self._on_fork = on_fork if on_fork is not None else warn_of_fork
         #: One tape per live invocation, keyed by run id.
         self._tapes = {}  # type: Dict[str, Any]
         #: In-flight asynchronous opens, so a turn's parallel tool calls share
@@ -144,6 +182,13 @@ class SalvorMiddleware(AgentMiddleware):
         #: The same guarantee for the synchronous path, where a turn's parallel
         #: tool calls arrive on a thread pool rather than on one event loop.
         self._open_lock = threading.Lock()
+        #: The server's client-tool declarations, by name, read once and kept:
+        #: what they say about a tool cannot change under a running server, and
+        #: what this middleware needs from them (whether the operator lets a
+        #: client close a call) must be known before the tool's result is
+        #: reported. ``None`` until the first tool call asks.
+        self._declared = None  # type: Optional[Dict[str, Any]]
+        self._declared_lock = threading.Lock()
 
     @property
     def name(self) -> str:
@@ -191,7 +236,7 @@ class SalvorMiddleware(AgentMiddleware):
             request_hash(request), canonical_request(request), perform
         )
         if not outcome.replayed and "response" in live:
-            return live["response"]
+            return _marked_live(live["response"], outcome, tape.run_id)
         # The recorded answer goes back through LangChain's own handler, with a
         # stand-in model in the provider's place, so a streaming caller sees the
         # replayed turn arrive whole instead of seeing nothing at all. See
@@ -213,11 +258,17 @@ class SalvorMiddleware(AgentMiddleware):
         tape = self._tape_for(getattr(request, "runtime", None))
         name = request.tool_call["name"]
         live = {}  # type: Dict[str, Any]
+        # Read before the call, used after it: a tool whose completion the
+        # operator does not trust still runs, and what must not happen is
+        # finding that out only once the result is being reported.
+        trusted = self._trusts_completion(name)
 
         def perform(opened: OpenedCall) -> Any:
             def body() -> Any:
-                live["message"] = _tool_message_of(handler(request), name)
-                return tool_output(live["message"])
+                live["message"] = _live_tool_message(handler(request), name)
+                output = tool_output(live["message"])
+                _stop_for_a_person(trusted, tape, opened, name, output)
+                return output
 
             return run_with_tool_call(_context(opened, tape.run_id, name), body)
 
@@ -232,8 +283,8 @@ class SalvorMiddleware(AgentMiddleware):
             raise undeclared from error
 
         if not outcome.replayed and "message" in live:
-            return live["message"]
-        return _replayed_tool_message(outcome, request, name, tape.run_id)
+            return mark(live["message"], outcome.marker)
+        return _replayed_tool_message(outcome, request, name)
 
     # -- the awaited hooks ------------------------------------------------------
 
@@ -267,7 +318,7 @@ class SalvorMiddleware(AgentMiddleware):
             request_hash(request), canonical_request(request), perform
         )
         if not outcome.replayed and "response" in live:
-            return live["response"]
+            return _marked_live(live["response"], outcome, tape.run_id)
         return await handler(_replaying(request, outcome, tape.run_id))
 
     async def awrap_tool_call(self, request: Any, handler: Any) -> Any:
@@ -278,11 +329,14 @@ class SalvorMiddleware(AgentMiddleware):
         tape = await self._atape_for(getattr(request, "runtime", None))
         name = request.tool_call["name"]
         live = {}  # type: Dict[str, Any]
+        trusted = await self._atrusts_completion(name)
 
         async def perform(opened: OpenedCall) -> Any:
             async def body() -> Any:
-                live["message"] = _tool_message_of(await handler(request), name)
-                return tool_output(live["message"])
+                live["message"] = _live_tool_message(await handler(request), name)
+                output = tool_output(live["message"])
+                _stop_for_a_person(trusted, tape, opened, name, output)
+                return output
 
             return await arun_with_tool_call(_context(opened, tape.run_id, name), body)
 
@@ -297,8 +351,8 @@ class SalvorMiddleware(AgentMiddleware):
             raise undeclared from error
 
         if not outcome.replayed and "message" in live:
-            return live["message"]
-        return _replayed_tool_message(outcome, request, name, tape.run_id)
+            return mark(live["message"], outcome.marker)
+        return _replayed_tool_message(outcome, request, name)
 
     # -- the run, blocking -------------------------------------------------------
 
@@ -328,17 +382,36 @@ class SalvorMiddleware(AgentMiddleware):
             existing = self._tapes.get(run_id)
             if existing is not None:
                 return existing
-            driver = self._client.open_client_run(
-                run_id=run_id, record_prompts=self._record_prompts
-            )
+            driver = self._open(run_id)
             _refuse_a_finished_run(
                 driver.log_envelopes, identity["thread_id"], run_id
             )
             tape = RunTape.open(
-                driver, _started(identity["thread_id"]), self._record_prompts
+                driver,
+                _started(identity["thread_id"]),
+                self._drive(identity["thread_id"], run_id),
             )
             self._tapes[run_id] = tape
             return tape
+
+    def _open(self, run_id: str) -> Any:
+        """Take up the run's lease, which is also how it is taken back after
+        another process took it (see
+        :meth:`salvor.langchain.RunTape._guarded`)."""
+        return self._client.open_client_run(
+            run_id=run_id, record_prompts=self._record_prompts
+        )
+
+    def _drive(self, thread_id: str, run_id: str) -> Drive:
+        """What this invocation drives the run with: the thread every refusal
+        names, whether prompts are recorded, how to take the run back, and who
+        hears about a fork."""
+        return Drive(
+            thread_id=thread_id,
+            record_prompts=self._record_prompts,
+            reopen=lambda: self._open(run_id),
+            on_fork=self._on_fork,
+        )
 
     # -- the run, awaited ---------------------------------------------------------
 
@@ -378,13 +451,41 @@ class SalvorMiddleware(AgentMiddleware):
         return tape
 
     async def _aopen_tape(self, run_id: str, thread_id: str) -> AsyncRunTape:
-        driver = await self._client.open_client_run(
-            run_id=run_id, record_prompts=self._record_prompts
-        )
+        driver = await self._open(run_id)
         _refuse_a_finished_run(driver.log_envelopes, thread_id, run_id)
         return await AsyncRunTape.open(
-            driver, _started(thread_id), self._record_prompts
+            driver, _started(thread_id), self._drive(thread_id, run_id)
         )
+
+    # -- what the operator declared -------------------------------------------------
+
+    def _trusts_completion(self, tool: str) -> bool:
+        """Whether the operator lets a client close a call to ``tool``.
+
+        The declarations are read once per middleware and kept, because they are
+        the server's startup configuration (``salvor serve --client-tool
+        <FILE>``) and cannot change while it runs. A tool this server declares
+        nothing about is treated as trusted here, so the refusal that reaches
+        the application is the one that names the missing declaration, raised
+        where it already was: when the intent is opened, before the tool runs.
+        """
+        if self._declared is None:
+            with self._declared_lock:
+                if self._declared is None:
+                    self._declared = _by_name(self._client.list_client_tools())
+        return _trusted(self._declared, tool)
+
+    async def _atrusts_completion(self, tool: str) -> bool:
+        """:meth:`_trusts_completion`, awaited.
+
+        Two tool calls of one turn may both find the listing unread and both
+        read it. That costs one extra GET and nothing else: the answer is the
+        same either way, and a lock held across an await would be a second
+        turnstile in a file that already has one.
+        """
+        if self._declared is None:
+            self._declared = _by_name(await self._client.list_client_tools())
+        return _trusted(self._declared, tool)
 
     # -- which way this agent is being driven --------------------------------------
 
@@ -416,6 +517,7 @@ def salvor_middleware(
     *,
     thread_id_to_run_id: Optional[ThreadIdToRunId] = None,
     record_prompts: bool = False,
+    on_fork: Optional[OnFork] = None,
 ) -> SalvorMiddleware:
     """Build a :class:`SalvorMiddleware`.
 
@@ -427,6 +529,7 @@ def salvor_middleware(
         client,
         thread_id_to_run_id=thread_id_to_run_id,
         record_prompts=record_prompts,
+        on_fork=on_fork,
     )
 
 
@@ -552,8 +655,71 @@ def _answer_of(response: Any, run: str) -> ModelAnswer:
 
 def _replaying(request: Any, outcome: ModelOutcome, run: str) -> Any:
     """The same model request with the recorded answer in the provider's place."""
-    recorded = mark(stored_ai_message(outcome.response, run), outcome.seq, run)
+    recorded = mark(stored_ai_message(outcome.response, run), outcome.marker)
     return request.override(model=ReplayChatModel(recorded))
+
+
+def _marked_live(response: Any, outcome: ModelOutcome, run: str) -> Any:
+    """The live response, with its AI message saying it was live.
+
+    Marking the message this middleware just recorded is what makes the absence
+    of a marker mean nothing at all: every answer a salvor-recorded agent hands
+    back says where it came from, so a reader never has to guess whether an
+    unmarked message was live or came from a build without the middleware. The
+    marker rides on ``response_metadata``, which no request hash reads, so it
+    cannot change what the next model call hashes to.
+    """
+    mark(_ai_message_of(response, run), outcome.marker)
+    return response
+
+
+def _live_tool_message(result: Any, tool: str) -> ToolMessage:
+    """The tool message a handler returned, spelt the way the log will spell it.
+
+    A JSON result is rewritten into its canonical form here, on the live path,
+    because the replayed message is built from the recorded value and would
+    otherwise carry different bytes for the same result. See
+    :func:`~salvor.langchain.messages.canonical_tool_message`.
+    """
+    return canonical_tool_message(_tool_message_of(result, tool))
+
+
+def _by_name(declarations: Any) -> Dict[str, Any]:
+    """The server's client-tool declarations, by tool name."""
+    return {declaration.name: declaration for declaration in declarations or []}
+
+
+def _trusted(declared: Dict[str, Any], tool: str) -> bool:
+    """Whether ``tool``'s declaration lets a client report its own result."""
+    declaration = declared.get(tool)
+    return declaration is None or bool(
+        getattr(declaration, "trust_completion", False)
+    )
+
+
+def _stop_for_a_person(
+    trusted: bool, tape: Any, opened: OpenedCall, tool: str, output: Any
+) -> None:
+    """Stop after a call the operator settles by hand, before reporting it.
+
+    The tool has run by now, which is right: performing the call is the
+    application's business and the intent is recorded ahead of it either way.
+    What this middleware must not do is report the result, because salvor
+    refuses a completion for a tool declared ``trust_completion = false`` and
+    the refusal would arrive as a bare ``403`` in the middle of a graph, after
+    the write. The log is left saying exactly what happened: the call was asked
+    for, and nobody has confirmed what it did.
+    """
+    if trusted:
+        return
+    raise ToolNeedsResolution(
+        run_id=tape.run_id,
+        thread_id=tape.thread_id,
+        seq=opened.seq,
+        tool=tool,
+        output=output,
+        key=opened.idempotency_key,
+    )
 
 
 def _tool_message_of(result: Any, tool: str) -> ToolMessage:
@@ -569,9 +735,14 @@ def _tool_message_of(result: Any, tool: str) -> ToolMessage:
 
 
 def _replayed_tool_message(
-    outcome: ToolOutcome, request: Any, tool: str, run: str
+    outcome: ToolOutcome, request: Any, tool: str
 ) -> ToolMessage:
-    """The recorded result of a tool call, as the message LangGraph expects."""
+    """The recorded result of a tool call, as the message LangGraph expects.
+
+    The content is the canonical spelling of the recorded value, which is
+    exactly what the live message carried, so the model call after it hashes to
+    the position the log already holds.
+    """
     return mark(
         ToolMessage(
             content=as_tool_content(outcome.output),
@@ -581,8 +752,7 @@ def _replayed_tool_message(
             # result: salvor refuses to record one any other way.
             status="success",
         ),
-        outcome.seq,
-        run,
+        outcome.marker,
     )
 
 

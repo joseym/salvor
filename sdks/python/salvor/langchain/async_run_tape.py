@@ -10,48 +10,65 @@ Read :class:`salvor.langchain.RunTape` for the same thing without the awaits.
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Awaitable, Callable, Dict, Optional
+import inspect
+from typing import Any, Awaitable, Callable, Dict, Optional, TypeVar
 
 from ..async_client_runs import AsyncClientRunDriver
+from ..errors import SalvorAPIError
 from .tape import (
+    Drive,
     ModelAnswer,
     ModelOutcome,
     OpenedCall,
     Tape,
     ToolOutcome,
     TurnPosition,
+    cannot_reopen,
+    lease_lost,
+    lease_taken,
     start_events,
     usage_payload,
 )
 
 __all__ = ["AsyncRunTape"]
 
+T = TypeVar("T")
+
 
 class AsyncRunTape:
     """Drives one thread's run for the length of one ``ainvoke`` or ``astream``."""
 
-    def __init__(self, driver: AsyncClientRunDriver, record_prompts: bool) -> None:
+    def __init__(self, driver: AsyncClientRunDriver, drive: Drive) -> None:
         self._driver = driver
+        self._drive = drive
         #: The run this tape is the cursor into.
         self.run_id = driver.run_id
-        self._tape = Tape(driver.run_id, driver.log_envelopes, record_prompts)
+        self._tape = Tape(driver.run_id, driver.log_envelopes, drive)
         #: The turnstile: one open intent at a time.
         self._gate = asyncio.Lock()
         #: Where a turn's later ranks wait for the rank before them.
         self._turn = asyncio.Condition()
+        #: True once this invoke has taken the run's lease back, which it may do
+        #: once. See :func:`salvor.langchain.tape.lease_taken`.
+        self._reopened = False
 
     @classmethod
     async def open(
-        cls,
-        driver: AsyncClientRunDriver,
-        started: Dict[str, Any],
-        record_prompts: bool,
+        cls, driver: AsyncClientRunDriver, started: Dict[str, Any], drive: Drive
     ) -> "AsyncRunTape":
         """Open (or re-open) the run behind a thread and take up its cursor."""
+        tape = cls(driver, drive)
         events = start_events(driver, started)
         if events:
-            await driver.append(events)
-        return cls(driver, record_prompts)
+            # A fresh run's first event is under the same lease rule as every
+            # write after it, so it goes through the same guard.
+            await tape._guarded(lambda: tape._driver.append(events))
+        return tape
+
+    @property
+    def thread_id(self) -> str:
+        """The LangGraph thread this run is behind, for whoever has to name it."""
+        return self._drive.thread_id
 
     @property
     def run(self) -> AsyncClientRunDriver:
@@ -74,14 +91,19 @@ class AsyncRunTape:
         """
         async with self._gate:
             seq = self._tape.model_slot(request_hash)
-            opened = await self._driver.client_model_intent(
-                seq, request_hash, self._tape.intent_body(body)
+            self._announce()
+            opened = await self._guarded(
+                lambda: self._driver.client_model_intent(
+                    seq, request_hash, self._tape.intent_body(body)
+                )
             )
             if opened.settled:
                 return self._tape.model_replayed(seq, opened)
             response, usage = await perform()
-            await self._driver.client_model_completion(
-                seq, response, usage_payload(usage)
+            await self._guarded(
+                lambda: self._driver.client_model_completion(
+                    seq, response, usage_payload(usage)
+                )
             )
             return self._tape.model_performed(seq, response, usage)
 
@@ -126,13 +148,18 @@ class AsyncRunTape:
     ) -> ToolOutcome:
         """One tool step, with the turnstile already held."""
         seq = self._tape.tool_slot(tool, tool_input)
-        opened = await self._driver.client_tool_intent(seq, tool, tool_input)
+        self._announce()
+        opened = await self._guarded(
+            lambda: self._driver.client_tool_intent(seq, tool, tool_input)
+        )
         if opened.settled:
             return self._tape.tool_replayed(
                 seq, opened, await self._recorded_output(seq + 1)
             )
         output = await perform(self._tape.opened_call(seq, opened))
-        await self._driver.client_tool_completion(seq, output)
+        await self._guarded(
+            lambda: self._driver.client_tool_completion(seq, output)
+        )
         return self._tape.tool_performed(seq, opened, output)
 
     async def _recorded_output(self, seq: int) -> Any:
@@ -141,7 +168,53 @@ class AsyncRunTape:
         known, output = self._tape.known_output(seq)
         if known:
             return output
-        return self._tape.output_from_tail(seq, await self._driver.log(seq))
+        tail = await self._guarded(lambda: self._driver.log(seq))
+        return self._tape.output_from_tail(seq, tail)
+
+    def _announce(self) -> None:
+        """Tell the application about a fork, the first time there is one.
+
+        Called rather than awaited: ``on_fork`` is an ordinary function in both
+        SDKs, so an application writes one callback and it runs the same way
+        under either transport.
+        """
+        info = self._tape.unreported_fork()
+        if info is not None and self._drive.on_fork is not None:
+            self._drive.on_fork(info)
+
+    async def _guarded(self, step: Callable[[], Awaitable[T]]) -> T:
+        """One request to the control plane, through one lost lease.
+
+        :meth:`salvor.langchain.RunTape._guarded`, awaited. The rule is the
+        same one: a lease lost once is taken back, the log is read again and the
+        step is retried at the position it reserved; a lease lost twice in one
+        invoke is two drivers taking turns and is refused by name.
+        """
+        while True:
+            try:
+                return await step()
+            except SalvorAPIError as error:
+                if not lease_lost(error):
+                    raise
+                if self._reopened or self._drive.reopen is None:
+                    raise lease_taken(
+                        self._drive.thread_id, self.run_id
+                    ) from error
+                await self._take_the_run_back()
+
+    async def _take_the_run_back(self) -> None:
+        """Re-open the run, once, and re-read what its log holds now."""
+        self._reopened = True
+        try:
+            driver = self._drive.reopen()  # type: ignore[misc]
+            if inspect.isawaitable(driver):
+                driver = await driver
+        except SalvorAPIError as refused:
+            raise cannot_reopen(
+                self._drive.thread_id, self.run_id, refused
+            ) from refused
+        self._driver = driver
+        self._tape.reread(driver.log_envelopes)
 
     async def _enter_turn(self, position: TurnPosition) -> None:
         """Wait until every earlier call in this turn has been recorded."""

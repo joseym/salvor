@@ -1,0 +1,35 @@
+# The read half of the key-order pair: a tool whose result names its keys in an
+# order sorting would move (`tracking_number`, `status`, `eta`).
+#
+# Salvor stores a result as JSON and hands it back with its keys sorted, so a
+# tool that answers in any other order is what proves the middleware records and
+# replays one spelling rather than two. See the key-order case in
+# `tests/test_langchain.py`.
+
+name = "track_shipment"
+
+effect = "read"
+
+trust_completion = true
+
+[input_schema]
+type = "object"
+required = ["order_id"]
+description = "Track the shipment an order was sent on."
+
+[input_schema.properties.order_id]
+type = "string"
+description = "The order whose shipment to track, for example ORD-5150."
+
+[output_schema]
+type = "object"
+required = ["tracking_number", "status", "eta"]
+
+[output_schema.properties.tracking_number]
+type = "string"
+
+[output_schema.properties.status]
+type = "string"
+
+[output_schema.properties.eta]
+type = "string"

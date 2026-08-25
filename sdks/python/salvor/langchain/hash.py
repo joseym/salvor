@@ -34,6 +34,7 @@ itself, and with its TypeScript twin, forever.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from decimal import Decimal
 from typing import Any, List, Tuple
@@ -43,6 +44,7 @@ __all__ = [
     "hash_value",
     "is_uuid",
     "json_stringify",
+    "parsed_json",
     "run_id_for_thread",
     "sha256_hex",
 ]
@@ -85,6 +87,28 @@ def hash_value(value: Any) -> str:
     however the call was performed.
     """
     return "sha256:" + sha256_hex(canonical_json(value))
+
+
+def parsed_json(text: str) -> Tuple[bool, Any]:
+    """``(True, value)`` when ``text`` is JSON, ``(False, None)`` when it is not.
+
+    The one place this package reads JSON rather than writing it, and it is
+    here rather than in a caller because the question "is this text a value?"
+    has to be answered the same way in both SDKs. Python's decoder is the more
+    forgiving of the two: it reads ``NaN``, ``Infinity`` and ``-Infinity``,
+    which ``JSON.parse`` refuses. Those are refused here too, so a tool result
+    spelt with one of them stays the string it is in either language rather
+    than becoming a number in one of them.
+    """
+    try:
+        return True, json.loads(text, parse_constant=_not_json)
+    except ValueError:
+        return False, None
+
+
+def _not_json(literal: str) -> Any:
+    """Refuse the three bare words Python reads and JavaScript does not."""
+    raise ValueError("`{literal}` is not JSON".format(literal=literal))
 
 
 _UUID = re.compile(

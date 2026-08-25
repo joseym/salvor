@@ -30,18 +30,45 @@ there, so the fork is appended rather than lost. The one case that cannot be
 appended to is a log ending at an intent with no completion, and that case is
 refused by name: an unfinished call is exactly what a person has to settle
 before the run means anything again.
+
+A fork is not silent. The tape remembers where it happened, every message the
+rest of that invoke returns says so in its marker (:meth:`Tape.marker`), and
+the application is told once through its ``on_fork`` (see
+:class:`salvor.langchain.SalvorMiddleware`). Running off the end of a recorded
+log is deliberately not a fork: a log that simply stops is a thread being
+carried on, which is what every invoke that adds a turn does. A fork is the log
+holding a DIFFERENT step at the position this invoke asked for, which means the
+answers recorded below it answer a question nobody is asking any more.
+
+The lease
+---------
+
+A drive token belongs to a process, not to a thread of one: another instance of
+the same app opening this thread's run takes the lease, and salvor then refuses
+this drive's next write with ``invalid_drive_token``. A salvor that restarted
+refuses it with ``unknown_run`` instead, because it holds its client-driven
+leases in memory; :data:`LEASE_LOST` is both. Losing the lease once is
+recoverable and nothing recorded is lost, so the tapes re-open the run (which
+returns the recorded state and a fresh lease), re-read the log and retry the
+step at the position it already reserved. Losing it twice in one invoke is two
+drivers taking turns, which no retry fixes, so it is refused by name
+(:func:`lease_taken`), and a server that will not hand the run back at all is
+refused by :func:`cannot_reopen`.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from ..errors import SalvorAPIError
 from ..models import Event, Usage
 from .errors import SalvorMiddlewareError
 from .hash import canonical_json
 
 __all__ = [
+    "Drive",
+    "ForkInfo",
     "ModelAnswer",
     "ModelOutcome",
     "OpenedCall",
@@ -49,9 +76,54 @@ __all__ = [
     "ToolOutcome",
     "TurnPosition",
     "ZERO_USAGE",
+    "cannot_reopen",
+    "lease_lost",
+    "lease_taken",
     "start_events",
     "usage_payload",
 ]
+
+
+@dataclass(frozen=True)
+class ForkInfo:
+    """Where an invoke left the recorded path, as the application is told it and
+    as every message from there on carries it.
+
+    The same four fields the TypeScript middleware's ``SalvorForkNotice``
+    carries, so an application that handles forks in both writes the same
+    handler twice.
+    """
+
+    #: The log position the tape asked for and the log answered differently at.
+    at: int
+    #: The LangGraph thread being invoked.
+    thread: str
+    #: The salvor run behind that thread.
+    run: str
+    #: The sentence the default handler warns with.
+    message: str
+
+
+@dataclass(frozen=True)
+class Drive:
+    """What one invoke drives a run with, beyond the connection itself.
+
+    One of these is built per invocation by
+    :class:`~salvor.langchain.SalvorMiddleware` and handed to the tape, which is
+    why both tapes are given the same four answers however they wait for them.
+    """
+
+    #: The LangGraph thread id, which every refusal and every fork names.
+    thread_id: str
+    #: Whether each model intent records the request body (see
+    #: :meth:`Tape.intent_body`).
+    record_prompts: bool = False
+    #: Takes the run up again after the lease was lost, answering with a fresh
+    #: driver (or, under the asynchronous client, an awaitable of one). ``None``
+    #: leaves a lost lease to the caller.
+    reopen: Optional[Callable[[], Any]] = None
+    #: Told once, the first time this invoke leaves the recorded path.
+    on_fork: Optional[Callable[[ForkInfo], None]] = None
 
 
 @dataclass
@@ -62,6 +134,9 @@ class ModelOutcome:
     replayed: bool
     response: Any
     usage: Usage
+    #: What the message this step produces says about itself: see
+    #: :meth:`Tape.marker`.
+    marker: Dict[str, Any]
 
 
 @dataclass
@@ -73,6 +148,9 @@ class ToolOutcome:
     output: Any
     effect: str
     idempotency_key: str
+    #: What the message this step produces says about itself: see
+    #: :meth:`Tape.marker`.
+    marker: Dict[str, Any]
 
 
 ZERO_USAGE = Usage(input_tokens=0, output_tokens=0)
@@ -132,6 +210,74 @@ def usage_payload(usage: Usage) -> Dict[str, int]:
     }
 
 
+def _fork_sentence(thread_id: str, run_id: str, at: int) -> str:
+    """What a fork is worth saying out loud.
+
+    A fork is not an error: the run carries on, appended past its recorded
+    history, and everything from there is performed for real. It is worth saying
+    all the same, because the usual cause is something an operator can fix and
+    would otherwise never see: a tool whose result is not the same twice, or a
+    graph that branches on the clock. The middleware cannot tell which, so it
+    names the position and the two things to look at. The TypeScript middleware
+    says the same sentence.
+    """
+    return (
+        "salvor: thread `{thread}` (run {run}) left its recorded path at seq "
+        "{at}. Nothing from there replays: every model call and every tool call "
+        "for the rest of this invoke is being performed and recorded afresh, "
+        "and the messages carry `response_metadata[\"salvor\"][\"forked\"]` "
+        "saying so. If this thread was meant to resume, look for a tool whose "
+        "result differs between invokes, or a graph that branches on the clock "
+        "or on randomness.".format(thread=thread_id, run=run_id, at=at)
+    )
+
+
+#: The refusals that mean this drive is no longer the run's driver. The first
+#: is another process having re-opened the run and taken the lease; the second
+#: is a salvor that no longer knows the run at all, which is what a restarted
+#: server answers, because it holds its client-driven leases in memory.
+LEASE_LOST = ("invalid_drive_token", "unknown_run")
+
+
+def lease_lost(error: Exception) -> bool:
+    """Whether ``error`` is salvor saying this drive no longer holds the run."""
+    return isinstance(error, SalvorAPIError) and error.code in LEASE_LOST
+
+
+def lease_taken(thread_id: str, run_id: str) -> SalvorMiddlewareError:
+    """The refusal for a lease lost twice inside one invoke."""
+    return SalvorMiddlewareError(
+        "run {run} (thread `{thread}`) is being driven from somewhere else: "
+        "this invoke lost the run's lease twice, once after taking it back. "
+        "Salvor allows one driver per thread at a time, so two app instances "
+        "invoking the same thread will go on taking the run from each other "
+        "and neither will finish. Invoke a thread from one place, or give the "
+        "other task a thread id of its own.".format(thread=thread_id, run=run_id)
+    )
+
+
+def cannot_reopen(
+    thread_id: str, run_id: str, refused: SalvorAPIError
+) -> SalvorMiddlewareError:
+    """The refusal for a run this server will not hand back at all.
+
+    A salvor server keeps its client-driven leases in memory, so a server that
+    restarted does not recognise a run it opened before and refuses to adopt one
+    that already has recorded history. Nothing is lost: the log is on disk and
+    reads back. What cannot happen is this invoke carrying on, and saying so is
+    better than retrying into the same refusal.
+    """
+    return SalvorMiddlewareError(
+        "run {run} (thread `{thread}`) lost its lease and could not be taken "
+        "up again: {reason}. The recorded log is intact and still readable; "
+        "what is gone is this server's lease on the run, which is what a "
+        "restarted salvor loses. Drive the thread against the server that "
+        "opened it, or start the next task on a new thread id.".format(
+            thread=thread_id, run=run_id, reason=refused.message
+        )
+    )
+
+
 class Tape:
     """The cursor and the turnstile for one thread's run, as pure decisions.
 
@@ -143,21 +289,41 @@ class Tape:
     anything, which is what lets both tapes share them.
     """
 
-    def __init__(
-        self, run_id: str, log: List[Event], record_prompts: bool
-    ) -> None:
+    def __init__(self, run_id: str, log: List[Event], drive: Drive) -> None:
         #: The run this tape is the cursor into.
         self.run_id = run_id
-        self._record_prompts = record_prompts
-        #: The recorded log at the moment this invoke opened the run, by seq.
-        self._recorded = {event.seq: event for event in log}  # type: Dict[int, Event]
-        self._recorded_length = len(log)
+        #: What this invoke is driving it with: the thread, the prompt-recording
+        #: choice, how to take the run up again, and who to tell about a fork.
+        self.drive = drive
         #: The next free position; every step takes this one and the one after.
         self._cursor = 1
-        #: False once this invoke has asked for something the log does not hold.
-        self._replaying = self._recorded_length > 0
+        #: Where this invoke left the recorded path, once it has.
+        self.fork = None  # type: Optional[ForkInfo]
+        #: The same, until the application has been told about it.
+        self._unreported = None  # type: Optional[ForkInfo]
         #: Per-turn admission order, keyed by turn: which rank goes next.
         self._turns = {}  # type: Dict[str, int]
+        self._take_up(log)
+
+    def _take_up(self, log: List[Event]) -> None:
+        """Take up a reading of the log, leaving the cursor where it is."""
+        #: The recorded log as this tape last read it, by seq.
+        self._recorded = {event.seq: event for event in log}  # type: Dict[int, Event]
+        self._recorded_length = len(log)
+        #: False once this invoke has asked for something the log does not hold,
+        #: and false forever after a fork: a re-read cannot put an invoke back
+        #: on a path it has already left.
+        self._replaying = self._recorded_length > 0 and self.fork is None
+
+    def reread(self, log: List[Event]) -> None:
+        """Take up the log as it stands now, after the run was re-opened.
+
+        The cursor does not move: the step that lost the lease is about to be
+        retried at the position it already reserved, and what it meets there is
+        decided by what the log holds now, which may include work another driver
+        recorded in between.
+        """
+        self._take_up(log)
 
     # -- the cursor -----------------------------------------------------------
 
@@ -227,10 +393,73 @@ class Tape:
                             tail_kind=tail.kind,
                         )
                     )
+                self._forked_at(self._cursor)
                 self._cursor = self._recorded_length
         seq = self._cursor
         self._cursor += 2
         return seq
+
+    def _forked_at(self, seq: int) -> None:
+        """Remember, once, that this invoke left the recorded path here.
+
+        Only the log holding a different step at ``seq`` gets here. A log that
+        simply stops is not a fork (see the module docs), and neither is a
+        refusal: an invoke that is turned away by an unsettled call never left
+        the path, it was stopped on it.
+        """
+        if self.fork is not None:
+            return
+        self.fork = ForkInfo(
+            at=seq,
+            thread=self.drive.thread_id,
+            run=self.run_id,
+            message=_fork_sentence(self.drive.thread_id, self.run_id, seq),
+        )
+        self._unreported = self.fork
+
+    def unreported_fork(self) -> Optional[ForkInfo]:
+        """The fork the application has not been told about, and never twice.
+
+        The telling is a side effect, so it belongs to whichever tape owns the
+        transport rather than to these rules; what belongs here is that it
+        happens exactly once per invoke.
+        """
+        info, self._unreported = self._unreported, None
+        return info
+
+    # -- what a message says about itself ---------------------------------------
+
+    def marker(self, seq: int, replayed: bool) -> Dict[str, Any]:
+        """What the message a step produces carries in
+        ``response_metadata["salvor"]``.
+
+        Three shapes, and every message this middleware returns carries one of
+        them, so a reader never has to read anything into a message that carries
+        none:
+
+        * ``{"replayed": True, "seq": n, "run": ...}``: this answer came out of
+          the log, and nothing was paid for or performed;
+        * ``{"live": True, "seq": n, "run": ...}``: this answer was paid for or
+          performed on this invoke and recorded at that position;
+        * ``{"forked": {"at": n, "thread": ..., "run": ...}}``: this invoke has
+          left the recorded path, at seq ``n``, and everything it returns from
+          there on is being appended to the run rather than replayed from it.
+
+        The fork shape wins over the other two, because it is the one a reader
+        acts on: which position an appended answer landed at matters less than
+        the fact that the thread is no longer following what was recorded.
+        """
+        if self.fork is not None:
+            return {
+                "forked": {
+                    "at": self.fork.at,
+                    "thread": self.fork.thread,
+                    "run": self.fork.run,
+                }
+            }
+        if replayed:
+            return {"replayed": True, "seq": seq, "run": self.run_id}
+        return {"live": True, "seq": seq, "run": self.run_id}
 
     # -- what an intent carries ------------------------------------------------
 
@@ -238,7 +467,7 @@ class Tape:
         """The request body the model intent records, which is none of it unless
         the application asked for it: the body carries user data, and replay
         never reads it, because the correlation key is the request hash alone."""
-        return body if self._record_prompts else None
+        return body if self.drive.record_prompts else None
 
     # -- the shapes a step hands back ------------------------------------------
 
@@ -249,11 +478,18 @@ class Tape:
             replayed=True,
             response=opened.response,
             usage=opened.usage or ZERO_USAGE,
+            marker=self.marker(seq, replayed=True),
         )
 
     def model_performed(self, seq: int, response: Any, usage: Usage) -> ModelOutcome:
         """The answer this invoke paid a provider for and recorded."""
-        return ModelOutcome(seq=seq, replayed=False, response=response, usage=usage)
+        return ModelOutcome(
+            seq=seq,
+            replayed=False,
+            response=response,
+            usage=usage,
+            marker=self.marker(seq, replayed=False),
+        )
 
     def opened_call(self, seq: int, opened: Any) -> OpenedCall:
         """What a tool body is told about the call it is running inside of."""
@@ -267,6 +503,7 @@ class Tape:
             output=output,
             effect=opened.effect,
             idempotency_key=opened.idempotency_key,
+            marker=self.marker(seq, replayed=True),
         )
 
     def tool_performed(self, seq: int, opened: Any, output: Any) -> ToolOutcome:
@@ -277,6 +514,7 @@ class Tape:
             output=output,
             effect=opened.effect,
             idempotency_key=opened.idempotency_key,
+            marker=self.marker(seq, replayed=False),
         )
 
     # -- reading a recorded completion back -------------------------------------
