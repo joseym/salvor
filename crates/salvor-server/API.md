@@ -1459,8 +1459,10 @@ the wait begins, so a run parked for a week blocks no other run and holds no
 MCP process. A request that is malformed, names both keys, sits on a result
 flagged `isError`, or uses a key salvor does not know fails the tool call
 with a message naming `_meta.salvor` and the problem; it is never passed
-through as ordinary output. A result with no `_meta.salvor` records exactly
-as it always has.
+through as ordinary output. That failure is never retried, on any effect
+class: the request is already in hand, so reading it a second time reaches
+the same refusal, and the tool executes exactly once. A result with no
+`_meta.salvor` records exactly as it always has.
 
 That order is the point. The completion settles the call, and for a call
 carrying an idempotency key it settles the store's claim in the same atomic
