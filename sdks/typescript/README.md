@@ -188,7 +188,9 @@ later, and `awaitWake(seq)` is what a later drive calls to find out whether
 the deadline has passed. Nothing on the server watches the clock for you, so
 the client wakes its own run: it replays its log, calls `awaitWake`, and
 either learns the run is still asleep (nothing appended) or gets the
-`SleepCompleted` appended and carries on.
+`SleepCompleted` appended and carries on. Once the deadline is past, a
+`sleeping` run's status also carries `overdue: true` and `overdueSeconds`
+(whole seconds since `wakeAt`); both are absent before then.
 
 The driver's full surface: `openClientRun` (also re-opens, i.e. resumes, an
 existing run), `log(fromSeq)`, `append(events)`, `modelStep`, `modelStepStream`

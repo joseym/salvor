@@ -168,6 +168,37 @@ class ClientAgainstStub(unittest.TestCase):
         self.assertEqual(labeled.labels, {"build": "42"})
         self.assertIsNone(unlabeled.labels)
 
+    def test_list_runs_decodes_overdue_when_present_and_false_none_otherwise(self) -> None:
+        runs_body = {
+            "runs": [
+                {
+                    "run": "overdue",
+                    "status": {
+                        "state": "sleeping",
+                        "wake_at": "2026-07-11T13:00:00Z",
+                        "overdue": True,
+                        "overdue_seconds": 90,
+                    },
+                    "event_count": 2,
+                },
+                {
+                    "run": "not-due-yet",
+                    "status": {"state": "sleeping", "wake_at": "2026-07-11T13:00:00Z"},
+                    "event_count": 2,
+                },
+            ]
+        }
+        client, _ = self.make_client(
+            {"/v1/runs": lambda h, body: h._send(200, runs_body)}
+        )
+        runs = client.list_runs()
+        overdue = next(r for r in runs if r.run == "overdue")
+        not_due_yet = next(r for r in runs if r.run == "not-due-yet")
+        self.assertTrue(overdue.status.overdue)
+        self.assertEqual(overdue.status.overdue_seconds, 90)
+        self.assertFalse(not_due_yet.status.overdue)
+        self.assertIsNone(not_due_yet.status.overdue_seconds)
+
 
 if __name__ == "__main__":
     unittest.main()
