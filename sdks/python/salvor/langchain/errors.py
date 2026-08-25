@@ -56,10 +56,14 @@ class ToolNeedsResolution(SalvorMiddlewareError):
             "the client that performed it. Run {run} holds the call's intent at "
             "seq {seq}, and what the tool returned is on this error's `.output`. "
             "A person confirms what the call did and records it: `salvor "
-            "resolve {run} --output '<json the tool returned>'`, the Inspector's "
-            "resolve, or `driver.resolve(output)` on a client run driver. The "
-            "next invoke of thread `{thread}` replays that resolved output and "
-            "carries on.".format(tool=tool, run=run_id, seq=seq, thread=thread_id)
+            "resolve {run} --store <path to the server's store> --output "
+            "'<json the tool returned>'` (this middleware never knows the "
+            "store path; use the one `salvor serve --store` was given), the "
+            "Inspector's resolve, or `driver.resolve(output)` on a client run "
+            "driver. The next invoke of thread `{thread}` replays that "
+            "resolved output and carries on.".format(
+                tool=tool, run=run_id, seq=seq, thread=thread_id
+            )
         )
         #: The run holding the call's recorded intent.
         self.run_id = run_id

@@ -58,7 +58,12 @@ except ImportError:
     ) from None
 
 from salvor import ClientRunDriver
-from salvor.errors import DivergenceError, NeedsReconciliationError, SalvorAPIError
+from salvor.errors import (
+    DivergenceError,
+    LeaseHeldError,
+    NeedsReconciliationError,
+    SalvorAPIError,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SALVOR = REPO_ROOT / "target" / "debug" / "salvor"
@@ -197,23 +202,30 @@ class ClientRunLoopRealServer(unittest.TestCase):
         tail = run.log(from_seq=2)
         self.assertEqual([e.seq for e in tail], [2, 3])
 
-    def test_reopen_supersedes_lease_and_returns_log(self) -> None:
+    def test_reopen_with_the_held_token_keeps_the_lease(self) -> None:
         run = ClientRunDriver.open(self.base)
         self.addCleanup(run.close)
         run.append([self.started(run, 0)])
         old_token = run.drive_token
 
-        # Re-opening the same run returns its recorded log and a fresh lease.
-        reopened = ClientRunDriver.open(self.base, run_id=run.run_id)
+        # A bare re-open, with no token, is refused while the lease is current:
+        # the rule is not "newest caller wins".
+        with self.assertRaises(LeaseHeldError) as caught:
+            ClientRunDriver.open(self.base, run_id=run.run_id)
+        self.assertEqual(caught.exception.code, "lease_held")
+        self.assertGreater(caught.exception.lapses_in_seconds, 0)
+
+        # Presenting the held lease's own token re-opens under the SAME token,
+        # so the driver that already holds the run is never made to give it up.
+        reopened = ClientRunDriver.open(
+            self.base, run_id=run.run_id, drive_token=old_token
+        )
         self.addCleanup(reopened.close)
         self.assertEqual([e.kind for e in reopened.log_envelopes], ["RunStarted"])
-        self.assertNotEqual(reopened.drive_token, old_token)
+        self.assertEqual(reopened.drive_token, old_token)
 
-        # The superseded lease no longer drives the run.
-        run.drive_token = old_token
-        with self.assertRaises(SalvorAPIError) as caught:
-            run.append([run.envelope(1, "NowObserved", now="2026-07-11T12:00:00Z")])
-        self.assertEqual(caught.exception.code, "invalid_drive_token")
+        # And that token still drives the run afterwards.
+        reopened.append([reopened.envelope(1, "NowObserved", now="2026-07-11T12:00:00Z")])
 
     def test_idempotent_reappend_is_a_no_op(self) -> None:
         run = ClientRunDriver.open(self.base)
@@ -374,8 +386,13 @@ class ClientRunLoopRealServer(unittest.TestCase):
         run_id = first.run_id
 
         # Drive two, ten minutes later: the replayed instants are the recorded
-        # ones, so the deadline has not moved and the run stays asleep.
-        early = ClientRunDriver.open(self.base, run_id=run_id)
+        # ones, so the deadline has not moved and the run stays asleep. `first`
+        # never went quiet, so its lease is still current, and this drive
+        # presents its token to re-open under it rather than being refused
+        # `lease_held`.
+        early = ClientRunDriver.open(
+            self.base, run_id=run_id, drive_token=first.drive_token
+        )
         self.addCleanup(early.close)
         early.clock = lambda: started_at + timedelta(minutes=10)
         replayed = early.sleep_for(1, timedelta(hours=1))
@@ -385,8 +402,12 @@ class ClientRunLoopRealServer(unittest.TestCase):
         self.assertEqual(len(early.log()), 3, "and appends nothing at all")
 
         # Drive three, two hours later: the deadline has passed, so this drive
-        # closes the pair itself and the run carries on to its result.
-        late = ClientRunDriver.open(self.base, run_id=run_id)
+        # closes the pair itself and the run carries on to its result. Same
+        # story: the lease is still current (this is the same held token
+        # `early` re-opened under), so this drive presents it too.
+        late = ClientRunDriver.open(
+            self.base, run_id=run_id, drive_token=early.drive_token
+        )
         self.addCleanup(late.close)
         late.clock = lambda: started_at + timedelta(hours=2)
         self.assertEqual(late.sleep_for(1, timedelta(hours=1)), wake_at)

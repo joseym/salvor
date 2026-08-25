@@ -101,6 +101,9 @@ class AsyncClient:
         # live tail waits between events, so the read timeout is disabled while
         # connect/write stay bounded.
         self._stream_timeout = httpx.Timeout(timeout, read=None)
+        #: The last drive token this client saw for a run it opened. See
+        #: :attr:`salvor.Client._client_run_tokens`; the rule is identical.
+        self._client_run_tokens: dict[str, str] = {}
 
     async def close(self) -> None:
         """Close the underlying HTTP connection pool."""
@@ -304,6 +307,7 @@ class AsyncClient:
         input: Any = None,
         run_id: Optional[str] = None,
         record_prompts: bool = False,
+        drive_token: Optional[str] = None,
     ) -> "AsyncClientRunDriver":
         """Open or re-open a client-driven run over this client's connection.
 
@@ -311,10 +315,17 @@ class AsyncClient:
         run is a request. Returns a
         :class:`~salvor.async_client_runs.AsyncClientRunDriver` sharing this
         client's HTTP pool and auth, so it is closed when this client is.
+
+        ``drive_token`` re-opens under a lease this process already holds; left
+        unset, this client fills in the last token it remembers for
+        ``run_id``, the same auto-fill :meth:`salvor.Client.open_client_run`
+        does. See there for the full rule.
         """
         from .async_client_runs import AsyncClientRunDriver
 
-        return await AsyncClientRunDriver._open_over(
+        if drive_token is None:
+            drive_token = self._client_run_tokens.get(run_id) if run_id else None
+        driver = await AsyncClientRunDriver._open_over(
             self._http,
             owns_http=False,
             stream_timeout=self._stream_timeout,
@@ -322,4 +333,7 @@ class AsyncClient:
             input=input,
             run_id=run_id,
             record_prompts=record_prompts,
+            drive_token=drive_token,
         )
+        self._client_run_tokens[driver.run_id] = driver.drive_token
+        return driver

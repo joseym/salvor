@@ -153,7 +153,19 @@ def open_run(
     input: Any,
     run_id: Optional[str],
     record_prompts: bool,
+    drive_token: Optional[str] = None,
 ) -> Call:
+    """Open a fresh run, or re-open one this server holds.
+
+    ``drive_token`` is the held lease's own token, presented on a re-open:
+    salvor returns the SAME token back rather than minting a fresh one, so a
+    client rebuilding its cursor is not made to give up the lease it holds
+    (see ``API.md``'s drive-token section). Omit it to re-open without
+    presenting one, which is refused with ``409 lease_held`` while another
+    driver's lease on the run is still current, and succeeds with a fresh
+    lease otherwise (an unheld run, a lapsed lease, or a run this server only
+    knows from its log after a restart).
+    """
     body: dict[str, Any] = {"record_prompts": record_prompts}
     if agent is not None:
         body["agent"] = agent
@@ -169,7 +181,8 @@ def open_run(
             log=[Event.from_envelope(e) for e in obj.get("log", [])],
         )
 
-    return Call("POST", "/v1/client-runs", parse=parse, json_body=body)
+    headers = lease(drive_token) if drive_token is not None else None
+    return Call("POST", "/v1/client-runs", parse=parse, json_body=body, headers=headers)
 
 
 def read_log(run_id: str, from_seq: int) -> Call:

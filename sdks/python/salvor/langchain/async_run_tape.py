@@ -24,8 +24,11 @@ from .tape import (
     ToolOutcome,
     TurnPosition,
     cannot_reopen,
+    dangling_untrusted_call,
+    held_by_another_driver,
     lease_lost,
     lease_taken,
+    one_driver_error,
     start_events,
     usage_payload,
 )
@@ -113,6 +116,7 @@ class AsyncRunTape:
         tool_input: Any,
         perform: Callable[[OpenedCall], Awaitable[Any]],
         position: Optional[TurnPosition] = None,
+        trust_completion: bool = True,
     ) -> ToolOutcome:
         """Record a tool call, replaying the recorded output when there is one.
 
@@ -129,14 +133,22 @@ class AsyncRunTape:
         ``position`` says where this call sits in the turn that asked for it,
         and is what makes a parallel turn replayable rather than merely
         serialized. See :meth:`salvor.langchain.tape.Tape.admitted`.
+
+        ``trust_completion`` is the operator's own word for this tool. When it
+        is ``False`` and this position's intent is a dangling one an earlier
+        invoke left open, ``perform`` never runs: see
+        :func:`~salvor.langchain.tape.dangling_untrusted_call`. A tool whose
+        intent this invoke is opening for the first time still runs; whether
+        its result is then reported is the caller's call inside ``perform``
+        (see ``_stop_for_a_person`` in ``middleware.py``).
         """
         if position is None:
             async with self._gate:
-                return await self._tool_call(tool, tool_input, perform)
+                return await self._tool_call(tool, tool_input, perform, trust_completion)
         await self._enter_turn(position)
         try:
             async with self._gate:
-                return await self._tool_call(tool, tool_input, perform)
+                return await self._tool_call(tool, tool_input, perform, trust_completion)
         finally:
             await self._leave_turn(position)
 
@@ -145,16 +157,26 @@ class AsyncRunTape:
         tool: str,
         tool_input: Any,
         perform: Callable[[OpenedCall], Awaitable[Any]],
+        trust_completion: bool,
     ) -> ToolOutcome:
         """One tool step, with the turnstile already held."""
         seq = self._tape.tool_slot(tool, tool_input)
         self._announce()
+        # Read from this invoke's own reading of the log, before the intent
+        # call below can add to it: true only when this exact position already
+        # held this tool's intent, which is what tells a dangling untrusted
+        # call apart from one this invoke is opening for the first time.
+        left_over = self._tape.left_over(seq)
         opened = await self._guarded(
             lambda: self._driver.client_tool_intent(seq, tool, tool_input)
         )
         if opened.settled:
             return self._tape.tool_replayed(
                 seq, opened, await self._recorded_output(seq + 1)
+            )
+        if not trust_completion and left_over:
+            raise dangling_untrusted_call(
+                self._drive.thread_id, self.run_id, tool, seq
             )
         output = await perform(self._tape.opened_call(seq, opened))
         await self._guarded(
@@ -183,17 +205,23 @@ class AsyncRunTape:
             self._drive.on_fork(info)
 
     async def _guarded(self, step: Callable[[], Awaitable[T]]) -> T:
-        """One request to the control plane, through one lost lease.
+        """One request to the control plane, through one recoverable loss.
 
         :meth:`salvor.langchain.RunTape._guarded`, awaited. The rule is the
-        same one: a lease lost once is taken back, the log is read again and the
-        step is retried at the position it reserved; a lease lost twice in one
-        invoke is two drivers taking turns and is refused by name.
+        same one: ``lease_held`` and ``invalid_drive_token`` mean another
+        driver holds this run right now and stop the invoke immediately;
+        ``unknown_run`` (a restart) is taken back once, the log read again and
+        the step retried at the position it reserved; a second ``unknown_run``
+        in one invoke is refused by name too.
         """
         while True:
             try:
                 return await step()
             except SalvorAPIError as error:
+                if held_by_another_driver(error):
+                    raise one_driver_error(
+                        self._drive.thread_id, self.run_id, error
+                    ) from error
                 if not lease_lost(error):
                     raise
                 if self._reopened or self._drive.reopen is None:

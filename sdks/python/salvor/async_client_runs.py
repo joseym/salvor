@@ -112,11 +112,16 @@ class AsyncClientRunDriver:
         input: Any = None,
         run_id: Optional[str] = None,
         record_prompts: bool = False,
+        drive_token: Optional[str] = None,
         token: Optional[str] = None,
         timeout: float = 30.0,
     ) -> "AsyncClientRunDriver":
         """Await :meth:`salvor.ClientRunDriver.open`: a fresh client-driven run,
-        or a re-open of an existing one with a fresh lease.
+        or a re-open of an existing one.
+
+        Passing the held lease's own ``drive_token`` re-opens under the SAME
+        token instead of raising :class:`~salvor.errors.LeaseHeldError`; see
+        :meth:`salvor.ClientRunDriver.open` for the full rule.
 
         The driver owns its own HTTP connection; close it with :meth:`close`.
         """
@@ -130,6 +135,7 @@ class AsyncClientRunDriver:
             input=input,
             run_id=run_id,
             record_prompts=record_prompts,
+            drive_token=drive_token,
         )
 
     @classmethod
@@ -143,8 +149,9 @@ class AsyncClientRunDriver:
         input: Any,
         run_id: Optional[str],
         record_prompts: bool,
+        drive_token: Optional[str] = None,
     ) -> "AsyncClientRunDriver":
-        call = rules.open_run(agent, input, run_id, record_prompts)
+        call = rules.open_run(agent, input, run_id, record_prompts, drive_token)
         resp = await http.request(call.method, call.path, **wire.request_kwargs(call))
         opened = call.parse(wire.decode_json(resp.status_code, resp.content))
         return cls(

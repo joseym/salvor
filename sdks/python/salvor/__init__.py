@@ -23,6 +23,7 @@ live in one sans-IO core, so the two transports cannot drift apart.
 
 from .errors import (
     DivergenceError,
+    LeaseHeldError,
     NeedsReconciliationError,
     SalvorAPIError,
     SalvorError,
@@ -95,6 +96,7 @@ __all__ = [
     "SalvorAPIError",
     "NeedsReconciliationError",
     "DivergenceError",
+    "LeaseHeldError",
     "SalvorStreamError",
     "Event",
     "EndFrame",

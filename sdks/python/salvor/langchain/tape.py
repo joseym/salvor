@@ -43,15 +43,26 @@ answers recorded below it answer a question nobody is asking any more.
 The lease
 ---------
 
-A drive token belongs to a process, not to a thread of one: another instance of
-the same app opening this thread's run takes the lease, and salvor then refuses
-this drive's next write with ``invalid_drive_token``. A salvor that restarted
-refuses it with ``unknown_run`` instead, because it holds its client-driven
-leases in memory; :data:`LEASE_LOST` is both. Losing the lease once is
-recoverable and nothing recorded is lost, so the tapes re-open the run (which
-returns the recorded state and a fresh lease), re-read the log and retry the
-step at the position it already reserved. Losing it twice in one invoke is two
-drivers taking turns, which no retry fixes, so it is refused by name
+A lease is held until it lapses, not until a newer caller asks for it (see
+``API.md``'s drive-token section): re-opening a run whose driver is still
+presenting its token within the lease TTL is refused outright, ``409
+lease_held``, and a write under a token that is no longer the current one is
+``403 invalid_drive_token``. Neither is recoverable by retrying from here: the
+first means another driver already holds the run, and under the new rule the
+second can now only mean the same thing (a driver that stayed live never loses
+`invalid_drive_token` to a race the way it could under "newest caller wins").
+Both stop the invoke immediately, by name, before running a tool body for a
+step that was never going to be recorded (:func:`held_by_another_driver`,
+:func:`one_driver_error`).
+
+The one refusal worth retrying is ``unknown_run``, which is what a restarted
+salvor answers with, because it holds its client-driven leases in memory but
+not the log itself. Losing the lease this way once is recoverable and nothing
+recorded is lost: the tapes re-open the run (which reads the log fresh,
+recognises it as client-driven from its own recorded ``RunStarted``, and mints
+this drive a lease of its own), re-read the log and retry the step at the
+position it already reserved. Losing it twice in one invoke is two restarts (or
+worse) in one invoke, which no retry fixes either, so it is refused by name
 (:func:`lease_taken`), and a server that will not hand the run back at all is
 refused by :func:`cannot_reopen`.
 """
@@ -77,8 +88,11 @@ __all__ = [
     "TurnPosition",
     "ZERO_USAGE",
     "cannot_reopen",
+    "dangling_untrusted_call",
+    "held_by_another_driver",
     "lease_lost",
     "lease_taken",
+    "one_driver_error",
     "start_events",
     "usage_payload",
 ]
@@ -232,20 +246,73 @@ def _fork_sentence(thread_id: str, run_id: str, at: int) -> str:
     )
 
 
-#: The refusals that mean this drive is no longer the run's driver. The first
-#: is another process having re-opened the run and taken the lease; the second
-#: is a salvor that no longer knows the run at all, which is what a restarted
-#: server answers, because it holds its client-driven leases in memory.
-LEASE_LOST = ("invalid_drive_token", "unknown_run")
+#: The one refusal worth retrying from here: this server no longer remembers
+#: the run's lease at all, which is what a restart answers with, because leases
+#: live only in process memory and the log they governed does not. A re-open
+#: reads that log fresh, recognises the run as client-driven from its own
+#: recorded ``RunStarted``, and mints this drive a lease of its own.
+RESTARTED = "unknown_run"
+
+#: The refusals that mean another driver holds this run's lease right now: a
+#: live lease refused this drive's open outright (``lease_held``), or refused
+#: a write because the token it is presenting is no longer the current one
+#: (``invalid_drive_token``, which under the held-until-it-lapses rule can now
+#: only mean a second driver already took the run over, never a race this
+#: drive could have won by asking again). Neither is fixed by re-opening: that
+#: would either meet the same refusal again or, worse, hand a tool body's
+#: result to a completion nobody is going to record. Both stop the invoke
+#: immediately instead.
+ONE_DRIVER = ("lease_held", "invalid_drive_token")
 
 
 def lease_lost(error: Exception) -> bool:
-    """Whether ``error`` is salvor saying this drive no longer holds the run."""
-    return isinstance(error, SalvorAPIError) and error.code in LEASE_LOST
+    """Whether ``error`` is salvor saying this drive no longer holds the run,
+    for the one reason a re-open from here actually fixes: a restart."""
+    return isinstance(error, SalvorAPIError) and error.code == RESTARTED
+
+
+def held_by_another_driver(error: Exception) -> bool:
+    """Whether ``error`` is salvor saying another driver holds this run's
+    lease right now, which no retry from here fixes."""
+    return isinstance(error, SalvorAPIError) and error.code in ONE_DRIVER
+
+
+def one_driver_error(
+    thread_id: str, run_id: str, error: SalvorAPIError
+) -> SalvorMiddlewareError:
+    """The immediate refusal for ``lease_held`` or ``invalid_drive_token``:
+    another driver holds this run right now, so this invoke stops without
+    re-opening and without running a tool body for a step that was never
+    going to be recorded.
+
+    ``lease_held`` carries ``details.lapses_in_seconds`` (see
+    :class:`~salvor.errors.LeaseHeldError`), the whole seconds until the hold
+    lapses on its own if that driver goes quiet; it rides along here when the
+    error is that kind. ``invalid_drive_token`` carries no such figure, so the
+    sentence names the rule instead of a number nobody sent.
+    """
+    lapses = error.details.get("lapses_in_seconds")
+    if lapses is not None:
+        when = (
+            "its lease lapses in {s}s if that driver goes quiet, and this "
+            "thread may be driven again then, or as soon as the run "
+            "finishes".format(s=lapses)
+        )
+    else:
+        when = "presenting that driver's own token is the only way in until its lease lapses"
+    return SalvorMiddlewareError(
+        "run {run} (thread `{thread}`) is already being driven by another "
+        "instance right now: {when}. Salvor allows one driver per thread at a "
+        "time, so a second instance invoking this thread while the first is "
+        "active is refused before it runs anything, rather than racing the "
+        "first for the lease.".format(run=run_id, thread=thread_id, when=when)
+    )
 
 
 def lease_taken(thread_id: str, run_id: str) -> SalvorMiddlewareError:
-    """The refusal for a lease lost twice inside one invoke."""
+    """The refusal for ``unknown_run`` met twice inside one invoke: this
+    server forgot the run's lease again after already being re-opened once,
+    which one straight restart does not do."""
     return SalvorMiddlewareError(
         "run {run} (thread `{thread}`) is being driven from somewhere else: "
         "this invoke lost the run's lease twice, once after taking it back. "
@@ -253,6 +320,31 @@ def lease_taken(thread_id: str, run_id: str) -> SalvorMiddlewareError:
         "invoking the same thread will go on taking the run from each other "
         "and neither will finish. Invoke a thread from one place, or give the "
         "other task a thread id of its own.".format(thread=thread_id, run=run_id)
+    )
+
+
+def dangling_untrusted_call(
+    thread_id: str, run_id: str, tool: str, seq: int
+) -> SalvorMiddlewareError:
+    """The refusal for a later invoke that meets an untrusted tool's own
+    dangling intent, still unresolved.
+
+    ``trust_completion = false`` exists so the party that performed a write
+    does not get to decide it succeeded; running the tool body again on a
+    later invoke, before a person has settled the first call, would be exactly
+    that. So it never runs a second time: this is the same "never completed"
+    refusal a mismatched replay raises in :meth:`Tape._slot`, because that is
+    what this is too, a call recorded as requested with nothing this tape may
+    treat as its completion.
+    """
+    return SalvorMiddlewareError(
+        "run {run} (thread `{thread}`) met the intent for `{tool}` at seq "
+        "{seq} that an earlier invoke left open: its declaration sets "
+        "`trust_completion = false`, so that call's result was never reported "
+        "and it is a call that was never completed. Settle it first (`salvor "
+        "resolve {run} --store <path to the server's store> --output '<json "
+        "the tool returned>'`, the Inspector, or `driver.resolve(...)`) and "
+        "invoke again.".format(run=run_id, thread=thread_id, tool=tool, seq=seq)
     )
 
 
@@ -516,6 +608,22 @@ class Tape:
             idempotency_key=opened.idempotency_key,
             marker=self.marker(seq, replayed=False),
         )
+
+    # -- an untrusted tool's own dangling intent --------------------------------
+
+    def left_over(self, seq: int) -> bool:
+        """Whether ``seq`` already held a ``ToolCallRequested`` in the log this
+        tape has read, before the call about to be opened there.
+
+        True only for a dangling intent an earlier invoke left open (this
+        invoke asked for the exact same call, at the exact same position, and
+        found it already recorded); a call this invoke is opening for the
+        first time is not in that reading yet, so this reads false for it. See
+        :func:`dangling_untrusted_call`, the refusal this tells apart from a
+        genuinely new call.
+        """
+        recorded = self._recorded.get(seq)
+        return recorded is not None and recorded.kind == "ToolCallRequested"
 
     # -- reading a recorded completion back -------------------------------------
 

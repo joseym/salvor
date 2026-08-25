@@ -85,7 +85,7 @@ except ImportError:  # pragma: no cover - depends on what is installed
         "(pip install -e 'sdks/python[langchain]')"
     ) from None
 
-from salvor import AsyncClient, Client, SalvorAPIError
+from salvor import AsyncClient, Client, ClientRunDriver, Event, SalvorAPIError
 from salvor.langchain import (
     SalvorMiddleware,
     SalvorMiddlewareError,
@@ -486,6 +486,32 @@ def wait_until_up(base: str) -> bool:
     return False
 
 
+def _read_log(base: str, thread_id: str) -> List[Event]:
+    """Read a client-driven run's recorded log for pure inspection, over
+    ``log()`` on a driver built directly rather than through ``open`` at all.
+
+    A test that wants to see what a run recorded is not driving it, so this
+    never opens the run: opening asks for (or presents) the lease, and a run
+    an invoke just finished with may still be held under it for up to the
+    lease TTL. The read endpoint needs no token (see
+    :meth:`salvor.ClientRunDriver.log`), so a driver built by hand, with no
+    open call and a throwaway token nothing checks, reads it exactly as an
+    operator's dashboard would.
+    """
+    driver = ClientRunDriver(
+        httpx.Client(base_url=base, timeout=10),
+        run_id=run_id_for_thread(thread_id),
+        drive_token="",
+        log=[],
+        owns_http=True,
+        stream_timeout=httpx.Timeout(10, read=None),
+    )
+    try:
+        return driver.log()
+    finally:
+        driver.close()
+
+
 ONE_TOOL_SCRIPT = [
     {
         "content": "looking that up",
@@ -561,6 +587,9 @@ class MiddlewareScenarios:
 
     def setUp(self) -> None:
         reset()
+        #: The middleware `agent_for` most recently built, for a scenario that
+        #: needs its still-open tape back. See `agent_for`.
+        self.last_middleware = None  # type: Optional[SalvorMiddleware]
 
     # -- harness --------------------------------------------------------------
 
@@ -588,21 +617,31 @@ class MiddlewareScenarios:
         on_fork: Any = None,
     ):
         model = ScriptedModel(turns=turns, calls={"count": 0})
+        middleware = SalvorMiddleware(client, on_fork=on_fork)
+        # Stashed for a scenario that needs the SAME driver back after a
+        # `ToolNeedsResolution`: the middleware's tape (and its currently
+        # held lease) survives an invoke that raised, because `after_agent`
+        # never runs to pop it (see `before_agent`'s own docstring). Re-using
+        # it, rather than opening the run again, is exactly what the error's
+        # own `driver.resolve(output)` suggestion means: the held lease is
+        # still current, so a bare re-open from anywhere else would now be
+        # refused `lease_held`.
+        self.last_middleware = middleware
         agent = create_agent(
             model=model,
             tools=list(tools if tools is not None else [lookup_order, stamp_ledger]),
-            middleware=[SalvorMiddleware(client, on_fork=on_fork)],
+            middleware=[middleware],
         )
         return agent, model
 
     async def kinds_of(self, client: Any, thread_id: str) -> List[str]:
-        run = await call(client.open_client_run, run_id=run_id_for_thread(thread_id))
-        return [event.kind for event in run.log_envelopes]
+        return [event.kind for event in _read_log(client.base_url, thread_id)]
 
     async def intents_of(self, client: Any, thread_id: str) -> List[Any]:
-        run = await call(client.open_client_run, run_id=run_id_for_thread(thread_id))
         return [
-            event for event in run.log_envelopes if event.kind == "ToolCallRequested"
+            event
+            for event in _read_log(client.base_url, thread_id)
+            if event.kind == "ToolCallRequested"
         ]
 
     @staticmethod
@@ -1203,9 +1242,13 @@ class MiddlewareScenarios:
             )
 
             # A person confirms what the payout did and records it, which is the
-            # one way this run moves again.
-            run = await call(client.open_client_run, run_id=run_id)
-            await call(run.resolve, error.output)
+            # one way this run moves again. The failed invoke's tape is still
+            # sitting in the middleware (`after_agent` never ran), holding a
+            # lease that is still current, so this reuses that SAME driver
+            # rather than opening the run again, which the held lease would
+            # now refuse from anywhere else.
+            driver = self.last_middleware._tapes[run_id].run
+            await call(driver.resolve, error.output)
 
             reset()
             again, model = self.agent_for(script, client, tools=[wire_payout])
@@ -1225,55 +1268,159 @@ class MiddlewareScenarios:
 
         self.drive(body)
 
-    # -- (l) another driver takes the run's lease mid-invoke ------------------
+    # -- (k3) a re-invoke meets that same untrusted call, still unresolved ----
 
-    def test_a_second_driver_mid_invoke_is_taken_back_once_and_then_refused(
+    def test_a_reinvoke_before_resolving_an_untrusted_tool_is_refused_not_rerun(
         self,
     ) -> None:
-        """A lease belongs to a process, and losing it is not losing the work.
+        """A re-invoke that meets its own untrusted tool's dangling intent,
+        still unresolved, never runs the tool body a second time.
 
-        Another instance of the same app opening this thread's run takes the
-        lease out from under this invoke, and salvor then refuses its next
-        write. Once, that costs nothing: the run is taken up again (which
-        returns the recorded state and a fresh lease), the log is read again,
-        and the step is retried at the position it already reserved. Twice in
-        one invoke is two drivers taking turns, which no retry settles, so it
-        stops and says which rule was broken.
+        `trust_completion = false` exists so the party that performed a write
+        does not get to decide it succeeded; retrying the call itself on a
+        later invoke, before a person has settled the first one, would be
+        exactly that. So this is refused outright: the same "never completed"
+        refusal a mismatched replay raises (see `Tape._slot`), because that is
+        what an unresolved intent is either way. The tool is touched nowhere
+        in this: not to decide the refusal, and not after it.
         """
-        thread_id = "thread-two-drivers"
+        thread_id = "thread-untrusted-reinvoke"
         run_id = run_id_for_thread(thread_id)
         script = [
             {
-                "content": "looking both up",
+                "content": "sending the payout",
                 "tool_calls": [
-                    {"name": "lookup_order", "args": {"order_id": "ORD-1"}, "id": "call-a"},
-                    {"name": "lookup_order", "args": {"order_id": "ORD-2"}, "id": "call-b"},
+                    {
+                        "name": "wire_payout",
+                        "args": {"order_id": "ORD-88", "amount_cents": 1500},
+                        "id": "call-wire",
+                    }
                 ],
             },
-            {"content": "Both orders are paid."},
+            {"content": "Payout wt-ORD-88 is confirmed."},
         ]
-        ask = {"messages": [{"role": "user", "content": "check ORD-1 and ORD-2"}]}
-
-        def take_the_lease() -> None:
-            httpx.post(
-                "{base}/v1/client-runs".format(base=self.base),
-                json={"run_id": run_id},
-                timeout=10,
-            )
+        ask = {"messages": [{"role": "user", "content": "pay ORD-88 out"}]}
 
         async def body(client: Any) -> None:
-            meddling["do"] = take_the_lease
-            agent, _ = self.agent_for(script, client)
-            with self.assertRaises(SalvorMiddlewareError) as caught:
+            # (1) The first invoke stops for a person, typed, having run the
+            # call exactly once.
+            agent, _ = self.agent_for(script, client, tools=[wire_payout])
+            with self.assertRaises(ToolNeedsResolution) as caught:
                 await self.invoke(agent, ask, self.thread(thread_id))
+            error = caught.exception
+            self.assertEqual(ran["payout"], 1, "the call ran once")
+
+            # (2) A re-invoke before anyone resolves it meets that SAME open
+            # intent and is refused, without running the tool a second time.
+            again, _ = self.agent_for(script, client, tools=[wire_payout])
+            with self.assertRaises(SalvorMiddlewareError) as caught2:
+                await self.invoke(again, ask, self.thread(thread_id))
+            text = str(caught2.exception)
+            self.assertIn("wire_payout", text, "the error names the tool")
+            self.assertIn("trust_completion", text, "and the rule it broke")
+            self.assertIn(run_id, text, "and the run")
+            self.assertIn(thread_id, text, "and the thread")
+            self.assertEqual(
+                ran["payout"], 1, "the tool body did not run a second time"
+            )
+            self.assertEqual(
+                await self.kinds_of(client, thread_id),
+                [
+                    "RunStarted",
+                    "ModelCallRequested",
+                    "ModelCallCompleted",
+                    "ToolCallRequested",
+                ],
+                "still just the one dangling intent: the refusal wrote nothing",
+            )
+
+            # (3) A person confirms what the call did and records it, over the
+            # driver the refused re-invoke's own tape is still holding open
+            # (the exception skipped `after_agent`, same as case (k2) above).
+            driver = self.last_middleware._tapes[run_id].run
+            await call(driver.resolve, error.output)
+
+            # (4) Now a further invoke replays the resolved completion, and
+            # the tool runs no further.
+            reset()
+            final, model = self.agent_for(script, client, tools=[wire_payout])
+            answer = await self.invoke(final, ask, self.thread(thread_id))
+            self.assertEqual(ran["payout"], 0, "zero executions: this is a replay")
+            self.assertEqual(model.calls["count"], 1, "only the answer turn was live")
+            settled = [m for m in answer["messages"] if m.type == "tool"][0]
+            self.assertEqual(json.loads(self.text_of(settled)), error.output)
+            self.assertIs(settled.response_metadata["salvor"]["replayed"], True)
+            self.assertEqual(
+                self.text_of(answer["messages"][-1]), "Payout wt-ORD-88 is confirmed."
+            )
+
+        self.drive(body)
+
+    # -- (l) another instance holds the run's lease mid-invoke ------------------
+
+    def test_a_second_instance_on_a_held_thread_is_refused_before_running_anything(
+        self,
+    ) -> None:
+        """The rule is not "newest caller wins": a lease is held until it
+        lapses.
+
+        A second instance of the same app invoking a thread the first is
+        still driving cannot take the lease out from under it any more: its
+        own open is refused outright, `lease_held`, naming how long the hold
+        has left, before it runs a single model or tool call. The first
+        invoke never notices and carries on to its ordinary finish, one tool
+        run, one full drive, with no trace of the refused second instance in
+        the log.
+        """
+        thread_id = "thread-two-instances"
+        run_id = run_id_for_thread(thread_id)
+        caught = {}  # type: Dict[str, Any]
+
+        def second_instance_attempt() -> None:
+            """What a second app instance invoking this same thread while the
+            first is mid-tool-call looks like: its own client, its own
+            middleware, its own agent, refused before any of it runs. Always
+            the synchronous surface, regardless of which transport is driving
+            the outer invoke: `meddle()` itself is a plain call (see
+            `alookup_body`), and the point under test, `_tape_for` and
+            `_aopen_tape` wrapping `lease_held` the same way, does not need a
+            second event loop nested inside this one to be proven.
+            """
+            second_client = Client(self.base)
+            try:
+                second_agent, _ = self.agent_for(ONE_TOOL_SCRIPT, second_client)
+                try:
+                    second_agent.invoke(ASK, self.thread(thread_id))
+                except Exception as error:  # noqa: BLE001 - captured, not raised, here
+                    caught["error"] = error
+            finally:
+                second_client.close()
+
+        async def body(client: Any) -> None:
+            meddling["do"] = second_instance_attempt
+            agent, _ = self.agent_for(ONE_TOOL_SCRIPT, client)
+            answer = await self.invoke(agent, ASK, self.thread(thread_id))
             meddling["do"] = None
 
-            text = str(caught.exception)
+            error = caught.get("error")
+            self.assertIsInstance(
+                error,
+                SalvorMiddlewareError,
+                "the second instance's own open was refused outright",
+            )
+            text = str(error)
             self.assertIn(thread_id, text, "the error names the thread")
             self.assertIn(run_id, text, "and the run")
-            self.assertIn("one driver per thread", text, "and the rule")
+            self.assertIn("lapses in", text, "and how long the hold has left")
 
-            self.assertEqual(ran["lookup"], 2, "each tool body ran once, not twice")
+            self.assertEqual(
+                ran["lookup"], 1, "only the first instance's tool body ran"
+            )
+            self.assertEqual(
+                self.text_of(answer["messages"][-1]),
+                "Order ORD-7781 is paid, 4200 cents.",
+                "the first invoke completes normally, undisturbed",
+            )
             self.assertEqual(
                 await self.kinds_of(client, thread_id),
                 [
@@ -1282,9 +1429,74 @@ class MiddlewareScenarios:
                     "ModelCallCompleted",
                     "ToolCallRequested",
                     "ToolCallCompleted",
+                    "ModelCallRequested",
+                    "ModelCallCompleted",
+                ],
+                "one ordinary drive; the refused second instance left no trace",
+            )
+
+        self.drive(body)
+
+    # -- (l2) a write's token is no longer the run's current one --------------
+
+    def test_an_invalid_drive_token_mid_invoke_is_the_one_driver_error_immediately(
+        self,
+    ) -> None:
+        """`invalid_drive_token` is the other one-driver refusal: a write
+        whose token is no longer the run's current lease.
+
+        Under the old "newest caller wins" rule this could mean a benign race
+        this drive would win by simply retrying; under the held-until-it-
+        lapses rule it can now only mean another driver already holds the
+        run, so it stops the invoke immediately, the same as `lease_held`
+        does on an open, and never retries.
+
+        There is no `salvor serve` flag to shrink the lease TTL and force a
+        real lapse: `salvor serve --help` names only the environment variable
+        `SALVOR_CLIENT_LEASE_TTL_SECS` in `API.md`, and shows no flag for it
+        (checked against the built binary). So this drives the refusal
+        through the driver API directly instead of waiting one out: the token
+        this invoke's own driver holds is swapped for one that is not the
+        run's current lease, at exactly the point a second driver's own write
+        would have made it stale (between the tool's intent and its
+        completion), and the very next write meets the refusal immediately.
+        """
+        thread_id = "thread-invalid-token"
+        run_id = run_id_for_thread(thread_id)
+        middleware_ref = {}  # type: Dict[str, Any]
+
+        def corrupt_the_token() -> None:
+            tape = middleware_ref["middleware"]._tapes[run_id]
+            tape.run.drive_token = "dt_not_the_current_lease"
+
+        async def body(client: Any) -> None:
+            agent, _ = self.agent_for(ONE_TOOL_SCRIPT, client)
+            middleware_ref["middleware"] = self.last_middleware
+            meddling["do"] = corrupt_the_token
+            with self.assertRaises(SalvorMiddlewareError) as caught:
+                await self.invoke(agent, ASK, self.thread(thread_id))
+            meddling["do"] = None
+
+            text = str(caught.exception)
+            self.assertIn(thread_id, text, "the error names the thread")
+            self.assertIn(run_id, text, "and the run")
+            self.assertNotIn(
+                "lapses in",
+                text,
+                "invalid_drive_token carries no lapse figure to report",
+            )
+            self.assertEqual(
+                ran["lookup"], 1, "the tool ran once; the failed write was not retried"
+            )
+            self.assertEqual(
+                await self.kinds_of(client, thread_id),
+                [
+                    "RunStarted",
+                    "ModelCallRequested",
+                    "ModelCallCompleted",
                     "ToolCallRequested",
                 ],
-                "the first call survived its lost lease; the second is where it stopped",
+                "the completion never landed: the corrupted token refused it",
             )
 
         self.drive(body)

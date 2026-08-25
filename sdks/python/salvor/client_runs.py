@@ -149,22 +149,30 @@ class ClientRunDriver:
         input: Any = None,
         run_id: Optional[str] = None,
         record_prompts: bool = False,
+        drive_token: Optional[str] = None,
         token: Optional[str] = None,
         timeout: float = 30.0,
     ) -> "ClientRunDriver":
         """Open a fresh client-driven run, or re-open (resume) an existing one.
 
-        Passing a ``run_id`` this server already holds re-opens it: the recorded
-        log comes back on :attr:`log_envelopes` and a fresh lease is minted, so a
-        resuming client always holds the current one and the superseded lease
-        stops working. Omitting ``run_id`` opens a fresh run the server mints an
-        id for.
+        Passing a ``run_id`` this server already holds re-opens it. A run whose
+        lease is unheld (never opened, lapsed, or terminal) or one this server
+        only knows from its log (after a restart) comes back with a fresh
+        lease. A run whose lease is still current is refused with
+        :class:`~salvor.errors.LeaseHeldError` UNLESS ``drive_token`` is that
+        lease's own token, in which case the re-open returns the recorded log
+        under the SAME token rather than minting a fresh one, so a client
+        rebuilding its cursor is not made to give up the lease it holds and a
+        call already in flight under that token stays valid. Omitting
+        ``run_id`` opens a fresh run the server mints an id for.
 
         ``agent`` and ``input`` are accepted for forward compatibility; this
         surface records them nowhere, because the client appends its own
         ``RunStarted`` (carrying the agent hash and input) as the run's first
         event. ``record_prompts`` is stored against the run and controls whether
-        a later :meth:`model_step` records the request body on its intent.
+        a later :meth:`model_step` records the request body on its intent; it
+        is ignored on a re-open under the held lease's own token, which keeps
+        what the lease was opened with.
 
         The driver owns its own HTTP connection; close it with :meth:`close`.
         """
@@ -178,6 +186,7 @@ class ClientRunDriver:
             input=input,
             run_id=run_id,
             record_prompts=record_prompts,
+            drive_token=drive_token,
         )
 
     @classmethod
@@ -191,8 +200,9 @@ class ClientRunDriver:
         input: Any,
         run_id: Optional[str],
         record_prompts: bool,
+        drive_token: Optional[str] = None,
     ) -> "ClientRunDriver":
-        call = rules.open_run(agent, input, run_id, record_prompts)
+        call = rules.open_run(agent, input, run_id, record_prompts, drive_token)
         resp = http.request(call.method, call.path, **wire.request_kwargs(call))
         opened = call.parse(wire.decode_json(resp.status_code, resp.content))
         return cls(

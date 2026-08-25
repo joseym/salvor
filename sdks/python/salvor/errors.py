@@ -5,10 +5,12 @@ The control plane answers every failure with one JSON shape::
     {"error": {"code": "unknown_run", "message": "...", "details": {...}}}
 
 `SalvorAPIError` carries that `code` and `message` so callers match on a
-stable token rather than parsing a sentence. The one refusal that carries
-structured evidence, a resume blocked because a write was recorded but never
-completed, gets its own subclass, `NeedsReconciliationError`, which exposes the
-recorded write intent.
+stable token rather than parsing a sentence. The refusals that carry
+structured evidence get their own subclasses: a resume blocked because a write
+was recorded but never completed is `NeedsReconciliationError`, exposing the
+recorded write intent; a client-driven open blocked because another driver's
+lease is still current is `LeaseHeldError`, exposing how long the hold has
+left.
 """
 
 from __future__ import annotations
@@ -81,6 +83,26 @@ class DivergenceError(SalvorAPIError):
     """
 
 
+class LeaseHeldError(SalvorAPIError):
+    """Raised when opening a client-driven run meets a lease another driver
+    still holds.
+
+    A lease is held until it lapses, not until a newer caller asks for it: this
+    is the refusal a re-open meets when the run's current driver has presented
+    its token within the last :attr:`lapses_in_seconds`. Presenting that
+    driver's own ``drive_token`` on the open (see
+    :meth:`salvor.client_runs.ClientRunDriver.open`) returns the recorded log
+    under the same token instead of raising this; a caller that means to take
+    the run over waits :attr:`lapses_in_seconds` and asks again, or waits for
+    the run to finish, which drops the hold immediately.
+    """
+
+    @property
+    def lapses_in_seconds(self) -> int:
+        """The whole seconds until the held lease lapses on its own."""
+        return int(self.details.get("lapses_in_seconds", 0))
+
+
 class SalvorStreamError(SalvorError):
     """Raised when the event stream drops and cannot be resumed within the
     configured retry budget."""
@@ -103,6 +125,8 @@ def api_error(
         return NeedsReconciliationError(code, message, status, details)
     if code == "divergence":
         return DivergenceError(code, message, status, details)
+    if code == "lease_held":
+        return LeaseHeldError(code, message, status, details)
     return SalvorAPIError(code, message, status, details)
 
 

@@ -52,6 +52,8 @@ from .tape import (
     OpenedCall,
     ToolOutcome,
     TurnPosition,
+    held_by_another_driver,
+    one_driver_error,
 )
 
 __all__ = ["SalvorMiddleware", "salvor_middleware", "warn_of_fork"]
@@ -274,7 +276,7 @@ class SalvorMiddleware(AgentMiddleware):
 
         try:
             outcome = tape.tool_call(
-                name, _tool_args(request), perform, _turn_position(request)
+                name, _tool_args(request), perform, _turn_position(request), trusted
             )
         except SalvorAPIError as error:
             undeclared = _undeclared_tool_error(error, name)
@@ -342,7 +344,7 @@ class SalvorMiddleware(AgentMiddleware):
 
         try:
             outcome = await tape.tool_call(
-                name, _tool_args(request), perform, _turn_position(request)
+                name, _tool_args(request), perform, _turn_position(request), trusted
             )
         except SalvorAPIError as error:
             undeclared = _undeclared_tool_error(error, name)
@@ -382,7 +384,11 @@ class SalvorMiddleware(AgentMiddleware):
             existing = self._tapes.get(run_id)
             if existing is not None:
                 return existing
-            driver = self._open(run_id)
+            try:
+                driver = self._open(run_id)
+            except SalvorAPIError as error:
+                _reraise_if_held(identity["thread_id"], run_id, error)
+                raise
             _refuse_a_finished_run(
                 driver.log_envelopes, identity["thread_id"], run_id
             )
@@ -396,8 +402,15 @@ class SalvorMiddleware(AgentMiddleware):
 
     def _open(self, run_id: str) -> Any:
         """Take up the run's lease, which is also how it is taken back after
-        another process took it (see
-        :meth:`salvor.langchain.RunTape._guarded`)."""
+        a restart (see :meth:`salvor.langchain.RunTape._guarded`).
+
+        Presents no token of its own: the client this middleware was given
+        (:class:`~salvor.Client` or :class:`~salvor.AsyncClient`) remembers
+        the last one it saw for this run and fills it in automatically, so
+        this middleware's own next invoke of a thread it drove moments ago
+        is not refused `lease_held` by a lease it minted itself. See
+        :attr:`salvor.Client._client_run_tokens`.
+        """
         return self._client.open_client_run(
             run_id=run_id, record_prompts=self._record_prompts
         )
@@ -451,7 +464,11 @@ class SalvorMiddleware(AgentMiddleware):
         return tape
 
     async def _aopen_tape(self, run_id: str, thread_id: str) -> AsyncRunTape:
-        driver = await self._open(run_id)
+        try:
+            driver = await self._open(run_id)
+        except SalvorAPIError as error:
+            _reraise_if_held(thread_id, run_id, error)
+            raise
         _refuse_a_finished_run(driver.log_envelopes, thread_id, run_id)
         return await AsyncRunTape.open(
             driver, _started(thread_id), self._drive(thread_id, run_id)
@@ -542,6 +559,16 @@ def _started(thread_id: str) -> Dict[str, Any]:
         "agent_def_hash": hash_value(AGENT_DEF),
         "input": {"thread_id": thread_id},
     }
+
+
+def _reraise_if_held(thread_id: str, run_id: str, error: SalvorAPIError) -> None:
+    """Turn `lease_held` (another driver's current lease refused this open
+    outright) into the one-driver refusal, naming the thread, the run, and how
+    long the hold has left. Every other refusal from an open, `run_exists`
+    among them, bubbles unchanged: this middleware did not cause it and cannot
+    fix it by naming a lease that was never the problem."""
+    if held_by_another_driver(error):
+        raise one_driver_error(thread_id, run_id, error) from error
 
 
 def _refuse_a_finished_run(log: List[Event], thread_id: str, run_id: str) -> None:

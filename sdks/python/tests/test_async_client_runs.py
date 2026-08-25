@@ -46,7 +46,7 @@ except ImportError:
     ) from None
 
 from salvor import AsyncClient, AsyncClientRunDriver
-from salvor.errors import DivergenceError, SalvorAPIError
+from salvor.errors import DivergenceError, LeaseHeldError, SalvorAPIError
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SALVOR = REPO_ROOT / "target" / "debug" / "salvor"
@@ -284,23 +284,29 @@ class AsyncDriverRealServer(unittest.TestCase):
 
         self.drive(scenario)
 
-    def test_reopen_supersedes_lease_and_returns_log(self) -> None:
+    def test_reopen_with_the_held_token_keeps_the_lease(self) -> None:
         async def scenario() -> None:
             run = await self.open()
             await run.append([self.started(run)])
             old_token = run.drive_token
 
-            reopened = await self.open(run_id=run.run_id)
-            self.assertEqual([e.kind for e in reopened.log_envelopes], ["RunStarted"])
-            self.assertNotEqual(reopened.drive_token, old_token)
+            # A bare re-open, with no token, is refused while the lease is
+            # current: the rule is not "newest caller wins".
+            with self.assertRaises(LeaseHeldError) as caught:
+                await self.open(run_id=run.run_id)
+            self.assertEqual(caught.exception.code, "lease_held")
+            self.assertGreater(caught.exception.lapses_in_seconds, 0)
 
-            # The superseded lease no longer drives the run.
-            run.drive_token = old_token
-            with self.assertRaises(SalvorAPIError) as caught:
-                await run.append(
-                    [run.envelope(1, "NowObserved", now="2026-07-11T12:00:00Z")]
-                )
-            self.assertEqual(caught.exception.code, "invalid_drive_token")
+            # Presenting the held lease's own token re-opens under the SAME
+            # token, so the driver that already holds the run never gives it up.
+            reopened = await self.open(run_id=run.run_id, drive_token=old_token)
+            self.assertEqual([e.kind for e in reopened.log_envelopes], ["RunStarted"])
+            self.assertEqual(reopened.drive_token, old_token)
+
+            # And that token still drives the run afterwards.
+            await reopened.append(
+                [reopened.envelope(1, "NowObserved", now="2026-07-11T12:00:00Z")]
+            )
 
         self.drive(scenario)
 
@@ -526,8 +532,10 @@ class AsyncDriverRealServer(unittest.TestCase):
             run_id = first.run_id
 
             # Drive two, ten minutes later: the replayed instants are the
-            # recorded ones, so the deadline has not moved.
-            early = await self.open(run_id=run_id)
+            # recorded ones, so the deadline has not moved. `first` never went
+            # quiet, so its lease is still current, and this drive presents its
+            # token to re-open under it rather than being refused `lease_held`.
+            early = await self.open(run_id=run_id, drive_token=first.drive_token)
             early.clock = lambda: started_at + timedelta(minutes=10)
             replayed = await early.sleep_for(1, timedelta(hours=1))
             self.assertEqual(replayed, wake_at, "the wake instant reproduces on replay")
@@ -536,8 +544,10 @@ class AsyncDriverRealServer(unittest.TestCase):
             self.assertEqual(len(await early.log()), 3, "and appends nothing at all")
 
             # Drive three, two hours later: the deadline has passed, so this
-            # drive closes the pair itself and the run carries on.
-            late = await self.open(run_id=run_id)
+            # drive closes the pair itself and the run carries on. Same story:
+            # the lease is still current (the token `early` just re-opened
+            # under), so this drive presents it too.
+            late = await self.open(run_id=run_id, drive_token=early.drive_token)
             late.clock = lambda: started_at + timedelta(hours=2)
             self.assertEqual(await late.sleep_for(1, timedelta(hours=1)), wake_at)
             woken = await late.await_wake(3)

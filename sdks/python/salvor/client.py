@@ -93,6 +93,21 @@ class Client:
         # live tail blocks between events, so the read timeout is disabled while
         # connect/write stay bounded.
         self._stream_timeout = httpx.Timeout(timeout, read=None)
+        #: The last drive token this client saw for a run it opened, so a
+        #: later `open_client_run` for that same run presents its own held
+        #: lease back rather than asking with no token and being refused
+        #: `lease_held` by a lease this same client minted a moment ago (a
+        #: lease is held until it lapses, not until a newer caller asks for
+        #: it; see ``API.md``'s drive-token section). Never cleared: a stale
+        #: entry is harmless (an open honours it only when it is the run's
+        #: CURRENT lease, and ignores it otherwise), while forgetting it would
+        #: needlessly refuse this same client's own next open of an idle
+        #: thread until the lease it minted lapsed on its own. Passing
+        #: ``drive_token`` explicitly always wins over what is remembered
+        #: here; the underlying :class:`~salvor.client_runs.ClientRunDriver`
+        #: stays stateless, so a genuinely different client (or the driver
+        #: used directly) is still refused.
+        self._client_run_tokens: dict[str, str] = {}
 
     def close(self) -> None:
         """Close the underlying HTTP connection pool."""
@@ -448,6 +463,7 @@ class Client:
         input: Any = None,
         run_id: Optional[str] = None,
         record_prompts: bool = False,
+        drive_token: Optional[str] = None,
     ) -> "ClientRunDriver":
         """Open or re-open a client-driven run over this client's connection.
 
@@ -457,10 +473,31 @@ class Client:
         two modes; :meth:`start_run` is the server-driven first. The driver
         shares this client's HTTP pool and auth, so it is closed when this
         client is.
+
+        ``drive_token`` re-opens under a lease this process already holds:
+        pass a run's current token back and the re-open returns its recorded
+        log under the SAME token rather than raising
+        :class:`~salvor.errors.LeaseHeldError`, which is what a bare re-open of
+        a run whose lease is still current meets instead. See
+        :meth:`salvor.client_runs.ClientRunDriver.open` for the full rule.
+
+        Left unset (the default), this client fills in the last token IT
+        remembers for ``run_id``, if any: this client's own earlier
+        :meth:`open_client_run` for the same run, or its own :meth:`start_run`
+        made no difference here, since it is the presented token, not the
+        caller, that a re-open checks. That remembered token is stale-safe
+        (see :attr:`_client_run_tokens`), so this is silent and free the first
+        time a run id is seen and whenever the remembered lease has already
+        lapsed. Pass ``drive_token`` explicitly to override it, including with
+        ``""`` or any other value that is not the current lease, which is
+        refused exactly as an unset one would be if the lease is still held by
+        someone else.
         """
         from .client_runs import ClientRunDriver
 
-        return ClientRunDriver._open_over(
+        if drive_token is None:
+            drive_token = self._client_run_tokens.get(run_id) if run_id else None
+        driver = ClientRunDriver._open_over(
             self._http,
             owns_http=False,
             stream_timeout=self._stream_timeout,
@@ -468,4 +505,7 @@ class Client:
             input=input,
             run_id=run_id,
             record_prompts=record_prompts,
+            drive_token=drive_token,
         )
+        self._client_run_tokens[driver.run_id] = driver.drive_token
+        return driver

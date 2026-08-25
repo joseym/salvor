@@ -30,8 +30,11 @@ from .tape import (
     ToolOutcome,
     TurnPosition,
     cannot_reopen,
+    dangling_untrusted_call,
+    held_by_another_driver,
     lease_lost,
     lease_taken,
+    one_driver_error,
     start_events,
     usage_payload,
 )
@@ -119,6 +122,7 @@ class RunTape:
         tool_input: Any,
         perform: Callable[[OpenedCall], Any],
         position: Optional[TurnPosition] = None,
+        trust_completion: bool = True,
     ) -> ToolOutcome:
         """Record a tool call, replaying the recorded output when there is one.
 
@@ -135,14 +139,22 @@ class RunTape:
         ``position`` says where this call sits in the turn that asked for it,
         and is what makes a parallel turn replayable rather than merely
         serialized. See :meth:`salvor.langchain.tape.Tape.admitted`.
+
+        ``trust_completion`` is the operator's own word for this tool. When it
+        is ``False`` and this position's intent is a dangling one an earlier
+        invoke left open, ``perform`` never runs: see
+        :func:`~salvor.langchain.tape.dangling_untrusted_call`. A tool whose
+        intent this invoke is opening for the first time still runs; whether
+        its result is then reported is the caller's call inside ``perform``
+        (see ``_stop_for_a_person`` in ``middleware.py``).
         """
         if position is None:
             with self._gate:
-                return self._tool_call(tool, tool_input, perform)
+                return self._tool_call(tool, tool_input, perform, trust_completion)
         self._enter_turn(position)
         try:
             with self._gate:
-                return self._tool_call(tool, tool_input, perform)
+                return self._tool_call(tool, tool_input, perform, trust_completion)
         finally:
             self._leave_turn(position)
 
@@ -151,16 +163,26 @@ class RunTape:
         tool: str,
         tool_input: Any,
         perform: Callable[[OpenedCall], Any],
+        trust_completion: bool,
     ) -> ToolOutcome:
         """One tool step, with the turnstile already held."""
         seq = self._tape.tool_slot(tool, tool_input)
         self._announce()
+        # Read from this invoke's own reading of the log, before the intent
+        # call below can add to it: true only when this exact position already
+        # held this tool's intent, which is what tells a dangling untrusted
+        # call apart from one this invoke is opening for the first time.
+        left_over = self._tape.left_over(seq)
         opened = self._guarded(
             lambda: self._driver.client_tool_intent(seq, tool, tool_input)
         )
         if opened.settled:
             return self._tape.tool_replayed(
                 seq, opened, self._recorded_output(seq + 1)
+            )
+        if not trust_completion and left_over:
+            raise dangling_untrusted_call(
+                self._drive.thread_id, self.run_id, tool, seq
             )
         output = perform(self._tape.opened_call(seq, opened))
         self._guarded(lambda: self._driver.client_tool_completion(seq, output))
@@ -182,22 +204,31 @@ class RunTape:
             self._drive.on_fork(info)
 
     def _guarded(self, step: Callable[[], T]) -> T:
-        """One request to the control plane, through one lost lease.
+        """One request to the control plane, through one recoverable loss.
 
-        The lease belongs to a process, so another instance of the app opening
-        this thread's run takes it and salvor refuses this drive's next write.
-        Losing it once costs nothing that a re-open cannot recover: taking the
-        run up again returns the recorded state and a fresh lease, the log is
-        read again in case the other driver wrote something, and the step is
+        ``lease_held`` (on an open) and ``invalid_drive_token`` (on a write)
+        both mean another driver holds this run right now, which no retry from
+        here fixes: they stop the invoke immediately, by name
+        (:func:`~salvor.langchain.tape.one_driver_error`), before running a
+        tool body for a step that was never going to be recorded.
+
+        ``unknown_run`` is the one refusal worth retrying: a restarted salvor
+        forgot the run's lease but not its log, so taking the run up again
+        returns the recorded state and a fresh lease, the log is read again in
+        case another driver wrote something in between, and the step is
         retried at the position it already reserved, where it either meets its
         own work already recorded or is still expected. Losing it twice in one
-        invoke is two drivers taking turns, which no retry settles, so it is
-        refused by name.
+        invoke is two restarts (or worse) in one invoke, which no retry
+        settles either, so it is refused by name too.
         """
         while True:
             try:
                 return step()
             except SalvorAPIError as error:
+                if held_by_another_driver(error):
+                    raise one_driver_error(
+                        self._drive.thread_id, self.run_id, error
+                    ) from error
                 if not lease_lost(error):
                     raise
                 if self._reopened or self._drive.reopen is None:

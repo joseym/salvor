@@ -597,6 +597,11 @@ the provider is not called; where the log already holds a tool result, the tool
 body does not run. A thread that ran to the end and is invoked again a second
 time costs nothing at all and returns the same final message.
 
+Replay is keyed to the canonical request recorded at a log position, not to
+whatever a model would currently answer for it, so a model or a test double
+whose canonical request at that position differs from the one recorded forks
+the thread there rather than replaying it.
+
 A replayed answer says so. It carries `response_metadata["salvor"]` with
 `{"replayed": True, "seq": ..., "run": ...}`, and under `agent.astream` it
 arrives as one whole message rather than a re-tokenised imitation of the
@@ -681,9 +686,22 @@ nothing else. A tool with no declaration is refused, and the error names the
 tool and the declaration it needs rather than quietly recording the call as a
 harmless read. `trust_completion = true` with an `[output_schema]` is what lets
 the middleware record what the tool returned; a declaration without them leaves
-every call for that tool to be settled by hand with `resolve`, once someone has
-verified it externally. `examples/client-tools/refund-card.toml` is the fully
-commented version of the same file.
+every call for that tool to be settled by hand, once someone has verified it
+externally:
+
+```sh
+salvor resolve <run> --store <path to the server's store> --output '<json the tool returned>'
+```
+
+That command, printed by the `ToolNeedsResolution` error this middleware raises
+for such a call, always carries a `--store <path to the server's store>`
+placeholder rather than a real path: `resolve` reads and writes the SQLite
+store directly, not over HTTP, and the middleware only ever holds a base URL,
+never the file path `salvor serve --store` was started with. Fill in that same
+path (or the Inspector's resolve, or `driver.resolve(output)` on a client run
+driver already holding the run's lease) to settle it.
+`examples/client-tools/refund-card.toml` is the fully commented version of the
+declaration file.
 
 The recorded output is the tool's own result, which is what the output schema
 describes. LangChain builds a tool message by stringifying whatever the tool
@@ -723,12 +741,28 @@ A thread is one task. Re-invoking it replays it; sending a genuinely new turn
 down the same thread is a fork by the rule above, and pays for the calls the new
 turn makes. Give a new task a new thread id.
 
-The run's lease lives in the server's memory, not on disk. If salvor itself
-restarts mid-invoke, the middleware notices its open run is gone, re-opens it
-once, and continues from the log as if the restart had not happened. If a
-second instance of your app invokes the same thread at the same time, the
-later one takes the lease and the earlier one fails, naming the thread: one
-driver per thread at a time, and the newest caller wins it.
+The run's lease lives in the server's memory, not on disk, and is HELD, not
+handed to whoever asks last: while a driver's lease on a thread's run is
+current, a second instance invoking that same thread is refused at once,
+before it runs a single model or tool call, naming the thread and how many
+seconds until the hold lapses on its own (`lease_held`; a driver that goes
+quiet for the lease TTL, 60 seconds by default, stops holding it). A lease
+taken out from under an active invoke mid-step, by contrast, means a second
+driver is live on the thread right now; that is refused too
+(`invalid_drive_token`), by the same one-driver error, and neither case is
+ever retried by re-opening, because there is no order in which two live
+drivers can both be right about what comes next.
+
+`Client` and `AsyncClient` each remember the last token they saw for a run and
+present it back automatically on a later `open_client_run`, so your own app
+re-invoking a thread it drove a moment ago is not what triggers either
+refusal: it takes a genuinely different instance, or a different
+`Client`/`AsyncClient` object, to be refused.
+
+If salvor itself restarts mid-invoke, none of this applies: the lease registry
+dies with the process but the log does not, so the middleware notices its open
+run is gone (`unknown_run`), re-opens it once, and continues from the log as if
+the restart had not happened. A restart is still survived.
 
 `wrap_tool_call` exists only inside `create_agent`. A hand-built `StateGraph`
 that calls tools from its own node has no hook for the middleware to sit in, so
