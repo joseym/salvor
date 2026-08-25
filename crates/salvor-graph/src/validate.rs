@@ -212,6 +212,26 @@ pub enum GraphError {
         label: String,
     },
 
+    /// An outbound edge from a `branch` node carries no `label` at all.
+    /// Caught at submit for the same engine reason as
+    /// [`GraphError::BranchEdgeWithoutCase`]: `salvor_engine::is_live_inbound`
+    /// only ever takes a branch's edge by matching the fired case's name
+    /// against the edge's label, and a fired case's name is always `Some`, so
+    /// an edge whose label is `None` can never match it either. Such an edge
+    /// can never fire, exactly like one whose label matches no case, so it
+    /// gets the same treatment: a submit-time, node- and target-precise
+    /// error instead of a route that silently never gets taken. See
+    /// [`check_branch_edge_labels`].
+    #[error(
+        "branch node `{node}`: outbound edge to `{to}` has no label; label it with one of the branch's cases"
+    )]
+    BranchEdgeWithoutLabel {
+        /// The branch node's id.
+        node: String,
+        /// The edge's destination.
+        to: String,
+    },
+
     /// A `fold` node's `stop_when` predicate does not parse in the
     /// [`crate::expr`] condition language. Caught at submit so a bad predicate is
     /// never a run-time failure, exactly like a branch case's expression.
@@ -606,11 +626,17 @@ fn check_branch_case_edges(graph: &Graph, errors: &mut Vec<GraphError>) {
 /// what lets an author see the mismatch and pick the correct spelling instead
 /// of guessing which side is wrong.
 ///
-/// An outbound edge from a branch that carries NO label at all is not
-/// reported here: [`crate::document::Edge::label`] is optional, and this
-/// check only judges a label that IS set to something. Such an edge can also
-/// never fire, by the same engine rule, but an unlabelled edge does not name
-/// anything wrong the way a mismatched label does, so it is left alone.
+/// An outbound edge from a branch that carries NO label at all is a
+/// validation error too, node- and target-precise, reported by this same
+/// function as [`GraphError::BranchEdgeWithoutLabel`]:
+/// [`crate::document::Edge::label`] is optional in the document's shape, but
+/// the engine can only ever pick a branch's live edge by matching the fired
+/// case's name against that label (see `salvor_engine::is_live_inbound`), and
+/// a fired case's name is always `Some`, so a `None` label can never match it
+/// either, exactly like a label naming no case. The two get their own
+/// [`GraphError`] variants because the fix differs: a mismatched label is a
+/// typo to correct, a missing one has no case to point at until the author
+/// picks one.
 fn check_branch_edge_labels(graph: &Graph, errors: &mut Vec<GraphError>) {
     for node in &graph.nodes {
         let Node::Branch(branch) = node else {
@@ -622,13 +648,20 @@ fn check_branch_edge_labels(graph: &Graph, errors: &mut Vec<GraphError>) {
             if edge.from != branch.id {
                 continue;
             }
-            if let Some(label) = &edge.label
-                && !case_names.contains(label.as_str())
-            {
-                errors.push(GraphError::BranchEdgeWithoutCase {
-                    node: branch.id.clone(),
-                    label: label.clone(),
-                });
+            match &edge.label {
+                Some(label) if !case_names.contains(label.as_str()) => {
+                    errors.push(GraphError::BranchEdgeWithoutCase {
+                        node: branch.id.clone(),
+                        label: label.clone(),
+                    });
+                }
+                None => {
+                    errors.push(GraphError::BranchEdgeWithoutLabel {
+                        node: branch.id.clone(),
+                        to: edge.to.clone(),
+                    });
+                }
+                Some(_) => {}
             }
         }
     }
@@ -1552,6 +1585,61 @@ mod tests {
         assert!(
             message.contains("case"),
             "says what to do about the mismatched label: {message}"
+        );
+    }
+
+    /// An outbound edge from a branch that carries no label at all can never
+    /// fire either, by the same engine rule as a mismatched label: it is a
+    /// node/target-precise error distinct from `BranchEdgeWithoutCase`. The
+    /// branch declares `paid` and `lost`; the `paid` edge is correctly
+    /// labelled and passes, while the second edge names no label at all.
+    #[test]
+    fn branch_edge_without_label_is_reported() {
+        let branch = Node::Branch(BranchNode {
+            name: None,
+            id: "route".into(),
+            on: None,
+            agent_hash: None,
+            cases: vec![
+                BranchCase {
+                    name: "paid".into(),
+                    when: BranchCondition::Expression("outcome == \"paid\"".into()),
+                },
+                BranchCase {
+                    name: "lost".into(),
+                    when: BranchCondition::Expression("outcome == \"lost\"".into()),
+                },
+            ],
+        });
+        let g = graph(
+            vec![branch, agent("celebrate"), agent("close")],
+            vec![
+                labeled_edge("route", "celebrate", "paid"),
+                edge("route", "close"),
+            ],
+        );
+        let errors = validate(&g).expect_err("invalid");
+        assert!(
+            errors.contains(&GraphError::BranchEdgeWithoutLabel {
+                node: "route".into(),
+                to: "close".into(),
+            }),
+            "names the branch node and the unlabelled edge's target: {errors:?}"
+        );
+        let message = errors
+            .iter()
+            .find_map(|e| match e {
+                GraphError::BranchEdgeWithoutLabel { .. } => Some(e.to_string()),
+                _ => None,
+            })
+            .expect("a BranchEdgeWithoutLabel error");
+        assert!(
+            message.contains("route") && message.contains("close"),
+            "{message}"
+        );
+        assert!(
+            message.contains("label"),
+            "says what to do about the unlabelled edge: {message}"
         );
     }
 

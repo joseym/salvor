@@ -221,7 +221,9 @@ All checks run and every failure is reported (never just the first):
   should end the run points at a terminal node instead of being left
   unrouted. The mirror is refused too: an outbound edge from a `branch` node
   labeled with a name none of its cases declare is dead and never fires, and
-  is refused naming the node and the label.
+  is refused naming the node and the label. So is an outbound edge from a
+  `branch` node with no label at all, for the same reason, naming the node
+  and the edge's target.
 - **Per-node required fields.** An `agent` hash is a well-formed
   `sha256:<64 hex>` string; a `map` concurrency cap is at least 1; a `gate`
   approval schema is a JSON object; a `delay` waits at least 1 second.

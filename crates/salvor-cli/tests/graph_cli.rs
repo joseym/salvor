@@ -198,6 +198,51 @@ fn validate_rejects_a_branch_edge_labeled_with_no_matching_case() {
     );
 }
 
+/// An outbound edge from a branch that carries no label at all can never
+/// fire either, by the same engine rule as a mismatched label: the `paid`
+/// case carries its own correctly labeled edge, while the edge meant to
+/// realize `lost` names no label whatsoever.
+#[test]
+fn validate_rejects_a_branch_edge_with_no_label() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("unlabelled_edge.json");
+    let doc = r#"{
+      "schema_version": 1,
+      "nodes": [
+        { "kind": "tool", "payload": { "id": "assess", "tool": "assess" } },
+        { "kind": "branch", "payload": { "id": "route", "on": "assess.outcome", "cases": [
+            { "name": "paid", "when": { "kind": "expression", "value": "outcome == \"paid\"" } },
+            { "name": "lost", "when": { "kind": "expression", "value": "outcome == \"lost\"" } }
+          ] } },
+        { "kind": "tool", "payload": { "id": "celebrate", "tool": "notify" } },
+        { "kind": "tool", "payload": { "id": "close", "tool": "notify" } }
+      ],
+      "edges": [
+        { "from": "assess", "to": "route" },
+        { "from": "route", "to": "celebrate", "label": "paid" },
+        { "from": "route", "to": "close" }
+      ]
+    }"#;
+    fs::write(&path, doc).expect("write");
+
+    let output = salvor()
+        .args(["graph", "validate"])
+        .arg(&path)
+        .output()
+        .expect("runs");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(1), "invalid exits 1: {output:?}");
+    assert!(
+        stderr.contains("branch node `route`") && stderr.contains("outbound edge to `close`"),
+        "names the branch and the unlabelled edge's target: {stderr}"
+    );
+    assert!(
+        stderr.contains("has no label"),
+        "says what went wrong: {stderr}"
+    );
+}
+
 #[test]
 fn validate_rejects_an_unknown_field() {
     let dir = tempdir().expect("tempdir");
