@@ -87,6 +87,42 @@ describe('validateGraph', () => {
     expect(validateGraph(fixed).some((e) => e.code === 'unrealized_case')).toBe(false);
   });
 
+  // Aligned to the server's own rule (`salvor_graph::validate::BranchEdgeWithoutLabel`): an edge
+  // out of a branch with no label at all can never fire either, by the same engine reasoning as a
+  // mismatched label, so it gets the same one-click treatment when exactly one declared case has
+  // no edge realizing it.
+  it('a caseless branch edge offers to label it, when exactly one case has none', () => {
+    const g: WfGraph = {
+      ...CLEAN,
+      nodes: [...CLEAN.nodes, { id: 'br', kind: 'branch', name: 'br', cases: ['paid', 'lost'] }],
+      edges: [
+        { from: 'a', to: 'br' },
+        { from: 'br', to: 'b', label: 'paid' },
+        { from: 'br', to: 'b' },
+      ],
+    };
+    const err = validateGraph(g).find((e) => e.code === 'edge_type');
+    expect(err?.fix).toMatchObject({ kind: 'relabel_case', case: 'lost' });
+
+    const fixed = applyFix(g, err!.fix!);
+    expect(fixed.edges).toContainEqual({ from: 'br', to: 'b', label: 'lost' });
+    expect(validateGraph(fixed).some((e) => e.code === 'edge_type')).toBe(false);
+    expect(validateGraph(fixed).some((e) => e.code === 'unrealized_case')).toBe(false);
+  });
+
+  it('a caseless branch edge offers no fix when more than one case has none', () => {
+    const g: WfGraph = {
+      ...CLEAN,
+      nodes: [...CLEAN.nodes, { id: 'br', kind: 'branch', name: 'br', cases: ['x', 'y'] }],
+      edges: [
+        { from: 'a', to: 'br' },
+        { from: 'br', to: 'b' },
+      ],
+    };
+    const err = validateGraph(g).find((e) => e.code === 'edge_type');
+    expect(err?.fix).toBeUndefined();
+  });
+
   it('a branch edge naming an undeclared case offers no fix when more than one case has none', () => {
     // Neither "x" nor "y" has a realizing edge, so there is nothing unambiguous to relabel to.
     const g: WfGraph = {
