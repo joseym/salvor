@@ -39,7 +39,9 @@ import {
   isSignalWait,
   isTerminalState,
   isWaitingState,
+  overdueOfStatus,
   pendingLabel,
+  sleepingBandHtml,
   statusHtml,
   statusStateOf,
   stepsOf,
@@ -604,10 +606,18 @@ export class Inspector implements AfterViewInit {
     // `run-model.ts` GROUP, mirroring the CLI's `status_group`): nothing here asks the operator
     // for anything, so this reads neutral like `is-abandoned`, never the amber attention family
     // or a fail band, and renders no action button. It moves on its own once its instant passes.
+    // UNLESS it's OVERDUE: `wake_at` has passed and nothing has woken it, which is no longer calm
+    // (something anticipated didn't happen), so that case borrows the STALLED band's own amber
+    // attention colour (base `.band`, never `is-sleeping`'s muted override) and its warning icon,
+    // and states the one thing an operator can do: wake it by hand.
     if (state === 'sleeping') {
       const wakeAt = st.status.kind === 'Sleeping' ? st.status.wake_at : undefined;
-      return `<div class="band is-sleeping">${SLEEP_ICO}
-        <span><b>Sleeping.</b> Wakes at <span class="mono">${wakeAt ? esc(clock(wakeAt)) : '-'}</span>; nothing to do until then. The run continues on its own once the instant passes.</span></div>`;
+      const overdue = overdueOfStatus(st.status) ?? { overdue: false };
+      const wakeClock = wakeAt ? esc(clock(wakeAt)) : '-';
+      const cls = overdue.overdue ? 'is-overdue' : 'is-sleeping';
+      const icon = overdue.overdue ? WARN_ICO : SLEEP_ICO;
+      return `<div class="band ${cls}">${icon}
+        <span>${sleepingBandHtml(wakeClock, overdue)}</span></div>`;
     }
     // SIGNAL WAIT: a suspension parked on an external system, not a person (see
     // `run-model.ts` GROUP, the same PROGRESS call `sleeping` makes): plain words, no jargon, and

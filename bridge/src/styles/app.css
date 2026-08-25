@@ -343,6 +343,12 @@
 #runs-table td.c-events { color: var(--fg); font-weight: 600; }
 #runs-table td.c-age    { color: var(--faint); }
 
+/* OVERDUE NOTE: a sleeping run whose wake_at has passed, shown beside its status pill. Secondary
+   text in the same muted register as the age column above, deliberately NOT the amber attention
+   wash: the row stays in the progress group (see run-model.ts GROUP), so the Inspector band is
+   where overdue reads as attention, not the ledger row. */
+.overdue-note { margin-left: var(--space-2); font-size: var(--text-xs); color: var(--faint); letter-spacing: 0.08px; white-space: nowrap; }
+
 /* ── AGENT COLUMN (item 15a). Replaces the old "Last event" cell. A readable name/label reads in
    the body face (identity, not wire data); an unregistered hash comes through the runref markup,
    already mono. Truncate long identities with an ellipsis rather than letting them push EVENTS

@@ -34,6 +34,7 @@ import {
   type RunRow,
   age,
   agentIdentity,
+  durationLabel,
   groupOf,
   hourKey,
   isHash,
@@ -666,6 +667,12 @@ export class Runs {
   }
   label(state: string): string {
     return labelOf(state);
+  }
+  /** "overdue by 2h", for a sleeping row whose wake_at has passed (see run-model.ts#overdueOf);
+   *  callers only reach this after checking `r.overdue`, so an absent `overdueSeconds` here would
+   *  be the rare case a source says overdue but can't say for how long. */
+  overdueLabel(r: RunRow): string {
+    return r.overdueSeconds !== undefined ? durationLabel(r.overdueSeconds) : '';
   }
   short(id: string): string {
     return id.slice(0, 8);

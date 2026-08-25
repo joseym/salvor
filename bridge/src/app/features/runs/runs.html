@@ -198,6 +198,12 @@
             [attr.title]="'Filter the list to ' + label(r.status) + ' runs'"
             (click)="toggleTerm('status:' + r.status); $event.stopPropagation()"
           >{{ label(r.status) }}<svg class="st-filter" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true"><path d="M1 2h10L7 7V10.5L5 9.5V7z"/></svg></button>
+          <!-- OVERDUE: wake_at has passed and nothing has woken this sleeper. Muted, secondary
+               text (the row itself stays in the progress group, no attention wash); the Inspector
+               band is where this reads as attention, see inspector.css .band.is-overdue. -->
+          @if (r.overdue) {
+            <span class="overdue-note" [attr.title]="'Was due to wake ' + overdueLabel(r) + ' ago; nothing has woken it yet'">overdue by {{ overdueLabel(r) }}</span>
+          }
         </td>
         <td>
           <span class="runref">

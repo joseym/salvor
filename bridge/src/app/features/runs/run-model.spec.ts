@@ -8,6 +8,8 @@ import {
   isHash,
   isWaiting,
   labelOf,
+  overdueOf,
+  overdueSince,
   toRunRow,
   waitingOnOf,
   type RunRow,
@@ -192,6 +194,63 @@ describe('waitingOnOf: the signal discriminator read off a RunStatus.raw', () =>
   });
 });
 
+describe('overdueSince: the clock-only check, the Inspector\'s wasm fold has no other way to tell', () => {
+  const NOW = Date.parse('2026-08-20T12:00:00Z');
+
+  it('a wake_at before now is overdue, by the whole seconds since it passed', () => {
+    expect(overdueSince('2026-08-20T10:00:00Z', NOW)).toEqual({ overdue: true, overdueSeconds: 7200 });
+  });
+
+  it('a wake_at still ahead of now is not overdue', () => {
+    expect(overdueSince('2026-08-20T13:00:00Z', NOW)).toEqual({ overdue: false });
+  });
+
+  it('a wake_at equal to now is not overdue yet: passed means strictly after, not at, the deadline', () => {
+    expect(overdueSince('2026-08-20T12:00:00Z', NOW)).toEqual({ overdue: false });
+  });
+
+  it('no wake_at at all is not overdue (nothing to be overdue against)', () => {
+    expect(overdueSince(undefined, NOW)).toEqual({ overdue: false });
+  });
+});
+
+describe('overdueOf: the server field wins when present, wake_at otherwise', () => {
+  const NOW = Date.parse('2026-08-20T12:00:00Z');
+  function sleeping(raw: Record<string, unknown>): RunStatus {
+    return { state: 'sleeping', wakeAt: raw['wake_at'] as string | undefined, raw };
+  }
+
+  it('a non-sleeping status is never overdue, whatever raw carries', () => {
+    const status: RunStatus = { state: 'running', raw: { overdue: true, overdue_seconds: 99 } };
+    expect(overdueOf(status, NOW)).toEqual({ overdue: false });
+  });
+
+  it('before the server has an opinion, a wake_at in the past derives overdue from the clock', () => {
+    expect(overdueOf(sleeping({ wake_at: '2026-08-20T10:00:00Z' }), NOW)).toEqual({
+      overdue: true,
+      overdueSeconds: 7200,
+    });
+  });
+
+  it('before the deadline, nothing renders as overdue: derived from the clock, same as the server would say', () => {
+    expect(overdueOf(sleeping({ wake_at: '2026-08-20T13:00:00Z' }), NOW)).toEqual({ overdue: false });
+  });
+
+  it('the server\'s own overdue/overdue_seconds win outright once present, over what the clock alone would derive', () => {
+    // wake_at here is still in the FUTURE by the browser's own math, but the server's clock says
+    // otherwise (e.g. clock skew): the server's word is final, never second-guessed.
+    expect(
+      overdueOf(sleeping({ wake_at: '2026-08-20T13:00:00Z', overdue: true, overdue_seconds: 45 }), NOW),
+    ).toEqual({ overdue: true, overdueSeconds: 45 });
+  });
+
+  it('the server can also say not-overdue explicitly, and that wins too, even past a naive wake_at read', () => {
+    expect(overdueOf(sleeping({ wake_at: '2026-08-20T10:00:00Z', overdue: false }), NOW)).toEqual({
+      overdue: false,
+    });
+  });
+});
+
 describe('toRunRow: bakes the derived status and carries driver evidence', () => {
   const NOW = 1_000_000_000_000;
   const stale = new Date(NOW - STALL_GRACE_MS - 1).toISOString();
@@ -249,6 +308,63 @@ describe('toRunRow: bakes the derived status and carries driver evidence', () =>
     );
     expect(r.status).toBe('sleeping');
     expect(r.driver).toBe('none');
+  });
+
+  it('a sleeping run before its wake_at is explicitly not overdue on the row: it still reads exactly as before', () => {
+    const r = toRunRow(
+      {
+        run: 'r1',
+        status: { state: 'sleeping', wakeAt: new Date(NOW + 3_600_000).toISOString(), raw: {} },
+        eventCount: 2,
+        raw: {},
+      },
+      NOW,
+    );
+    // false, not absent: a reader must never treat "not overdue" and "unknown" as the same thing.
+    expect(r.overdue).toBe(false);
+    expect(r.overdueSeconds).toBeUndefined();
+  });
+
+  it('a sleeping run past its wake_at is overdue on the row, derived from the clock, and stays sleeping (no new state)', () => {
+    const r = toRunRow(
+      {
+        run: 'r1',
+        status: { state: 'sleeping', wakeAt: new Date(NOW - 7_200_000).toISOString(), raw: {} },
+        eventCount: 2,
+        raw: {},
+      },
+      NOW,
+    );
+    expect(r.status).toBe('sleeping');
+    expect(r.overdue).toBe(true);
+    expect(r.overdueSeconds).toBe(7200);
+  });
+
+  it('the server-computed overdue/overdue_seconds on raw win over the row\'s own clock derivation', () => {
+    const r = toRunRow(
+      {
+        run: 'r1',
+        status: {
+          state: 'sleeping',
+          wakeAt: new Date(NOW - 7_200_000).toISOString(),
+          raw: { overdue: true, overdue_seconds: 30 },
+        },
+        eventCount: 2,
+        raw: {},
+      },
+      NOW,
+    );
+    expect(r.overdue).toBe(true);
+    expect(r.overdueSeconds).toBe(30);
+  });
+
+  it('a non-sleeping row never carries overdue, even one long finished', () => {
+    const r = toRunRow(
+      { run: 'r1', status: { state: 'completed', raw: {} }, eventCount: 2, raw: {} },
+      NOW,
+    );
+    expect(r.overdue).toBeUndefined();
+    expect(r.overdueSeconds).toBeUndefined();
   });
 
   // THE STATED ACCEPTANCE CASE for signal waits: a suspended run reporting driver: "none" (its

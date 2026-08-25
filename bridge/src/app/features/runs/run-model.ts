@@ -199,11 +199,20 @@ export interface RunRow {
    * travels, without every reader re-reading `raw` by hand. Absent for every state but a signal
    * wait's `suspended`. */
   readonly waitingOn?: 'signal';
+  /** Whether a `sleeping` run's `wake_at` has passed with nothing having woken it (see
+   * {@link overdueOf}). Always absent for every other state; `false`, never absent, for a
+   * sleeping run that just isn't due yet, so a reader never has to treat "unknown" and "not
+   * overdue" as the same thing. */
+  readonly overdue?: boolean;
+  /** Whole seconds since `wake_at`, alongside {@link overdue}. Absent whenever `overdue` is, and
+   * also on the rare case a source says overdue but can't say for how long. */
+  readonly overdueSeconds?: number;
 }
 
 export function toRunRow(s: RunSummary, now: number = Date.now()): RunRow {
   const driver = s.driver === 'attached' || s.driver === 'none' ? s.driver : undefined;
   const waitingOn = waitingOnOf(s.status);
+  const overdue = overdueOf(s.status, now);
   return {
     id: s.run,
     status: derivedStatus(s.status.state, driver, s.lastRecordedAt, now, waitingOn),
@@ -216,6 +225,8 @@ export function toRunRow(s: RunSummary, now: number = Date.now()): RunRow {
     agentDefHash: s.agentDefHash,
     labels: s.labels,
     waitingOn,
+    overdue: s.status.state === 'sleeping' ? overdue.overdue : undefined,
+    overdueSeconds: overdue.overdueSeconds,
   };
 }
 
@@ -288,16 +299,69 @@ export function hourKey(iso: string | undefined): string {
   return iso ? iso.slice(0, 13) + ':00Z' : '';
 }
 
-/** A short relative age from an ISO timestamp against `now` (default: real wall clock). */
-export function age(iso: string | undefined, now: number = Date.now()): string {
-  if (!iso) return '-';
-  const then = Date.parse(iso);
-  if (Number.isNaN(then)) return '-';
-  const s = Math.max(0, Math.round((now - then) / 1000));
+/** Bucket a duration given in whole seconds the same way {@link age} buckets a timestamp:
+ *  seconds under a minute, then minutes, then hours, then days. Shared so "last event 10m ago"
+ *  and "overdue by 2h" round the exact same way and never drift into two different phrasings. */
+export function durationLabel(seconds: number): string {
+  const s = Math.max(0, Math.round(seconds));
   if (s < 60) return `${s}s`;
   const m = Math.round(s / 60);
   if (m < 60) return `${m}m`;
   const h = Math.round(m / 60);
   if (h < 48) return `${h}h`;
   return `${Math.round(h / 24)}d`;
+}
+
+/** A short relative age from an ISO timestamp against `now` (default: real wall clock). */
+export function age(iso: string | undefined, now: number = Date.now()): string {
+  if (!iso) return '-';
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return '-';
+  return durationLabel((now - then) / 1000);
+}
+
+/** Whether a sleeping run is overdue, and for how long in whole seconds. `overdueSeconds` is
+ *  absent when {@link overdue} is false, and also when it's true but no duration could be told
+ *  (never a fabricated 0). */
+export interface Overdue {
+  readonly overdue: boolean;
+  readonly overdueSeconds?: number;
+}
+
+const NOT_OVERDUE: Overdue = { overdue: false };
+
+/**
+ * Whether `wakeAt` (an ISO instant, or absent) has passed `now`, and for how long. This is the
+ * ONE clock check overdue-ness is ever computed with in this app: the runs list falls back to it
+ * for an older server ({@link overdueOf} below), and the Inspector uses it as its only path at
+ * all, because its wasm fold (see `inspector/wasm-fold.ts`) has no clock of its own; it only ever
+ * sees the recorded log, never the wall clock.
+ */
+export function overdueSince(wakeAt: string | undefined, now: number = Date.now()): Overdue {
+  const wakeMs = wakeAt ? Date.parse(wakeAt) : NaN;
+  // Strictly past, matching the server's own `now > wake_at` (see `crates/salvor-server/src/
+  // json.rs#status`): the deadline instant itself is not yet overdue.
+  if (Number.isNaN(wakeMs) || now <= wakeMs) return NOT_OVERDUE;
+  return { overdue: true, overdueSeconds: Math.floor((now - wakeMs) / 1000) };
+}
+
+/**
+ * Overdue-ness for a sleeping run's typed {@link RunStatus}. The server now folds `overdue` and
+ * `overdue_seconds` onto a `sleeping` status itself once ITS OWN clock passes `wake_at` (see the
+ * `sleeping` row of `crates/salvor-server/API.md`), and when that's present it wins outright: it
+ * is the server's clock reporting on its own deadline, not this browser's guess at the same
+ * question, so it cannot be second-guessed by a client-side recomputation. The typed
+ * {@link RunStatus} doesn't surface the two fields as named properties (only `wakeAt` is;
+ * {@link waitingOnOf} reads off `raw` for the same shape of gap), so they're read off `raw`, the
+ * SDK's escape hatch for anything not yet promoted to a field of its own. Falls back to
+ * {@link overdueSince} against `wakeAt` for an older server that predates the field.
+ */
+export function overdueOf(status: RunStatus, now: number = Date.now()): Overdue {
+  if (status.state !== 'sleeping') return NOT_OVERDUE;
+  const raw = status.raw;
+  if (raw && typeof raw['overdue'] === 'boolean') {
+    const seconds = raw['overdue_seconds'];
+    return { overdue: raw['overdue'], overdueSeconds: typeof seconds === 'number' ? seconds : undefined };
+  }
+  return overdueSince(status.wakeAt, now);
 }

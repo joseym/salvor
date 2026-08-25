@@ -195,6 +195,16 @@
 .band.is-sleeping .mono {
   color: var(--fg-2);
 }
+/* OVERDUE band: a sleeping run whose wake_at has passed with nothing having woken it. It still
+   groups as progress (see run-model.ts GROUP), so it stays out of `.band.is-fail`'s danger red,
+   but it must not read as calm either: it takes the base `.band`'s amber attention colour (never
+   `.is-sleeping`'s muted override above) and the same dashed left rule `.is-stalled` uses for
+   "something anticipated didn't happen on time". */
+.band.is-overdue {
+  border-left-width: 3px;
+  border-left-style: dashed;
+  border-left-color: var(--warn);
+}
 /* SIGNAL WAIT band: a suspension parked on an external system, PROGRESS not waiting (see
    run-model.ts GROUP), the same neutral treatment as .is-sleeping/.is-abandoned: nothing here is
    an error or a to-do a person owes. `align-items: flex-start` overrides the base .band's vertical
