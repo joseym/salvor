@@ -1720,6 +1720,7 @@ impl BeginPermit<'_> {
             agent_def_hash: self.agent_def_hash,
             input,
             labels: self.labels,
+            driven_by: None,
         };
         self.cursor.emit(event)
     }
@@ -2123,6 +2124,7 @@ mod tests {
                 agent_def_hash: "sha256:agent".into(),
                 input: serde_json::json!({}),
                 labels: None,
+                driven_by: None,
             },
         )];
         let err = ReplayCursor::new(log).expect_err("a truncated head must be rejected");

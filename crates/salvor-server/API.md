@@ -956,6 +956,9 @@ has arrived is the client's. `GET /v1/runs/{id}` reports such a run as
 For the same reason, `POST /v1/runs/{id}/resume` (the server-driven surface)
 refuses a client-driven run outright, `409 client_driven_run`, whatever its
 state: only its own client may drive it, by re-opening `POST /v1/client-runs`.
+Both that refusal and the sweep's skip read the run's recorded `driven_by`, not
+only the server's in-memory leases, so they hold after a restart and before the
+client has re-opened anything.
 
 The generic append carries only the control and deterministic-context events the
 client's cursor emits itself, which hold no secret and no side effect:
@@ -977,6 +980,16 @@ per-run gate that layers on top of the process-wide bearer, so one authenticated
 caller cannot drive another caller's run, and a second live driver without the
 current lease is refused. Re-opening a run mints a fresh lease, so a resuming tab
 always holds the current one; the superseded lease stops working.
+
+Leases live in the server process and do not survive its restart, but the run
+does. A client-driven run's `RunStarted` records `driven_by: "client"`, stamped
+by the server when it accepted that event, and that is what a restarted server
+reads to know the run is a client's to drive. So a restart does not strand a
+run: re-opening it returns its recorded log with a fresh lease (see below), and
+until then the surfaces that would otherwise become a second writer still
+refuse it (`POST /v1/runs/{id}/resume` answers `409 client_driven_run`, and the
+wake sweep leaves its due timer alone). Every lease minted before the restart is
+gone, so a client that was mid-drive re-opens the run to get a current one.
 
 ### POST /v1/client-runs
 
@@ -1004,11 +1017,20 @@ endpoint records them nowhere, because the client appends its own
 The empty `log` is what the client builds its cursor from. The client then
 appends its own `RunStarted` at seq 0 through the events endpoint.
 
-- Response `200` for a re-open of a run this server already holds: the same
-  shape, with `log` carrying every recorded envelope and a fresh `drive_token`.
-- `409 run_exists` when the chosen `run_id` already has history and is not a
-  client-driven run this server opened (a server-driven run, so the two modes
-  cannot collide).
+- Response `200` for a re-open, with `log` carrying every recorded envelope and
+  a fresh `drive_token`. Two things make a `run_id` re-openable, and either is
+  enough: this server opened it since it started (it holds the lease), or the
+  run's own log says it is client-driven, its `RunStarted` carrying
+  `driven_by: "client"`. The second is what makes a restart survivable: the
+  lease registry dies with the process, the log does not, so a server that has
+  just come back re-opens a run its client is still driving instead of refusing
+  it as foreign. Adopting a run this way mints a fresh lease exactly as any
+  other re-open does, and the returned `log` is the recorded state the client
+  rebuilds its cursor from, dangling intent and all.
+- `409 run_exists` when the chosen `run_id` already has history and its log does
+  not record it as client-driven, which means it is a server-driven run. That
+  refusal is unchanged by a restart, so the two modes still cannot collide over
+  one store.
 
 ### GET /v1/client-runs/{id}/log
 
@@ -1049,6 +1071,14 @@ bounds `POST /v1/runs` enforces apply here, at the one point this server ever
 sees them for a client-driven run: at most 16 labels, each key at most 64
 bytes, each value at most 256 bytes. A `RunStarted` carrying labels over the
 bounds is `400 bad_request`, and nothing in the batch is written.
+
+A `RunStarted` event in the batch is also **stamped** with
+`driven_by: "client"` before it is folded or written, whatever the submitted
+event carried in that field. Reaching this endpoint means holding the run's
+lease, so the run is client-driven, and its head is where that fact is recorded
+durably; a caller cannot set the marker anywhere else. The stamp happens before
+the retry comparison below, so re-appending the same `RunStarted` bytes is
+still the byte-identical no-op it was.
 
 Every envelope's `recorded_at` is **server-stamped**: the server overwrites it
 with its own clock reading before folding or writing the event, regardless of

@@ -44,6 +44,14 @@
 //! here would be a second writer racing its drive token, so a due one is
 //! left asleep here regardless of how overdue it is.
 //!
+//! That check reads a registry that dies with the process, so the run's own
+//! log is consulted too (see
+//! [`client_runs::log_is_client_driven`](crate::client_runs::log_is_client_driven)):
+//! a client-driven run's `RunStarted` records `driven_by: client`, which
+//! survives a restart the leases do not. A restarted server therefore still
+//! leaves a napping client-driven run to its client, rather than adopting
+//! every one it no longer remembers.
+//!
 //! # One bad run does not stop the sweep
 //!
 //! Every failure is per-run: an agent this server has never had registered, a
@@ -173,6 +181,19 @@ pub async fn sweep(state: &AppState) -> Vec<RunId> {
                 continue;
             }
         };
+        // The same skip, on the log's own evidence. The lease check above
+        // knows only the runs this process opened, so after a restart it does
+        // not recognize a run a client is still driving; the `driven_by` its
+        // `RunStarted` records does, because the log outlived the process the
+        // leases died with. Without this, the first restart would put this
+        // sweeper back to racing clients for their runs' log positions.
+        if crate::client_runs::log_is_client_driven(&log) {
+            tracing::debug!(
+                run_id = %run.run_id.as_uuid(),
+                "skipping a due run whose log records it as client-driven"
+            );
+            continue;
+        }
         match crate::runs::redrive(state.clone(), run.run_id, &log).await {
             Ok(_) => {
                 state.clear_unwakeable_warned(run.run_id);

@@ -57,6 +57,19 @@
 //! live driver without the current lease is refused. Re-opening a run mints a
 //! fresh lease, so a resuming tab always holds the current one.
 //!
+//! # The lease is process-lived; the run is not
+//!
+//! The lease registry is in memory and dies with the process, which is right
+//! for a lease: a token nobody is holding any more means nothing. What must
+//! not die with it is the fact that the run is client-driven at all, because
+//! every surface that must not become a second writer (this one when a run is
+//! re-opened, [`crate::runs::resume`], the wake sweeper) turns on that fact.
+//! So the run records it: [`append`] stamps `driven_by: client` on the
+//! `RunStarted` it accepts, and [`log_is_client_driven`] reads it back. A
+//! restarted server therefore re-opens a run its client is still driving,
+//! keeps refusing to resume it, and still leaves its timer alone, none of
+//! which it could do from memory it no longer has.
+//!
 //! # Labels on a client-driven run
 //!
 //! The client, not this server, synthesizes the run's `RunStarted` (see [`open`]):
@@ -274,14 +287,26 @@ struct ResolveRequest {
 }
 
 /// `POST /v1/client-runs`: open a fresh client-driven run, or re-open (resume)
-/// one this process already holds.
+/// one whose log says it is client-driven.
 ///
 /// A fresh run comes back with an empty log and a new drive token; the client
 /// appends its own `RunStarted` as the first event through the append endpoint.
 /// Re-opening a known client run returns its full recorded log and a fresh
-/// lease, for a refreshed tab to rebuild its cursor. A chosen id that already
-/// has history but is not a client-driven run this process opened is refused,
-/// so the client-driven and server-driven modes cannot collide.
+/// lease, for a refreshed tab to rebuild its cursor.
+///
+/// Two things say a run id is client-driven, and either is enough. The first is
+/// this process's own lease registry, which answers for every run opened since
+/// the server started. The second is the run's log: the `RunStarted` at its
+/// head carries `driven_by: client`, stamped by [`append`] when this server
+/// accepted it. The registry dies with the process and the log does not, so
+/// without the second an id opened before a restart would be refused as
+/// foreign, and a client-driven run would be stranded by any restart, which is
+/// the opposite of what a durable log is for. Adopting a run from its log mints
+/// a fresh lease exactly as re-opening one this process already held does; the
+/// client resumes by rebuilding its cursor from the returned log.
+///
+/// A chosen id whose history says nothing of the sort is a server-driven run,
+/// and it is still refused, so the two modes cannot collide over one store.
 pub async fn open(
     State(state): State<AppState>,
     body: Bytes,
@@ -296,21 +321,24 @@ pub async fn open(
         None => RunId::new(),
     };
 
-    // A re-open of a run this process opened: return its log and a fresh lease.
-    if state.is_client_run(run_id) {
-        let log = state.store().read_log(run_id).await.map_err(store_error)?;
+    let log = state.store().read_log(run_id).await.map_err(store_error)?;
+
+    // A re-open: either this process opened the run (the lease registry knows
+    // it, which is also the only evidence a run opened but not yet started has)
+    // or its recorded log says it is client-driven (which survives the restart
+    // the registry does not). Return the recorded log and a fresh lease.
+    if state.is_client_run(run_id) || log_is_client_driven(&log) {
         let drive_token = state.lease_client_run(run_id, request.record_prompts);
         return Ok((StatusCode::OK, Json(open_body(run_id, &drive_token, &log))));
     }
 
-    // A run id with existing history that this process did not open as a
-    // client-driven run is foreign (a server-driven run, or one from before a
-    // restart): refuse it rather than adopt it.
-    let log = state.store().read_log(run_id).await.map_err(store_error)?;
+    // A run id with existing history and no client-driven marker is foreign: a
+    // server-driven run, whose driver is this process's own. Refuse it rather
+    // than adopt it and become a second writer on its log.
     if !log.is_empty() {
         return Err(ApiError::RunExists(format!(
-            "run {} already has recorded history and is not a client-driven run on this server; \
-             it cannot be opened for client-driven runs",
+            "run {} already has recorded history and its log does not record it as client-driven; \
+             it is a server-driven run, so it cannot be opened for client-driven runs",
             run_id.as_uuid()
         )));
     }
@@ -406,12 +434,25 @@ pub async fn append(
         // byte-identical retry at an already-recorded position (handled just
         // below) was validated the first time it landed, so re-checking here
         // is cheap and harmless, never a behavior change.
+        //
+        // It is also where the run records who drives it. Reaching this line
+        // means the caller holds this run's lease, so the run IS client-driven,
+        // and the head of its log is the one place that fact can be written
+        // down durably. The server stamps it rather than trusting a submitted
+        // value, exactly as it does with `recorded_at` just below: what the
+        // client sent in the field is discarded, so a caller cannot mark a run
+        // client-driven anywhere but here, under a lease this server minted.
+        // Stamping before the retry comparison is what keeps a retry
+        // byte-identical: the resubmitted event is canonicalized the same way
+        // the recorded one was.
         if let Event::RunStarted {
-            labels: Some(labels),
-            ..
-        } = &candidate.event
+            labels, driven_by, ..
+        } = &mut candidate.event
         {
-            validate_labels(labels).map_err(ApiError::BadRequest)?;
+            if let Some(labels) = labels {
+                validate_labels(labels).map_err(ApiError::BadRequest)?;
+            }
+            *driven_by = Some(Performer::Client);
         }
 
         let next_seq = validator.next_seq();
@@ -1878,6 +1919,33 @@ fn is_sleeping(log: &[EventEnvelope]) -> bool {
             _ => None,
         })
         .unwrap_or(false)
+}
+
+/// Whether `log` is a client-driven run's own log, on the log's own evidence:
+/// the `RunStarted` at its head carries `driven_by: client`.
+///
+/// This is the durable half of the answer to "who drives this run". The other
+/// half is [`AppState::is_client_run`], the in-memory lease registry, which is
+/// authoritative only for runs this process opened and knows nothing after a
+/// restart. Every surface that must not become a second writer against a
+/// client's drive token asks both: [`open`] (to adopt rather than refuse a run
+/// from an earlier process), [`crate::runs::resume`] (to keep refusing it), and
+/// the wake sweeper (to keep leaving its timer to its client). Asking only the
+/// registry would make a restart quietly re-arm this server as a driver of runs
+/// it does not own.
+///
+/// Only the head is read, because only the head can carry the marker: a run
+/// head may appear at seq 0 and nowhere else (the append-guard enforces that),
+/// and this server stamps the field itself in [`append`], so a caller cannot
+/// write the marker onto a run it does not drive.
+pub(crate) fn log_is_client_driven(log: &[EventEnvelope]) -> bool {
+    matches!(
+        log.first().map(|envelope| &envelope.event),
+        Some(Event::RunStarted {
+            driven_by: Some(Performer::Client),
+            ..
+        })
+    )
 }
 
 /// The per-run lease gate shared by every driving endpoint: the run must be a

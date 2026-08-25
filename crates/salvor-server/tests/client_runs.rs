@@ -10,7 +10,7 @@ use common::{
 };
 use reqwest::StatusCode;
 use salvor_core::{Effect, Event, EventEnvelope, ReplayCursor, RunId, SequenceNumber};
-use salvor_server::AppState;
+use salvor_server::{AppState, ClientToolDecl, ClientToolRegistry};
 use serde_json::{Value, json};
 use std::time::Duration;
 use time::macros::datetime;
@@ -48,6 +48,7 @@ fn run_started() -> Event {
         agent_def_hash: "sha256:agent".into(),
         input: json!({ "topic": "otters" }),
         labels: None,
+        driven_by: None,
     }
 }
 
@@ -234,6 +235,7 @@ async fn divergent_bytes_at_existing_seq_is_409() {
             agent_def_hash: "sha256:DIFFERENT".into(),
             input: json!({ "topic": "badgers" }),
             labels: None,
+            driven_by: None,
         },
     );
     let (status, body) = append(&client, &server.base, &run, Some(&token), vec![divergent]).await;
@@ -488,6 +490,7 @@ async fn appended_run_started_with_too_many_labels_is_rejected() {
         agent_def_hash: "sha256:agent".into(),
         input: json!({ "topic": "otters" }),
         labels: Some(labels),
+        driven_by: None,
     };
     let (status, body) = append(
         &client,
@@ -530,6 +533,7 @@ async fn appended_run_started_with_labels_round_trips() {
             "build".to_owned(),
             "42".to_owned(),
         )])),
+        driven_by: None,
     };
     let (status, body) = append(
         &client,
@@ -975,6 +979,7 @@ async fn resuming_a_client_driven_run_through_the_server_endpoint_is_refused() {
                     agent_def_hash: agent,
                     input: json!({ "topic": "otters" }),
                     labels: None,
+                    driven_by: None,
                 },
             ),
             env_value(&run, 1, Event::NowObserved { now: ts() }),
@@ -1019,5 +1024,313 @@ async fn resuming_a_client_driven_run_through_the_server_endpoint_is_refused() {
     assert!(
         !server.state.is_run_active(run_id),
         "the refusal never reaches the code that spawns a drive"
+    );
+}
+
+/// A client-driven server over `store`, holding one declared client-performed
+/// tool so a run can be left mid-call.
+///
+/// It takes the store instead of minting one, which is what lets a test drop
+/// the whole server and stand a second one over the same store. That is all a
+/// `salvor serve` restart is from a run's point of view: the process's lease
+/// registry goes, the recorded log stays.
+async fn client_server_over(store: std::sync::Arc<dyn salvor_store::EventStore>) -> TestServer {
+    let model = ScriptedModel::mount(vec![]).await;
+    let factory = agent_factory(
+        model.uri(),
+        "record",
+        Effect::Read,
+        CountBehavior::Record,
+        counter(),
+    );
+    Box::leak(Box::new(model));
+    let mut client_tools = ClientToolRegistry::new();
+    client_tools.declare(ClientToolDecl {
+        name: "charge_card".into(),
+        effect: Effect::Write,
+        input_schema: json!({
+            "type": "object",
+            "required": ["amount_cents"],
+            "properties": { "amount_cents": { "type": "integer" } }
+        }),
+        output_schema: Some(json!({
+            "type": "object",
+            "required": ["charge_id"],
+            "properties": { "charge_id": { "type": "string" } }
+        })),
+        trust_completion: true,
+        require_equal: Vec::new(),
+    });
+    let state = app_state(store, factory).with_client_tools(std::sync::Arc::new(client_tools));
+    TestServer::spawn(state).await
+}
+
+/// Stops `server` and gives up everything it held in memory. The store it was
+/// serving is the caller's and survives, so what comes next reads a log with
+/// no process behind it, exactly as a restarted server does.
+fn restart(server: TestServer) {
+    server.state.abort_all();
+    server.handle.abort();
+    drop(server);
+}
+
+/// A `POST` carrying a run's drive token.
+async fn post_driven(
+    client: &reqwest::Client,
+    url: &str,
+    body: Value,
+    token: &str,
+) -> (StatusCode, Value) {
+    let response = client
+        .post(url)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .header("x-drive-token", token)
+        .body(body.to_string())
+        .send()
+        .await
+        .expect("request sends");
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    (status, serde_json::from_str(&text).unwrap_or(Value::Null))
+}
+
+/// A restart does not strand a run its client is still driving. The lease
+/// registry that used to be the only thing saying "this run is client-driven"
+/// died with the first process; the `driven_by` the server stamped on the
+/// run's `RunStarted` did not, so the second process re-opens the run from its
+/// log, hands out a fresh lease, and the client carries on from where it was:
+/// here, with an unanswered tool intent still open.
+#[tokio::test]
+async fn a_restart_re_opens_a_client_driven_run_from_its_log() {
+    let store = memory_store();
+    let first = client_server_over(store.clone()).await;
+    let client = reqwest::Client::new();
+    let (run, first_token) = open_run(&client, &first.base).await;
+    let run_id = RunId::from_uuid(Uuid::parse_str(&run).expect("run id"));
+
+    let (status, body) = append(
+        &client,
+        &first.base,
+        &run,
+        Some(&first_token),
+        vec![
+            env_value(&run, 0, run_started()),
+            env_value(&run, 1, Event::NowObserved { now: ts() }),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the head and a clock reading: {body}"
+    );
+
+    // A call the client had asked for but not yet reported back on when the
+    // server went down: the state a resuming client most needs returned to it.
+    let (status, body) = post_driven(
+        &client,
+        &format!("{}/v1/client-runs/{run}/client-tool-intent", first.base),
+        json!({ "seq": 2, "tool": "charge_card", "input": { "amount_cents": 250 } }),
+        &first_token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the intent is recorded: {body}");
+
+    restart(first);
+    let second = client_server_over(store.clone()).await;
+    assert!(
+        !second.state.is_client_run(run_id),
+        "the fresh process remembers no lease for the run; only its log speaks"
+    );
+
+    // Re-opening is an adoption: an existing run, so `200`, not `201`.
+    let (status, body) = post_json(
+        &client,
+        &format!("{}/v1/client-runs", second.base),
+        json!({ "run_id": run }),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the run is re-opened: {body}");
+    let kinds: Vec<&str> = body["log"]
+        .as_array()
+        .expect("the recorded log comes back")
+        .iter()
+        .map(|envelope| envelope["event"]["kind"].as_str().expect("a kind"))
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["RunStarted", "NowObserved", "ToolCallRequested"],
+        "the recorded state, intent included: {body}"
+    );
+
+    let token = body["drive_token"].as_str().expect("a lease").to_owned();
+    assert_ne!(
+        token, first_token,
+        "adoption mints a fresh lease, as any re-open does"
+    );
+    assert!(
+        second.state.is_client_run(run_id),
+        "and the run is a client-driven run of this process from here on"
+    );
+
+    // The dead process's token is not the current lease.
+    let (status, _) = append(
+        &client,
+        &second.base,
+        &run,
+        Some(&first_token),
+        vec![env_value(&run, 3, Event::RandomObserved { value: 4 })],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "the lease the first process minted is superseded"
+    );
+
+    // The client finishes the call it had open, and then the run.
+    let (status, body) = post_driven(
+        &client,
+        &format!(
+            "{}/v1/client-runs/{run}/client-tool-completion",
+            second.base
+        ),
+        json!({ "seq": 2, "output": { "charge_id": "ch_1" } }),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the open call is answered: {body}");
+
+    let (status, body) = append(
+        &client,
+        &second.base,
+        &run,
+        Some(&token),
+        vec![env_value(
+            &run,
+            4,
+            Event::RunCompleted {
+                output: json!({ "charged": true }),
+            },
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the run finishes: {body}");
+
+    let (status, body) = get_json(&client, &format!("{}/v1/runs/{run}", second.base), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["status"]["state"], "completed",
+        "the run a restart interrupted ran to completion: {body}"
+    );
+}
+
+/// Adoption reads the marker, not merely "this id has history". A run this
+/// server drove itself carries no `driven_by`, so a restart leaves it exactly
+/// as refused as it was before: the two modes still cannot collide over one
+/// store.
+#[tokio::test]
+async fn a_restart_still_refuses_a_server_driven_run_id() {
+    let store = memory_store();
+    let first = client_server_over(store.clone()).await;
+    let client = reqwest::Client::new();
+
+    // A server-driven run's head: the same event, without the marker this
+    // server stamps only under a client's lease.
+    let foreign = RunId::new();
+    store
+        .append(&EventEnvelope::new(
+            foreign,
+            SequenceNumber::new(0),
+            ts(),
+            run_started(),
+        ))
+        .await
+        .expect("seed a server-driven run");
+
+    restart(first);
+    let second = client_server_over(store.clone()).await;
+
+    let (status, body) = post_json(
+        &client,
+        &format!("{}/v1/client-runs", second.base),
+        json!({ "run_id": foreign.as_uuid().to_string() }),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "still refused: {body}");
+    assert_eq!(body["error"]["code"], "run_exists");
+}
+
+/// The other two surfaces that must never become a second writer read the same
+/// evidence, and they read it before any re-open: a client-driven run that a
+/// restart has left with no lease anywhere is still refused by `resume` and
+/// still left asleep by the wake sweeper. Were either to consult only the
+/// in-memory registry, the first restart would put this server back to racing
+/// the client for the run's log positions.
+#[tokio::test]
+async fn after_a_restart_resume_refuses_and_the_sweeper_skips_a_client_driven_run() {
+    let store = memory_store();
+    let first = client_server_over(store.clone()).await;
+    let client = reqwest::Client::new();
+    let (run, token) = open_run(&client, &first.base).await;
+    let run_id = RunId::from_uuid(Uuid::parse_str(&run).expect("run id"));
+
+    // The client parks its own run on a timer that is already overdue against
+    // the server's clock, so the sweeper genuinely selects it.
+    let (status, body) = append(
+        &client,
+        &first.base,
+        &run,
+        Some(&token),
+        vec![
+            env_value(&run, 0, run_started()),
+            env_value(&run, 1, Event::NowObserved { now: ts() }),
+            env_value(
+                &run,
+                2,
+                Event::SleepStarted {
+                    wake_at: datetime!(2026-07-10 11:00:00 UTC),
+                },
+            ),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the run parks on its timer: {body}");
+
+    restart(first);
+    let second = client_server_over(store.clone()).await;
+    assert!(
+        !second.state.is_client_run(run_id),
+        "no lease survived; the log is the only evidence either surface has"
+    );
+
+    let (status, body) = post_json(
+        &client,
+        &format!("{}/v1/runs/{run}/resume", second.base),
+        json!({}),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "resume still refuses a run whose client drives it: {body}"
+    );
+    assert_eq!(body["error"]["code"], "client_driven_run");
+
+    assert!(
+        salvor_server::sweep(&second.state).await.is_empty(),
+        "and the sweeper still leaves the due timer to the client"
+    );
+    assert_eq!(
+        store.read_log(run_id).await.expect("log reads").len(),
+        3,
+        "neither surface wrote anything to the run"
+    );
+    assert!(
+        !second.state.is_run_active(run_id),
+        "and no driver task was spawned for it"
     );
 }

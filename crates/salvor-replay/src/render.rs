@@ -424,6 +424,7 @@ mod tests {
             agent_def_hash: "sha256:abcdef0123456789".into(),
             input: json!({ "prompt": big }),
             labels: None,
+            driven_by: None,
         });
         assert!(detail.contains('\u{2026}'), "detail should be truncated");
         assert!(

@@ -848,6 +848,7 @@ fn reference_logs() -> Vec<(&'static str, Vec<EventEnvelope>)> {
                         .to_owned(),
                 input: json!({"item": "ss-waratah"}),
                 labels: None,
+                driven_by: None,
             },
             Event::NowObserved { now: ts(0) },
             Event::ModelCallRequested {
@@ -913,6 +914,7 @@ fn reference_logs() -> Vec<(&'static str, Vec<EventEnvelope>)> {
                 agent_def_hash: "sha256:aabbcc".to_owned(),
                 input: json!({"claim": "wreck-9931"}),
                 labels: None,
+                driven_by: None,
             },
             Event::BudgetExceeded {
                 budget: salvor_replay::Budget {

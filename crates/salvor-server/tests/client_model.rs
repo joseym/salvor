@@ -77,6 +77,7 @@ async fn started_run(
             agent_def_hash: "sha256:agent".into(),
             input: json!({ "topic": "otters" }),
             labels: None,
+            driven_by: None,
         },
     );
     let (status, body) = post_driven(

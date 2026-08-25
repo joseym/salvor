@@ -168,12 +168,20 @@ struct Inner {
     handles: Mutex<HashMap<RunId, JoinHandle<()>>>,
     // The client-driven runs this process has opened, each with its current
     // drive-token lease. This registry is what keeps the client-driven and
-    // server-driven modes from colliding over one store: the client-driven
-    // endpoints operate only on runs recorded here, so a server-driven run is
-    // never reachable through them, and a foreign run id with existing history
-    // is refused rather than adopted. It is in-memory because the drive token
-    // is a single-writer lease with a process lifetime:
-    // re-opening a run mints a fresh lease.
+    // server-driven modes from colliding over one store: the driving
+    // client-run endpoints operate only on runs recorded here, so a
+    // server-driven run is never reachable through them. It is in-memory
+    // because the drive token is a single-writer lease with a process
+    // lifetime: re-opening a run mints a fresh lease.
+    //
+    // Which is why membership here is not the whole answer to "is this run
+    // client-driven". This map knows only what this process opened; a run
+    // opened before a restart is absent from it while its client is still
+    // driving it. The durable half of the answer is the run's own
+    // `RunStarted`, which records `driven_by: client` (see
+    // `client_runs::log_is_client_driven`). The open endpoint adopts such a
+    // run back into this registry, and the surfaces that must not become a
+    // second writer (resume, the wake sweeper) consult the log directly.
     client_runs: Mutex<HashMap<RunId, ClientRunLease>>,
     // How long a client-driven run's lease stays "current" without the driver
     // presenting its token again. Past this, the run reports no attached driver

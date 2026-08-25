@@ -65,6 +65,11 @@ use crate::id::{RunId, SequenceNumber};
 /// written before the field meant, and it omits the key entirely, so those
 /// logs replay byte for byte and the version stays 1.
 ///
+/// The optional `driven_by` on [`Event::RunStarted`] is the same contract
+/// again. Absent means salvor drives the run, which is what every run recorded
+/// before the field existed was, and the key is omitted entirely, so those
+/// logs serialize byte for byte as they did before and the version stays 1.
+///
 /// The optional `performed_by` on [`Event::ToolCallRequested`] is the fifth,
 /// and the same field on [`Event::ModelCallRequested`] is the sixth. Absent
 /// means salvor performed the call itself, which is what every call recorded
@@ -274,6 +279,34 @@ pub enum Event {
         /// disk is trusted and replayed as recorded, whatever it holds.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         labels: Option<BTreeMap<String, String>>,
+        /// Who drives this run's loop, recorded once at the head of the log
+        /// when the answer is not salvor itself.
+        ///
+        /// Absent, the overwhelmingly common case, means salvor drives the
+        /// run in its own process: a task started through `POST /v1/runs`,
+        /// the CLI, or the runtime used directly. A recorded
+        /// [`Performer::Client`] means the client owns the loop and salvor
+        /// only guards and stores the log, which is what a run opened
+        /// through `POST /v1/client-runs` is.
+        ///
+        /// It is here because it is the one durable fact that says so. The
+        /// server's lease registry for client-driven runs lives in memory
+        /// and dies with the process, so without this field a restarted
+        /// server cannot tell a client-driven run from a server-driven one
+        /// and every surface that must treat them differently (re-opening a
+        /// run, refusing to resume one, leaving one's timer to its client)
+        /// gets the answer wrong. The log outlives the process; the registry
+        /// does not.
+        ///
+        /// The server stamps it, never the client: the client-run append
+        /// endpoint writes it onto the `RunStarted` it accepts, exactly as
+        /// it overwrites `recorded_at`, so a caller cannot claim a run is
+        /// client-driven on some other surface. Additive under the same
+        /// `#[serde(default, skip_serializing_if = "Option::is_none")]`
+        /// contract as `labels`: a server-driven run omits the key entirely
+        /// and serializes byte for byte as it did before this field existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        driven_by: Option<Performer>,
     },
     /// A model call was requested. Records the correlating sequence number and
     /// the hash of the request, so a later completion can be matched to it.
@@ -890,6 +923,7 @@ mod tests {
             agent_def_hash: "sha256:abc".into(),
             input: serde_json::json!({"topic": "otters"}),
             labels: None,
+            driven_by: None,
         });
         assert_round_trips(Event::RunStarted {
             agent_def_hash: "sha256:abc".into(),
@@ -898,6 +932,7 @@ mod tests {
                 ("build".to_owned(), "42".to_owned()),
                 ("env".to_owned(), "prod".to_owned()),
             ])),
+            driven_by: None,
         });
         assert_round_trips(Event::ModelCallRequested {
             seq: SequenceNumber::new(1),
@@ -1323,6 +1358,7 @@ mod tests {
             agent_def_hash: "sha256:abc".into(),
             input: serde_json::json!({"topic": "otters"}),
             labels: None,
+            driven_by: None,
         });
         let json = serde_json::to_string(&env).expect("serialize");
         assert_eq!(
@@ -1347,6 +1383,7 @@ mod tests {
                 ("env".to_owned(), "prod".to_owned()),
                 ("build".to_owned(), "42".to_owned()),
             ])),
+            driven_by: None,
         });
         let json = serde_json::to_string(&env).expect("serialize");
         assert_eq!(

@@ -463,6 +463,7 @@ fn dangling_write_intent_needs_reconciliation() {
                 agent_def_hash: AGENT_HASH.into(),
                 input: json!({}),
                 labels: None,
+                driven_by: None,
             },
         ),
         EventEnvelope::new(
@@ -513,6 +514,7 @@ fn dangling_idempotent_intent_retries_under_recorded_key() {
                 agent_def_hash: AGENT_HASH.into(),
                 input: json!({}),
                 labels: None,
+                driven_by: None,
             },
         ),
         EventEnvelope::new(
@@ -571,6 +573,7 @@ fn recorded_request_body_does_not_change_replay() {
                 agent_def_hash: AGENT_HASH.into(),
                 input: json!({"topic": "otters"}),
                 labels: None,
+                driven_by: None,
             },
             Event::ModelCallRequested {
                 seq: SequenceNumber::new(1),
@@ -730,6 +733,7 @@ fn head_only_log() -> Vec<EventEnvelope> {
             agent_def_hash: AGENT_HASH.into(),
             input: json!({"topic": "otters"}),
             labels: None,
+            driven_by: None,
         },
     )]
 }
@@ -890,6 +894,7 @@ fn dangling_intent_reports_the_gap_without_advancing() {
             agent_def_hash: AGENT_HASH.into(),
             input: json!({}),
             labels: None,
+            driven_by: None,
         },
     );
 
@@ -948,6 +953,7 @@ fn a_proven_unexecuted_intent_records_a_deduplicated_completion() {
                 agent_def_hash: AGENT_HASH.into(),
                 input: json!({}),
                 labels: None,
+                driven_by: None,
             },
         ),
         EventEnvelope::new(

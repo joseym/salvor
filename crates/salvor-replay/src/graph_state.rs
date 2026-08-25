@@ -378,6 +378,7 @@ mod tests {
                 agent_def_hash: "sha256:agent".into(),
                 input: serde_json::json!({}),
                 labels: None,
+                driven_by: None,
             },
             Event::RunCompleted {
                 output: serde_json::json!({"done": true}),
