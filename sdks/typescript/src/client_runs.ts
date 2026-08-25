@@ -15,7 +15,12 @@
  * `SleepStarted`, `SleepCompleted`, `BudgetExceeded`, `RunCompleted`,
  * `RunFailed`). The side-effecting steps, which the server must perform because
  * it holds the key or the binary, have their own methods:
- * {@link ClientRunDriver.modelStep} and {@link ClientRunDriver.toolStep}.
+ * {@link ClientRunDriver.modelStep} and {@link ClientRunDriver.toolStep}. A
+ * call the CLIENT performs in its own process, with its own secrets, has its
+ * own pair as well: {@link ClientRunDriver.clientToolIntent} with
+ * {@link ClientRunDriver.clientToolCompletion}, and
+ * {@link ClientRunDriver.clientModelIntent} with
+ * {@link ClientRunDriver.clientModelCompletion}.
  *
  * A client-driven run may park on a durable timer, and the client is what wakes
  * it. Nothing on the server waits for the deadline: the wake sweeper leaves
@@ -128,6 +133,40 @@ function parseClientToolIntentResult(
     idempotencyKey: obj.idempotency_key as string,
     effect: obj.effect as string,
     settled: obj.settled as boolean,
+    raw: obj,
+  };
+}
+
+/**
+ * The receipt from opening a client-performed model call: the position, and
+ * whether this position's completion is already recorded.
+ *
+ * `settled` is `false` on a fresh intent and on a re-post of one still
+ * awaiting its answer: the call has to be made. `settled` is `true` when the
+ * completion is already in the log, and then `response` and `usage` carry it,
+ * which is the whole reason to record the call at all. A middleware calls the
+ * provider only on the `false` branch and returns the recorded answer on the
+ * `true` one, so a resumed run never pays twice for the same request.
+ */
+export interface ClientModelIntentResult {
+  seq: number;
+  settled: boolean;
+  /** The recorded response, present only when `settled`. */
+  response?: unknown;
+  /** The recorded token usage, present only when `settled`. */
+  usage?: Usage;
+  raw: Record<string, unknown>;
+}
+
+function parseClientModelIntentResult(
+  obj: Record<string, unknown>,
+): ClientModelIntentResult {
+  const settled = obj.settled as boolean;
+  return {
+    seq: obj.seq as number,
+    settled,
+    response: settled ? obj.response : undefined,
+    usage: settled ? parseUsage(obj.usage) : undefined,
     raw: obj,
   };
 }
@@ -440,6 +479,88 @@ export class ClientRunDriver {
       "POST",
       `/v1/client-runs/${this.runId}/client-tool-completion`,
       { seq, output },
+    );
+  }
+
+  /**
+   * Open a model call the CLIENT performs, in its own process, with its own
+   * key and its own model configuration. `seq` is the log position the
+   * client's cursor reserved for the intent; `requestHash` is the client's own
+   * canonical hash of the request it is about to send; `requestBody` is the
+   * full request, recorded on the intent only when the run was opened with
+   * `recordPrompts: true` and dropped otherwise.
+   *
+   * This is the counterpart of {@link modelStep} for a call salvor does not
+   * make. There the server holds the key, performs the call, and recomputes
+   * the hash from the request it was handed, so the hash cannot be lied about.
+   * Here it can: the request never reaches the server, so the hash is the
+   * client's claim over its own request, the way a client-performed tool
+   * result is the client's claim about its own call. What the trust buys is
+   * the point of the method: a resume replays the recorded answer instead of
+   * paying the provider for it again. The claim is also self-punishing rather
+   * than dangerous to anyone else, because the hash is a key into this run's
+   * own log: a client that hashes inconsistently diverges against its own
+   * history and nobody else's.
+   *
+   * The returned `settled` is `true` when the intent at `seq` already has its
+   * completion recorded, and the recorded `response` and `usage` come back
+   * with it. That is what a middleware short-circuits on: call the provider
+   * only when `settled` is `false`, and otherwise return the recorded answer
+   * without a second request.
+   *
+   * A re-post at a recorded position with the same hash is a replay that
+   * writes nothing. A different hash there, a non-model event, or an intent
+   * the SERVER performed throws {@link DivergenceError}, as does a `seq` the
+   * log is not ready for.
+   */
+  async clientModelIntent(
+    seq: number,
+    requestHash: string,
+    requestBody?: unknown,
+  ): Promise<ClientModelIntentResult> {
+    const body: Record<string, unknown> = { seq, request_hash: requestHash };
+    if (requestBody !== undefined) body.request_body = requestBody;
+    const obj = await this.send(
+      "POST",
+      `/v1/client-runs/${this.runId}/client-model-intent`,
+      body,
+    );
+    return parseClientModelIntentResult(obj);
+  }
+
+  /**
+   * Report what a client-performed model call returned. `seq` must name the
+   * pending intent at the end of the log; `response` is recorded verbatim and
+   * `usage` is the token count the run's budgets are held to, so it is
+   * required rather than optional: a completion that quietly reported none
+   * would under-count every budget the run runs under.
+   *
+   * Refused, recording nothing, as a {@link DivergenceError} when the log does
+   * not end at a model intent or ends at one for a different `seq`, and as a
+   * `SalvorApiError` with code `client_completion_refused` when the pending
+   * intent was performed by the SERVER: salvor holds the real response for
+   * that call, so a client may not overwrite it with a claim.
+   *
+   * Once recorded, the completion is byte-identical to a server-performed
+   * one, so the run folds the same either way: pending while the intent is
+   * open, closed by this call, tokens counted.
+   */
+  async clientModelCompletion(
+    seq: number,
+    response: unknown,
+    usage: Usage,
+  ): Promise<void> {
+    await this.send(
+      "POST",
+      `/v1/client-runs/${this.runId}/client-model-completion`,
+      {
+        seq,
+        response,
+        usage: {
+          input_tokens: usage.inputTokens,
+          output_tokens: usage.outputTokens,
+        },
+      },
     );
   }
 

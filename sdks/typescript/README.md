@@ -178,7 +178,14 @@ const { idempotencyKey } = await run.clientToolIntent(4, "charge_card", { amount
 const receipt = await chargeCard(idempotencyKey, { amount_cents: 500 }); // your code, your key
 await run.clientToolCompletion(4, receipt);
 
-await run.append([run.envelope(5, "RunCompleted", { output: answer })]);
+// A model call YOU made, with your own key and model configuration: salvor
+// records it so a resume replays the answer instead of paying for it again.
+const opened = await run.clientModelIntent(5, hashOf(request));
+if (opened.settled) return opened.response;                  // already recorded, pay nothing
+const answered = await callTheProvider(request);             // your code, your key
+await run.clientModelCompletion(5, answered, { inputTokens: 10, outputTokens: 5 });
+
+await run.append([run.envelope(7, "RunCompleted", { output: answer })]);
 ```
 
 The driver can also park the run on a durable timer: `sleepUntil(seq, wakeAt)`
@@ -195,7 +202,8 @@ either learns the run is still asleep (nothing appended) or gets the
 The driver's full surface: `openClientRun` (also re-opens, i.e. resumes, an
 existing run), `log(fromSeq)`, `append(events)`, `modelStep`, `modelStepStream`
 (an `AsyncIterable` of ticker deltas with a `completion` after), `toolStep`,
-`clientToolIntent`, `clientToolCompletion`, `sleepUntil`, `sleepFor`,
+`clientToolIntent`, `clientToolCompletion`, `clientModelIntent`,
+`clientModelCompletion`, `sleepUntil`, `sleepFor`,
 `awaitWake`, and `resolve(output)`. Re-opening a
 run returns its recorded log on `run.logEnvelopes` and mints a fresh drive
 token (the single-writer lease every append presents), so a refreshed client
@@ -217,6 +225,20 @@ or carries no output schema to check it against; settle those by hand with
 `resolve` once you have verified the call externally. A reported output that
 fails the declared schema is refused too, and there the fix is the output
 itself.
+
+`clientModelIntent` and `clientModelCompletion` are the same idea for a model
+call salvor never makes: a middleware calls the provider with its own key and
+its own model configuration, and salvor records the call so a resume replays
+the recorded answer instead of paying for it a second time. Open the intent
+with your own canonical hash of the request; `settled` comes back `true` when
+that position's completion is already recorded, carrying the recorded
+`response` and `usage`, which is what lets a resumed run short-circuit without
+a second request. Salvor never sees the request, so the hash and the reported
+answer are your claims, not facts it witnessed, and the recorded
+`ModelCallRequested` says so with `performed_by: "client"`. The claim is a key
+into your own log, so an inconsistently hashed request diverges against your
+own history and nobody else's: a different hash at a recorded position throws
+`DivergenceError`, as does a completion with nothing outstanding.
 
 The driver uses only `fetch` and the SDK's own SSE parser, with no Node-only
 API, so it runs unchanged in a browser tab: the streaming model step is a POST

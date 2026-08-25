@@ -490,6 +490,58 @@ test("live model step records, returns, and never re-pays against salvor serve",
 });
 
 
+test("a client-performed model call records, replays, and diverges on a different hash", async (t) => {
+  if (!base) return t.skip("salvor serve not available");
+  // Nothing here calls a provider. That is the point: the middleware holds the
+  // key and the model configuration, calls the provider itself, and hands
+  // salvor the hash and the answer so a later drive replays the answer.
+  const run = await openClientRun(base);
+  await run.append([run.envelope(0, "RunStarted", { agent_def_hash: "sha256:agent", input: {} })]);
+
+  const before = providerHits();
+  const hash = "sha256:client-request-1";
+  const opened = await run.clientModelIntent(1, hash);
+  strictEqual(opened.settled, false, "a fresh intent has to be performed");
+  strictEqual(opened.response, undefined);
+
+  // The client calls the provider here, in its own process.
+  const answer = { content: [{ type: "text", text: "the plan" }] };
+  await run.clientModelCompletion(1, answer, { inputTokens: 10, outputTokens: 5 });
+
+  const log = await run.log();
+  deepStrictEqual(
+    log.map((e) => e.kind),
+    ["RunStarted", "ModelCallRequested", "ModelCallCompleted"],
+  );
+  strictEqual(
+    (log[1].payload as any).performed_by,
+    "client",
+    "the log says the client performed it",
+  );
+
+  // The replay: the same position and hash on a later drive answers with the
+  // recorded completion, so the middleware short-circuits and pays nothing.
+  const replayed = await run.clientModelIntent(1, hash);
+  strictEqual(replayed.settled, true);
+  deepStrictEqual(replayed.response, answer, "the recorded answer, verbatim");
+  strictEqual(replayed.usage?.inputTokens, 10);
+  strictEqual(replayed.usage?.outputTokens, 5);
+  strictEqual((await run.log()).length, 3, "the replay wrote nothing");
+  strictEqual(providerHits(), before, "no provider was called at any point");
+
+  // A different hash at that position is the client disagreeing with its own log.
+  await rejects(
+    () => run.clientModelIntent(1, "sha256:a-different-request"),
+    (error: unknown) => error instanceof DivergenceError,
+  );
+
+  // And a completion with nothing outstanding is refused.
+  await rejects(
+    () => run.clientModelCompletion(2, answer, { inputTokens: 1, outputTokens: 1 }),
+    (error: unknown) => error instanceof DivergenceError,
+  );
+});
+
 test("a sleep parks the run, refuses to wake early, and continues after the deadline", async (t) => {
   if (!base) return t.skip("salvor serve not available");
   // Three drives over one run: park, come back too soon, come back late. Each

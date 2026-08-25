@@ -27,6 +27,7 @@ export type {
   ModelStepStream,
   ModelStepDelta,
   ClientToolIntentResult,
+  ClientModelIntentResult,
   Waking,
 } from "./client_runs.js";
 export {
