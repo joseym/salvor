@@ -39,7 +39,12 @@ import type { ChatResult } from "@langchain/core/outputs";
 import { z } from "zod";
 
 import { SalvorClient } from "../dist/index.js";
-import { salvorMiddleware, runIdForThread } from "../dist/langchain/index.js";
+import {
+  currentToolCall,
+  finishThread,
+  runIdForThread,
+  salvorMiddleware,
+} from "../dist/langchain/index.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..", "..", "..");
@@ -110,6 +115,8 @@ class ScriptedModel extends BaseChatModel {
 const ran = { lookup: 0, stamp: 0, concurrent: 0, peakConcurrent: 0 };
 /** Set to make the next `stamp_ledger` body throw, standing in for a crash. */
 let stampCrashes = false;
+/** What `currentToolCall()` reported the last time `lookup_order`'s body ran. */
+let capturedCall: ReturnType<typeof currentToolCall> | undefined;
 
 function enter(): void {
   ran.concurrent += 1;
@@ -120,6 +127,7 @@ const lookupOrder = tool(
   async ({ order_id }: { order_id: string }) => {
     enter();
     try {
+      capturedCall = currentToolCall();
       await new Promise((r) => setTimeout(r, 15));
       ran.lookup += 1;
       return { order_id, status: "paid", total_cents: 4200 };
@@ -216,6 +224,7 @@ function reset(): void {
   ran.concurrent = 0;
   ran.peakConcurrent = 0;
   stampCrashes = false;
+  capturedCall = undefined;
 }
 
 async function kindsOf(threadId: string): Promise<string[]> {
@@ -535,6 +544,142 @@ test("an invoke that asks for something the log does not hold appends instead of
     "ModelCallRequested",
     "ModelCallCompleted",
   ]);
+});
+
+// -- (g) finishThread closes a thread's run -----------------------------------
+
+test("finishThread appends RunCompleted, GET /v1/runs/{id} shows completed, and a further invoke is refused", async (t) => {
+  if (!base) return t.skip("salvor serve not available");
+  reset();
+  const threadId = "thread-finish";
+
+  const first = agentFor(ONE_TOOL_SCRIPT);
+  const answer = await first.agent.invoke(
+    { messages: [{ role: "user", content: "how is ORD-7781?" }] },
+    { configurable: { thread_id: threadId } },
+  );
+  const finalText = textOf(answer.messages.at(-1)!);
+
+  const runId = await runIdForThread(threadId);
+  const finished = await finishThread(client!, threadId);
+  strictEqual(finished.runId, runId);
+
+  deepStrictEqual((await kindsOf(threadId)).slice(-1), ["RunCompleted"]);
+
+  const state = await client!.getRun(runId);
+  strictEqual(state.status.state, "completed");
+  strictEqual(state.status.output, finalText, "the default output is the last AI message");
+
+  // A further invoke on the finished thread is refused, clearly, rather than
+  // failing somewhere inside the append.
+  reset();
+  const second = agentFor(ONE_TOOL_SCRIPT);
+  await rejects(
+    () =>
+      second.agent.invoke(
+        { messages: [{ role: "user", content: "how is ORD-7781?" }] },
+        { configurable: { thread_id: threadId } },
+      ),
+    (error: unknown) => {
+      const text = String((error as Error).message ?? error);
+      match(text, /thread-finish/, "the error names the thread");
+      match(text, /finish/i, "and says it is finished");
+      return true;
+    },
+  );
+});
+
+// -- (h) currentToolCall() inside a tool body ---------------------------------
+
+test("a tool body reads currentToolCall(), and the key matches the recorded intent on both the live and the replayed invoke", async (t) => {
+  if (!base) return t.skip("salvor serve not available");
+  reset();
+  const threadId = "thread-current-tool-call";
+
+  const first = agentFor(ONE_TOOL_SCRIPT);
+  await first.agent.invoke(
+    { messages: [{ role: "user", content: "how is ORD-7781?" }] },
+    { configurable: { thread_id: threadId } },
+  );
+  ok(capturedCall, "the tool body read a current call");
+  strictEqual(capturedCall!.tool, "lookup_order");
+  strictEqual(capturedCall!.runId, await runIdForThread(threadId));
+
+  const run = await client!.openClientRun({ runId: await runIdForThread(threadId) });
+  const intent = run.logEnvelopes.find((event) => event.kind === "ToolCallRequested")!;
+  strictEqual(capturedCall!.seq, intent.seq, "the seq matches the recorded intent");
+  strictEqual(
+    capturedCall!.key,
+    intent.payload.idempotency_key,
+    "the key is the one salvor recorded on the intent",
+  );
+
+  // A replayed invoke never runs the tool body, so nothing new is captured,
+  // but the log's own recorded key is unchanged.
+  capturedCall = undefined;
+  reset();
+  const second = agentFor(ONE_TOOL_SCRIPT);
+  await second.agent.invoke(
+    { messages: [{ role: "user", content: "how is ORD-7781?" }] },
+    { configurable: { thread_id: threadId } },
+  );
+  strictEqual(capturedCall, undefined, "the replay never ran the tool body");
+  strictEqual(ran.lookup, 0);
+
+  const replayedRun = await client!.openClientRun({ runId: await runIdForThread(threadId) });
+  const replayedIntent = replayedRun.logEnvelopes.find(
+    (event) => event.kind === "ToolCallRequested",
+  )!;
+  strictEqual(
+    replayedIntent.payload.idempotency_key,
+    intent.payload.idempotency_key,
+    "the recorded key is identical on replay",
+  );
+});
+
+// -- (i) finishThread refuses a thread with an open intent --------------------
+
+test("finishThread on a thread whose log ends at an open intent is refused, naming the run", async (t) => {
+  if (!base) return t.skip("salvor serve not available");
+  reset();
+  const threadId = "thread-finish-open-intent";
+  const script: Turn[] = [
+    {
+      content: "stamping the ledger",
+      toolCalls: [
+        { name: "stamp_ledger", args: { order_id: "ORD-4242", note: "seen" }, id: "call-stamp" },
+      ],
+    },
+    { content: "Stamped ORD-4242." },
+  ];
+
+  stampCrashes = true;
+  const crashed = agentFor(script);
+  await rejects(() =>
+    crashed.agent.invoke(
+      { messages: [{ role: "user", content: "stamp ORD-4242" }] },
+      { configurable: { thread_id: threadId } },
+    ),
+  );
+  stampCrashes = false;
+
+  const runId = await runIdForThread(threadId);
+  await rejects(
+    () => finishThread(client!, threadId),
+    (error: unknown) => {
+      const text = String((error as Error).message ?? error);
+      match(text, new RegExp(runId), "the error names the run");
+      match(text, /never completed/, "and says the call was never completed");
+      return true;
+    },
+  );
+
+  // Nothing was appended: the log still ends at the same open intent.
+  deepStrictEqual(
+    (await kindsOf(threadId)).slice(-1),
+    ["ToolCallRequested"],
+    "finishThread wrote nothing",
+  );
 });
 
 // -- the thread-id rule ------------------------------------------------------

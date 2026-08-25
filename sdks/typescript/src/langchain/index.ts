@@ -56,13 +56,18 @@ import type { SalvorClient } from "../client.js";
 import type { ClientRunDriver } from "../client_runs.js";
 import { SalvorApiError } from "../errors.js";
 import type { Usage } from "../types.js";
+import { runWithToolCall } from "./current_call.js";
 import { SalvorMiddlewareError } from "./errors.js";
 import { hashValue, runIdForThread } from "./hash.js";
 import { ReplayChatModel } from "./replay_model.js";
 import { canonicalRequest, requestHash } from "./request.js";
 import { RunTape } from "./tape.js";
 
+export { currentToolCall } from "./current_call.js";
+export type { CurrentToolCall } from "./current_call.js";
 export { SalvorMiddlewareError } from "./errors.js";
+export { finishThread } from "./finish.js";
+export type { FinishedThread } from "./finish.js";
 export { canonicalJson, hashValue, isUuid, runIdForThread } from "./hash.js";
 export { ReplayChatModel } from "./replay_model.js";
 export { canonicalRequest, requestHash } from "./request.js";
@@ -137,6 +142,14 @@ export function salvorMiddleware(options: SalvorMiddlewareOptions) {
       runId,
       recordPrompts,
     });
+    const tail = driver.logEnvelopes.at(-1);
+    if (tail?.kind === "RunCompleted") {
+      throw new SalvorMiddlewareError(
+        `thread \`${threadId}\` (run ${runId}) is finished: \`finishThread\` recorded ` +
+          "its `RunCompleted`, and a completed run cannot be appended to. Give the " +
+          "next task a new thread id.",
+      );
+    }
     return RunTape.open(
       driver,
       {
@@ -241,19 +254,21 @@ export function salvorMiddleware(options: SalvorMiddlewareOptions) {
       let live: ToolMessage | undefined;
 
       const outcome = await tape
-        .toolCall(name, args, async () => {
-          const result = await handler(request);
-          if (!ToolMessage.isInstance(result)) {
-            throw new SalvorMiddlewareError(
-              `the tool \`${name}\` returned a LangGraph Command rather than a ` +
-                "tool message. A Command is graph control flow, not a recorded " +
-                "result, so this middleware cannot put it in the log. Return a " +
-                "value or a ToolMessage from tools you want recorded.",
-            );
-          }
-          live = result;
-          return toolOutput(result);
-        })
+        .toolCall(name, args, async ({ seq, idempotencyKey }) =>
+          runWithToolCall({ key: idempotencyKey, seq, runId: tape.runId, tool: name }, async () => {
+            const result = await handler(request);
+            if (!ToolMessage.isInstance(result)) {
+              throw new SalvorMiddlewareError(
+                `the tool \`${name}\` returned a LangGraph Command rather than a ` +
+                  "tool message. A Command is graph control flow, not a recorded " +
+                  "result, so this middleware cannot put it in the log. Return a " +
+                  "value or a ToolMessage from tools you want recorded.",
+              );
+            }
+            live = result;
+            return toolOutput(result);
+          }),
+        )
         .catch((error: unknown) => {
           throw undeclaredToolError(error, name);
         });

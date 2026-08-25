@@ -149,11 +149,16 @@ export class RunTape {
    * middleware never chooses either, which is the whole point of the
    * client-tool surface: the party that performs a write does not get to pick
    * the key that would let a duplicate through.
+   *
+   * `perform` is handed that same key (with the seq it landed at) before it
+   * runs, not after, because the tool body it eventually calls is what needs
+   * it: see `currentToolCall()` in `current_call.ts`, which is what makes the
+   * key reachable there without changing the tool's own signature.
    */
   toolCall(
     tool: string,
     input: unknown,
-    perform: () => Promise<unknown>,
+    perform: (opened: { seq: number; idempotencyKey: string }) => Promise<unknown>,
   ): Promise<ToolOutcome> {
     return this.turnstile(async () => {
       const wanted = canonicalJson(input);
@@ -174,7 +179,7 @@ export class RunTape {
           idempotencyKey: opened.idempotencyKey,
         };
       }
-      const output = await perform();
+      const output = await perform({ seq, idempotencyKey: opened.idempotencyKey });
       await this.driver.clientToolCompletion(seq, output);
       return {
         seq,

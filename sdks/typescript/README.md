@@ -318,6 +318,17 @@ turnstile inside the middleware admits one open intent per run at a time, in the
 order the model listed the calls, so both are recorded and both replay at the
 same positions on a later invoke.
 
+### Finishing a thread
+
+A thread's run stays open by default: replay only checks whether a position is
+already recorded, never whether the whole thread is done. Call
+`finishThread(client, threadId)` once a thread genuinely has no more turns
+coming; it records `RunCompleted` with the last AI message's content, or with
+whatever value you pass as a third argument, and closes the run for good.
+After that, invoking the same thread again is refused, naming the thread. It
+refuses the same way, naming the run, when the log already ends at an open
+intent: settle that call first, then finish the thread.
+
 ### The thread id is the run id
 
 A LangGraph `thread_id` that is already a UUID is used as the salvor run id
@@ -396,6 +407,16 @@ a graph gets model recording only and its tool calls stay outside the ledger.
 Changing a tool's schema or a model's settings mid-flight changes the request
 hash, which is the same fork as above and is meant to be: the question is not
 the one the recorded answer was an answer to.
+
+A tool body can read its own recorded idempotency key with `currentToolCall()`,
+returning `{ key, seq, runId, tool }` for the call `wrapToolCall` is recording
+right now. `key` is the value salvor already derived for `(run, seq, tool)`,
+the same one sitting on the intent; hand it straight to the tool's own
+provider as that provider's idempotency token, so a retried write and the
+first attempt present the same one. It works only from inside a tool body a
+live `wrapToolCall` is running, and only in Node; called from anywhere else it
+returns `undefined`, and the middleware keeps recording and replaying exactly
+as it does without it.
 
 ## Graphs
 
