@@ -712,7 +712,7 @@ saying which of the three things happened to it: `{"replayed": True, "seq":
 was a real call on a path the log still agrees with, and `{"forked": {"at":
 ..., "thread": ..., "run": ...}}` on every message from the point the invoke
 actually forked onward. A fork also calls `on_fork` once per invoke, naming
-the thread, the run and the seq it forked at; by default it logs a warning,
+the thread, the run and the seq it forked at. That seq is the first recorded position that no longer matches, so when several things changed between invokes it points at the earliest of them, not necessarily the one you meant. By default it logs a warning,
 and you can pass your own callback to route that wherever your app already
 logs.
 

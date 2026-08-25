@@ -547,7 +547,7 @@ when the answer came from the log, `{ live: true, seq }` when it was a real
 call on a path the log still agrees with, and `{ forked: { at, thread, run } }`
 on every message from the point the invoke actually forked onward. A fork also
 calls `onFork` once per invoke, naming the thread, the run and the seq it
-forked at; the default is `console.warn`, and it is the hook to point at your
+forked at. That seq is the first recorded position that no longer matches, so when several things changed between invokes it points at the earliest of them, not necessarily the one you meant. The default is `console.warn`, and it is the hook to point at your
 own logging instead.
 
 The one case it refuses is a log whose last event is a call that never
