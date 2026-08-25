@@ -1146,6 +1146,7 @@ pub async fn resolve(store_path: &Path, args: ResolveArgs) -> Result<u8> {
     // passed: an operator can resolve a graph run without supplying it, and
     // the printed command still needs to hint at `--graph <FILE>` then.
     let graph_run = is_graph_run(&log);
+    let client_driven = log_is_client_driven(&log);
 
     let runtime = Runtime::new(store);
     match runtime.resolve(run_id, output).await {
@@ -1157,6 +1158,7 @@ pub async fn resolve(store_path: &Path, args: ResolveArgs) -> Result<u8> {
                     &args.agents,
                     args.graph.as_deref(),
                     graph_run,
+                    client_driven,
                     Some(store_path),
                     render::DEFAULT_REPORT_WIDTH
                 )
