@@ -55,9 +55,9 @@ import {
 import type { SalvorClient } from "../client.js";
 import type { ClientRunDriver } from "../client_runs.js";
 import { SalvorApiError } from "../errors.js";
-import type { Usage } from "../types.js";
+import type { ClientToolDecl, Usage } from "../types.js";
 import { runWithToolCall } from "./current_call.js";
-import { SalvorMiddlewareError } from "./errors.js";
+import { SalvorMiddlewareError, ToolNeedsResolution } from "./errors.js";
 import { canonicalJson, hashValue, runIdForThread } from "./hash.js";
 import { ReplayChatModel } from "./replay_model.js";
 import { canonicalRequest, requestHash } from "./request.js";
@@ -65,7 +65,8 @@ import { RunTape } from "./tape.js";
 
 export { currentToolCall } from "./current_call.js";
 export type { CurrentToolCall } from "./current_call.js";
-export { SalvorMiddlewareError } from "./errors.js";
+export { SalvorMiddlewareError, ToolNeedsResolution } from "./errors.js";
+export type { ToolNeedsResolutionDetails } from "./errors.js";
 export { finishThread } from "./finish.js";
 export type { FinishedThread } from "./finish.js";
 export { canonicalJson, hashValue, isUuid, runIdForThread } from "./hash.js";
@@ -181,6 +182,48 @@ export function salvorMiddleware(options: SalvorMiddlewareOptions) {
   const tapes = new Map<string, RunTape>();
   /** In-flight opens, so a turn's parallel tool calls share one open. */
   const opening = new Map<string, Promise<RunTape>>();
+
+  /**
+   * The client-tool declarations this server holds, by name, fetched once and
+   * shared by every thread this middleware instance drives. `trust_completion`
+   * is the operator's call, not each tool call's, so one listing serves the
+   * whole instance rather than one per run.
+   */
+  let decls: Map<string, ClientToolDecl> | undefined;
+  /** An in-flight refresh, so two tools missing from the cache at once share one fetch. */
+  let refreshingDecls: Promise<Map<string, ClientToolDecl>> | undefined;
+
+  /** Fetch the listing again and replace the cache with it. */
+  function refreshDecls(): Promise<Map<string, ClientToolDecl>> {
+    if (!refreshingDecls) {
+      refreshingDecls = client
+        .listClientTools()
+        .then((list) => {
+          decls = new Map(list.map((decl) => [decl.name, decl]));
+          return decls;
+        })
+        .finally(() => {
+          refreshingDecls = undefined;
+        });
+    }
+    return refreshingDecls;
+  }
+
+  /**
+   * Whether `tool`'s declaration lets a client close its own call.
+   *
+   * The cache is refreshed once, lazily, the first time a name it does not
+   * hold is asked for: a tool declared after this middleware started, or the
+   * very first call this instance ever makes. A name still missing after that
+   * refresh is left to the server's own `unknown_tool` refusal (see
+   * `undeclaredToolError`) rather than guessed at here; `false` is returned
+   * in the meantime because a call this middleware cannot vouch for is safer
+   * left for a person than reported on trust it was never given.
+   */
+  async function trustCompletionFor(tool: string): Promise<boolean> {
+    if (!decls?.has(tool)) await refreshDecls();
+    return decls?.get(tool)?.trustCompletion ?? false;
+  }
 
   /** The thread this hook is running for, and the run id it maps to. */
   async function identify(
@@ -325,6 +368,13 @@ export function salvorMiddleware(options: SalvorMiddlewareOptions) {
      * order, so several tools asked for at once are recorded one after
      * another in the order the model listed them, and none of them is
      * refused.
+     *
+     * `trustCompletionFor` says whether THIS tool's own declaration lets a
+     * client close its call by reporting on it. When it does not, the tool
+     * still runs (its effect already happened; refusing to run it fixes
+     * nothing), but `tape.toolCall` throws {@link ToolNeedsResolution}
+     * instead of recording a completion salvor would refuse anyway, and the
+     * intent is left for a person to settle.
      */
     wrapToolCall: async (request: any, handler: any) => {
       const tape = await tapeFor(request.runtime);
@@ -332,6 +382,7 @@ export function salvorMiddleware(options: SalvorMiddlewareOptions) {
       const args = request.toolCall.args ?? {};
       const callId: string = request.toolCall.id ?? "";
       const position = tape.positionOf(callId, name);
+      const trustCompletion = await trustCompletionFor(name);
       let live: ToolMessage | undefined;
 
       const outcome = await tape
@@ -356,6 +407,7 @@ export function salvorMiddleware(options: SalvorMiddlewareOptions) {
               },
             ),
           position,
+          trustCompletion,
         )
         .catch((error: unknown) => {
           throw undeclaredToolError(error, name);

@@ -6,3 +6,9 @@ key: it sends a tool's name and the arguments the model produced, and everything
 else about the call comes from the declaration the server was started with. A
 tool with no declaration here is refused by name, which is what
 `test/langchain.test.ts` proves in its last case.
+
+`wire-payout.toml` declares `trust_completion = false`: the one tool here whose
+result the middleware may not report on the tool's own say-so. Its body still
+runs, but the middleware stops with `ToolNeedsResolution` instead of posting a
+completion salvor would refuse, and the test resolves it by hand before
+re-invoking.

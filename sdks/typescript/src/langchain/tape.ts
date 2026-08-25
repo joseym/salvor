@@ -34,6 +34,21 @@
  * one permit to say so, so the middleware can mark every message it returns
  * afterwards and warn once instead of forking in silence.
  *
+ * ## A tool that will not self-complete
+ *
+ * `trust_completion = false` on a tool's declaration means the operator will
+ * not let a client close that call by reporting on it: salvor refuses the
+ * completion outright, whatever it says. `toolCall` still opens the intent
+ * and still runs the tool body under it, because the body's effect already
+ * happened by the time anyone could decide otherwise; what it does not do is
+ * post the result. It throws {@link ToolNeedsResolution} instead, and the
+ * intent is left open, the same shape a crash between intent and completion
+ * leaves it in. A re-invoke before a person resolves it meets that same open
+ * intent and is refused by the "never completed" check above; a re-invoke
+ * after resolution meets a completion at the intent's seq, recorded by the
+ * resolve call rather than by this tape, and replays it exactly as it would
+ * replay one of its own.
+ *
  * ## The lease
  *
  * Every write this tape makes presents the drive token the run was opened
@@ -51,7 +66,7 @@
 import type { ClientRunDriver } from "../client_runs.js";
 import { SalvorApiError } from "../errors.js";
 import type { SalvorEvent, Usage } from "../types.js";
-import { SalvorMiddlewareError } from "./errors.js";
+import { SalvorMiddlewareError, ToolNeedsResolution } from "./errors.js";
 import { canonicalJson } from "./hash.js";
 
 /** What a model step turned out to be. */
@@ -270,12 +285,32 @@ export class RunTape {
    * `position` says where this call sits in the turn that asked for it (see
    * `positionOf`), and is what makes a parallel turn replayable rather than
    * merely serialized: see `admitRank`.
+   *
+   * `trustCompletion` is the operator's own word for this tool (the
+   * declaration's `trust_completion`), not something this tape decides. When
+   * it is `false` the first invoke to reach this call still runs the body,
+   * under the same intent and the same key as always, but never reports the
+   * result: salvor refuses a client completion for such a tool regardless, so
+   * reporting it would only trade a clear stop for a bare `403`. Instead this
+   * throws {@link ToolNeedsResolution} carrying the unrecorded output, and the
+   * intent is left open exactly as a crash between intent and completion
+   * would leave it, for a person to settle with {@link ClientRunDriver.resolve}
+   * (or the CLI, or the Inspector) before the thread is invoked again.
+   *
+   * A LATER invoke that meets that same open intent, still unresolved, does
+   * not run the body a second time: for an untrusted write, retrying the
+   * call itself is exactly the thing `trust_completion = false` exists to
+   * rule out. It is refused instead, by the same "never completed" refusal a
+   * mismatched replay throws (see `slot`), because that is what this is: a
+   * call recorded as requested with nothing this tape may treat as its
+   * completion.
    */
   toolCall(
     tool: string,
     input: unknown,
     perform: (opened: { seq: number; idempotencyKey: string }) => Promise<unknown>,
     position: TurnPosition,
+    trustCompletion: boolean,
   ): Promise<ToolOutcome> {
     return this.admitRank(position).then(() =>
       this.turnstile(async () => {
@@ -287,6 +322,12 @@ export class RunTape {
             canonicalJson(event.payload.input) === wanted,
           `a call to the tool \`${tool}\``,
         );
+        // Set before the intent call below, from this invoke's own opening
+        // snapshot: true only when this exact position already held this
+        // tool's intent before this invoke started, which is what tells a
+        // dangling untrusted call apart from one this invoke is opening for
+        // the first time.
+        const leftOverFromEarlierInvoke = this.recorded.get(seq)?.kind === "ToolCallRequested";
         const opened = await this.lease(() =>
           this.driver.clientToolIntent(seq, tool, input),
         );
@@ -299,7 +340,27 @@ export class RunTape {
             idempotencyKey: opened.idempotencyKey,
           };
         }
+        if (!trustCompletion && leftOverFromEarlierInvoke) {
+          throw new SalvorMiddlewareError(
+            `run ${this.runId} (thread \`${this.threadId}\`) met the intent for \`${tool}\` ` +
+              `at seq ${seq} that an earlier invoke left open: its declaration sets ` +
+              "`trust_completion = false`, so that call's result was never reported and it " +
+              "is a call that was never completed. Settle it first (`salvor resolve " +
+              `${this.runId} --output '<json the tool returned>'\`, the Inspector, or ` +
+              "`driver.resolve(...)`) and invoke again.",
+          );
+        }
         const output = await perform({ seq, idempotencyKey: opened.idempotencyKey });
+        if (!trustCompletion) {
+          throw new ToolNeedsResolution({
+            run: this.runId,
+            seq,
+            thread: this.threadId,
+            tool,
+            output,
+            key: opened.idempotencyKey,
+          });
+        }
         await this.lease(() => this.driver.clientToolCompletion(seq, output));
         return {
           seq,

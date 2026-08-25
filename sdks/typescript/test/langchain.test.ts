@@ -53,6 +53,7 @@ import { z } from "zod";
 import { SalvorClient } from "../dist/index.js";
 import {
   type SalvorForkNotice,
+  ToolNeedsResolution,
   currentToolCall,
   finishThread,
   runIdForThread,
@@ -67,6 +68,7 @@ const DECLS = [
   resolve(here, "client-tools", "stamp-ledger.toml"),
   resolve(here, "client-tools", "track-parcel.toml"),
   resolve(here, "client-tools", "record-delivery.toml"),
+  resolve(here, "client-tools", "wire-payout.toml"),
 ];
 
 // -- the scripted model ------------------------------------------------------
@@ -127,7 +129,15 @@ class ScriptedModel extends BaseChatModel {
 // -- the tools ---------------------------------------------------------------
 
 /** How often each tool body actually ran, and how many ran at once. */
-const ran = { lookup: 0, stamp: 0, track: 0, deliver: 0, concurrent: 0, peakConcurrent: 0 };
+const ran = {
+  lookup: 0,
+  stamp: 0,
+  track: 0,
+  deliver: 0,
+  payout: 0,
+  concurrent: 0,
+  peakConcurrent: 0,
+};
 /** Set to make the next `stamp_ledger` body throw, standing in for a crash. */
 let stampCrashes = false;
 /** What `currentToolCall()` reported the last time `lookup_order`'s body ran. */
@@ -191,6 +201,22 @@ const sendEmail = tool(async () => ({ sent: true }), {
   description: "Send an email. Deliberately never declared to salvor.",
   schema: z.object({ to: z.string() }),
 });
+
+/**
+ * The one tool in this suite declared `trust_completion = false`: the body
+ * runs and returns a real result, but the middleware may never report it.
+ */
+const wirePayout = tool(
+  async ({ payee, amount_cents }: { payee: string; amount_cents: number }) => {
+    ran.payout += 1;
+    return { provider_transfer_id: `ptx-${payee}`, status: "succeeded", amount_cents };
+  },
+  {
+    name: "wire_payout",
+    description: "Send a bank transfer to a payee whose card refund is not available.",
+    schema: z.object({ payee: z.string(), amount_cents: z.number() }),
+  },
+);
 
 /**
  * A read whose result's keys are NOT in alphabetical order.
@@ -330,6 +356,7 @@ function reset(): void {
   ran.stamp = 0;
   ran.track = 0;
   ran.deliver = 0;
+  ran.payout = 0;
   ran.concurrent = 0;
   ran.peakConcurrent = 0;
   stampCrashes = false;
@@ -1124,6 +1151,124 @@ test("finishThread on a thread whose log ends at an open intent is refused, nami
     ["ToolCallRequested"],
     "finishThread wrote nothing",
   );
+});
+
+// -- (j) a tool declared trust_completion = false stops for a person ---------
+
+const PAYOUT_SCRIPT: Turn[] = [
+  {
+    content: "sending the payout",
+    toolCalls: [
+      {
+        name: "wire_payout",
+        args: { payee: "acct-9001", amount_cents: 250000 },
+        id: "call-payout",
+      },
+    ],
+  },
+  { content: "Payout sent." },
+];
+
+async function invokeRejection(
+  agent: ReturnType<typeof createAgent>,
+  threadId: string,
+): Promise<unknown> {
+  try {
+    await agent.invoke(
+      { messages: [{ role: "user", content: "wire the payout" }] },
+      { configurable: { thread_id: threadId } },
+    );
+  } catch (error) {
+    return error;
+  }
+  throw new Error("expected the invoke to reject");
+}
+
+/**
+ * `createAgent` wraps every error a middleware throws in its own
+ * `MiddlewareError`, copying the original's `name` and `message` but keeping
+ * the actual instance only as `.cause`. Unwrap it to reach the typed error
+ * salvor's own middleware threw.
+ */
+function causeOf(error: unknown): unknown {
+  return (error as { cause?: unknown } | null | undefined)?.cause ?? error;
+}
+
+test("a tool declared trust_completion = false runs once, then stops the invoke for a person to resolve", async (t) => {
+  if (!base) return t.skip("salvor serve not available");
+  reset();
+  const threadId = "thread-untrusted-completion";
+  const runId = await runIdForThread(threadId);
+
+  // The first invoke pays for the model call, runs the tool body exactly
+  // once, and then stops with the typed error rather than reporting a
+  // completion salvor would refuse.
+  const first = agentFor(PAYOUT_SCRIPT, [wirePayout]);
+  const stopped = causeOf(await invokeRejection(first.agent, threadId));
+  ok(stopped instanceof ToolNeedsResolution, "throws ToolNeedsResolution");
+  const stop = stopped as ToolNeedsResolution;
+  strictEqual(stop.run, runId);
+  strictEqual(stop.thread, threadId);
+  strictEqual(stop.tool, "wire_payout");
+  strictEqual(typeof stop.key, "string");
+  ok(stop.key.length > 0, "carries the derived idempotency key");
+  const output = { provider_transfer_id: "ptx-acct-9001", status: "succeeded", amount_cents: 250000 };
+  deepStrictEqual(stop.output, output, "carries what the tool body returned");
+  match(stop.message, /trust_completion = false/);
+  match(stop.message, new RegExp(`salvor resolve ${runId}`), "names the resolve command");
+
+  strictEqual(ran.payout, 1, "the tool body ran exactly once");
+  deepStrictEqual(
+    await kindsOf(threadId),
+    ["RunStarted", "ModelCallRequested", "ModelCallCompleted", "ToolCallRequested"],
+    "the log ends at the intent: no completion was ever reported",
+  );
+
+  // Re-invoking before anyone resolves it does not run the tool again: it
+  // meets the same open intent and is refused by name, naming the same fix.
+  reset();
+  const impatient = agentFor(PAYOUT_SCRIPT, [wirePayout]);
+  const refusal = await invokeRejection(impatient.agent, threadId);
+  const refusalText = String((refusal as Error).message ?? refusal);
+  match(refusalText, /never completed/, "the same refusal a stuck intent always gets");
+  match(refusalText, new RegExp(`salvor resolve ${runId}`), "names the resolve step");
+  strictEqual(ran.payout, 0, "refused before the tool ran again");
+  deepStrictEqual(
+    (await kindsOf(threadId)).slice(-1),
+    ["ToolCallRequested"],
+    "still nothing appended",
+  );
+
+  // A person resolves it by hand, through the driver: the same surface
+  // `salvor resolve` and the Inspector both go through.
+  const driver = await client!.openClientRun({ runId });
+  await driver.resolve(stop.output);
+
+  // The next invoke meets a settled call at that seq and replays it: zero
+  // tool executions, the resolved output on the tool message and in the
+  // final answer.
+  reset();
+  const second = agentFor(PAYOUT_SCRIPT, [wirePayout]);
+  const answer = await second.agent.invoke(
+    { messages: [{ role: "user", content: "wire the payout" }] },
+    { configurable: { thread_id: threadId } },
+  );
+  strictEqual(ran.payout, 0, "the write never ran again");
+  strictEqual(second.model.calls.count, 1, "only the answer turn was live");
+
+  const toolMessage = answer.messages.find((m) => m.getType() === "tool")!;
+  deepStrictEqual(JSON.parse(textOf(toolMessage)), output, "the resolved output reached the model");
+  strictEqual(textOf(answer.messages.at(-1)!), "Payout sent.");
+
+  deepStrictEqual(await kindsOf(threadId), [
+    "RunStarted",
+    "ModelCallRequested",
+    "ModelCallCompleted",
+    "ToolCallRequested",
+    "ToolCallCompleted",
+    "ModelCallRequested",
+    "ModelCallCompleted",
+  ]);
 });
 
 // -- the lease ---------------------------------------------------------------

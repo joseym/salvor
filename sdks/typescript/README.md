@@ -507,6 +507,25 @@ returned, so the result is recovered by parsing that content back when the parse
 round-trips exactly; when it does not, the content is recorded as the string it
 is, and an object schema will refuse it and say so.
 
+### Tools a person must confirm
+
+A tool declared `trust_completion = false` still runs: refusing to run it fixes
+nothing, since not trusting its own report is a different decision from not
+sending the payment. What changes is what happens next. Salvor refuses a
+client completion for such a tool outright (`403 client_completion_refused`),
+whatever it says, so the middleware never tries to post one. It throws
+`ToolNeedsResolution` instead, carrying `{ run, seq, thread, tool, output, key }`,
+and the invoke stops there rather than let that refusal tear through LangGraph
+after the call has already happened.
+
+The run is left at `seq`, an intent with no completion, the same shape a crash
+between intent and completion leaves. Settle it by hand once you have checked
+what the tool actually did: `salvor resolve <run> --output '<json the tool
+returned>'`, the Inspector, or `driver.resolve(output)`. Invoke the thread again
+and the resolved output replays in the call's place; invoke it again before
+resolving and it meets the same open intent, refused by name, naming the same
+fix.
+
 ### The honest limits
 
 This is a recorded effect ledger with exactly-once writes and salvor's budgets,
