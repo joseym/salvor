@@ -371,11 +371,11 @@ The codes:
 | `tool_needs_resolution` | The tool ran and its operator settles such a call by hand. This one is the typed `ToolNeedsResolution`, with the result on `.output`. |
 | `tool_returned_command` | A tool answered with a LangGraph `Command`, which is control flow, not a result to record. |
 | `call_unranked` | The call's id is not among the ones the model's last recorded turn listed, so its position in the run cannot be pinned: either that turn was never recorded, or a middleware ahead of this one changed the call's id. |
-| `tool_failed` | The log already holds a recorded failure at this position: an earlier invoke's tool body threw, this middleware reported it, and salvor settled the call on it. Carries `seq`, the position it was recorded at. Fails the same way on every replay, because it is settled, not retried; fix the input, or start a new thread. |
+| `tool_failed` | The log already holds a recorded failure at this position: an earlier invoke's `effect = "write"` tool body threw, this middleware reported it, and salvor settled the call on it. Carries `seq`, the position it was recorded at. Fails the same way on every replay, because it is settled, not retried; fix the input, or start a new thread. |
 | `open_intent` | The log holds a call recorded as requested and never completed. Settle it and invoke again. |
 | `unreadable_record` | A model answer is missing or does not read back as one. |
-| `bad_request` | The server's own refusal, unwrapped: a reported tool output failed the declared schema. |
-| `client_completion_refused` | The server's own refusal: a `require_equal` field's reported value differed from the intent's, or the declaration refuses self-completion outright. |
+| `bad_request` | The server's own refusal, unwrapped: an intent's input failed the declared `input_schema` before the tool ran, or a reported tool output failed the declared `output_schema`. |
+| `client_completion_refused` | The server's own refusal: a `require_equal` field's reported value differed from the intent's, or a client tried to close a call salvor itself already performed, or the declaration says `trust_completion = false` (for a reported result or a reported failure alike), or the declaration has no `output_schema` to check a reported result against. |
 
 A fork is not among them: leaving the recorded path is not an error (see
 `onFork` below). `ToolNeedsResolution` is still its own class, so
@@ -853,17 +853,22 @@ line: pass it, and the duplicate collapses into the first write; leave it out,
 and the write can happen twice, with salvor's log recording it once either way.
 
 That dangling-intent case is what a process dying mid-write leaves behind. A
-tool body that instead throws is not dangling at all: the middleware records
-the thrown message as the call's failure, the same way salvor itself records
-a native tool's exhausted retries, and the invoke rejects with the tool's own
-error. Re-invoking the thread does not run that body again; it meets the
-recorded failure and rejects with `tool_failed` on the spot, carrying the
-message that was recorded. A permanently failing input fails the same way on
-every replay from here on: fix the input, or start a new thread. A tool
-declared `trust_completion = false` is the one exception, because it may not
-report even a failure on its own say-so any more than it may report a
-result: it stops with the same open-intent refusal `ToolNeedsResolution`
-gives a successful untrusted call, and a person settles it by hand.
+tool body that instead throws is recorded as the call's failure only when the
+tool is declared `effect = "write"`: the middleware posts the thrown message
+as that failure, the same way salvor itself records a native tool's exhausted
+retries, and the invoke rejects with the tool's own error. Re-invoking the
+thread does not run that body again; it meets the recorded failure and rejects
+with `tool_failed` on the spot, carrying the message that was recorded. A
+permanently failing input fails the same way on every replay from here on: fix
+the input, or start a new thread. A `read` or `idempotent` tool that throws
+posts nothing at all: its intent stays open exactly as if the call had never
+returned, and the next invoke simply performs it again, which is why a
+transient error on a lookup does not wedge the thread the way a failed write's
+record would. A tool declared `trust_completion = false` is the one exception
+on the write side, because it may not report even a failure on its own say-so
+any more than it may report a result: it stops with the same open-intent
+refusal `ToolNeedsResolution` gives a successful untrusted call, and a person
+settles it by hand.
 
 ## Graphs
 

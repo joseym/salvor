@@ -645,13 +645,17 @@ your own API's dedupe column). A provider that ignores it, or a tool that never
 passes it on, is a tool that can charge twice, and no ledger on this side
 changes that.
 
-A tool body that raises is a different case from the crash above, and salvor
-does not leave it dangling: the middleware catches the raise, reports it as the
-call's failure, and salvor records it as the call's completion the same way it
-would record a returned value. So a raised tool body is recorded as a failure
-and fails the same way on every replay, without running the body again; fix
-whatever the tool keeps failing on and give the thread a new turn, or start a
-new thread.
+A tool body that raises is a different case from the crash above, and what
+salvor does with it depends on the tool's own `effect`. A `write` tool is not
+left dangling: the middleware catches the raise, reports it as the call's
+failure, and salvor records it as the call's completion the same way it would
+record a returned value. So a raised write is recorded as a failure and fails
+the same way on every replay, without running the body again; fix whatever the
+tool keeps failing on and give the thread a new turn, or start a new thread. A
+`read` or `idempotent` tool that raises posts nothing: its intent stays open,
+the same as if the process had died mid-call, and the next invoke simply
+performs the call again, so a transient error on a lookup never wedges the
+thread.
 
 ### What replay means
 
@@ -887,12 +891,12 @@ The codes:
 | `tool_needs_resolution` | The tool ran and its operator settles such a call by hand. This one is the typed `ToolNeedsResolution`, with the result on `.output`. |
 | `tool_returned_command` | A tool answered with a LangGraph `Command`, which is control flow, not a result to record. |
 | `call_unranked` | A tool call's id is not among the ones the last recorded model turn listed, so its position in the run cannot be pinned. This SDK never raises it: when a call's turn can't be found in state, the tape admits the call on arrival instead of ordering it. Only the TypeScript middleware treats this as a refusal. |
-| `tool_failed` | The log already holds a recorded failure at this position: an earlier invoke's tool body raised, this middleware reported it, and salvor settled the call on it. Fails the same way on every further invoke, because it is settled, not retried; fix the input, or start a new thread. |
+| `tool_failed` | The log already holds a recorded failure at this position: an earlier invoke's `effect = "write"` tool body raised, this middleware reported it, and salvor settled the call on it. Fails the same way on every further invoke, because it is settled, not retried; fix the input, or start a new thread. |
 | `open_intent` | The log holds a call recorded as requested and never completed. Settle it and invoke again. |
 | `unreadable_record` | A model answer is missing or does not read back as one. |
 | `wrong_client` | The middleware was given the wrong client for the way the agent is being driven. |
-| `bad_request` | The server's own refusal, unwrapped: a reported tool output failed the declared `output_schema`. |
-| `client_completion_refused` | The server's own refusal: a `require_equal` field's reported value differed from the intent's, or the declaration has no `output_schema` to check against. |
+| `bad_request` | The server's own refusal, unwrapped: an intent's input failed the declared `input_schema` before the tool ran, or a reported tool output failed the declared `output_schema`. |
+| `client_completion_refused` | The server's own refusal: a `require_equal` field's reported value differed from the intent's, or a client tried to close a call salvor itself already performed, or the declaration says `trust_completion = false` (for a reported result or a reported failure alike), or the declaration has no `output_schema` to check a reported result against. |
 
 Refusals that come from the control plane rather than from the middleware stay
 `SalvorAPIError`, with their own stable `code` (see [Errors](#errors) above), so

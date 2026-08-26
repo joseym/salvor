@@ -201,10 +201,19 @@ Fixing that disagreement is itself a fork. The app's `z.object({...})` / typed
 schema is part of what the model request is hashed from, so changing it
 changes the hash the next invoke opens its first model call with, and the
 thread's recorded first position no longer matches. Invoking the same thread
-again does not resume it; it forks, the whole conversation runs again from
-there, and every model call before the fork is paid for a second time (the
-rule is stated in [The honest limits](#the-honest-limits)). Give the corrected
-task a new thread id unless that fork is what you want.
+again does not resume it; it forks, and the whole conversation runs again from
+there, writes included. What that costs depends on the write's own
+declaration. `refund_order` names `idempotency_key` fields, so the re-run
+derives the same key from `order_id` and `amount_cents` and settles from the
+first call rather than moving money again (`salvor history` shows it as
+`deduplicated: copied from`); a write whose declaration names no fields
+derives a new positional key on the fork and runs again for real, and a
+refund tool that runs again for real can refund the customer twice. Every
+model call before the fork is also paid for a second time (the rule is
+stated in [The honest limits](#the-honest-limits)), but that bill is the
+smaller of the two. Give the corrected task a new thread id whenever the thread holds a write.
+That is not a preference: it is what keeps a second run from moving money
+the first one already moved.
 
 ## Running it
 
@@ -713,8 +722,9 @@ call, so running it a second time is precisely the move the declaration exists t
 rule out. The middleware stops and names the run, and a resolution over HTTP (or
 `salvor resolve`) is the only way past it.
 
-Failures are recorded, not left hanging, and which kind of failure it was decides
-what happens next. A tool body that raises is posted to salvor as that call's
+A thrown tool body is recorded as the call's failure only when the tool is
+declared `effect = "write"`, and which kind of failure it was decides what
+happens next. A `write` body that raises is posted to salvor as that call's
 failure, recorded as the same error sentinel a native tool writes when its
 retries run out, and then rethrown unchanged, so LangChain still sees exactly
 what the tool raised. The call is closed rather than dangling, so the thread is
@@ -723,12 +733,17 @@ that position meets the recorded failure and is refused with
 `SalvorMiddlewareError` (`tool_failed`), naming the seq, without running the body
 again. A recorded failure settles the call the same way on every replay, exactly
 as a recorded success does, so a permanently failing input fails the same way
-forever. Fix the input and give it a new thread. A tool a person must confirm is
-the exception, as ever: salvor would not take this process's word for "it did not
-land" any more than for "it landed", so a throw there posts nothing and stops the
-invoke with `open_intent`, for a person to settle. "Settle" is not always
-"resolve": if what the provider actually shows is that the call never happened,
-there is nothing to resolve, and the honest move is to abandon the run
+forever. Fix the input and give it a new thread. A `read` or `idempotent` body
+that raises is the opposite case: nothing is posted at all, its intent stays
+open exactly as it would if the process had simply died there, and the next
+invoke performs the call again, which is why a transient connection error on
+a lookup does not wedge the thread the way a failed write's record would. A
+tool a person must confirm is the exception on the write side, as ever: salvor
+would not take this process's word for "it did not land" any more than for "it
+landed", so a throw there posts nothing and stops the invoke with
+`open_intent`, for a person to settle. "Settle" is not always "resolve": if
+what the provider actually shows is that the call never happened, there is
+nothing to resolve, and the honest move is to abandon the run
 (`POST /v1/runs/{id}/abandon`, or `salvor abandon`) and give the next task a new
 thread id.
 
