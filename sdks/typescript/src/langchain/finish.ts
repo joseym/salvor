@@ -43,9 +43,13 @@ export interface FinishedThread {
  *   `RunFailed`);
  * - the log ends at an open intent: a model or tool call salvor recorded as
  *   requested but never recorded as completed. That call has to be settled
- *   first (`salvor resolve <run> --store <path> --output <output>`, or the
- *   resolve endpoint), because a `RunCompleted` appended past it would
- *   silently abandon whatever that call was doing.
+ *   first (`salvor resolve <run> --store <path> --output <output>`, or
+ *   `POST /v1/runs/{id}/resolve` on the server), because a `RunCompleted`
+ *   appended past it would silently abandon whatever that call was doing.
+ *
+ * Closing a thread takes its lease to write the `RunCompleted`, and hands it
+ * back on the way out, refusal or not. Nothing here holds a run any longer
+ * than the one append it came to make.
  *
  * `output` defaults to the content of the last recorded AI message, read
  * back from the run's own log the same way a replayed model call is (see
@@ -62,37 +66,51 @@ export async function finishThread(
 ): Promise<FinishedThread> {
   const runId = await threadIdToRunId(threadId);
   const driver = await client.openClientRun({ runId });
-  const log = driver.logEnvelopes;
+  // Opening took the run's lease, and every path out of here is done with it:
+  // the run is closed, or it was refused and nothing was written. Either way
+  // the next caller should not wait out a TTL for a lease this function is no
+  // longer using. A failure to hand it back is swallowed for the same reason
+  // the middleware swallows one: the lapse is the safety net, and a goodbye
+  // that did not arrive is not worth losing a recorded `RunCompleted` over.
+  try {
+    const log = driver.logEnvelopes;
 
-  if (log.length === 0) {
-    throw new SalvorMiddlewareError(
-      `thread \`${threadId}\` (run ${runId}) has never been invoked, so there is ` +
-        "no run to finish.",
-    );
-  }
+    if (log.length === 0) {
+      throw new SalvorMiddlewareError(
+        `thread \`${threadId}\` (run ${runId}) has never been invoked, so there is ` +
+          "no run to finish.",
+        { code: "thread_never_invoked" },
+      );
+    }
 
-  const tail = log[log.length - 1];
-  if (tail.kind === "RunCompleted" || tail.kind === "RunFailed") {
-    throw new SalvorMiddlewareError(
-      `thread \`${threadId}\` (run ${runId}) is already finished.`,
-    );
-  }
-  if (tail.kind === "ModelCallRequested" || tail.kind === "ToolCallRequested") {
-    const what = tail.kind === "ModelCallRequested" ? "a model call" : "a tool call";
-    throw new SalvorMiddlewareError(
-      `run ${runId} (thread \`${threadId}\`) ends at ${what} (seq ${tail.seq}) that ` +
-        "was requested and never completed. Settle it first (`salvor resolve " +
-        `${runId} --store <the server's store> --output <output>\`, or the resolve ` +
-        "endpoint) and finish the thread again.",
-    );
-  }
+    const tail = log[log.length - 1];
+    if (tail.kind === "RunCompleted" || tail.kind === "RunFailed") {
+      throw new SalvorMiddlewareError(
+        `thread \`${threadId}\` (run ${runId}) is already finished.`,
+        { code: "thread_finished" },
+      );
+    }
+    if (tail.kind === "ModelCallRequested" || tail.kind === "ToolCallRequested") {
+      const what = tail.kind === "ModelCallRequested" ? "a model call" : "a tool call";
+      throw new SalvorMiddlewareError(
+        `run ${runId} (thread \`${threadId}\`) ends at ${what} (seq ${tail.seq}) that ` +
+          "was requested and never completed. Settle it first (`salvor resolve " +
+          `${runId} --store <the server's store> --output '<json the call returned>'\`, ` +
+          `or \`POST /v1/runs/${runId}/resolve\` on the server) and finish the thread ` +
+          "again.",
+        { code: "open_intent" },
+      );
+    }
 
-  const resolvedOutput = output !== undefined ? output : lastAiMessageContent(log);
-  const seq = tail.seq + 1;
-  const appended = await driver.append([
-    driver.envelope(seq, "RunCompleted", { output: resolvedOutput ?? null }),
-  ]);
-  return { runId, seq: appended[0] ?? seq };
+    const resolvedOutput = output !== undefined ? output : lastAiMessageContent(log);
+    const seq = tail.seq + 1;
+    const appended = await driver.append([
+      driver.envelope(seq, "RunCompleted", { output: resolvedOutput ?? null }),
+    ]);
+    return { runId, seq: appended[0] ?? seq };
+  } finally {
+    await driver.release().catch(() => undefined);
+  }
 }
 
 /**

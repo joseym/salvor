@@ -281,30 +281,80 @@ await agent.invoke(
 
 ### Catching what the middleware throws
 
-`createAgent` wraps every error a middleware throws in its own `MiddlewareError`,
-copying the original's `name` and `message` but keeping the actual instance
-only as `.cause`. So a `catch` around `agent.invoke` has to unwrap it to reach
-the typed error salvor's own middleware threw:
+Everything this middleware refuses by name is a `SalvorMiddlewareError`
+carrying a `code` you can branch on, and the server's own refusal (a
+`SalvorApiError`) on `cause` when there was one. Reach it with `salvorError(e)`,
+which returns the middleware error or `undefined` when the failure was not
+salvor's at all:
 
 ```ts
+import { salvorError } from "@salvor-run/client/langchain";
+
+try {
+  await agent.invoke(input, { configurable: { thread_id: "order-7781" } });
 } catch (e) {
-  if (e.cause instanceof ToolNeedsResolution) { /* ... */ }
+  const refusal = salvorError(e);
+  if (!refusal) throw e; // the app's own error, unchanged
+
+  switch (refusal.code) {
+    case "lease_held": {
+      // Another driver has this thread right now. Wait out its hold and retry;
+      // the refusal says exactly how long that is.
+      const seconds = refusal.lapsesInSeconds ?? 1;
+      await new Promise((r) => setTimeout(r, seconds * 1000));
+      return agent.invoke(input, { configurable: { thread_id: "order-7781" } });
+    }
+    case "tool_needs_resolution":
+      // A `trust_completion = false` tool ran and is waiting on a person.
+      await alertOps(refusal); // it is a ToolNeedsResolution: run, seq, tool, output, key
+      break;
+    case "open_intent":
+      // The log ends at a call that was never completed. Settle it first.
+      await alertOps(refusal);
+      break;
+    default:
+      throw e;
+  }
 }
 ```
 
-The same unwrap applies to `SalvorMiddlewareError` itself (the one-driver
-refusal below, a fork onto an unexpected path, and the rest of what this
-middleware refuses by name): check `e.cause instanceof SalvorMiddlewareError`,
-or `e.cause instanceof ToolNeedsResolution` for its more specific subclass.
+The helper exists because the two shapes an error arrives in are not the same
+shape. `createAgent` wraps an error thrown inside a graph node in its own
+`MiddlewareError`, copying the `name` and `message` but keeping the real
+instance only on `.cause`: that is how `ToolNeedsResolution` and the tool-side
+refusals (`tool_undeclared`, `open_intent`, `lease_lost`) reach you. An error
+thrown from `beforeAgent`, before any node runs, arrives **bare**: that is
+`lease_held`, `thread_finished`, `thread_id_missing`, `thread_id_invalid` and
+`run_exists`. A `catch` that checks only `e.cause` misses the second group and
+a `catch` that checks only `instanceof` misses the first; `salvorError` walks
+the `cause` chain and covers both. Note that a middleware error now carries a
+`cause` of its own (the `SalvorApiError` underneath), so reaching one level in
+by hand can land on the server's error rather than the middleware's.
+
+The codes are: `lease_held`, `lease_lost`, `reopen_refused`, `thread_finished`,
+`thread_id_missing`, `thread_id_invalid`, `tool_undeclared`,
+`tool_needs_resolution`, `open_intent`, and then `run_exists`,
+`thread_never_invoked`, `tool_returned_command`, `call_unranked` and
+`unreadable_record` for conditions there is nothing to do about but read the
+message. A fork is not among them: leaving the recorded path is not an error
+(see `onFork` below). `ToolNeedsResolution` is still its own class, so
+`salvorError(e) instanceof ToolNeedsResolution` works as well as its code does.
 
 ### Try it without a key
 
 The client-driven tool below needs a declaration before the model can call
 it: its effect class, its schemas and its idempotency key are the operator's,
 never the middleware's, and they come from a client-tool declaration the
-server was started with. Skip this and the first call fails with
-`unknown_tool: no client-performed tool named "lookup_order" is declared on
-this server`.
+server was started with. Skip this and the invoke is refused with
+`tool_undeclared`, carrying the server's own words underneath:
+
+```
+unknown_tool: no client-performed tool named `lookup_order` is declared on this
+server; declarations are loaded by the operator (`salvor serve --client-tool
+<FILE>`) and are never registered over HTTP
+```
+
+Save this as `lookup-order.toml`:
 
 ```toml
 name = "lookup_order"
@@ -329,7 +379,30 @@ salvor serve --client-tool lookup-order.toml
 
 The rest below runs the same middleware end to end with no provider key and no
 network: a scripted model stands in for whatever provider your app actually
-uses.
+uses. Save it as `try-salvor.ts` next to a `package.json` that says
+`"type": "module"` and run it with Node 22.18 or newer, which strips the types
+itself:
+
+```sh
+node try-salvor.ts
+```
+
+The `"type": "module"` is not optional: this file is ESM, and without it Node
+reads it as CommonJS and stops at `Cannot use import statement outside a
+module`. A `package.json` with the four dependencies, and one `npm install`, is
+all it takes:
+
+```json
+{
+  "type": "module",
+  "dependencies": {
+    "@salvor-run/client": "^0.9.2",
+    "@langchain/core": "^1.2.9",
+    "langchain": "^1.5.10",
+    "zod": "^3.25.0"
+  }
+}
+```
 
 ```ts
 import { createAgent, tool } from "langchain";
@@ -406,6 +479,27 @@ const answer = await agent.invoke(
 console.log(answer.messages.at(-1)?.content);
 ```
 
+It prints `Order ORD-7781 is paid, 4200 cents.` Run it a second time and it
+prints the same thing without calling the model or the tool at all: the run is
+already recorded, and the invoke replays it. That second run works immediately
+rather than being refused for a minute because the first one handed the
+thread's lease back on its way out.
+
+To see what was recorded, read the run's log with the CLI, over the same store
+the server is using (`salvor.db` in the working directory unless `salvor serve
+--store <path>` said otherwise):
+
+```sh
+salvor history <run> --store ./salvor.db
+```
+
+The run id for a thread id is `runIdForThread("order-7781")`, exported from
+`@salvor-run/client/langchain`.
+
+When you are done, the whole experiment is three files: delete `salvor.db`
+along with its `salvor.db-wal` and `salvor.db-shm` side files, which SQLite
+writes beside it, and the store is gone.
+
 A real app replaces `ScriptedModel` with its provider model (`ChatAnthropic`,
 `ChatOpenAI`, and so on) and nothing else changes.
 
@@ -422,6 +516,13 @@ the intent, so a retried write presents the key the first attempt used and the
 provider collapses the duplicate. Pass `recordPrompts: true` to store the
 request body on the intent as well, for an inspector to show; replay never
 reads it, because the correlation key is the hash alone.
+
+To read a thread's recorded log back: `GET /v1/client-runs/{id}/log` serves it
+(no drive token needed) while the run is one this server currently holds open,
+which after an invoke has handed its lease back it no longer is, so once the
+invoke is over read the log with `salvor history <run> --store <path>` against
+the store or `GET /v1/runs/{id}/events` against the server, both of which read
+the durable log rather than the lease registry.
 
 Model responses, tool arguments and tool results are always recorded,
 whatever `recordPrompts` is set to; that flag only decides whether the
@@ -538,14 +639,34 @@ after the call has already happened.
 
 The run is left at `seq`, an intent with no completion, the same shape a crash
 between intent and completion leaves. Settle it by hand once you have checked
-what the tool actually did: `salvor resolve <run> --store <path> --output
-'<json the tool returned>'`, the Inspector, or `driver.resolve(output)`.
+what the tool actually did. There are two ways in, and the error message names
+both, because the person reading it usually has one of them and not the other:
+
+```sh
+# against the running server, from anywhere that can reach it
+curl -X POST http://127.0.0.1:8080/v1/runs/<run>/resolve \
+  -H 'content-type: application/json' \
+  -d '{"output": {"provider_transfer_id": "ptx-...", "status": "succeeded"}}'
+
+# or against the store file, from a shell on the machine that holds it
+salvor resolve <run> --store <path> --output '<json the tool returned>'
+```
+
+A container running this agent often has no store path at all, only the
+server's URL, which is why the HTTP endpoint is named first. The two differ in
+one way worth knowing: the HTTP resolve clears the run's lease along with the
+resolution, so the thread re-opens at once, while `salvor resolve` writes the
+store directly and cannot reach a live server's memory, so a lease held there
+survives it and lapses on its own (at most the TTL, 60 seconds by default). The
+Inspector and `driver.resolve(output)` go through the server too.
+
 `--store` has to name the SERVER's store file; this middleware only ever
 speaks HTTP to that server, so it has no way to know that path itself, which
 is why `ToolNeedsResolution.message` prints a `--store <the server's store>`
 placeholder there rather than a guess. Invoke the thread again and the
 resolved output replays in the call's place; invoke it again before resolving
-and it meets the same open intent, refused by name, naming the same fix.
+and it meets the same open intent, refused by name (`open_intent`), naming the
+same fix.
 
 ### The honest limits
 
@@ -582,13 +703,35 @@ The run's lease lives in the server's memory, not on disk. A lease is HELD,
 not handed to whoever asks last: while a driver's lease on a thread's run is
 current, a second instance invoking that same thread is refused at once,
 before it runs a single tool, naming the thread and how many seconds until the
-hold lapses on its own (`lease_held`; a driver that goes quiet for the lease
-TTL, 60 seconds by default, stops holding it). A lease taken out from under an
-active invoke mid-step, by contrast, means a second driver is live on the
-thread RIGHT NOW; that is refused too (`invalid_drive_token`), by the same
-one-driver message, and neither case is ever retried by re-opening, because
-there is no order in which two live drivers can both be right about what
-comes next.
+hold lapses on its own (`lease_held`, carrying `lapsesInSeconds`). A lease
+taken out from under an active invoke mid-step, by contrast, means a second
+driver is live on the thread RIGHT NOW; that is refused too (`lease_lost`,
+`invalid_drive_token` on the wire), by the same one-driver message, and neither
+case is ever retried by re-opening, because there is no order in which two live
+drivers can both be right about what comes next.
+
+An invoke does not keep the lease a moment longer than it is driving:
+
+- **It is released when the invoke ends**, on the success path and on every
+  error path alike (a tool body that threw, a `ToolNeedsResolution` stop, a
+  LangChain error on its way out), so the next process to invoke the thread
+  takes it on its very next request rather than waiting out a TTL. `finishThread`
+  releases too. The one thing never released is a lease this invoke does not
+  hold: `lease_held` and `lease_lost` leave the other driver's hold alone.
+- **It is kept alive during long steps.** While a tool body or a live model
+  call is running, nothing else presents the drive token, so the middleware
+  beats a heartbeat every third of the TTL (it learns the TTL from the
+  server's own answer) until the step returns. A tool that takes ten minutes
+  keeps the run it never left.
+- **It is cleared by an HTTP resolve.** `POST /v1/runs/{id}/resolve` says the
+  driver that opened the dangling write is gone, so the lease it left behind
+  goes with the resolution and the thread re-opens at once. `salvor resolve`
+  on the command line writes the store directly, cannot reach the server's
+  memory, and so leaves the lease to lapse on its own.
+- **It lapses after a crash.** A process that dies says nothing, and a lease
+  nobody refreshes for the TTL (60 seconds by default,
+  `SALVOR_CLIENT_LEASE_TTL_SECS`) stops holding the run. That is the safety
+  net, not the ordinary way a drive ends.
 
 If salvor itself restarts mid-invoke, none of this applies: the lease registry
 dies with the process but the log does not, so the middleware notices its open
@@ -612,6 +755,18 @@ first attempt present the same one. It works only from inside a tool body a
 live `wrapToolCall` is running, and only in Node; called from anywhere else it
 returns `undefined`, and the middleware keeps recording and replaying exactly
 as it does without it.
+
+Be plain about what that key does and does not buy. Salvor guarantees two
+things: the call is recorded exactly once in the log, and the key it derives
+for a given call is stable across every attempt at it. It does not guarantee
+that the tool's body ran once. If the process dies between the provider
+answering "done" and salvor recording the completion, the log still ends at
+the intent, and the next invoke does the only honest thing it can: it runs the
+body again, at the same seq, under the same key. Whether that second run
+charges the card a second time is the provider's decision, made on that key.
+So the key has to reach the provider as its idempotency token, not sit in a log
+line: pass it, and the duplicate collapses into the first write; leave it out,
+and the write can happen twice, with salvor's log recording it once either way.
 
 ## Graphs
 

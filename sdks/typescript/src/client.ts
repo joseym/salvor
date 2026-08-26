@@ -469,6 +469,11 @@ export class SalvorClient {
    * is trying to take is still current. Pass `options.driveToken` explicitly
    * to override this (or to present a token this instance never saw, read
    * back from wherever an application persists it).
+   *
+   * {@link ClientRunDriver.release} on a driver this method handed out clears
+   * that memory for its run. The lease is gone at that point, so the token is
+   * no longer one worth presenting, and the next open of the run is a plain
+   * one that mints a fresh lease.
    */
   openClientRun(options: OpenClientRunOptions = {}): Promise<ClientRunDriver> {
     const token = this.headers["Authorization"]?.replace(/^Bearer /, "");
@@ -480,6 +485,13 @@ export class SalvorClient {
       ...options,
     }).then((driver) => {
       this.leaseTokens.set(driver.runId, driver.driveToken);
+      // A released lease is gone, and a remembered token for a lease nobody
+      // holds is worse than no memory at all: presented on the next open it
+      // says "I am the driver of this run" about a run this client let go, so
+      // the token is forgotten at the moment it stops being one.
+      driver.onRelease = () => {
+        this.leaseTokens.delete(driver.runId);
+      };
       return driver;
     });
   }

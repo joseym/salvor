@@ -57,7 +57,7 @@ import type { ClientRunDriver } from "../client_runs.js";
 import { LeaseHeldError, SalvorApiError } from "../errors.js";
 import type { ClientToolDecl, Usage } from "../types.js";
 import { runWithToolCall } from "./current_call.js";
-import { SalvorMiddlewareError, ToolNeedsResolution } from "./errors.js";
+import { SalvorMiddlewareError, ToolNeedsResolution, salvorError } from "./errors.js";
 import { canonicalJson, hashValue, runIdForThread } from "./hash.js";
 import { ReplayChatModel } from "./replay_model.js";
 import { canonicalRequest, requestHash } from "./request.js";
@@ -65,8 +65,12 @@ import { RunTape } from "./tape.js";
 
 export { currentToolCall } from "./current_call.js";
 export type { CurrentToolCall } from "./current_call.js";
-export { SalvorMiddlewareError, ToolNeedsResolution } from "./errors.js";
-export type { ToolNeedsResolutionDetails } from "./errors.js";
+export { SalvorMiddlewareError, ToolNeedsResolution, salvorError } from "./errors.js";
+export type {
+  SalvorErrorCode,
+  SalvorMiddlewareErrorDetails,
+  ToolNeedsResolutionDetails,
+} from "./errors.js";
 export { finishThread } from "./finish.js";
 export type { FinishedThread } from "./finish.js";
 export { canonicalJson, hashValue, isUuid, runIdForThread } from "./hash.js";
@@ -231,11 +235,29 @@ export function salvorMiddleware(options: SalvorMiddlewareOptions) {
   ): Promise<{ threadId: string; runId: string }> {
     const threadId = (runtime as { configurable?: { thread_id?: unknown } } | undefined)
       ?.configurable?.thread_id;
-    if (typeof threadId !== "string" || threadId.length === 0) {
+    if (threadId === undefined || threadId === null) {
       throw new SalvorMiddlewareError(
         "salvorMiddleware needs a thread id: invoke the agent with " +
           '`{ configurable: { thread_id: "..." } }`. The thread id is the run id, ' +
           "so without one there is nothing for a later invoke to resume.",
+        { code: "thread_id_missing" },
+      );
+    }
+    // A thread id that is there but is not a usable one gets its own refusal,
+    // naming what arrived. The two are different mistakes with different
+    // fixes: nothing was passed, or something was, and it came out of a
+    // template, a database column or a counter as the wrong sort of value.
+    // Told apart here rather than downstream, because the downstream symptom
+    // of a numeric thread id is a run id hashed from `String(7)`, which
+    // resumes nothing and looks like a durability bug.
+    if (typeof threadId !== "string" || threadId.length === 0) {
+      throw new SalvorMiddlewareError(
+        `salvorMiddleware needs a thread id that is a non-empty string; this invoke ` +
+          `passed ${describeThreadId(threadId)}. Pass ` +
+          '`{ configurable: { thread_id: "order-7781" } }`, converting whatever names ' +
+          "the task (an order number, a job id) to a string yourself, so the id salvor " +
+          "records is the id your application means.",
+        { code: "thread_id_invalid" },
       );
     }
     return { threadId, runId: await toRunId(threadId) };
@@ -254,6 +276,7 @@ export function salvorMiddleware(options: SalvorMiddlewareOptions) {
         `thread \`${threadId}\` (run ${runId}) is finished: \`finishThread\` recorded ` +
           "its `RunCompleted`, and a completed run cannot be appended to. Give the " +
           "next task a new thread id.",
+        { code: "thread_finished" },
       );
     }
     return RunTape.open(
@@ -283,6 +306,41 @@ export function salvorMiddleware(options: SalvorMiddlewareOptions) {
         },
       },
     );
+  }
+
+  /**
+   * Hand the thread's run back, because this invoke is over: the next process
+   * to invoke this thread then takes it on its very next request instead of
+   * being refused `lease_held` for the rest of the TTL. That is the whole
+   * difference between a short-lived process that hands over cleanly and one
+   * that locks its successor out for a minute for nothing.
+   *
+   * The tape itself is deliberately left in the map on an error path. Nothing
+   * should still be stepping this run once the invoke has ended, but if
+   * something is (one of a turn's parallel calls, still in flight while
+   * another threw), meeting the released lease through the tape it already
+   * holds is a `unknown_run` its own `lease()` takes the run back up from,
+   * with its cursor intact. Dropping the tape here would instead hand that
+   * straggler a fresh one, whose cursor starts back at the top of the log.
+   * `beforeAgent` clears the map at the start of every invoke, so nothing is
+   * inherited across one.
+   *
+   * `error` is what ended the invoke, when something did. Two of them mean the
+   * lease is NOT this invoke's to hand back, and both are left strictly alone:
+   * `lease_held` (this invoke never took the run, another driver has it) and
+   * `lease_lost` (the run was taken mid-invoke, so the lease being held now is
+   * that other driver's). Releasing on either would be this process ending
+   * somebody else's hold. Every other ending releases, the ordinary success
+   * included: a thrown tool body, a `ToolNeedsResolution` stop, a LangChain
+   * error on its way through. A fork is not an ending at all and never reaches
+   * here.
+   */
+  async function letGo(tape: RunTape, error?: unknown): Promise<void> {
+    if (error !== undefined) {
+      const code = salvorError(error)?.code;
+      if (code === "lease_held" || code === "lease_lost") return;
+    }
+    await tape.release();
   }
 
   async function tapeFor(runtime: unknown): Promise<RunTape> {
@@ -319,10 +377,16 @@ export function salvorMiddleware(options: SalvorMiddlewareOptions) {
       return undefined;
     },
 
-    /** Let go of the run. The log is the durable part; the cursor is not. */
+    /**
+     * Let go of the run: the log is the durable part, the cursor is not, and
+     * the lease belongs to whoever is driving, which after this hook is
+     * nobody.
+     */
     afterAgent: async (_state: unknown, runtime: unknown) => {
       const { runId } = await identify(runtime);
+      const tape = tapes.get(runId);
       tapes.delete(runId);
+      if (tape) await letGo(tape);
       return undefined;
     },
 
@@ -336,35 +400,45 @@ export function salvorMiddleware(options: SalvorMiddlewareOptions) {
      */
     wrapModelCall: async (request: any, handler: any): Promise<AIMessage> => {
       const tape = await tapeFor(request.runtime);
-      const hash = await requestHash(request);
-      let live: AIMessage | undefined;
-      const outcome = await tape.modelCall(
-        hash,
-        canonicalRequest(request),
-        async () => {
-          const answer: AIMessage = await handler(request);
-          live = answer;
-          return { response: answer.toDict(), usage: usageOf(answer) };
-        },
-      );
-      announceFork(tape, onFork);
-      if (!outcome.replayed && live) {
-        tape.noteTurn(live);
-        // Marked only now, after the answer was recorded: what the log holds is
-        // the model's own message, and the provenance of a message is this
-        // middleware's note to the reader, not part of the recorded answer.
-        return mark(live, markFor(tape, outcome.seq, false));
+      try {
+        const hash = await requestHash(request);
+        let live: AIMessage | undefined;
+        const outcome = await tape.modelCall(
+          hash,
+          canonicalRequest(request),
+          async () => {
+            const answer: AIMessage = await handler(request);
+            live = answer;
+            return { response: answer.toDict(), usage: usageOf(answer) };
+          },
+        );
+        announceFork(tape, onFork);
+        if (!outcome.replayed && live) {
+          tape.noteTurn(live);
+          // Marked only now, after the answer was recorded: what the log holds
+          // is the model's own message, and the provenance of a message is
+          // this middleware's note to the reader, not part of the recorded
+          // answer.
+          return mark(live, markFor(tape, outcome.seq, false));
+        }
+        // The recorded answer goes back through LangChain's own handler, with a
+        // stand-in model in the provider's place, so a streaming caller sees the
+        // replayed turn arrive whole instead of seeing nothing at all. See
+        // `replay_model.ts` for why that indirection is worth having.
+        const recorded = mark(
+          storedToAiMessage(outcome.response, tape.runId),
+          markFor(tape, outcome.seq, true),
+        );
+        tape.noteTurn(recorded);
+        return await handler({ ...request, model: new ReplayChatModel(recorded) });
+      } catch (error) {
+        // An error here leaves the invoke: LangGraph does not catch what a
+        // model wrapper throws, so this hook is one of the two places an
+        // invoke actually ends when it ends badly. Hand the lease back on the
+        // way out, unless the error IS the lease being somebody else's.
+        await letGo(tape, error);
+        throw error;
       }
-      // The recorded answer goes back through LangChain's own handler, with a
-      // stand-in model in the provider's place, so a streaming caller sees the
-      // replayed turn arrive whole instead of seeing nothing at all. See
-      // `replay_model.ts` for why that indirection is worth having.
-      const recorded = mark(
-        storedToAiMessage(outcome.response, tape.runId),
-        markFor(tape, outcome.seq, true),
-      );
-      tape.noteTurn(recorded);
-      return handler({ ...request, model: new ReplayChatModel(recorded) });
     },
 
     /**
@@ -388,65 +462,101 @@ export function salvorMiddleware(options: SalvorMiddlewareOptions) {
      */
     wrapToolCall: async (request: any, handler: any) => {
       const tape = await tapeFor(request.runtime);
-      const name: string = request.toolCall.name;
-      const args = request.toolCall.args ?? {};
-      const callId: string = request.toolCall.id ?? "";
-      const position = tape.positionOf(callId, name);
-      const trustCompletion = await trustCompletionFor(name);
-      let live: ToolMessage | undefined;
-
-      const outcome = await tape
-        .toolCall(
-          name,
-          args,
-          async ({ seq, idempotencyKey }) =>
-            runWithToolCall(
-              { key: idempotencyKey, seq, runId: tape.runId, tool: name },
-              async () => {
-                const result = await handler(request);
-                if (!ToolMessage.isInstance(result)) {
-                  throw new SalvorMiddlewareError(
-                    `the tool \`${name}\` returned a LangGraph Command rather than a ` +
-                      "tool message. A Command is graph control flow, not a recorded " +
-                      "result, so this middleware cannot put it in the log. Return a " +
-                      "value or a ToolMessage from tools you want recorded.",
-                  );
-                }
-                live = result;
-                return toolOutput(result);
-              },
-            ),
-          position,
-          trustCompletion,
-        )
-        .catch((error: unknown) => {
-          throw undeclaredToolError(error, name);
-        });
-
-      announceFork(tape, onFork);
-      // One serialisation, used by both branches on purpose. The model reads a
-      // tool result as text, and the text a replay produces is the text the
-      // live call produced, byte for byte, or the next model call's request
-      // hash misses and the thread forks on nothing but key order. See
-      // `toolContent`.
-      const content = toolContent(outcome.output);
-      const marker = markFor(tape, outcome.seq, outcome.replayed);
-      if (!outcome.replayed && live) {
-        return mark(canonicalize(live, content), marker);
+      try {
+        return await recordToolCall(tape, request, handler);
+      } catch (error) {
+        // The other place an invoke ends badly: a tool body that threw, a
+        // `ToolNeedsResolution` stop, an undeclared tool. All of them leave
+        // the invoke, and all of them should leave the run free for the next
+        // process. The exception, as ever, is a lease that was never ours.
+        await letGo(tape, error);
+        throw error;
       }
-      return mark(
-        new ToolMessage({
-          content,
-          tool_call_id: request.toolCall.id ?? "",
-          name,
-          // A recorded completion is, by construction, a call that reported a
-          // result: salvor refuses to record one any other way.
-          status: "success",
-        }),
-        marker,
-      );
     },
   });
+
+  /**
+   * The body of `wrapToolCall`, lifted out of its own error handling so the
+   * hook above reads as the one sentence it is: record the call, and whatever
+   * happens, do not walk out of the invoke still holding the run.
+   */
+  async function recordToolCall(
+    tape: RunTape,
+    request: any,
+    handler: any,
+  ): Promise<ToolMessage> {
+    const name: string = request.toolCall.name;
+    const args = request.toolCall.args ?? {};
+    const callId: string = request.toolCall.id ?? "";
+    const position = tape.positionOf(callId, name);
+    const trustCompletion = await trustCompletionFor(name);
+    let live: ToolMessage | undefined;
+
+    const outcome = await tape
+      .toolCall(
+        name,
+        args,
+        async ({ seq, idempotencyKey }) =>
+          runWithToolCall(
+            { key: idempotencyKey, seq, runId: tape.runId, tool: name },
+            async () => {
+              const result = await handler(request);
+              if (!ToolMessage.isInstance(result)) {
+                throw new SalvorMiddlewareError(
+                  `the tool \`${name}\` returned a LangGraph Command rather than a ` +
+                    "tool message. A Command is graph control flow, not a recorded " +
+                    "result, so this middleware cannot put it in the log. Return a " +
+                    "value or a ToolMessage from tools you want recorded.",
+                  { code: "tool_returned_command" },
+                );
+              }
+              live = result;
+              return toolOutput(result);
+            },
+          ),
+        position,
+        trustCompletion,
+      )
+      .catch((error: unknown) => {
+        throw undeclaredToolError(error, name);
+      });
+
+    announceFork(tape, onFork);
+    // One serialisation, used by both branches on purpose. The model reads a
+    // tool result as text, and the text a replay produces is the text the
+    // live call produced, byte for byte, or the next model call's request
+    // hash misses and the thread forks on nothing but key order. See
+    // `toolContent`.
+    const content = toolContent(outcome.output);
+    const marker = markFor(tape, outcome.seq, outcome.replayed);
+    if (!outcome.replayed && live) {
+      return mark(canonicalize(live, content), marker);
+    }
+    return mark(
+      new ToolMessage({
+        content,
+        tool_call_id: request.toolCall.id ?? "",
+        name,
+        // A recorded completion is, by construction, a call that reported a
+        // result: salvor refuses to record one any other way.
+        status: "success",
+      }),
+      marker,
+    );
+  }
+}
+
+/**
+ * What arrived where a thread id should have been, for the message that says
+ * so. A string is quoted (an empty one is the case worth naming outright);
+ * anything else is named by its type and its value, both, because "a number"
+ * without the number is one round trip short of useful.
+ */
+function describeThreadId(threadId: unknown): string {
+  if (typeof threadId === "string") return "an empty string";
+  const value =
+    typeof threadId === "object" ? JSON.stringify(threadId) : String(threadId);
+  return `a ${typeof threadId} (${value})`;
 }
 
 /**
@@ -594,6 +704,7 @@ function storedToAiMessage(stored: unknown, run: string): AIMessage {
       `run ${run} recorded a model response this middleware cannot read back. ` +
         "It expects a LangChain stored message (`{ type: \"ai\", data: {...} }`), " +
         "which is what it writes; a run driven by other code records other shapes.",
+      { code: "unreadable_record" },
     );
   }
   return mapStoredMessageToChatMessage(stored as never) as AIMessage;
@@ -641,6 +752,11 @@ function openRefusalError(error: unknown, threadId: string, runId: string): unkn
         "quiet (or as soon as the run finishes). One driver per thread at a time. Wait " +
         "for the lease to lapse and invoke again, or confirm no other process is already " +
         "driving this thread.",
+      {
+        code: "lease_held",
+        cause: error,
+        lapsesInSeconds: error.lapsesInSeconds,
+      },
     );
   }
   return serverDrivenRunError(error, threadId, runId);
@@ -665,6 +781,7 @@ function serverDrivenRunError(error: unknown, threadId: string, runId: string): 
     `thread \`${threadId}\` (run ${runId}) cannot be opened for a client-driven run: ` +
       `${error.message}. Give this task a thread id that has never named a ` +
       "server-driven run.",
+    { code: "run_exists", cause: error },
   );
 }
 
@@ -686,5 +803,6 @@ function undeclaredToolError(error: unknown, tool: string): unknown {
       "middleware may record what the tool returned, `trust_completion = true` " +
       "with an `[output_schema]`. Then start the server with `salvor serve " +
       "--client-tool <FILE>`. See examples/client-tools/refund-card.toml.",
+    { code: "tool_undeclared", cause: error },
   );
 }

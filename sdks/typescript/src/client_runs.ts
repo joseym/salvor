@@ -272,6 +272,14 @@ export class ClientRunDriver {
    */
   clock: () => Date = () => new Date();
 
+  /**
+   * Called after {@link release} has handed the lease back, so whoever handed
+   * this driver out can forget the token it remembered for the run. A
+   * {@link SalvorClient} sets it (see `openClientRun` there); a driver opened
+   * through the free function has nobody to tell and leaves it unset.
+   */
+  onRelease?: () => void;
+
   private readonly base: string;
   private readonly headers: Record<string, string>;
   private readonly timeoutMs: number;
@@ -704,6 +712,55 @@ export class ClientRunDriver {
    */
   async resolve(output: unknown): Promise<void> {
     await this.send("POST", `/v1/client-runs/${this.runId}/resolve`, { output });
+  }
+
+  /**
+   * Hand the lease back, so the next open takes the run at once instead of
+   * waiting out the TTL.
+   *
+   * Lapsing is the safety net for a driver that can no longer say anything (it
+   * crashed, the tab closed); it is a poor way to end a drive that ended in an
+   * orderly fashion, because the run stays unopenable for the rest of the TTL.
+   * A short-lived process is exactly where that bites: an invoke returns, the
+   * process exits, and the next one is refused `409 lease_held` for up to a
+   * minute for nothing. So a driver that is finished calls this.
+   *
+   * Returns whether there was a lease here to give back. `false` is not an
+   * error: it means the run has no lease on this server (already released,
+   * lapsed, or never opened here), which is the state the caller was asking
+   * for anyway, so the call is idempotent. Throws a `SalvorApiError` with code
+   * `invalid_drive_token` when a lease DOES stand and this token is not it: a
+   * hold that is not this driver's is not this driver's to end.
+   *
+   * Only the lease goes. The log is untouched and the run stays client-driven,
+   * so a later open adopts it exactly as it would after a server restart.
+   */
+  async release(): Promise<boolean> {
+    const obj = await this.send("POST", `/v1/client-runs/${this.runId}/release`, {});
+    const released = (obj.released as boolean) ?? false;
+    this.onRelease?.();
+    return released;
+  }
+
+  /**
+   * Say "still here" without driving the run, and learn the lease TTL.
+   *
+   * Presenting the drive token has always been the heartbeat, and every
+   * driving call carries it. What that misses is the driver that makes no
+   * drive call for longer than the TTL because it is inside one long body: a
+   * tool that takes minutes, a model call it is streaming to its own screen.
+   * Its lease would lapse mid-body and another opener could take a run whose
+   * driver never went anywhere.
+   *
+   * Returns `lapses_in_seconds`, the whole lease TTL as of this beat, so a
+   * caller picks its interval from the answer rather than from a copy of the
+   * server's configuration. Throws a `SalvorApiError` with code
+   * `invalid_drive_token` when this token is no longer the run's lease, or
+   * `unknown_run` when this server holds no lease for the run at all.
+   */
+  async heartbeat(): Promise<number> {
+    const obj = await this.send("POST", `/v1/client-runs/${this.runId}/heartbeat`, {});
+    return (obj.lapses_in_seconds as number | undefined) ?? 0;
   }
 
   // -- helpers --------------------------------------------------------------

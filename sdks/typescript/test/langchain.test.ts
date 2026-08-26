@@ -53,7 +53,12 @@ import { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import type { ChatResult } from "@langchain/core/outputs";
 import { z } from "zod";
 
-import { ClientRunDriver, SalvorClient, type SalvorEvent } from "../dist/index.js";
+import {
+  LeaseHeldError,
+  SalvorApiError,
+  SalvorClient,
+  type SalvorEvent,
+} from "../dist/index.js";
 import {
   RunTape,
   SalvorMiddlewareError,
@@ -62,6 +67,7 @@ import {
   currentToolCall,
   finishThread,
   runIdForThread,
+  salvorError,
   salvorMiddleware,
 } from "../dist/langchain/index.js";
 
@@ -383,20 +389,23 @@ function reset(): void {
 }
 
 /**
- * Read a run's recorded log straight off the log-read endpoint, which needs no
- * drive token (see `GET /v1/client-runs/{id}/log` in API.md). A bare
- * `openClientRun` would try to mint or take the lease, which a run another
- * driver still holds refuses with `409 lease_held`; these assertions only want
- * to read what is recorded, so they never touch the lease at all.
+ * Read a run's recorded log without touching its lease, through the run's own
+ * event stream (`GET /v1/runs/{id}/events`), which reads the durable log and
+ * ends as soon as the run is not being driven in this process.
+ *
+ * Not `GET /v1/client-runs/{id}/log`, though that read needs no drive token
+ * either: it serves only client-driven runs this server currently HOLDS, and
+ * the middleware now hands a thread's lease back the moment an invoke ends, so
+ * every assertion below would meet `404 unknown_run` on a run that is
+ * perfectly well recorded. Not `openClientRun` either, which would mint or
+ * take the lease and be refused `409 lease_held` while another driver has it.
+ * These assertions only want to read what is recorded.
  */
 async function readLog(threadId: string): Promise<SalvorEvent[]> {
   const runId = await runIdForThread(threadId);
-  const driver = new ClientRunDriver(client!.baseUrl, {}, 5000, {
-    runId,
-    driveToken: "",
-    log: [],
-  });
-  return driver.log();
+  const events: SalvorEvent[] = [];
+  for await (const event of client!.streamEvents(runId)) events.push(event);
+  return events;
 }
 
 async function kindsOf(threadId: string): Promise<string[]> {
@@ -903,7 +912,15 @@ test("a tool with no client-tool declaration is refused by name", async (t) => {
         { configurable: { thread_id: "thread-undeclared-tool" } },
       ),
     (error: unknown) => {
-      const text = String((error as Error).message ?? error);
+      const refusal = salvorError(error);
+      ok(refusal, "reachable through salvorError, wrapped or not");
+      strictEqual(refusal!.code, "tool_undeclared", "and carries its code");
+      strictEqual(
+        (refusal!.cause as SalvorApiError).code,
+        "unknown_tool",
+        "with the server's own refusal underneath",
+      );
+      const text = refusal!.message;
       match(text, /send_email/, "the error names the tool");
       match(text, /client-tool declaration/, "and the declaration it needs");
       match(text, /--client-tool/, "and how to load it");
@@ -1086,9 +1103,10 @@ test("finishThread appends RunCompleted, GET /v1/runs/{id} shows completed, and 
         { configurable: { thread_id: threadId } },
       ),
     (error: unknown) => {
-      const text = String((error as Error).message ?? error);
-      match(text, /thread-finish/, "the error names the thread");
-      match(text, /finish/i, "and says it is finished");
+      const refusal = salvorError(error);
+      strictEqual(refusal?.code, "thread_finished", "refused by code");
+      match(refusal!.message, /thread-finish/, "the error names the thread");
+      match(refusal!.message, /finish/i, "and says it is finished");
       return true;
     },
   );
@@ -1170,9 +1188,15 @@ test("finishThread on a thread whose log ends at an open intent is refused, nami
   await rejects(
     () => finishThread(client!, threadId),
     (error: unknown) => {
-      const text = String((error as Error).message ?? error);
-      match(text, new RegExp(runId), "the error names the run");
-      match(text, /never completed/, "and says the call was never completed");
+      const refusal = salvorError(error);
+      strictEqual(refusal?.code, "open_intent", "refused by code");
+      match(refusal!.message, new RegExp(runId), "the error names the run");
+      match(refusal!.message, /never completed/, "and says the call was never completed");
+      match(
+        refusal!.message,
+        new RegExp(`POST /v1/runs/${runId}/resolve`),
+        "and names the HTTP resolve endpoint beside the CLI command",
+      );
       return true;
     },
   );
@@ -1217,13 +1241,17 @@ async function invokeRejection(
 }
 
 /**
- * `createAgent` wraps every error a middleware throws in its own
- * `MiddlewareError`, copying the original's `name` and `message` but keeping
- * the actual instance only as `.cause`. Unwrap it to reach the typed error
- * salvor's own middleware threw.
+ * The middleware error behind whatever an invoke threw.
+ *
+ * `salvorError` is the SDK's own unwrapper and the one the README teaches, so
+ * these cases exercise the same path an application takes rather than a
+ * hand-rolled `e.cause` reach that only covers half the shapes: an error
+ * thrown from a graph node arrives inside `createAgent`'s `MiddlewareError`,
+ * one thrown from `beforeAgent` arrives bare, and a middleware error now
+ * carries the server's own refusal on its `cause` besides.
  */
 function causeOf(error: unknown): unknown {
-  return (error as { cause?: unknown } | null | undefined)?.cause ?? error;
+  return salvorError(error) ?? error;
 }
 
 test("a tool declared trust_completion = false runs once, then stops the invoke for a person to resolve", async (t) => {
@@ -1246,8 +1274,14 @@ test("a tool declared trust_completion = false runs once, then stops the invoke 
   ok(stop.key.length > 0, "carries the derived idempotency key");
   const output = { provider_transfer_id: "ptx-acct-9001", status: "succeeded", amount_cents: 250000 };
   deepStrictEqual(stop.output, output, "carries what the tool body returned");
+  strictEqual(stop.code, "tool_needs_resolution", "carries its code");
   match(stop.message, /trust_completion = false/);
   match(stop.message, new RegExp(`salvor resolve ${runId}`), "names the resolve command");
+  match(
+    stop.message,
+    new RegExp(`POST /v1/runs/${runId}/resolve`),
+    "and the HTTP resolve endpoint, for a caller with no store path",
+  );
 
   strictEqual(ran.payout, 1, "the tool body ran exactly once");
   deepStrictEqual(
@@ -1261,6 +1295,7 @@ test("a tool declared trust_completion = false runs once, then stops the invoke 
   reset();
   const impatient = agentFor(PAYOUT_SCRIPT, [wirePayout]);
   const refusal = await invokeRejection(impatient.agent, threadId);
+  strictEqual(salvorError(refusal)?.code, "open_intent", "the open-intent refusal, by code");
   const refusalText = String((refusal as Error).message ?? refusal);
   match(refusalText, /never completed/, "the same refusal a stuck intent always gets");
   match(refusalText, new RegExp(`salvor resolve ${runId}`), "names the resolve step");
@@ -1338,6 +1373,16 @@ test("a second instance on a held thread is refused with lease_held before runni
       refusal = causeOf(error);
     }
     ok(refusal instanceof SalvorMiddlewareError, "the middleware itself named the refusal");
+    strictEqual((refusal as SalvorMiddlewareError).code, "lease_held", "by code");
+    ok(
+      ((refusal as SalvorMiddlewareError).lapsesInSeconds ?? 0) > 0,
+      "carrying how long to back off for",
+    );
+    strictEqual(
+      ((refusal as SalvorMiddlewareError).cause as SalvorApiError).code,
+      "lease_held",
+      "with the server's own refusal underneath",
+    );
     const text = (refusal as Error).message;
     match(text, new RegExp(threadId), "the error names the thread");
     match(text, new RegExp(runId), "and the run");
@@ -1454,6 +1499,12 @@ test("a lease that lapses and is taken mid-step surfaces invalid_drive_token by 
         }),
       (error: unknown) => {
         ok(error instanceof SalvorMiddlewareError, "a named middleware refusal");
+        strictEqual(error.code, "lease_lost", "by code");
+        strictEqual(
+          (error.cause as SalvorApiError).code,
+          "invalid_drive_token",
+          "with the server's own refusal underneath",
+        );
         const text = (error as Error).message;
         match(text, new RegExp(threadId), "the error names the thread");
         match(text, new RegExp(driver.runId), "and the run");
@@ -1575,13 +1626,269 @@ test("a server-driven run's id refuses a client-driven open, naming the thread a
         { configurable: { thread_id: threadId } },
       ),
     (error: unknown) => {
-      const text = String((error as Error).message ?? error);
-      match(text, new RegExp(threadId), "the error names the thread");
-      match(text, /server-driven run/, "and the reason");
+      const refusal = salvorError(error);
+      strictEqual(refusal?.code, "run_exists", "refused by code");
+      match(refusal!.message, new RegExp(threadId), "the error names the thread");
+      match(refusal!.message, /server-driven run/, "and the reason");
       return true;
     },
   );
   strictEqual(ran.lookup, 0, "the middleware never reached the tool");
+});
+
+/**
+ * The lease is handed back when an invoke ends, not left to lapse.
+ *
+ * This suite's server runs the default 60 second TTL, which is what makes the
+ * case worth writing: nothing here waits, so an open that succeeds a
+ * millisecond after the invoke returned can only have succeeded because the
+ * lease was released. Before the release existed, the very next process to
+ * invoke this thread was refused `lease_held` for a full minute for nothing,
+ * which is precisely the shape of a short-lived process handing over to its
+ * successor.
+ */
+test("an invoke hands the lease back, so a stranger takes the thread on its next request", async (t) => {
+  if (!base) return t.skip("salvor serve not available");
+  reset();
+  const threadId = "thread-released-on-exit";
+  const runId = await runIdForThread(threadId);
+
+  const { agent } = agentFor(ONE_TOOL_SCRIPT);
+  await agent.invoke(
+    { messages: [{ role: "user", content: "how is ORD-7781?" }] },
+    { configurable: { thread_id: threadId } },
+  );
+
+  // A genuinely independent client: no memory of any token, exactly what the
+  // next process would be. A bare open, with no wait of any kind.
+  const stranger = new SalvorClient(base!);
+  const taken = await stranger.openClientRun({ runId });
+  strictEqual(taken.runId, runId, "the stranger opened the very run the invoke drove");
+  deepStrictEqual(
+    taken.logEnvelopes.map((event) => event.kind),
+    [
+      "RunStarted",
+      "ModelCallRequested",
+      "ModelCallCompleted",
+      "ToolCallRequested",
+      "ToolCallCompleted",
+      "ModelCallRequested",
+      "ModelCallCompleted",
+    ],
+    "and got the recorded log back, untouched by the release",
+  );
+
+  // Handing it back twice is not an error: nothing to give back is the state
+  // the caller wanted anyway.
+  strictEqual(await taken.release(), true, "the stranger's own lease goes back");
+  strictEqual(await taken.release(), false, "and releasing again is a no-op, not a refusal");
+});
+
+test("a tool body that throws still hands the lease back", async (t) => {
+  if (!base) return t.skip("salvor serve not available");
+  reset();
+  const threadId = "thread-released-after-throw";
+  const runId = await runIdForThread(threadId);
+  const script: Turn[] = [
+    {
+      content: "stamping the ledger",
+      toolCalls: [
+        { name: "stamp_ledger", args: { order_id: "ORD-5150", note: "seen" }, id: "call-stamp" },
+      ],
+    },
+    { content: "Stamped ORD-5150." },
+  ];
+
+  stampCrashes = true;
+  const crashed = agentFor(script);
+  await rejects(
+    () =>
+      crashed.agent.invoke(
+        { messages: [{ role: "user", content: "stamp ORD-5150" }] },
+        { configurable: { thread_id: threadId } },
+      ),
+    (error: unknown) => /ledger writer died/.test(String(error)),
+  );
+  stampCrashes = false;
+
+  // The invoke died between the intent and the completion, which is the case
+  // that matters most: the run is stuck at a dangling write, and the process
+  // that comes to unstick it must not be locked out for a minute first.
+  const stranger = new SalvorClient(base!);
+  const taken = await stranger.openClientRun({ runId });
+  deepStrictEqual(
+    taken.logEnvelopes.map((event) => event.kind).slice(-1),
+    ["ToolCallRequested"],
+    "the log still ends at the open intent: releasing the lease writes nothing",
+  );
+  await taken.release();
+});
+
+/**
+ * A tool body longer than the whole lease TTL, and a rival trying the whole
+ * time.
+ *
+ * The TTL is the server's, set from `SALVOR_CLIENT_LEASE_TTL_SECS` (whole
+ * seconds only), so this case runs its own `salvor serve` at one second rather
+ * than making the suite wait a minute for the same proof. Three seconds of
+ * tool body against a one second TTL is three lapses' worth of silence: the
+ * only thing keeping the run is the middleware's heartbeat, which beats every
+ * TTL/3 while a body runs. Without it the rival takes the run partway through
+ * and the tool's completion is refused as a superseded token.
+ */
+test("a tool body longer than the lease TTL keeps its run, and a rival is refused throughout", async (t) => {
+  if (!base) return t.skip("salvor serve not available");
+  reset();
+  const dir = mkdtempSync(join(tmpdir(), "salvor-ts-beat-"));
+  const beatPort = await freePort();
+  const beatBase = `http://127.0.0.1:${beatPort}`;
+  const child = spawn(
+    SALVOR,
+    [
+      "--store",
+      join(dir, "beat.db"),
+      "serve",
+      "--bind",
+      `127.0.0.1:${beatPort}`,
+      ...DECLS.flatMap((path) => ["--client-tool", path]),
+    ],
+    {
+      stdio: "ignore",
+      env: { PATH: "/usr/bin:/bin", SALVOR_CLIENT_LEASE_TTL_SECS: "1" },
+    },
+  );
+  try {
+    const up = Date.now() + 15000;
+    for (;;) {
+      try {
+        if ((await fetch(`${beatBase}/v1/client-tools`)).ok) break;
+      } catch {
+        /* not up yet */
+      }
+      if (Date.now() > up) throw new Error("short-TTL salvor serve did not come up");
+      await new Promise((r) => setTimeout(r, 100));
+    }
+
+    const beatClient = new SalvorClient(beatBase);
+    const threadId = "thread-long-body";
+    const runId = await runIdForThread(threadId);
+    const rival = new SalvorClient(beatBase);
+    const refusals: number[] = [];
+
+    // Three seconds inside the tool body, with the rival asking for the run
+    // every half second: nine tries against a lease that lapses after one.
+    midToolCall = async () => {
+      const until = Date.now() + 3000;
+      while (Date.now() < until) {
+        await new Promise((r) => setTimeout(r, 500));
+        const refused = await rival
+          .openClientRun({ runId })
+          .then(() => undefined, (error: unknown) => error);
+        ok(
+          refused instanceof LeaseHeldError,
+          `the rival was refused while the body ran (try ${refusals.length + 1})`,
+        );
+        refusals.push((refused as LeaseHeldError).lapsesInSeconds);
+      }
+    };
+
+    const agent = createAgent({
+      model: new ScriptedModel(ONE_TOOL_SCRIPT) as never,
+      tools: [lookupOrder, stampLedger] as never,
+      middleware: [salvorMiddleware({ client: beatClient })],
+    });
+    const answer = await agent.invoke(
+      { messages: [{ role: "user", content: "how is ORD-7781?" }] },
+      { configurable: { thread_id: threadId } },
+    );
+
+    strictEqual(ran.lookup, 1, "the long body ran once");
+    strictEqual(textOf(answer.messages.at(-1)!), "Order ORD-7781 is paid, 4200 cents.");
+    ok(refusals.length >= 5, `the rival tried through the whole body (${refusals.length} tries)`);
+    ok(
+      refusals.every((lapses) => lapses > 0),
+      "and was told each time when the hold lapses",
+    );
+
+    // The completion landed under the same lease the intent was opened with:
+    // one intent, one completion, nothing abandoned mid-body.
+    const log: SalvorEvent[] = [];
+    for await (const event of beatClient.streamEvents(runId)) log.push(event);
+    deepStrictEqual(log.map((event) => event.kind), [
+      "RunStarted",
+      "ModelCallRequested",
+      "ModelCallCompleted",
+      "ToolCallRequested",
+      "ToolCallCompleted",
+      "ModelCallRequested",
+      "ModelCallCompleted",
+    ]);
+
+    // And the invoke let the run go on its way out, so the rival that was
+    // refused for three seconds gets it at once now.
+    const after = await rival.openClientRun({ runId });
+    strictEqual(after.runId, runId, "the rival takes the run the moment the invoke ends");
+    await after.release();
+  } finally {
+    reset();
+    child.kill();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// -- reaching the error an invoke threw ---------------------------------------
+
+/**
+ * `salvorError` unwraps both shapes, which is the whole reason it exists.
+ *
+ * An error thrown from inside a graph node arrives wrapped in `createAgent`'s
+ * own `MiddlewareError`, with the real instance on `.cause`; an error thrown
+ * from `beforeAgent` arrives bare. A caller that checks only `e.cause` misses
+ * the second, a caller that checks only `e instanceof` misses the first, and
+ * the middleware's own errors now carry a `.cause` of their own (the server's
+ * refusal) besides, so reaching past one level blindly lands on the wrong
+ * object.
+ */
+test("salvorError finds the middleware error whether it arrived wrapped or bare", async (t) => {
+  if (!base) return t.skip("salvor serve not available");
+  reset();
+
+  // Wrapped: `ToolNeedsResolution` is thrown from `wrapToolCall`, inside the
+  // graph, so LangChain wraps it on the way out.
+  const wrappedThread = "thread-unwrap-wrapped";
+  const wrapped = await invokeRejection(
+    agentFor(PAYOUT_SCRIPT, [wirePayout]).agent,
+    wrappedThread,
+  );
+  ok(!(wrapped instanceof ToolNeedsResolution), "what the caller catches is not the error itself");
+  const unwrapped = salvorError(wrapped);
+  ok(unwrapped instanceof ToolNeedsResolution, "salvorError reaches through the wrapper");
+  strictEqual(unwrapped!.code, "tool_needs_resolution");
+
+  // Bare: a missing thread id is refused in `beforeAgent`, before any node
+  // runs, so nothing wraps it.
+  const { agent } = agentFor(ONE_TOOL_SCRIPT);
+  let bare: unknown;
+  try {
+    await agent.invoke({ messages: [{ role: "user", content: "hello" }] }, {});
+    throw new Error("expected the invoke to be refused");
+  } catch (error) {
+    bare = error;
+  }
+  ok(bare instanceof SalvorMiddlewareError, "this one arrives as itself");
+  strictEqual(salvorError(bare), bare, "and salvorError hands back the very same object");
+  strictEqual((bare as SalvorMiddlewareError).code, "thread_id_missing");
+
+  // Anything that is not salvor's stays not salvor's: no false positives.
+  strictEqual(salvorError(new Error("the app's own problem")), undefined);
+  strictEqual(salvorError(undefined), undefined);
+
+  // Leave the payout thread settled, so a later run of this suite against the
+  // same store does not meet a dangling write.
+  const stop = unwrapped as ToolNeedsResolution;
+  const driver = await client!.openClientRun({ runId: stop.run });
+  await driver.resolve(stop.output);
+  await driver.release();
 });
 
 // -- the thread-id rule ------------------------------------------------------
@@ -1595,6 +1902,47 @@ test("a UUID thread id is the run id; anything else is hashed into one", async (
   match(derived, /^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   strictEqual(await runIdForThread("order-7781"), derived, "the mapping is stable");
   notStrictEqual(await runIdForThread("order-7782"), derived);
+});
+
+/**
+ * A thread id of the wrong type is its own refusal, not the missing one.
+ *
+ * An application whose order numbers are integers passes one straight through
+ * and gets a run id hashed from `String(7)`: it resumes nothing anyone meant,
+ * and looks for all the world like a durability bug. So the middleware refuses
+ * it by name, says what arrived, and says what it needs instead.
+ */
+test("a thread id that is not a non-empty string is refused separately from a missing one", async (t) => {
+  if (!base) return t.skip("salvor serve not available");
+  reset();
+  const { agent } = agentFor(ONE_TOOL_SCRIPT);
+  const message = { messages: [{ role: "user", content: "how is ORD-7781?" }] };
+
+  const refuse = async (configurable: Record<string, unknown>): Promise<SalvorMiddlewareError> => {
+    try {
+      await agent.invoke(message, { configurable } as never);
+    } catch (error) {
+      const refusal = salvorError(error);
+      ok(refusal, "a named middleware refusal");
+      return refusal!;
+    }
+    throw new Error("expected the invoke to be refused");
+  };
+
+  const numeric = await refuse({ thread_id: 7 });
+  strictEqual(numeric.code, "thread_id_invalid");
+  match(numeric.message, /number \(7\)/, "says what arrived, value and all");
+  match(numeric.message, /non-empty string/, "and what is required");
+
+  const empty = await refuse({ thread_id: "" });
+  strictEqual(empty.code, "thread_id_invalid");
+  match(empty.message, /empty string/, "names the empty case for what it is");
+
+  const missing = await refuse({});
+  strictEqual(missing.code, "thread_id_missing", "and a missing id is a different refusal");
+  match(missing.message, /needs a thread id/);
+
+  strictEqual(ran.lookup, 0, "none of them reached a tool");
 });
 
 // -- the plain entry must not pull LangChain in ------------------------------

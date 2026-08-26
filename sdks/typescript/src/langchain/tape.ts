@@ -76,6 +76,14 @@
  * `unknown_run` earns is still possible to lose to a genuinely new driver
  * that opened the restarted server first; that second refusal is
  * `invalid_drive_token` too, and gets the same immediate, unretried refusal.
+ *
+ * A lease is also something to hold on to and something to give back, and this
+ * tape does both. `keepAlive` beats while a tool body or a live model call is
+ * running, because that is the one stretch of an invoke where nothing presents
+ * the drive token and a body of minutes would otherwise lose the run it is
+ * working on. `release` hands the lease back when the invoke ends, so the next
+ * process to invoke the thread takes it on its next request rather than
+ * waiting out a TTL for a driver that has already gone home.
  */
 
 import type { ClientRunDriver } from "../client_runs.js";
@@ -155,6 +163,21 @@ interface TurnGate {
 
 const ZERO_USAGE: Usage = { inputTokens: 0, outputTokens: 0 };
 
+/**
+ * How long a body runs before the first beat goes out, while the TTL is still
+ * unknown.
+ *
+ * The open response does not carry the lease TTL and a heartbeat's answer
+ * does, so the only way to learn it is to beat once. This number is the
+ * compromise that follows: early enough to be in time under a TTL of one
+ * second, late enough that an ordinary tool body (a lookup, a fetch) finishes
+ * and never beats at all.
+ */
+const PROBE_BEAT_MS = 250;
+
+/** The floor on a beat interval, whatever a very short TTL divides down to. */
+const MIN_BEAT_MS = 50;
+
 /** Drives one thread's run for the length of one agent invocation. */
 export class RunTape {
   readonly runId: string;
@@ -181,6 +204,12 @@ export class RunTape {
   private lastTurn: NotedTurn | undefined;
   /** Per-turn admission state, keyed by `TurnPosition.turn`. */
   private turns = new Map<string, TurnGate>();
+  /**
+   * The lease TTL in milliseconds, as the last heartbeat reported it, or
+   * undefined until one has been answered. Remembered for the life of the
+   * tape, so only the first long body of an invoke pays the probe beat.
+   */
+  private leaseTtlMs: number | undefined;
 
   private constructor(driver: ClientRunDriver, options: RunTapeOptions) {
     this.driver = driver;
@@ -277,7 +306,10 @@ export class RunTape {
           usage: opened.usage ?? ZERO_USAGE,
         };
       }
-      const answered = await perform();
+      // Under the beats: a model call the app performs itself can outlast the
+      // lease TTL (a long completion, a stream it is rendering), and nothing
+      // else presents the token while it does.
+      const answered = await this.keepAlive(perform);
       await this.lease(() =>
         this.driver.clientModelCompletion(seq, answered.response, answered.usage),
       );
@@ -364,10 +396,18 @@ export class RunTape {
               "`trust_completion = false`, so that call's result was never reported and it " +
               "is a call that was never completed. Settle it first (`salvor resolve " +
               `${this.runId} --store <the server's store> --output '<json the tool ` +
-              `returned>'\`, the Inspector, or \`driver.resolve(...)\`) and invoke again.`,
+              `returned>'\`, \`POST /v1/runs/${this.runId}/resolve\` on the server, the ` +
+              "Inspector, or `driver.resolve(...)`) and invoke again.",
+            { code: "open_intent" },
           );
         }
-        const output = await perform({ seq, idempotencyKey: opened.idempotencyKey });
+        // Under the beats, for the same reason a model call is: the tool body
+        // is the longest stretch of an invoke that presents the drive token
+        // nowhere, and a body of minutes must not lose the run it is working
+        // on to the next opener.
+        const output = await this.keepAlive(() =>
+          perform({ seq, idempotencyKey: opened.idempotencyKey }),
+        );
         if (!trustCompletion) {
           throw new ToolNeedsResolution({
             run: this.runId,
@@ -435,6 +475,7 @@ export class RunTape {
           "run cannot be pinned. This means either the model turn that asked for " +
           "it was never recorded, or another middleware ahead of this one changed " +
           "the call's id.",
+        { code: "call_unranked" },
       );
     }
     return { turn: turn.turn, rank, total: turn.ids.length };
@@ -506,6 +547,87 @@ export class RunTape {
   // -- the lease -------------------------------------------------------------
 
   /**
+   * Hand the run's lease back, so the next process to invoke this thread takes
+   * it at once instead of being refused for the rest of the TTL.
+   *
+   * Called when an invoke ends, on the success path and on the error paths
+   * alike (see `index.ts`), and never on the one-driver refusals: a lease that
+   * is not this invoke's is not this invoke's to end.
+   *
+   * A failure here is swallowed on purpose. Releasing is a courtesy to the
+   * next driver, not part of what the invoke was asked to do: the log is
+   * already written, the answer is already computed, and turning "I could not
+   * say goodbye" into a thrown invoke would trade a run that costs the next
+   * caller a TTL of waiting for one that costs this caller its result. The
+   * lease lapses on its own either way, which is exactly what the lapse is
+   * for.
+   */
+  async release(): Promise<boolean> {
+    try {
+      return await this.driver.release();
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Run `work` while telling the server, every so often, that this driver is
+   * still here.
+   *
+   * A tool body or a live model call is the one stretch of an invoke that
+   * makes no drive call at all: nothing presents the token between the intent
+   * and the completion, so a body that outlasts the lease TTL would have its
+   * run taken by the next opener while it was still working, and its
+   * completion refused when it came back. The beats close that window.
+   *
+   * The interval comes from the server's own answer (`lapses_in_seconds`),
+   * divided by three, so two beats can be lost in a row before the lease is
+   * actually at risk. Until the first answer arrives the interval is
+   * {@link PROBE_BEAT_MS}, because the TTL is not knowable any other way.
+   *
+   * A failed beat is not fatal and is deliberately not retried into an error:
+   * it may be a blip (the next beat covers it), or the run may have been taken
+   * or the server restarted, and both of those the next real drive call
+   * discovers properly, through `lease()`, with the log in hand. Stopping the
+   * beats is in a `finally`, so a body that throws leaves no timer behind.
+   */
+  private async keepAlive<T>(work: () => Promise<T>): Promise<T> {
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const schedule = (): void => {
+      timer = setTimeout(beat, this.beatInterval());
+      // Never a reason for the process to stay alive: the beats exist for the
+      // sake of work that is already running, and outlive nothing.
+      (timer as { unref?: () => void }).unref?.();
+    };
+    const beat = async (): Promise<void> => {
+      if (stopped) return;
+      try {
+        const lapsesInSeconds = await this.driver.heartbeat();
+        if (lapsesInSeconds > 0) this.leaseTtlMs = lapsesInSeconds * 1000;
+      } catch {
+        /* a missed beat is not a failed step; the next drive call finds out */
+      }
+      if (!stopped) schedule();
+    };
+
+    schedule();
+    try {
+      return await work();
+    } finally {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /** How long until the next beat: a third of the TTL, or the probe until one is known. */
+  private beatInterval(): number {
+    if (this.leaseTtlMs === undefined) return PROBE_BEAT_MS;
+    return Math.max(MIN_BEAT_MS, Math.floor(this.leaseTtlMs / 3));
+  }
+
+  /**
    * Run one guarded step, taking the run up again only when this server has
    * simply forgotten it (a restart), and refusing by name at once when
    * something else is actively driving it.
@@ -518,13 +640,13 @@ export class RunTape {
     try {
       return await step();
     } catch (error) {
-      if (isSupersededLease(error)) throw this.oneDriverError();
+      if (isSupersededLease(error)) throw this.oneDriverError(error);
       if (!isForgottenRun(error)) throw error;
       await this.reopen(error);
       try {
         return await step();
       } catch (again) {
-        if (isSupersededLease(again)) throw this.oneDriverError();
+        if (isSupersededLease(again)) throw this.oneDriverError(again);
         throw again;
       }
     }
@@ -538,12 +660,13 @@ export class RunTape {
    * the NEXT invoke succeeds on its own) or take it from whoever holds it now,
    * which is the same fight this refusal exists to avoid having.
    */
-  private oneDriverError(): SalvorMiddlewareError {
+  private oneDriverError(cause: unknown): SalvorMiddlewareError {
     return new SalvorMiddlewareError(
       `run ${this.runId} (thread \`${this.threadId}\`) is no longer this invoke's to ` +
         "drive: another driver holds its lease now. One driver per thread at a time. " +
         "Invoke a given thread id from one process at a time, and give work that must " +
         "run alongside it a thread id of its own.",
+      { code: "lease_lost", cause },
     );
   }
 
@@ -564,6 +687,7 @@ export class RunTape {
           `token (${describe(cause)}), and re-opening the run was refused too: ` +
           `${why}. The server refuses to re-open a run when it is not marked as ` +
           "client-driven in its log, or when the store no longer holds it.",
+        { code: "reopen_refused", cause: error },
       );
     }
     this.driver = driver;
@@ -595,7 +719,9 @@ export class RunTape {
               `holds a ${recorded.kind} there, and its last event (seq ${tail.seq}, ` +
               `${tail.kind}) is a call that was never completed. Settle that call ` +
               `first (\`salvor resolve ${this.runId} --store <the server's store> ` +
-              "--output <output>`, or the resolve endpoint) and invoke again.",
+              `--output '<json the call returned>'\`, or \`POST /v1/runs/${this.runId}/resolve\` ` +
+              "on the server) and invoke again.",
+            { code: "open_intent" },
           );
         }
         this.forked = this.cursor;
@@ -621,6 +747,7 @@ export class RunTape {
       throw new SalvorMiddlewareError(
         `run ${this.runId} reports the tool call at seq ${seq - 1} settled, but ` +
           `seq ${seq} holds no completion to replay.`,
+        { code: "unreadable_record" },
       );
     }
     return completion.payload.output;
