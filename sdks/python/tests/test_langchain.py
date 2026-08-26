@@ -236,6 +236,18 @@ ran = {
 counting = threading.Lock()
 #: Set to make the next `stamp_ledger` body raise, standing in for a crash.
 stamp_crashes = {"on": False}
+#: Set to make the next `stamp_ledger` body leave by an interrupt rather than
+#: fail: the sync body raises `KeyboardInterrupt` directly, and the async body
+#: hangs on `"event"` (an `asyncio.Event` the test supplies) until the test
+#: cancels its task, standing in for `asyncio.CancelledError`. Neither is an
+#: `Exception`, which is the whole point: the middleware's failure-reporting
+#: catch must not treat a process leaving as a call failing.
+stamp_interrupts = {"on": False, "event": None}  # type: Dict[str, Any]
+#: Set to make the next `wire_payout` body raise. `wire_payout` is declared
+#: `trust_completion = false`, so this is how the suite proves the OTHER
+#: outcome a raise can have: nothing posted, the intent left open for a
+#: person, rather than a recorded failure.
+payout_crashes = {"on": False}
 #: Set to make the next `stamp_ledger` body report an output the server
 #: refuses to record: `"schema"` drops the required `entry_id` (`bad_request`
 #: against the declared `output_schema`), `"mismatch"` reports a different
@@ -380,6 +392,8 @@ def stamp_body(order_id: str, note: str) -> Dict[str, Any]:
         count("stamp")
         if stamp_crashes["on"]:
             raise RuntimeError("the ledger writer died mid-call")
+        if stamp_interrupts["on"]:
+            raise KeyboardInterrupt("ctrl-c mid-write")
         kind = stamp_bad_output["kind"]
         if kind == "schema":
             # No `entry_id`: fails the declaration's `output_schema`.
@@ -397,12 +411,22 @@ def stamp_body(order_id: str, note: str) -> Dict[str, Any]:
 
 
 async def astamp_body(order_id: str, note: str) -> Dict[str, Any]:
+    if stamp_interrupts["on"]:
+        # Standing in for a task cancellation mid-write: signal that the body
+        # has actually started, then hang at an await point until the test
+        # cancels this task. Nothing here catches the `CancelledError` that
+        # delivers.
+        count("stamp")
+        stamp_interrupts["event"].set()
+        await asyncio.sleep(10)
     return stamp_body(order_id, note)
 
 
 def payout_body(order_id: str, amount_cents: int) -> Dict[str, Any]:
     """Wire a payout for an order whose card refund is not available."""
     count("payout")
+    if payout_crashes["on"]:
+        raise RuntimeError("the payout provider died mid-call")
     return {
         "provider_transfer_id": "wt-{order}".format(order=order_id),
         "status": "succeeded",
@@ -451,6 +475,9 @@ def reset() -> None:
         }
     )
     stamp_crashes["on"] = False
+    stamp_interrupts["on"] = False
+    stamp_interrupts["event"] = None
+    payout_crashes["on"] = False
     stamp_bad_output["kind"] = None
     model_raises_once["on"] = False
     meddling["do"] = None
@@ -783,10 +810,23 @@ class MiddlewareScenarios:
 
         self.drive(body)
 
-    # -- (c) a crash between a tool's intent and its completion ---------------
+    # -- (c) a tool body raises between its intent and a completion -----------
 
-    def test_a_crash_mid_write_leaves_a_dangling_intent_the_next_invoke_picks_up(self) -> None:
+    def test_a_raised_tool_body_is_recorded_as_a_failure_and_fails_the_same_way_again(
+        self,
+    ) -> None:
+        """A trusted tool's raise is not left dangling: it is the call's
+        failure, recorded as a completion the same way a returned value is.
+
+        The first invoke runs the body, which raises; the middleware reports
+        that raise to salvor as the call's failure and re-raises the original
+        error, and the lease comes back with the step that raised, same as any
+        other raising step. A second invoke meets the recorded failure at the
+        same position and raises naming it, without running the body again:
+        the call is settled, not retried.
+        """
         thread_id = "thread-crash-mid-write"
+        run_id = run_id_for_thread(thread_id)
         script = [
             {
                 "content": "stamping the ledger",
@@ -803,9 +843,6 @@ class MiddlewareScenarios:
         ask = {"messages": [{"role": "user", "content": "stamp ORD-9001"}]}
 
         async def body(client: Any) -> None:
-            # The tool dies after salvor recorded the intent and before anything
-            # could report a result, which is the shape of every real mid-write
-            # crash.
             stamp_crashes["on"] = True
             crashed, _ = self.agent_for(script, client)
             with self.assertRaises(RuntimeError) as caught:
@@ -819,35 +856,47 @@ class MiddlewareScenarios:
                     "ModelCallRequested",
                     "ModelCallCompleted",
                     "ToolCallRequested",
+                    "ToolCallCompleted",
                 ],
-                "the log ends at the intent: a write asked for and never reported",
+                "the raise is recorded as the call's completion, not left dangling",
             )
+            stamp_crashes["on"] = False
 
-            # The next invoke replays the model call for free, meets the
-            # dangling intent, performs the call once more under the same
-            # derived key, and closes it.
-            reset()
-            recovered, model = self.agent_for(script, client)
-            answer = await self.invoke(recovered, ask, self.thread(thread_id))
-            self.assertEqual(model.calls["count"], 1, "only the answer turn was live")
-            self.assertEqual(ran["stamp"], 1, "the unfinished write ran once more")
-            self.assertEqual(self.text_of(answer["messages"][-1]), "Stamped ORD-9001.")
+            # The lease came back with the failed step, so a stranger opens the
+            # run at once rather than meeting `lease_held`.
+            stranger = self.CLIENT(self.base)
+            try:
+                taken = await call(stranger.open_client_run, run_id=run_id)
+                self.assertEqual(taken.run_id, run_id, "the run was free at once")
+                await call(taken.release)
+            finally:
+                await call(stranger.close)
 
-            kinds = await self.kinds_of(client, thread_id)
+            # The next invoke replays the model turn for free, meets the
+            # recorded failure at the tool's position, and raises naming it
+            # without running the body a second time.
+            again, model = self.agent_for(script, client)
+            with self.assertRaises(SalvorMiddlewareError) as caught2:
+                await self.invoke(again, ask, self.thread(thread_id))
+            refusal = caught2.exception
+            self.assertEqual(refusal.code, "tool_failed")
+            self.assertIn("ledger writer died mid-call", str(refusal))
+            self.assertIn(run_id, str(refusal), "the error names the run")
+            self.assertEqual(ran["stamp"], 1, "the body did not run a second time")
             self.assertEqual(
-                kinds,
+                model.calls["count"], 0, "the second model turn never ran either"
+            )
+            self.assertEqual(
+                await self.kinds_of(client, thread_id),
                 [
                     "RunStarted",
                     "ModelCallRequested",
                     "ModelCallCompleted",
                     "ToolCallRequested",
                     "ToolCallCompleted",
-                    "ModelCallRequested",
-                    "ModelCallCompleted",
                 ],
+                "nothing new was appended: the failure is settled, not retried",
             )
-            self.assertEqual(kinds.count("ToolCallRequested"), 1, "exactly one intent")
-            self.assertEqual(kinds.count("ToolCallCompleted"), 1, "exactly one completion")
 
         self.drive(body)
 
@@ -2009,31 +2058,37 @@ class MiddlewareScenarios:
     # -- (i) finish_thread refuses a thread with an open intent ---------------
 
     def test_finish_thread_on_an_open_intent_is_refused_naming_the_run(self) -> None:
+        """A dangling intent stops `finish_thread`, whatever left it dangling.
+
+        A raised tool body is no longer one of those ways for a TRUSTED tool
+        (see the case above: the raise is recorded as the call's failure, a
+        completion), so this uses the case that still is one: a tool nobody
+        may self-report ran, returned a result, and the log ends at the
+        intent because `trust_completion = false` leaves it for a person.
+        """
         thread_id = "thread-finish-open-intent"
         script = [
             {
-                "content": "stamping the ledger",
+                "content": "sending the payout",
                 "tool_calls": [
                     {
-                        "name": "stamp_ledger",
-                        "args": {"order_id": "ORD-4242", "note": "seen"},
-                        "id": "call-stamp",
+                        "name": "wire_payout",
+                        "args": {"order_id": "ORD-4242", "amount_cents": 4200},
+                        "id": "call-wire",
                     }
                 ],
             },
-            {"content": "Stamped ORD-4242."},
+            {"content": "Payout confirmed."},
         ]
 
         async def body(client: Any) -> None:
-            stamp_crashes["on"] = True
-            crashed, _ = self.agent_for(script, client)
-            with self.assertRaises(RuntimeError):
+            agent, _ = self.agent_for(script, client, tools=[wire_payout])
+            with self.assertRaises(ToolNeedsResolution):
                 await self.invoke(
-                    crashed,
-                    {"messages": [{"role": "user", "content": "stamp ORD-4242"}]},
+                    agent,
+                    {"messages": [{"role": "user", "content": "pay ORD-4242 out"}]},
                     self.thread(thread_id),
                 )
-            stamp_crashes["on"] = False
 
             run_id = run_id_for_thread(thread_id)
             with self.assertRaises(SalvorMiddlewareError) as caught:
@@ -2121,48 +2176,60 @@ class MiddlewareScenarios:
 
     # -- (o2) and it goes back when the invoke dies instead -------------------
 
-    def test_a_raising_tool_body_hands_the_lease_back_on_its_way_out(self) -> None:
-        """An invoke that dies inside a tool body releases too.
+    def test_an_untrusted_tool_that_raises_stops_with_open_intent_and_nothing_posted(
+        self,
+    ) -> None:
+        """An invoke that dies inside a tool body releases the lease -- and for
+        an untrusted tool, posts nothing on its way out.
 
         `after_agent` does not run when a hook or a tool raises: LangChain
         re-raises and the graph stops there. If the lease only went back from
         that hook, the thread every crash touched would be locked for the rest
         of the TTL, which is exactly the thread somebody is about to retry. So
-        the step that raised gives it back on its way out, and the log still
-        says what it should: the intent went in before the body ran, and no
-        completion followed it.
+        the step that raised gives it back on its way out.
+
+        `wire_payout` is declared `trust_completion = false`: the client never
+        gets to say whether its own write landed, and that includes saying it
+        FAILED, which is exactly what reporting this raise would be. So unlike
+        a trusted tool's raise (recorded as the call's failure, a completion),
+        nothing is posted here: the log ends at the intent the crash left
+        open, for a person to settle once they have confirmed with the
+        provider what the call actually did.
         """
         thread_id = "thread-release-after-a-crash"
         run_id = run_id_for_thread(thread_id)
         script = [
             {
-                "content": "stamping the ledger",
+                "content": "sending the payout",
                 "tool_calls": [
                     {
-                        "name": "stamp_ledger",
-                        "args": {"order_id": "ORD-9119", "note": "seen"},
-                        "id": "call-stamp",
+                        "name": "wire_payout",
+                        "args": {"order_id": "ORD-9119", "amount_cents": 900},
+                        "id": "call-wire",
                     }
                 ],
             },
-            {"content": "Stamped ORD-9119."},
+            {"content": "Payout confirmed."},
         ]
 
         async def body(client: Any) -> None:
-            stamp_crashes["on"] = True
-            agent, _ = self.agent_for(script, client)
-            with self.assertRaises(RuntimeError):
+            payout_crashes["on"] = True
+            agent, _ = self.agent_for(script, client, tools=[wire_payout])
+            with self.assertRaises(SalvorMiddlewareError) as caught:
                 await self.invoke(
                     agent,
-                    {"messages": [{"role": "user", "content": "stamp ORD-9119"}]},
+                    {"messages": [{"role": "user", "content": "pay ORD-9119 out"}]},
                     self.thread(thread_id),
                 )
-            stamp_crashes["on"] = False
-            self.assertEqual(ran["stamp"], 1, "the body ran and died")
+            payout_crashes["on"] = False
+            refusal = caught.exception
+            self.assertEqual(refusal.code, "open_intent")
+            self.assertIn(run_id, str(refusal), "the error names the run")
+            self.assertEqual(ran["payout"], 1, "the body ran and raised, once")
             self.assertEqual(
                 (await self.kinds_of(client, thread_id))[-1],
                 "ToolCallRequested",
-                "the log ends at the intent the crash left open",
+                "nothing was posted: the intent is exactly as recorded, still open",
             )
 
             stranger = self.CLIENT(self.base)
@@ -2474,6 +2541,68 @@ class SyncTransport(MiddlewareScenarios, unittest.TestCase):
 
         self.drive(body)
 
+    # -- a process leaving is not a call failing -------------------------------
+
+    def test_a_keyboard_interrupt_mid_write_leaves_the_intent_open_and_propagates(
+        self,
+    ) -> None:
+        """`KeyboardInterrupt` is a `BaseException`, not an `Exception`.
+
+        The middleware's failure-reporting catch around a tool body is
+        narrowed to `Exception` precisely so an interrupt is never mistaken
+        for the call failing: nothing is posted, the intent is left exactly as
+        recorded, open, and the interrupt propagates unchanged, the same
+        dangling-write case a real crash leaves (see the case above with
+        `RuntimeError`, now recorded as a failure, for the contrast).
+        """
+        thread_id = "thread-keyboard-interrupt-mid-write"
+        run_id = run_id_for_thread(thread_id)
+        script = [
+            {
+                "content": "stamping the ledger",
+                "tool_calls": [
+                    {
+                        "name": "stamp_ledger",
+                        "args": {"order_id": "ORD-9500", "note": "seen"},
+                        "id": "call-stamp",
+                    }
+                ],
+            },
+            {"content": "Stamped ORD-9500."},
+        ]
+
+        async def body(client: Any) -> None:
+            stamp_interrupts["on"] = True
+            agent, _ = self.agent_for(script, client)
+            with self.assertRaises(KeyboardInterrupt):
+                await self.invoke(
+                    agent,
+                    {"messages": [{"role": "user", "content": "stamp ORD-9500"}]},
+                    self.thread(thread_id),
+                )
+            stamp_interrupts["on"] = False
+            self.assertEqual(ran["stamp"], 1, "the body ran once and was interrupted")
+            self.assertEqual(
+                await self.kinds_of(client, thread_id),
+                [
+                    "RunStarted",
+                    "ModelCallRequested",
+                    "ModelCallCompleted",
+                    "ToolCallRequested",
+                ],
+                "nothing was posted: the intent is exactly as recorded, still open",
+            )
+
+            stranger = self.CLIENT(self.base)
+            try:
+                taken = await call(stranger.open_client_run, run_id=run_id)
+                self.assertEqual(taken.run_id, run_id, "the run was free at once")
+                await call(taken.release)
+            finally:
+                await call(stranger.close)
+
+        self.drive(body)
+
 
 class AsyncTransport(MiddlewareScenarios, unittest.TestCase):
     """Every scenario through ``await agent.ainvoke`` over ``salvor.AsyncClient``.
@@ -2497,6 +2626,79 @@ class AsyncTransport(MiddlewareScenarios, unittest.TestCase):
 
     def dispose(self, client: Any) -> None:
         client.close()
+
+    # -- a process leaving is not a call failing -------------------------------
+
+    def test_cancelling_the_task_mid_write_leaves_the_intent_open_and_propagates(
+        self,
+    ) -> None:
+        """The asyncio twin of the sync interrupt case, a real task
+        cancellation rather than a raised exception the tool body chose.
+
+        `asyncio.CancelledError` is a `BaseException`, not an `Exception`
+        (since 3.8), for the same reason: cancelling a task is the caller
+        taking the work away, not the work failing, and the middleware's
+        failure-reporting catch around a tool body must not treat it as one
+        either. Nothing is posted, the intent is left exactly as recorded,
+        open, and the cancellation propagates out of the awaited task.
+        """
+        thread_id = "thread-cancelled-mid-write"
+        run_id = run_id_for_thread(thread_id)
+        script = [
+            {
+                "content": "stamping the ledger",
+                "tool_calls": [
+                    {
+                        "name": "stamp_ledger",
+                        "args": {"order_id": "ORD-9600", "note": "seen"},
+                        "id": "call-stamp",
+                    }
+                ],
+            },
+            {"content": "Stamped ORD-9600."},
+        ]
+
+        async def scenario() -> None:
+            async with AsyncClient(self.base) as client:
+                stamp_interrupts["on"] = True
+                stamp_interrupts["event"] = asyncio.Event()
+                agent, _ = self.agent_for(script, client)
+                task = asyncio.ensure_future(
+                    agent.ainvoke(
+                        {"messages": [{"role": "user", "content": "stamp ORD-9600"}]},
+                        self.thread(thread_id),
+                    )
+                )
+                # Wait for the body to actually be running -- past its intent,
+                # inside its await point -- before taking the task away.
+                await stamp_interrupts["event"].wait()
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+                stamp_interrupts["on"] = False
+                self.assertEqual(
+                    ran["stamp"], 1, "the body started once and was cancelled"
+                )
+                self.assertEqual(
+                    await self.kinds_of(client, thread_id),
+                    [
+                        "RunStarted",
+                        "ModelCallRequested",
+                        "ModelCallCompleted",
+                        "ToolCallRequested",
+                    ],
+                    "nothing was posted: the intent is exactly as recorded, still open",
+                )
+
+                stranger = AsyncClient(self.base)
+                try:
+                    taken = await stranger.open_client_run(run_id=run_id)
+                    self.assertEqual(taken.run_id, run_id, "the run was free at once")
+                    await taken.release()
+                finally:
+                    await stranger.close()
+
+        asyncio.run(scenario())
 
 
 # -- the vectors shared with the TypeScript suite ------------------------------

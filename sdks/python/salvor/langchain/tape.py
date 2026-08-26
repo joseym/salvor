@@ -106,9 +106,12 @@ __all__ = [
     "lease_lost",
     "lease_taken",
     "one_driver_error",
+    "recorded_failure_message",
+    "recorded_tool_failure",
     "server_driven_run",
     "start_events",
     "still_ours",
+    "untrusted_tool_raised",
     "usage_payload",
 ]
 
@@ -446,6 +449,96 @@ def dangling_untrusted_call(
     )
 
 
+#: The reserved key a recorded completion's output carries when the call it
+#: closes failed rather than returned: the same sentinel a native tool's
+#: exhausted retries write and a reported client failure writes too (see
+#: ``salvor_runtime::wire::ERROR_SENTINEL_KEY`` and
+#: :meth:`~salvor.client_runs.ClientRunDriver.client_tool_failure`).
+ERROR_SENTINEL_KEY = "__salvor_error"
+
+
+def recorded_failure_message(output: Any) -> Optional[str]:
+    """The message a recorded completion's output carries, when that output is
+    the failure sentinel; ``None`` for an ordinary result.
+
+    Mirrors the decode rule the sentinel itself is defined by: an object with
+    exactly one key, ``__salvor_error``, and nothing else is the sentinel, so
+    an ordinary tool result that happens to nest a key by that name somewhere
+    inside it is unaffected. This is how a tape meeting a settled intent tells
+    "the recorded call failed" from "the recorded call returned this" without
+    a second round trip: :attr:`ClientToolIntentResult.output` already carries
+    whichever one it is.
+    """
+    if not isinstance(output, dict) or len(output) != 1:
+        return None
+    body = output.get(ERROR_SENTINEL_KEY)
+    if not isinstance(body, dict):
+        return None
+    message = body.get("message")
+    return message if isinstance(message, str) else None
+
+
+def recorded_tool_failure(
+    thread_id: str, run_id: str, tool: str, seq: int, message: str
+) -> SalvorMiddlewareError:
+    """The refusal when a later invoke meets a call this run already recorded
+    as failed.
+
+    A recorded failure settles the position exactly as a recorded success
+    does: nothing runs again, and the log is not asking to be retried. Handing
+    the failure sentinel to the model as though it were the tool's real output
+    would be the wrong kind of quiet, so this middleware raises instead,
+    naming the message the failure was recorded with. A permanently failing
+    input fails the same way on every invoke, because the call is settled, not
+    retried: fix whatever the tool keeps failing on and give the thread a new
+    turn, or start a new thread.
+    """
+    return SalvorMiddlewareError(
+        "run {run} (thread `{thread}`) already recorded the call to `{tool}` "
+        "at seq {seq} as a failure: {message}. That recording settles the "
+        "call the same way a recorded success would, so this middleware "
+        "raises rather than handing the model a failure it was never meant "
+        "to read, and it will raise the same way on every further invoke: a "
+        "failed call is not retried. Fix the input this call keeps failing "
+        "on and give the thread a new turn, or start a new thread.".format(
+            run=run_id, thread=thread_id, tool=tool, seq=seq, message=message
+        ),
+        code="tool_failed",
+    )
+
+
+def untrusted_tool_raised(
+    thread_id: str, run_id: str, tool: str, seq: int
+) -> SalvorMiddlewareError:
+    """The refusal when a tool this operator settles by hand raises on this
+    very invoke, rather than returning.
+
+    `trust_completion = false` means the client never gets to decide whether
+    its own write landed, and a caught exception reported as a failure would
+    be exactly that decision made the other way: "it did NOT land," said by
+    the party that benefits from being believed. So nothing is posted. The
+    call ran once, for real, and what it did is unknown to salvor either way;
+    the intent stays open, exactly as recorded, for a person to settle after
+    confirming with the provider what actually happened.
+    """
+    return SalvorMiddlewareError(
+        "run {run} (thread `{thread}`) ran the tool `{tool}` at seq {seq} and "
+        "it raised, but its declaration sets `trust_completion = false`: this "
+        "middleware cannot report that failure any more than it could report "
+        "a success, so nothing was posted and the call's intent is left open. "
+        "Confirm with the tool's own provider what the call actually did, "
+        "then settle it (`POST /v1/runs/{run}/resolve` on the live server, "
+        "which clears the run's lease too; `salvor resolve {run} --store "
+        "<path to the server's store> --output '<json the call produced, or "
+        "an empty object if it produced nothing>'`, which leaves the lease "
+        "to lapse on its own; or `driver.resolve(...)` on a driver holding "
+        "the run's lease) and invoke again.".format(
+            run=run_id, thread=thread_id, tool=tool, seq=seq
+        ),
+        code="open_intent",
+    )
+
+
 def cannot_reopen(
     thread_id: str, run_id: str, refused: SalvorAPIError
 ) -> SalvorMiddlewareError:
@@ -776,42 +869,6 @@ class Tape:
         """
         recorded = self._recorded.get(seq)
         return recorded is not None and recorded.kind == "ToolCallRequested"
-
-    # -- reading a recorded completion back -------------------------------------
-
-    def known_output(self, seq: int) -> Tuple[bool, Any]:
-        """The output recorded at ``seq`` in this invoke's own snapshot of the
-        log, and whether the snapshot held one at all.
-
-        ``(False, None)`` means the completion landed after this invoke opened
-        the run, which is another drive's doing and takes a fresh read to see.
-        """
-        known = self._recorded.get(seq)
-        if known is not None and known.kind == "ToolCallCompleted":
-            return True, known.payload.get("output")
-        return False, None
-
-    def output_from_tail(self, seq: int, tail: List[Event]) -> Any:
-        """The output at ``seq`` in a log tail read from ``seq``.
-
-        Salvor said this call was settled, so a tail with no completion at that
-        position is a contradiction rather than a missing value, and is refused
-        as one instead of replayed as ``None``.
-        """
-        completion = tail[0] if tail else None
-        if (
-            completion is None
-            or completion.seq != seq
-            or completion.kind != "ToolCallCompleted"
-        ):
-            raise SalvorMiddlewareError(
-                "run {run} reports the tool call at seq {intent} settled, but seq "
-                "{seq} holds no completion to replay.".format(
-                    run=self.run_id, intent=seq - 1, seq=seq
-                ),
-                code="open_intent",
-            )
-        return completion.payload.get("output")
 
     # -- the turnstile -----------------------------------------------------------
 

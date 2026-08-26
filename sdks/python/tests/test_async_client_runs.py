@@ -446,6 +446,47 @@ class AsyncDriverRealServer(unittest.TestCase):
             settled = await run.client_tool_intent(1, "refund_card", refund)
             self.assertTrue(settled.settled)
             self.assertEqual(settled.idempotency_key, intent.idempotency_key)
+            self.assertEqual(
+                settled.output,
+                {"provider_refund_id": "re_1", "status": "succeeded", "amount_cents": 5000},
+                "a settled answer carries the recorded completion's output",
+            )
+
+        self.drive(scenario)
+
+    def test_client_tool_failure_records_the_sentinel_and_settles_the_call(
+        self,
+    ) -> None:
+        async def scenario() -> None:
+            run = await self.open()
+            await run.append([self.started(run)])
+            refund = {"order_id": "ORD-9002", "amount_cents": 1200, "currency": "USD"}
+
+            intent = await run.client_tool_intent(1, "refund_card", refund)
+            self.assertFalse(intent.settled)
+
+            await run.client_tool_failure(1, "the provider timed out")
+            self.assertEqual(
+                [e.kind for e in await run.log()],
+                ["RunStarted", "ToolCallRequested", "ToolCallCompleted"],
+            )
+
+            # The failure settles the call exactly as a reported output would:
+            # a re-post of the same intent comes back settled, carrying the
+            # sentinel a native tool's exhausted retries would have written.
+            settled = await run.client_tool_intent(1, "refund_card", refund)
+            self.assertTrue(settled.settled)
+            self.assertEqual(
+                settled.output,
+                {
+                    "__salvor_error": {
+                        "is_error": True,
+                        "kind": "handler",
+                        "message": "the provider timed out",
+                        "attempts": 1,
+                    }
+                },
+            )
 
         self.drive(scenario)
 

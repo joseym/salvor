@@ -676,7 +676,11 @@ class ClientToolDecl:
     ``trust_completion`` is ``False`` unless the operator opted in: silence gets
     the safe direction. ``require_equal`` lists the fields whose reported value
     the server pins to the intent's recorded value, and is empty unless the
-    declaration names one.
+    declaration names one. ``idempotency_key`` lists the input fields a
+    client-tool intent's derived key is taken from, and is empty unless the
+    declaration names them, which is the positional default: a hash of the
+    run, the position and the tool name (see
+    :meth:`~salvor.client_runs.ClientRunDriver.client_tool_intent`).
     """
 
     name: str
@@ -685,6 +689,7 @@ class ClientToolDecl:
     output_schema: Optional[Any] = None
     trust_completion: bool = False
     require_equal: list[str] = field(default_factory=list)
+    idempotency_key: list[str] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -696,6 +701,7 @@ class ClientToolDecl:
             output_schema=obj.get("output_schema"),
             trust_completion=bool(obj.get("trust_completion", False)),
             require_equal=list(obj.get("require_equal", [])),
+            idempotency_key=list(obj.get("idempotency_key", [])),
             raw=obj,
         )
 

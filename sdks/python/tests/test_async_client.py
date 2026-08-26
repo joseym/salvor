@@ -600,6 +600,7 @@ class TransportScenarios:
                     "output_schema": {"type": "object", "required": ["charge_id"]},
                     "trust_completion": False,
                     "require_equal": ["amount_cents"],
+                    "idempotency_key": ["order_id", "amount_cents"],
                 },
                 {
                     "name": "lookup_invoice",
@@ -617,9 +618,11 @@ class TransportScenarios:
             self.assertEqual(charge.effect, "write")
             self.assertFalse(charge.trust_completion)
             self.assertEqual(charge.require_equal, ["amount_cents"])
+            self.assertEqual(charge.idempotency_key, ["order_id", "amount_cents"])
             lookup = next(d for d in decls if d.name == "lookup_invoice")
             self.assertIsNone(lookup.output_schema)
             self.assertEqual(lookup.require_equal, [])
+            self.assertEqual(lookup.idempotency_key, [])
 
         self.drive(
             {"/v1/client-tools": lambda h, body: h._send(200, declared)}, scenario

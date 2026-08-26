@@ -640,6 +640,14 @@ your own API's dedupe column). A provider that ignores it, or a tool that never
 passes it on, is a tool that can charge twice, and no ledger on this side
 changes that.
 
+A tool body that raises is a different case from the crash above, and salvor
+does not leave it dangling: the middleware catches the raise, reports it as the
+call's failure, and salvor records it as the call's completion the same way it
+would record a returned value. So a raised tool body is recorded as a failure
+and fails the same way on every replay, without running the body again; fix
+whatever the tool keeps failing on and give the thread a new turn, or start a
+new thread.
+
 ### What replay means
 
 Invoking the same thread again re-opens the same run and walks the recorded
@@ -734,6 +742,16 @@ required = ["order_id", "status", "total_cents"]
 ```sh
 salvor serve --client-tool lookup-order.toml
 ```
+
+Keys are positional unless the declaration names `idempotency_key` fields
+(`idempotency_key = ["order_id", "amount_cents"]`); the default is a hash of the
+run, the position and the tool, so only the exact same call retried at the exact
+same position shares one. With fields named, two calls in one run whose values
+for those fields match share a key regardless of position, and the second's
+intent comes back already settled, carrying the first's recorded result rather
+than running its tool body. So a model that emits the same write twice in one
+turn runs it once when those fields match and twice when they do not, unless
+the provider's own idempotency handling dedupes it first.
 
 The middleware sends the tool's name and the arguments the model produced, and
 nothing else. A tool with no declaration is refused, and the error names the

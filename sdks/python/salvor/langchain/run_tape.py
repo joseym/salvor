@@ -26,6 +26,7 @@ from typing import Any, Callable, Dict, Iterator, Optional, TypeVar
 
 from ..client_runs import ClientRunDriver
 from ..errors import SalvorAPIError
+from .errors import SalvorMiddlewareError
 from .tape import (
     MINIMUM_BEAT_SECONDS,
     Drive,
@@ -42,8 +43,11 @@ from .tape import (
     lease_lost,
     lease_taken,
     one_driver_error,
+    recorded_failure_message,
+    recorded_tool_failure,
     start_events,
     still_ours,
+    untrusted_tool_raised,
     usage_payload,
 )
 
@@ -256,7 +260,18 @@ class RunTape:
         :func:`~salvor.langchain.tape.dangling_untrusted_call`. A tool whose
         intent this invoke is opening for the first time still runs; whether
         its result is then reported is the caller's call inside ``perform``
-        (see ``_stop_for_a_person`` in ``middleware.py``).
+        (see ``_stop_for_a_person`` in ``middleware.py``). If ``perform``
+        raises an ``Exception`` that is not this middleware's own
+        :class:`~salvor.langchain.errors.SalvorMiddlewareError`, the raise
+        itself is reported as the call's failure (for a trusted tool) or left
+        unposted and refused by name (for an untrusted one): see
+        :func:`~salvor.langchain.tape.recorded_tool_failure` and
+        :func:`~salvor.langchain.tape.untrusted_tool_raised`. A
+        ``BaseException`` that is not an ``Exception`` -- ``KeyboardInterrupt``,
+        ``SystemExit``, ``GeneratorExit``, ``asyncio.CancelledError`` -- is the
+        process leaving, not the call failing, so it is never caught here: it
+        propagates untouched and the intent stays exactly as recorded, open,
+        the same dangling-write case a real crash leaves.
         """
         if position is None:
             with self._gate:
@@ -287,26 +302,32 @@ class RunTape:
             lambda: self._driver.client_tool_intent(seq, tool, tool_input)
         )
         if opened.settled:
-            return self._tape.tool_replayed(
-                seq, opened, self._recorded_output(seq + 1)
-            )
+            failure = recorded_failure_message(opened.output)
+            if failure is not None:
+                raise recorded_tool_failure(
+                    self._drive.thread_id, self.run_id, tool, seq, failure
+                )
+            return self._tape.tool_replayed(seq, opened, opened.output)
         if not trust_completion and left_over:
             raise dangling_untrusted_call(
                 self._drive.thread_id, self.run_id, tool, seq
             )
         with self._beating():
-            output = perform(self._tape.opened_call(seq, opened))
+            try:
+                output = perform(self._tape.opened_call(seq, opened))
+            except Exception as error:
+                if isinstance(error, SalvorMiddlewareError):
+                    raise
+                if not trust_completion:
+                    raise untrusted_tool_raised(
+                        self._drive.thread_id, self.run_id, tool, seq
+                    ) from error
+                self._guarded(
+                    lambda: self._driver.client_tool_failure(seq, str(error))
+                )
+                raise
         self._guarded(lambda: self._driver.client_tool_completion(seq, output))
         return self._tape.tool_performed(seq, opened, output)
-
-    def _recorded_output(self, seq: int) -> Any:
-        """The output recorded at ``seq``, from this invoke's snapshot of the
-        log when it is there and from a fresh read when it is not."""
-        known, output = self._tape.known_output(seq)
-        if known:
-            return output
-        tail = self._guarded(lambda: self._driver.log(seq))
-        return self._tape.output_from_tail(seq, tail)
 
     def _announce(self) -> None:
         """Tell the application about a fork, the first time there is one."""

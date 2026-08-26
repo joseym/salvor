@@ -67,7 +67,18 @@ class SalvorMiddlewareError(SalvorError):
                 :class:`ToolNeedsResolution`.
             ``open_intent``
                 The log holds a call recorded as requested and never completed.
-                Settle it and invoke again.
+                Settle it and invoke again. One way there: an untrusted tool
+                (``trust_completion = false``) raised on this very invoke, and
+                this middleware cannot report a failure any more than it could
+                report a success, so nothing was posted.
+            ``tool_failed``
+                A recorded completion at this position is the failure
+                sentinel: an earlier invoke's tool body raised, this
+                middleware reported it, and salvor settled the call on it. The
+                sentence carries the recorded message. This call fails the
+                same way on every further invoke, because it is settled, not
+                retried; fix the input it keeps failing on and give the
+                thread a new turn, or start a new thread.
             ``run_exists``
                 The thread maps to a run id salvor's other mode already
                 started. A server-driven run and a client-driven one cannot
