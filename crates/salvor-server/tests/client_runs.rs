@@ -611,6 +611,284 @@ async fn a_finished_run_re_opens_even_though_its_lease_is_current() {
     );
 }
 
+/// A `POST` to one of a run's lease endpoints (`release`, `heartbeat`),
+/// optionally presenting a drive token. Neither reads a body, so the empty
+/// object stands in for one.
+async fn post_lease(
+    client: &reqwest::Client,
+    base: &str,
+    run: &str,
+    verb: &str,
+    token: Option<&str>,
+) -> (StatusCode, Value) {
+    let mut request = client
+        .post(format!("{base}/v1/client-runs/{run}/{verb}"))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body("{}".to_string());
+    if let Some(token) = token {
+        request = request.header("x-drive-token", token);
+    }
+    let response = request.send().await.expect("lease call sends");
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    (status, serde_json::from_str(&text).unwrap_or(Value::Null))
+}
+
+/// Lapsing is for a driver that cannot say anything any more. One that finished
+/// on purpose hands the lease back, and the next open takes the run on the very
+/// next request instead of waiting out a minute of TTL: the cost a short-lived
+/// process pays otherwise is that the process after it cannot drive at all.
+///
+/// The run itself is untouched by a release. Its log still says client-driven,
+/// so the next open adopts it exactly as it would after a restart, and the
+/// surfaces that must not become a second writer still refuse it.
+#[tokio::test]
+async fn releasing_the_lease_lets_the_next_open_take_the_run_at_once() {
+    let server = client_server().await;
+    let client = reqwest::Client::new();
+    let (run, token) = open_run(&client, &server.base).await;
+    let (status, body) = append(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        vec![env_value(&run, 0, run_started())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the run starts: {body}");
+
+    // A beat while the driver still has work says nothing but "still here",
+    // and reports the TTL the driver has to beat inside of.
+    let (status, body) = post_lease(&client, &server.base, &run, "heartbeat", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "the beat is accepted: {body}");
+    assert_eq!(
+        body["lapses_in_seconds"], 60,
+        "the whole default TTL, as of this beat: {body}"
+    );
+
+    // Until it is released, the run is held, as it always was.
+    let (status, body) = reopen(&client, &server.base, &run, None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "held: {body}");
+
+    let (status, body) = post_lease(&client, &server.base, &run, "release", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "release: {body}");
+    assert_eq!(
+        body["released"], true,
+        "the lease was this caller's to give"
+    );
+
+    // Idempotent: giving back a lease that is already gone is the caller's goal
+    // already met, not an error.
+    let (status, body) = post_lease(&client, &server.base, &run, "release", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "second release: {body}");
+    assert_eq!(
+        body["released"], false,
+        "there was nothing left to give back"
+    );
+
+    // No wait at all: the next process picks the run straight up.
+    let (status, body) = reopen(&client, &server.base, &run, None).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a released run is free on the next request: {body}"
+    );
+    let second_token = body["drive_token"]
+        .as_str()
+        .expect("a fresh lease")
+        .to_owned();
+    assert_ne!(second_token, token, "the next opener gets its own lease");
+    assert_eq!(
+        body["log"].as_array().unwrap().len(),
+        1,
+        "and the recorded log, which a release never touched: {body}"
+    );
+
+    // The released token is not the lease any more; the fresh one drives.
+    let (status, _) = append(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        vec![env_value(&run, 1, Event::NowObserved { now: ts() })],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "the driver that let go does not still write"
+    );
+    let (status, body) = append(
+        &client,
+        &server.base,
+        &run,
+        Some(&second_token),
+        vec![env_value(&run, 1, Event::NowObserved { now: ts() })],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the new lease drives: {body}");
+
+    // The run is still a client's to drive: the marker in its log outlived the
+    // lease, so this server still refuses to become a second writer on it.
+    let (status, body) = post_json(
+        &client,
+        &format!("{}/v1/runs/{run}/resume", server.base),
+        json!({}),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "resume still refuses a released client-driven run: {body}"
+    );
+    assert_eq!(body["error"]["code"], "client_driven_run");
+}
+
+/// A release ends a hold, so it is only for the caller whose hold it is.
+/// Anything else is the failure the lease exists to stop, arriving by a
+/// politer route: a second app instance that could release the run it was
+/// refused would simply take it on the next request.
+#[tokio::test]
+async fn releasing_without_the_lease_is_refused_and_the_hold_stands() {
+    let server = client_server().await;
+    let client = reqwest::Client::new();
+    let (run, token) = open_run(&client, &server.base).await;
+    let (status, _) = append(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        vec![env_value(&run, 0, run_started())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = post_lease(
+        &client,
+        &server.base,
+        &run,
+        "release",
+        Some("dt_not_the_lease"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "not yours to end: {body}");
+    assert_eq!(body["error"]["code"], "invalid_drive_token");
+
+    // No token at all is the same refusal: the question here is whose hold it
+    // is, not whether the caller brought credentials.
+    let (status, body) = post_lease(&client, &server.base, &run, "release", None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "still not yours: {body}");
+    assert_eq!(body["error"]["code"], "invalid_drive_token");
+
+    // The hold stands, refusing an open ...
+    let (status, body) = reopen(&client, &server.base, &run, None).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "the run is still held: {body}"
+    );
+    assert_eq!(body["error"]["code"], "lease_held");
+
+    // ... and the driver that holds it never noticed any of it.
+    let (status, body) = append(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        vec![env_value(&run, 1, Event::NowObserved { now: ts() })],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the holder keeps driving: {body}");
+}
+
+/// A driver inside one long body (a tool that takes minutes, a model stream the
+/// client is rendering) makes no drive call at all while it works, so before
+/// the beat existed its lease lapsed mid-body and another opener could take a
+/// run whose driver had never gone anywhere. Beating holds it, and stopping
+/// still lapses, because the beat is proof of life and nothing more.
+///
+/// A real clock and a short TTL, for the reason
+/// [`an_open_takes_the_run_once_the_holding_driver_goes_quiet`] uses them:
+/// freshness is a wall-clock property, so this lets real time pass.
+#[tokio::test]
+async fn a_heartbeat_holds_the_lease_through_a_body_longer_than_the_ttl() {
+    let model = ScriptedModel::mount(vec![]).await;
+    let factory = agent_factory(
+        model.uri(),
+        "record",
+        Effect::Read,
+        CountBehavior::Record,
+        counter(),
+    );
+    Box::leak(Box::new(model));
+    let state = AppState::new(memory_store(), factory)
+        .with_poll_interval(Duration::from_millis(10))
+        .with_client_lease_ttl(Duration::from_millis(150));
+    let server = TestServer::spawn(state).await;
+    let client = reqwest::Client::new();
+
+    let (run, token) = open_run(&client, &server.base).await;
+    let (status, _) = append(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        vec![env_value(&run, 0, run_started())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Six quiet stretches, each longer than half the TTL and the six together
+    // three times it: nothing here drives the run, only beats.
+    for beat in 0..6 {
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let (status, body) =
+            post_lease(&client, &server.base, &run, "heartbeat", Some(&token)).await;
+        assert_eq!(status, StatusCode::OK, "beat {beat}: {body}");
+        assert_eq!(
+            body["lapses_in_seconds"], 1,
+            "a sub-second TTL still reports a whole second to beat inside of: {body}"
+        );
+
+        let (status, body) = reopen(&client, &server.base, &run, None).await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "a beating driver keeps its run at beat {beat}: {body}"
+        );
+        assert_eq!(body["error"]["code"], "lease_held");
+    }
+
+    // A beat is a driving call, so it needs the run's token like any other.
+    let (status, body) = post_lease(&client, &server.base, &run, "heartbeat", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "no token: {body}");
+    assert_eq!(body["error"]["code"], "missing_drive_token");
+
+    // The driver stops beating, and the hold lapses exactly as it does for one
+    // that stopped driving.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (status, body) = reopen(&client, &server.base, &run, None).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a driver that stops beating loses the run: {body}"
+    );
+    assert_ne!(
+        body["drive_token"].as_str().expect("a fresh lease"),
+        token,
+        "the run went to the opener that asked for it"
+    );
+
+    let (status, body) = post_lease(&client, &server.base, &run, "heartbeat", Some(&token)).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "and the superseded driver learns so on its next beat: {body}"
+    );
+    assert_eq!(body["error"]["code"], "invalid_drive_token");
+}
+
 #[tokio::test]
 async fn foreign_run_id_with_history_is_refused() {
     let server = client_server().await;
@@ -1549,4 +1827,92 @@ async fn after_a_restart_resume_refuses_and_the_sweeper_skips_a_client_driven_ru
         !second.state.is_run_active(run_id),
         "and no driver task was spawned for it"
     );
+}
+
+/// An operator resolving a client-driven run's stuck write over HTTP is saying
+/// the driver that opened that write is gone: it never came back to record what
+/// the write did, and the caller unsticking it presents no drive token, so it
+/// is somebody else. The lease that dead driver left would otherwise hold the
+/// run for nobody, and the client sent to re-open the run it was just told is
+/// unstuck would be refused for the rest of the TTL. So a recorded resolution
+/// drops the lease, and the next open takes the run at once.
+#[tokio::test]
+async fn an_http_resolve_of_a_client_driven_run_clears_the_dead_driver_lease() {
+    let store = memory_store();
+    let server = client_server_over(store.clone()).await;
+    let client = reqwest::Client::new();
+    let (run, token) = open_run(&client, &server.base).await;
+
+    let (status, body) = append(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        vec![env_value(&run, 0, run_started())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the run starts: {body}");
+
+    // The client asks for a write and is never heard from again: the crash
+    // that leaves a dangling intent.
+    let (status, body) = post_driven(
+        &client,
+        &format!("{}/v1/client-runs/{run}/client-tool-intent", server.base),
+        json!({ "seq": 1, "tool": "charge_card", "input": { "amount_cents": 250 } }),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the intent is recorded: {body}");
+
+    // The dead driver's lease is still current, so nobody else can pick the
+    // run up.
+    let (status, body) = reopen(&client, &server.base, &run, None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "the run is held: {body}");
+    assert_eq!(body["error"]["code"], "lease_held");
+
+    // An operator records what the charge actually did.
+    let (status, body) = post_json(
+        &client,
+        &format!("{}/v1/runs/{run}/resolve", server.base),
+        json!({ "output": { "charge_id": "ch_1" } }),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "resolve: {body}");
+    assert_eq!(body["resolved"], true);
+
+    // The lease went with the resolution: no wait for the TTL.
+    let (status, body) = reopen(&client, &server.base, &run, None).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the resolved run is free on the next request: {body}"
+    );
+    let fresh = body["drive_token"]
+        .as_str()
+        .expect("a fresh lease")
+        .to_owned();
+    assert_ne!(fresh, token, "and it is the new opener's lease");
+    let kinds: Vec<&str> = body["log"]
+        .as_array()
+        .expect("the recorded log comes back")
+        .iter()
+        .map(|envelope| envelope["event"]["kind"].as_str().expect("a kind"))
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["RunStarted", "ToolCallRequested", "ToolCallCompleted"],
+        "the once-dangling intent has its recorded completion: {body}"
+    );
+
+    // And the run drives on from there under the fresh lease.
+    let (status, body) = append(
+        &client,
+        &server.base,
+        &run,
+        Some(&fresh),
+        vec![env_value(&run, 3, Event::NowObserved { now: ts() })],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the run is unstuck: {body}");
 }

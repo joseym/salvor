@@ -561,6 +561,25 @@ pub(crate) async fn redrive(
 /// /v1/client-runs/{id}/resolve` is the client's own path when it still holds
 /// its lease; this is the same override [`abandon`] already is for any run,
 /// whatever drove it.
+///
+/// # It clears a client-driven run's lease
+///
+/// A dangling write is a driver that never came back to record what its write
+/// did, and the caller here presents no drive token, so it is not that driver.
+/// Recording the completion over its head therefore says the driver is gone,
+/// and the lease it left behind is holding the run for nobody: the run would
+/// stay `409 lease_held` against its own client's next open for the rest of the
+/// TTL, right after an operator unstuck it. So a recorded resolution drops the
+/// lease, and the client re-opens straight away and carries on from the log.
+///
+/// Only the lease goes; the run's recorded `driven_by: client` stays, so it is
+/// still a client-driven run to every surface that reads the log (this endpoint
+/// included, [`resume`] still refusing it, the wake sweeper still skipping it).
+///
+/// `salvor resolve` cannot go through here: the CLI writes the store directly
+/// and has no way to reach a running server's memory, so a lease left on a live
+/// server survives a CLI resolve and lapses on its own. The client's next open
+/// then waits at most the TTL.
 pub async fn resolve(
     State(state): State<AppState>,
     Path(run_id_text): Path<String>,
@@ -578,6 +597,12 @@ pub async fn resolve(
     // inline rather than in a task.
     match state.runtime().resolve(run_id, request.output).await {
         Ok(_) => {
+            // The driver whose write dangled is gone (see above), so the lease
+            // it left is holding the run for nobody. Asked of a server-driven
+            // run this is simply a no-op: there is no lease on one.
+            if state.is_client_run(run_id) || crate::client_runs::log_is_client_driven(&log) {
+                state.clear_client_lease(run_id, None);
+            }
             let log = state.store().read_log(run_id).await.map_err(store_error)?;
             let derived = derive_state(&log);
             Ok(Json(json!({

@@ -226,6 +226,26 @@ pub struct ClientRunLease {
     pub last_seen: OffsetDateTime,
 }
 
+/// What asking to drop a client-driven run's lease came to (see
+/// [`release_client_run`](AppState::release_client_run)).
+///
+/// The three outcomes are kept apart because the release endpoint answers each
+/// one differently: a release that dropped a lease and a release that found
+/// none are both a job done (the run is unheld either way, which is all a
+/// caller wanted), while a caller presenting somebody else's token is refused
+/// rather than quietly obeyed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaseRelease {
+    /// The caller held the lease, and it is gone.
+    Released,
+    /// There was no lease on the run to drop: it lapsed, it was released
+    /// already, or this process never opened the run at all.
+    NoLease,
+    /// A lease stands on the run and the caller did not present its token.
+    /// Nothing was dropped.
+    NotTheHolder,
+}
+
 impl AppState {
     /// Builds server state over `store`, using `factory` to turn submitted
     /// definitions into live agents. Auth is off and the clock and random
@@ -679,6 +699,61 @@ impl AppState {
             .expect("client runs lock")
             .get(&run_id)
             .cloned()
+    }
+
+    /// How long a client-driven run's lease stays current without the driver
+    /// presenting its token again, the TTL every freshness judgment here is
+    /// made against. Read by the heartbeat endpoint, which answers with it so a
+    /// driver about to be busy for a while knows how often it has to beat.
+    #[must_use]
+    pub fn client_lease_ttl(&self) -> Duration {
+        self.inner.client_lease_ttl
+    }
+
+    /// Hands a client-driven run's lease back when `presented` is the token
+    /// holding it, so the next open takes the run immediately instead of
+    /// waiting out the TTL.
+    ///
+    /// The token check and the removal happen under one lock, so a release can
+    /// only ever drop the lease the caller was actually holding, never one
+    /// minted in between by a driver that took the run over.
+    ///
+    /// Only the lease goes. Nothing about the run itself changes, its recorded
+    /// `driven_by: client` included, so a later open adopts it back exactly as
+    /// it would after a restart.
+    pub fn release_client_run(&self, run_id: RunId, presented: Option<&str>) -> LeaseRelease {
+        let mut leases = self.inner.client_runs.lock().expect("client runs lock");
+        let Some(lease) = leases.get(&run_id) else {
+            return LeaseRelease::NoLease;
+        };
+        if presented != Some(lease.drive_token.as_str()) {
+            return LeaseRelease::NotTheHolder;
+        }
+        leases.remove(&run_id);
+        LeaseRelease::Released
+    }
+
+    /// Drops a client-driven run's lease unless `keep` is the token that holds
+    /// it, reporting whether a lease went. What a resolve calls: recording a
+    /// dangling write by hand says the driver that opened that write never came
+    /// back, so the lease it left behind is holding the run for nobody and the
+    /// next open should not have to wait out the TTL for it.
+    ///
+    /// `keep` is how the client-driven resolve keeps its own lease. That caller
+    /// presented its current token to get in, which is the driver saying it is
+    /// right here, so the lease is not a dead one and taking it away would
+    /// strand a driver mid-run. Every other resolve passes `None`, because no
+    /// token was presented and nothing says a driver is still attached.
+    pub fn clear_client_lease(&self, run_id: RunId, keep: Option<&str>) -> bool {
+        let mut leases = self.inner.client_runs.lock().expect("client runs lock");
+        let Some(lease) = leases.get(&run_id) else {
+            return false;
+        };
+        if keep == Some(lease.drive_token.as_str()) {
+            return false;
+        }
+        leases.remove(&run_id);
+        true
     }
 
     /// Whether `run_id` names a client-driven run this process opened.

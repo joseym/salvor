@@ -67,6 +67,17 @@
 //! refusal says how long that is, so the second caller waits instead of
 //! polling.
 //!
+//! Lapsing is the safety net, not the way a drive is meant to end. A driver
+//! that is finished says so with [`release`], and the run is another driver's
+//! on the very next request rather than a TTL later; a driver that will be busy
+//! for longer than the TTL, inside one tool body or one streamed model call,
+//! says THAT with [`heartbeat`], and keeps the run it never actually left.
+//! Without the first, a short-lived process locks the process that follows it
+//! out for a minute for nothing; without the second, a slow step loses a run
+//! its driver is still working on. Recording a dangling write by hand drops the
+//! lease as well, because a write nobody came back to record is a driver that
+//! is gone (see [`resolve`] and [`crate::runs::resolve`]).
+//!
 //! # The lease is process-lived; the run is not
 //!
 //! The lease registry is in memory and dies with the process, which is right
@@ -136,7 +147,7 @@ use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::executor::{ModelExecutor, ModelStream};
-use crate::state::{AppState, ClientRunLease};
+use crate::state::{AppState, ClientRunLease, LeaseRelease};
 use std::sync::Arc;
 
 /// The header carrying the per-run drive token on a guarded append.
@@ -407,6 +418,86 @@ pub async fn open(
     Ok((
         StatusCode::CREATED,
         Json(open_body(run_id, &drive_token, &[])),
+    ))
+}
+
+/// `POST /v1/client-runs/{id}/release`: hand the lease back, so the next open
+/// takes the run at once instead of waiting out the TTL.
+///
+/// A driver that is finished for now says so with this rather than by going
+/// quiet. The lapse is the safety net for a driver that cannot say anything
+/// any more (it crashed, the tab closed); it is a poor way to end a drive that
+/// ended in an orderly fashion, because the run stays unopenable for the rest
+/// of the TTL. That is exactly what a short-lived process hits: an SDK invoke
+/// returns, the process exits, and the very next process is refused
+/// `409 lease_held` for up to a minute for no reason at all.
+///
+/// Only the lease goes. The log is untouched, and the run keeps its recorded
+/// `driven_by: client`, so it is still a client-driven run: a later open adopts
+/// it exactly as it adopts one after a restart, `POST /v1/runs/{id}/resume`
+/// still refuses it, and the wake sweeper still leaves its timer to its client,
+/// all three of which read that marker rather than this registry.
+///
+/// Idempotent: a run with no lease here (already released, lapsed, or never
+/// opened by this process) answers `200` with `released: false`. Nothing to
+/// give back is not an error, because the caller's goal, a run nobody is
+/// holding, is already true. Presenting a token that is not the current lease,
+/// or none at all, IS refused (`403 invalid_drive_token`), because that caller
+/// is asking to end somebody else's hold.
+pub async fn release(
+    State(state): State<AppState>,
+    Path(run_id_text): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let run_id = parse_run_id(&run_id_text)?;
+    let presented = headers
+        .get(DRIVE_TOKEN_HEADER)
+        .and_then(|value| value.to_str().ok());
+    match state.release_client_run(run_id, presented) {
+        LeaseRelease::Released => Ok(Json(json!({ "released": true }))),
+        LeaseRelease::NoLease => Ok(Json(json!({ "released": false }))),
+        // A missing token lands here alongside a wrong one, unlike the driving
+        // endpoints, which answer `401 missing_drive_token` for it. Here the
+        // question is not "did you bring credentials" but "is this hold
+        // yours to end", and the answer to that is no either way.
+        LeaseRelease::NotTheHolder => Err(ApiError::InvalidDriveToken(format!(
+            "the presented drive token is not the current lease for run {}, so it cannot release it",
+            run_id.as_uuid()
+        ))),
+    }
+}
+
+/// `POST /v1/client-runs/{id}/heartbeat`: refresh the lease without driving.
+/// Requires the `X-Drive-Token` header.
+///
+/// Presenting the drive token has always been the heartbeat, and every driving
+/// call carries it. What that misses is the driver that is busy for longer than
+/// the TTL between two calls: a tool that takes minutes, a model body streaming
+/// to the client's own screen. Nothing refreshes the lease while that runs, so
+/// it lapses mid-work and another opener can take the run out from under a
+/// driver that never went anywhere. So a driver with a long stretch of work
+/// ahead of it beats every so often instead.
+///
+/// The answer carries `lapses_in_seconds`, the whole TTL as of this beat, which
+/// is what a client needs to pick its interval without being told the server's
+/// configuration some other way.
+///
+/// A driver could get the same effect by re-opening the run under its own token
+/// (that keeps the lease and counts as proof of life), and that is what the
+/// SDKs did before this existed. It re-reads the whole recorded log every beat
+/// to do it, which is the wrong price for saying "still here".
+pub async fn heartbeat(
+    State(state): State<AppState>,
+    Path(run_id_text): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let run_id = parse_run_id(&run_id_text)?;
+    // The lease gate IS the beat: it checks the token is this run's current
+    // lease and refreshes `last_seen` on the way through, exactly as it does
+    // for an append.
+    authorize_drive(&state, run_id, &headers)?;
+    Ok(Json(
+        json!({ "lapses_in_seconds": whole_seconds(state.client_lease_ttl()) }),
     ))
 }
 
@@ -1290,6 +1381,23 @@ fn tool_output_body(output: &Value) -> Json<Value> {
 /// share one reconciliation contract. After it records the completion the run
 /// is drivable again, so the client re-fetches the log and its cursor sails
 /// past the once-dangling intent.
+///
+/// # The lease a resolve clears, and the one it does not
+///
+/// A dangling write means the driver that opened it never came back to record
+/// what happened, so a resolve is normally the sign that that driver is gone
+/// and the lease it left behind is holding the run for nobody. Both resolve
+/// endpoints say so the same way (see
+/// [`AppState::clear_client_lease`](crate::state::AppState::clear_client_lease)):
+/// the run's lease is dropped once the resolution is recorded, and the next
+/// open takes the run at once instead of waiting out the TTL. The operator's
+/// path, `POST /v1/runs/{id}/resolve`, is where that matters, because the
+/// caller there presents no token and is by definition not the driver.
+///
+/// This endpoint is the exception, and passes its own token to be kept. Getting
+/// in here at all means presenting the run's current lease, which is the driver
+/// saying it is right here; revoking it would strand the very caller that just
+/// proved it is alive, mid-run, over a write it is about to carry on past.
 pub async fn resolve(
     State(state): State<AppState>,
     Path(run_id_text): Path<String>,
@@ -1297,14 +1405,23 @@ pub async fn resolve(
     body: Bytes,
 ) -> Result<Json<Value>, ApiError> {
     let run_id = parse_run_id(&run_id_text)?;
-    authorize_drive(&state, run_id, &headers)?;
+    let lease = authorize_drive(&state, run_id, &headers)?;
     let request: ResolveRequest = parse_body(&body)?;
 
     match state.runtime().resolve(run_id, request.output).await {
-        Ok(_) => Ok(Json(json!({
-            "run": run_id.as_uuid().to_string(),
-            "resolved": true,
-        }))),
+        Ok(_) => {
+            // The resolve rule, with this caller's own lease held back from
+            // it. In the one case where the stored lease is no longer the one
+            // authorized above (it lapsed while the completion was being
+            // written and another driver took the run), this does clear that
+            // driver's lease, which is the same outcome it would meet on its
+            // next call anyway.
+            state.clear_client_lease(run_id, Some(&lease.drive_token));
+            Ok(Json(json!({
+                "run": run_id.as_uuid().to_string(),
+                "resolved": true,
+            })))
+        }
         Err(RuntimeError::NotReconcilable { status, .. }) => Err(ApiError::WrongState(format!(
             "run {} does not need reconciliation (status: {status}); there is no dangling write \
              to resolve",
@@ -2067,16 +2184,10 @@ fn run_is_finished(log: &[EventEnvelope]) -> bool {
 }
 
 /// The refusal for a re-open of a run whose driver still holds a current lease,
-/// naming how long the hold has left.
-///
-/// `remaining` is rounded UP to whole seconds. Rounding down would let a hold
-/// with a fraction of a second left report `0`, and a caller reading that as
-/// "try again now" would come straight back into the same refusal; rounding up
-/// means the number is always a time at which retrying can actually work.
+/// naming how long the hold has left, rounded up to whole seconds by
+/// [`whole_seconds`] so the number is always a time at which retrying works.
 fn lease_held(run_id: RunId, remaining: Duration) -> ApiError {
-    let lapses_in_seconds = i64::try_from(remaining.as_nanos().div_ceil(1_000_000_000))
-        .unwrap_or(i64::MAX)
-        .max(1);
+    let lapses_in_seconds = whole_seconds(remaining);
     ApiError::LeaseHeld {
         message: format!(
             "another driver holds run {}; its lease lapses in {lapses_in_seconds}s if that \
@@ -2085,6 +2196,21 @@ fn lease_held(run_id: RunId, remaining: Duration) -> ApiError {
         ),
         lapses_in_seconds,
     }
+}
+
+/// A lease duration as the whole seconds the wire carries, for the `lease_held`
+/// refusal and the heartbeat answer alike.
+///
+/// Rounded UP, and never below 1. Rounding down would let a hold with a
+/// fraction of a second left report `0`, and a caller reading that as "try
+/// again now" would come straight back into the same refusal; rounding up means
+/// the number is always a time at which retrying can actually work. The same
+/// reasoning covers a heartbeat interval: a driver told `0` would beat in a
+/// tight loop.
+fn whole_seconds(duration: Duration) -> i64 {
+    i64::try_from(duration.as_nanos().div_ceil(1_000_000_000))
+        .unwrap_or(i64::MAX)
+        .max(1)
 }
 
 /// The not-found error for a run that is not a client-driven run here.

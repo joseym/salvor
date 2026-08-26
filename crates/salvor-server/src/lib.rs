@@ -66,7 +66,7 @@ pub use error::ApiError;
 pub use executor::{LlmModelExecutor, ModelExecutor, ModelStream};
 pub use state::{
     AgentDefinition, AgentFactory, AppState, BuildFuture, BuiltAgent, ClientRunLease,
-    DEFAULT_WAKE_INTERVAL, DefFormat, RegisteredAgent,
+    DEFAULT_WAKE_INTERVAL, DefFormat, LeaseRelease, RegisteredAgent,
 };
 pub use tool_registry::ToolRegistry;
 pub use wake::{Sweeper, spawn_sweeper, sweep};
@@ -100,6 +100,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/graph-runs", post(graph::start_run))
         .route("/v1/client-tools", get(client_tools::list))
         .route("/v1/client-runs", post(client_runs::open))
+        .route("/v1/client-runs/{id}/release", post(client_runs::release))
+        .route(
+            "/v1/client-runs/{id}/heartbeat",
+            post(client_runs::heartbeat),
+        )
         .route("/v1/client-runs/{id}/log", get(client_runs::get_log))
         .route("/v1/client-runs/{id}/events", post(client_runs::append))
         .route(

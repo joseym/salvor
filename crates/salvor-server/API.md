@@ -60,7 +60,7 @@ codes:
 | 409 | `needs_reconciliation` | Resuming a run whose log ends at a write intent with no completion; `details.intent` carries the recorded write |
 | 409 | `still_sleeping` | Resuming a run parked on a durable timer before its instant; `details.wake_at` and `details.remaining_seconds` say when it can be driven. Nothing is recorded |
 | 401 | `missing_drive_token` | A client-driven append with no drive token (see [Client-driven runs](#client-driven-runs)) |
-| 403 | `invalid_drive_token` | A client-driven append whose drive token is not the run's current lease |
+| 403 | `invalid_drive_token` | A client-driven append whose drive token is not the run's current lease, or a release asking to end a hold the caller does not hold |
 | 409 | `lease_held` | Re-opening a client-driven run whose driver still holds a current lease; `details.lapses_in_seconds` says how long until the hold lapses. Nothing is recorded and no lease is minted |
 | 409 | `divergence` | A client-driven append that is not the legal next event, or different bytes at an already-recorded position |
 | 422 | `unsupported_event_kind` | A client-driven append carrying a model or tool event, which this surface does not accept |
@@ -98,6 +98,8 @@ codes:
 | POST | `/v1/graph-runs` | Start a run of a stored graph |
 | GET | `/v1/client-tools` | List the client-performed tool declarations this server holds |
 | POST | `/v1/client-runs` | Open or resume a client-driven run |
+| POST | `/v1/client-runs/{id}/release` | Hand the drive-token lease back, so the next open takes the run at once |
+| POST | `/v1/client-runs/{id}/heartbeat` | Refresh the lease without driving, for a driver inside a long body |
 | GET | `/v1/client-runs/{id}/log` | Read a client-driven run's recorded log |
 | POST | `/v1/client-runs/{id}/events` | Append control and context events (the guarded append) |
 | POST | `/v1/client-runs/{id}/model-step` | Perform and record a model call (server-performed) |
@@ -565,6 +567,23 @@ drives nothing.
   dangling write to resolve).
 - `404 unknown_run` when the id has no history.
 
+**It clears a client-driven run's lease.** A dangling write is a driver that
+never came back to record what its write did, and this caller presents no drive
+token, so it is not that driver. Recording the completion over its head
+therefore says the driver is gone, and a recorded resolution drops the lease it
+left behind: the run's own client re-opens it on the next request rather than
+being refused `409 lease_held` for the rest of the TTL right after an operator
+unstuck it. Only the lease goes; the run keeps its recorded `driven_by:
+"client"`, so it is still a client-driven run to every surface that reads the
+log. On a server-driven run there is no lease and nothing changes.
+
+`salvor resolve` on the command line cannot do this. It writes the store
+directly and has no way to reach a running server's memory, so a lease held by a
+live server survives a CLI resolve and lapses on its own; the middleware's next
+open then waits at most the lease TTL
+(`SALVOR_CLIENT_LEASE_TTL_SECS`, 60s by default). Resolve over HTTP against a
+live server to free the run at once.
+
 ### POST /v1/runs/{id}/abandon
 
 Retire a run by hand. A deliberate sibling of `resolve`: the operator's "we do
@@ -1001,6 +1020,32 @@ so a client rebuilding its cursor is not made to give up the lease it holds and
 a call already in flight under that token stays valid. `record_prompts` is
 ignored on such a re-open; the lease keeps what it was opened with.
 
+**Lapsing is the safety net, not how a drive ends.** A driver that is finished
+hands the lease back with `POST /v1/client-runs/{id}/release`, and the run is
+free on the very next request instead of a TTL later. Without it a short-lived
+process locks out the process that follows it: an SDK invoke returns, the
+process exits, and the next one is refused `409 lease_held` for up to a minute
+for nothing. A driver that will be busy for longer than the TTL inside one body
+(a tool that takes minutes, a model stream it is rendering itself) makes no
+drive call while it works, so it says "still here" with `POST
+/v1/client-runs/{id}/heartbeat` and keeps the run it never left.
+
+**A resolve clears the lease.** Recording a dangling write by hand through `POST
+/v1/runs/{id}/resolve` says the driver that opened that write is gone: it never
+came back to record what the write did, and the caller unsticking it presents no
+drive token, so it is somebody else. The lease that dead driver left behind is
+dropped along with the resolution, and the client re-opens the run straight away rather than being
+refused for the rest of the TTL right after being told the run is unstuck. The
+client's own `POST /v1/client-runs/{id}/resolve` is the exception: it presented
+the run's current token to get in, which is the driver saying it is right here,
+so it keeps the lease and carries on.
+
+`salvor resolve` on the command line is a third case. The CLI writes the store
+directly and has no way to reach a running server's memory, so a lease held by a
+live server survives a CLI resolve and lapses on its own; a client re-opening
+after one waits at most the TTL. Use the HTTP resolve against a live server to
+free the run at once.
+
 The rule is not "newest caller wins", and deliberately so. The caller re-opening
 a live run is usually not the driver that has it, but a second app instance, a
 duplicated tab, or a middleware retrying after a failed call. Handing it the
@@ -1078,6 +1123,66 @@ appends its own `RunStarted` at seq 0 through the events endpoint.
   not record it as client-driven, which means it is a server-driven run. That
   refusal is unchanged by a restart, so the two modes still cannot collide over
   one store.
+
+### POST /v1/client-runs/{id}/release
+
+Hand the drive-token lease back. Requires the `X-Drive-Token` header. No request
+body is read.
+
+- Response `200`:
+
+```json
+{ "released": true }
+```
+
+- Response `200` with `"released": false` when the run has no lease here: it was
+  released already, it lapsed, or this server never opened the run. The call is
+  idempotent, and finding nothing to give back is not an error, because the
+  caller's goal (a run nobody is holding) is already true.
+- `403 invalid_drive_token` when a lease stands on the run and the request did
+  not present its token, a missing token included. Unlike the driving endpoints,
+  a missing token here is not `401 missing_drive_token`: the question a release
+  asks is not "did you bring credentials" but "is this hold yours to end", and
+  the answer is no either way. Nothing is dropped.
+
+Only the lease goes. The run's log is untouched and it stays a client-driven run
+(its `RunStarted` still carries `driven_by: "client"`), so the next open adopts
+it exactly as it would after a restart, `POST /v1/runs/{id}/resume` still answers
+`409 client_driven_run`, and the wake sweeper still leaves a due timer to its
+client. All three read the log marker, not the lease.
+
+An SDK calls this when an invoke ends, in the success path and the error path
+alike. It is the difference between the next process picking the run up
+immediately and being refused for the rest of the TTL.
+
+### POST /v1/client-runs/{id}/heartbeat
+
+Refresh the lease without driving the run. Requires the `X-Drive-Token` header.
+No request body is read.
+
+- Response `200`:
+
+```json
+{ "lapses_in_seconds": 60 }
+```
+
+`lapses_in_seconds` is the whole lease TTL as of this beat (rounded up to whole
+seconds, never below `1`), so a driver picks its interval from the answer rather
+than being told the server's configuration some other way. Beat comfortably
+inside it.
+
+- `401 missing_drive_token` / `403 invalid_drive_token` on a missing or
+  superseded lease; `404 unknown_run` when the id is not a client-driven run
+  this server opened.
+
+Presenting the drive token has always been the heartbeat, and every driving call
+carries it. What that misses is the driver that makes no drive call for longer
+than the TTL because it is inside one long body: a tool that takes minutes, a
+model call it is streaming to its own screen. Its lease would lapse mid-body and
+another opener could take a run whose driver never went anywhere. Re-opening
+under the held token has the same effect (it keeps the lease and counts as proof
+of life), but it re-reads the whole recorded log every beat to say four words;
+this is the call the SDKs use.
 
 ### GET /v1/client-runs/{id}/log
 
@@ -1559,6 +1664,12 @@ run's log ends at a dangling `Write` intent, it correlates the caller-supplied
 output to that intent, and it dispatches nothing. After it records the completion
 the run is drivable again, so the client re-fetches the log and its cursor sails
 past the once-dangling intent.
+
+**This one keeps the caller's lease**, unlike `POST /v1/runs/{id}/resolve`, which
+drops it. Getting in here at all means presenting the run's current drive token,
+which is the driver saying it is right here, so there is no dead lease to clear
+and revoking a live one would strand the very caller that just proved it is
+alive.
 
 - `409 wrong_state` when the run does not need reconciliation (there is no
   dangling write to resolve).
