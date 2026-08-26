@@ -28,6 +28,23 @@ trust_completion = true
 # refuses the declaration when it loads it.
 require_equal = ["order_id", "amount_cents"]
 
+# What this call's identity is derived from. Left unset, salvor derives a key
+# from the call's POSITION in the run (run, seq, tool), which is an attempt
+# identifier and promises one thing: the same call retried after a crash
+# presents the same key, which is all the crash proof needs. Naming a field here
+# says something stronger, that two refunds of the same order in one run are one
+# refund: the key becomes a hash of (run, tool, order_id) with no seq in it, so a
+# second intent for ORD-5150 finds the first call's identity already on file, the
+# server copies the first completion onto it, and the desk performs nothing at
+# all. The order refunded is the identity here; the amount is not, because a
+# second call naming a different amount for the same order in the same run is a
+# mistake worth collapsing rather than a second refund worth making.
+#
+# Each name must be required by `input_schema`, or the server refuses the
+# declaration when it loads it: a key derived from a field a call may omit is a
+# key that is sometimes something else.
+idempotency_key = ["order_id"]
+
 [input_schema]
 type = "object"
 required = ["order_id", "amount_cents"]

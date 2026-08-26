@@ -17,7 +17,7 @@ Everything runs offline with no API key. Each app carries a scripted model that
 reads the conversation so far and answers the way a real one would for this
 desk, so the whole thing is free and identical on every machine. Set
 `ANTHROPIC_API_KEY` and the same apps use `ChatAnthropic` instead, with nothing
-else changing.
+else changing; `run.sh` unsets it for its own invokes, for a reason given below.
 
 ## The desk
 
@@ -28,12 +28,16 @@ Three tools, and one order book standing in for a real order system:
 - **`refund_large`** (a `write`, `trust_completion = false`): the refund above
   that limit, which no report from the desk is allowed to close.
 
-The conversation is always the same three turns: look the order up, refund it,
-say what happened. Each refund tool appends a line to a ledger file, which is
-this desk's stand-in for a payment provider, and each line is keyed by the
-idempotency key salvor derived for that call. A key already on file returns the
-refund that key produced and writes nothing, which is exactly what a real
+The conversation is nearly always the same three turns: look the order up,
+refund it, say what happened. Each refund tool appends a line to a ledger file,
+which is this desk's stand-in for a payment provider, and each line is keyed by
+the idempotency key salvor derived for that call. A key already on file returns
+the refund that key produced and writes nothing, which is exactly what a real
 provider does with an `Idempotency-Key` header.
+
+One ticket takes a shorter path. It names its own amount and says the refund is
+on it twice, so there is nothing to look up and the desk asks for the same
+refund twice in the one turn. Proof 8 is what salvor does with that.
 
 ## The one line that is salvor's
 
@@ -100,6 +104,41 @@ application.
 in the report to what the intent recorded and refuses a completion that alters
 one. A schema check says a report is well shaped; `require_equal` says it is
 about the call that was authorized.
+[`refund-large.toml`](tools/refund-large.toml) carries the same pair, and there
+it binds a person rather than the app: nothing may report on that tool, so the
+only thing those names can hold to the intent is a hand-recorded resolution.
+
+[`refund-order.toml`](tools/refund-order.toml) carries one more field,
+`idempotency_key = ["order_id"]`, which decides what a call's identity is. Left
+unset, salvor derives the key from the call's position in the
+run, `(run, seq, tool)`: an attempt identifier, the same on every attempt at that
+one call, which is all proof 3 needs. Naming fields makes it a hash of
+`(run, tool, order_id)` with no position in it, so the same order refunded twice
+in one run derives one key and the second call settles from the first. Every name
+must be required by `input_schema`, or the server refuses the declaration when it
+loads it. Proof 8 is that difference, and the choice is the operator's in the
+same file as everything else: an app cannot widen its own key.
+
+### The app's schema and the operator's declaration
+
+Each tool is described twice, from two sides, and neither copy is redundant. The
+`z.object({...})` / typed signature in `app.ts` and `app.py` is what the MODEL
+sees: it is the function definition LangChain sends to the provider, and it is
+how the model knows a refund takes an order id and an amount in cents. The
+declaration in [`tools/`](tools/) is what the SERVER enforces: every intent's
+input is checked against `input_schema` before it becomes history, and every
+completion against `output_schema` and `require_equal` before it does.
+
+When they disagree, the declaration wins, always, and the disagreement surfaces
+as a refusal naming the field rather than as a wrong recording. A tester who
+typed `amount` in one place and `amount_cents` in the other found out the first
+time an intent was opened, from a `400` that said so. That is the intended
+failure mode, not an inconvenience: the app's copy is a hint to a model that may
+ignore it, and the operator's copy is a gate that cannot be. It also means
+editing a tool is editing both files. Change the arguments in the app without
+changing the declaration and the next call is refused; change the declaration
+without changing the app and the model keeps producing arguments the server will
+not take.
 
 ## Running it
 
@@ -110,12 +149,25 @@ bash examples/langchain/run.sh
 
 It brings up a `salvor serve` per language on its own port (18401 and 18402 by
 default) over its own store, installs what each app needs, and then makes the
-same seven proofs twice, TypeScript first. It exits 0 only if all fourteen hold,
+same eight proofs twice, TypeScript first. It exits 0 only if all sixteen hold,
 and every check that does not hold prints a `FAILED: expected ...` line naming
 what it wanted and what it found, so a run that stopped early can never be
 mistaken for one that passed. It takes well under a minute, most of it two
 deliberate waits: a tool body held open for five seconds, and a crashed driver's lease
 lapsing.
+
+Two things about the script are demo posture and not advice. It starts each
+server with no `--auth-token`, which leaves the control plane open to anything
+that can reach the port; that is fine for a loopback port that lives for forty
+seconds and is wrong for anything else, so set one and put the server behind a
+proxy for anything past a demo (see
+[`docs/OPERATIONS.md`](../../docs/OPERATIONS.md)). And the scratch directory is
+not cleaned up: the two stores, the six ledgers and every captured invoke are
+still there when the run finishes, written at whatever file mode the account's
+umask gives them, so anything else on the machine that can read the directory can
+read the refunds. That is deliberate, because the proofs are only worth
+something if you can go and read the log yourself afterwards. Delete the
+directory when you are done reading it.
 
 The first run installs things. On the TypeScript side, `npm install
 --install-links --omit=optional` into `examples/langchain/node_modules`
@@ -152,24 +204,33 @@ for five seconds. `--finish` closes the thread. Each run prints `MODEL CALLS`,
 `TOOL BODIES`, `MARKERS` and `FORKS`, which is what `run.sh` reads its proofs
 out of.
 
-## The seven proofs, against the recorded log
+## The eight proofs, against the recorded log
 
 Every log below is real output from a run of `run.sh`, read back with
 `salvor history <run> --store <store>`.
+
+`run.sh` always runs the scripted model. It unsets `ANTHROPIC_API_KEY` for its
+own invokes, whatever the shell that started it had, because most of the proofs
+below assert an exact number of model calls and an app cannot count a call a
+provider made on its behalf: under a key each invoke prints `MODEL CALLS:
+unavailable (real provider)` instead of a number, and those checks would have
+nothing to compare. Set a key and invoke an app by hand and the same replay
+happens, position for position, with the counts reading `unavailable`. See
+"Swapping in a real model" below.
 
 ### 1. The first invoke pays for everything once
 
 ```
    0  RunStarted           agent sha256:51e608f… input {"thread_id":"orders-7781"}
-   1  ModelCallRequested   request sha256:ffee658… [Client]
+   1  ModelCallRequested   request sha256:95202bf… [Client]
    2  ModelCallCompleted   usage in 0 out 0
    3  ToolCallRequested    lookup_order [Read] [Client] key sha256:02f11262… input {"order_id":"ORD-7781"}
    4  ToolCallCompleted    output {"order_id":"ORD-7781","status":"paid","total_cents":4200}
-   5  ModelCallRequested   request sha256:989ad59… [Client]
+   5  ModelCallRequested   request sha256:a8425f0… [Client]
    6  ModelCallCompleted   usage in 0 out 0
-   7  ToolCallRequested    refund_order [Write] [Client] key sha256:07513bd5… input {"amount_cents":4200,"order_id":"ORD-7781"}
-   8  ToolCallCompleted    output {"amount_cents":4200,"order_id":"ORD-7781","refund_id":"re_b9f07ccfcfd0",…
-   9  ModelCallRequested   request sha256:1a0f26a… [Client]
+   7  ToolCallRequested    refund_order [Write] [Client] key sha256:9d6df81e… input {"amount_cents":4200,"order_id":"ORD-7781"}
+   8  ToolCallCompleted    output {"amount_cents":4200,"order_id":"ORD-7781","refund_id":"re_e93422b6b8fe",…
+   9  ModelCallRequested   request sha256:d0adbb0… [Client]
   10  ModelCallCompleted   usage in 0 out 0
 ```
 
@@ -185,7 +246,7 @@ The desk printed `MODEL CALLS: 3`, `TOOL BODIES: 2`, and the refunds ledger got
 its one line:
 
 ```json
-{"order_id":"ORD-7781","amount_cents":4200,"refund_id":"re_b9f07ccfcfd0","status":"succeeded","tool":"refund_order","idempotency_key":"sha256:07513bd5e1ecef2a5c65992d54120306037099493fb2e9f6fef7b9f07ccfcfd0"}
+{"order_id":"ORD-7781","amount_cents":4200,"refund_id":"re_e93422b6b8fe","status":"succeeded","tool":"refund_order","idempotency_key":"sha256:9d6df81e6a7c0497538de28faffc6030fe497fbe8e2b6c0e6d20e93422b6b8fe"}
 ```
 
 Every message the desk got back carries `MARKERS: live@1,live@5,live@9`: the
@@ -209,17 +270,17 @@ the first one handed the thread's lease back on its way out.
 in the ledger, the process dies with exit 9, and the log ends here:
 
 ```
-   7  05:07:09Z  ToolCallRequested  refund_order [Write] [Client] key sha256:a62b6c89… input {"amount_cents":15900,"order_id":"ORD-8120"}
+   7  21:53:50Z  ToolCallRequested  refund_order [Write] [Client] key sha256:b99ac79f… input {"amount_cents":15900,"order_id":"ORD-8120"}
 ```
 
-An intent with nothing after it, which is exactly what an unfinished write looks
-like and is why `write` is worth declaring. The desk is then invoked again,
-which is all a worker picking the job up does. It replays everything before seq
-7 for free, runs that one tool body again, and the body finds the key already on
-file:
+An intent with nothing after it: the log's last word is a call that was asked
+for, and nothing in the log says whether the money moved. The desk is then invoked
+again, which is all a worker picking the job up does. It replays everything
+before seq 7 for free, runs that one tool body again, and the body finds the key
+already on file:
 
 ```
-[desk] refund_order: key sha256:a62b6c89878e2... is already on file; no second refund
+[desk] refund_order: key sha256:b99ac79f5b137... is already on file; no second refund
 MODEL CALLS: 1
 TOOL BODIES: 1
 MARKERS: replayed@1,replayed@5,live@9
@@ -228,8 +289,8 @@ MARKERS: replayed@1,replayed@5,live@9
 The log closes the call it left open, ten seconds after it opened it:
 
 ```
-   7  05:07:09Z  ToolCallRequested  refund_order [Write] [Client] key sha256:a62b6c89…
-   8  05:07:19Z  ToolCallCompleted  output {"amount_cents":15900,"order_id":"ORD-8120","refund_id":"re_3baa02ab8e00",…
+   7  21:53:50Z  ToolCallRequested  refund_order [Write] [Client] key sha256:b99ac79f…
+   8  21:54:00Z  ToolCallCompleted  output {"amount_cents":15900,"order_id":"ORD-8120","refund_id":"re_5863eb647eaf",…
 ```
 
 One intent, one completion, one key, one line in the ledger. Say plainly what
@@ -241,11 +302,40 @@ which is why both apps read it with `currentToolCall()` / `current_tool_call()`
 and hand it to the ledger. A tool that drops that key can charge twice, and
 salvor's log will record it once either way.
 
+What `effect` buys is worth stating exactly, because it is easy to over-credit.
+It does not buy the key: salvor derives one for a `read` as readily as for a
+`write`, from the same declaration. It does not buy the recovery either: the
+intent is in the log because it is written ahead of the call, whatever the
+effect says, so the next invoke walks back to that position regardless. What
+`write` versus `read` decides is what an unanswered intent MEANS, and therefore
+who is allowed to act on it. A dangling `write` is the run's terminal question:
+the fold in `salvor-replay` reports `needs_reconciliation`, and nothing performs
+the call again on its own, because a write performed twice is the failure this
+whole design exists to prevent. It waits for a person, and proof 6 is what that
+looks like. A dangling `read` is not a question at all, because nothing outside
+the process changed, so the next invoke simply performs it again and records the
+answer, which is what `lookup_order` declaring `read` buys. The same split is
+the retry policy on a call recorded as having FAILED: a failed read is worth
+performing again, a failed write is worth someone looking first.
+
+The reason proof 3's re-invoke can run the body again at all is that
+`refund_order` is a write the desk may close for itself, and the key is what
+makes running it twice safe. That is not a licence the effect class grants; it
+is one `trust_completion = true` grants, and `refund_large` withholds.
+
 The ten seconds between the two events are the lease the crashed process left
-behind. A driver that dies says nothing, so its hold ends on a timer;
-`run.sh` starts each server with `SALVOR_CLIENT_LEASE_TTL_SECS=8` and polls,
-which is the `lease_held` handler both SDK READMEs write out. Production keeps
-the 60 second default.
+behind. A driver that dies says nothing, so its hold ends on a timer, and
+nothing else may open the thread until it does. `run.sh` starts each server with
+`SALVOR_CLIENT_LEASE_TTL_SECS=8` so the proof does not sit out a full minute,
+which is a demo's number and not a production one. In production the default is
+60 seconds: a desk that crashes hard holds its thread for that whole minute
+before anything else can pick the job up, or until a person resolves its
+dangling write over HTTP, which drops the dead lease along with the resolution
+(proof 6 does exactly that). The retry belongs in the app, not in a sleep: catch
+`lease_held`, read `lapsesInSeconds` / `lapses_in_seconds` off the refusal, and
+poll rather than wait the window out, because a live driver usually finishes
+well before its hold does. Both SDK READMEs write that handler out, and
+`desk_when_free` in `run.sh` is the same loop.
 
 ### 4. Two copies of the desk, one thread
 
@@ -256,16 +346,21 @@ calls a model or runs a tool:
 ```
 MODEL CALLS: 0
 TOOL BODIES: 0
-REFUSED lease_held: thread `orders-3050` (run dd8ee71d-…) cannot be opened: another
-driver holds its lease right now, and it lapses in 8s if that driver goes quiet
-(or as soon as the run finishes). One driver per thread at a time.
+REFUSED lease_held: thread `orders-3050` (run dd8ee71d-e5d1-8dc5-a82d-c6208fce7344)
+cannot be opened: another driver holds its lease right now, and it lapses in 8s if
+that driver goes quiet (or as soon as the run finishes). One driver per thread at a
+time. Wait for the lease to lapse and invoke again, or confirm no other process is
+already driving this thread.
+LAPSES IN: 8
 ```
 
-The lease is HELD, not handed to whoever asks last, and the refusal says how
-long the hold has left so a caller can back off rather than guess. Meanwhile the
-first copy finished normally: a tool body that takes longer than the TTL keeps
-the run it never left, because the middleware beats a heartbeat while the body
-runs.
+That is the whole line, wrapped to fit; the desk prints it as one. The lease is
+HELD, not handed to whoever asks last, and the refusal says how long the hold has
+left so a caller can back off rather than guess: `LAPSES IN` is that number,
+lifted off the refusal, which is what a retry loop should sleep against.
+Meanwhile the first copy finished normally: a tool body that takes longer than
+the TTL keeps the run it never left, because the middleware beats a heartbeat
+while the body runs.
 
 ### 5. A new question down an old thread forks, and says so
 
@@ -274,9 +369,13 @@ ORD-9002 and the request at the first recorded position no longer matches what
 the log holds there:
 
 ```
-[desk] FORK at seq 1: salvor: thread `orders-7781` (run ea14b3ef-…) left its
-recorded path at seq 1. Nothing from there replays: every model call and every
-tool call for the rest of this invoke is being performed and recorded afresh.
+[desk] FORK at seq 1: salvor: thread `orders-7781` (run
+ea14b3ef-42b6-82dc-85bd-7fd80cc53df1) left its recorded path at seq 1. Nothing from
+there replays: every model call and every tool call for the rest of this invoke is
+being performed and recorded afresh, and the messages carry
+`response_metadata.salvor.forked` saying so. If this thread was meant to resume,
+look for a tool whose result differs between invokes, or a graph that branches on
+the clock or on randomness.
 FORKS: 1
 MARKERS: forked@1,forked@1
 ```
@@ -308,17 +407,44 @@ client_completion_refused` tear through LangGraph after the money moved. The run
 is left at seq 7, an intent with no completion, the same shape the crash left.
 A person confirms the transfer at the provider and records what they saw.
 `run.sh` does that over HTTP, because a container running an agent usually has
-the server's URL and no store path at all:
+the server's URL and no store path at all.
+
+A person's resolution is held to the declaration too, which is the thing worth
+noticing here. It is not a back door: an output that fails `output_schema` or
+that changes a `require_equal` field is refused before anything is written, so a
+typed amount that is not the one the intent recorded cannot become the run's
+history. `run.sh` tries a dropped zero first, and gets this:
+
+```
+400 {"error":{"code":"bad_request","message":"the output offered for `refund_large`
+reports `amount_cents` as 24000, but the intent recorded 240000; a resolution may
+not alter a require_equal field. Record what was authorized, or abandon the run if
+the provider did something else"}}
+```
+
+Nothing was recorded, and the run still needs its resolution. A resolver's
+authority is to say what the provider did with the call that was authorized, not
+to authorize a different one; if the provider really did something else, the
+honest move is `POST /v1/runs/{id}/abandon`, which the refusal names. Then the
+right amount:
 
 ```sh
-curl -X POST http://127.0.0.1:18402/v1/runs/2ac4ce19-…/resolve \
+curl -X POST http://127.0.0.1:18401/v1/runs/2ac4ce19-…/resolve \
   -H 'content-type: application/json' \
-  -d '{"output": {"amount_cents": 240000, "order_id": "ORD-4400", "refund_id": "re_06b3fa2dd968", "status": "succeeded"}}'
+  -d '{"output": {"order_id": "ORD-4400", "amount_cents": 240000, "refund_id": "re_06b3fa2dd968", "status": "succeeded"}}'
 ```
 
 ```
 {"resolved":true,"run":"2ac4ce19-…","status":{"state":"running"}}
 ```
+
+One honest thing about the demo: its "person" is a `python3` line that reads the
+output the app printed and posts it straight back. That is a stand-in for the
+step, not the step. The whole reason `trust_completion = false` exists is that
+the desk's report is the one thing not to be believed about this call, so a real
+resolver opens the payment provider's own records, finds the refund the
+idempotency key names, and records what THAT says. Reposting the app's output
+would record the desk's claim with a person's signature on it.
 
 The HTTP resolve clears the run's lease along with the resolution, so the thread
 re-opens at once. Invoke it again and the resolved output replays in the call's
@@ -334,7 +460,10 @@ ANSWER: Refunded $2400.00 on ORD-4400; the provider has it as re_06b3fa2dd968.
 Zero tool bodies, and the large-refunds ledger still holds exactly one line. What
 resolve recorded is the same `ToolCallCompleted` the trusted tool wrote for
 itself in proof 1, so a later replay of this log behaves the same way that one
-does.
+does. It is not quite indistinguishable: the completion carries `settled_by:
+"operator"`, and `salvor log` renders it `[Operator]`, so a reader can always
+tell a call a person closed from one the desk closed. Replay never reads that
+field.
 
 ### 7. A finished thread takes no more invokes
 
@@ -360,12 +489,54 @@ appended to. Give the next task a new thread id.
 It refuses the same way, naming the run instead of the thread, when the log ends
 at an open intent: settle that call first, then finish the thread.
 
+### 8. The same refund, asked for twice in one turn
+
+Proof 3 is one call retried. This is two calls, at two positions, that are the
+same refund. The ticket for ORD-5150 names its own amount and says the refund is
+on it twice, so the desk asks for it twice in the one turn:
+
+```
+[desk] refund_order moved money: $33.00 on ORD-5150 as re_e540d225cf69
+MODEL CALLS: 2
+TOOL BODIES: 1
+ANSWER: Refunded $33.00 on ORD-5150; the provider has it as re_e540d225cf69.
+```
+
+Two calls asked for, one tool body run, one line in the ledger. The log says
+where the second one went:
+
+```
+   3  ToolCallRequested  refund_order [Write] [Client] key sha256:dd001dd6… input {"amount_cents":3300,"order_id":"ORD-5150"}
+   4  ToolCallCompleted  output {"amount_cents":3300,"order_id":"ORD-5150","refund_id":"re_e540d225cf69",…
+   5  ToolCallRequested  refund_order [Write] [Client] key sha256:dd001dd6… input {"amount_cents":3300,"order_id":"ORD-5150"}
+   6  ToolCallCompleted  output {"amount_cents":3300,"order_id":"ORD-5150","refund_id":"re_e540d225cf69",… (deduplicated: copied from run c7b2cdc3-… seq 3)
+```
+
+Both intents are recorded, because both were genuinely asked for and a log that
+hid the second one would be lying about what the run did. Both carry the same
+key, because `refund-order.toml` declares `idempotency_key = ["order_id"]` and
+the derivation has no `seq` in it. When the second intent was opened, salvor
+found that identity already claimed by a call this run had finished, so it
+copied that call's completion onto the new position, named what it copied, and
+answered the middleware `settled: true`. The desk's tool body was never called
+for it: `TOOL BODIES: 1` is the whole point, and the desk's own "key already on
+file" guard never even ran, because the request never reached it.
+
+Leave the declaration silent and the same turn behaves differently: two
+positions, two keys, two calls, and the money moves twice unless the desk's own
+ledger catches it. This is the case a positional key deliberately does not
+cover, and it is why the choice sits in the operator's file. A read never
+deduplicates however it is declared, because answering a repeated read out of an
+older one would freeze a loop that is polling for a change on purpose.
+
 ## Swapping in a real model
 
-Set a key and run the same script:
+Set a key and invoke an app directly:
 
 ```sh
-ANTHROPIC_API_KEY=sk-ant-... bash examples/langchain/run.sh
+ANTHROPIC_API_KEY=sk-ant-... node examples/langchain/app.ts \
+  --server http://127.0.0.1:18401 --thread orders-7781 \
+  --ask "Refund ORD-7781, the item arrived damaged."
 ```
 
 Each app picks `ChatAnthropic` over its scripted model when the key is there
@@ -380,13 +551,19 @@ cd examples/langchain && npm install --install-links   # adds @langchain/anthrop
 pip install langchain-anthropic                        # into whichever interpreter runs app.py
 ```
 
-Two honest caveats. A real model costs money and answers differently every time,
-so the proofs that count model calls are written against the scripted one:
-`MODEL CALLS` reads `unavailable (real provider)` under a key, and the desk's
-answers will not be the sentences quoted above. And a real model deciding
-differently on a re-invoke is a fork by the rule in proof 5, which is the correct
-behavior and not a bug: the question is no longer the one the recorded answer was
-an answer to.
+Not through `run.sh`, which unsets the key for its own invokes on purpose. Its
+proofs assert exact model-call counts, and neither app can count a call a
+provider made on its behalf: `MODEL CALLS` prints `unavailable (real provider)`
+under a key, so those checks would have nothing to compare. Everything the
+proofs are actually about still holds, because none of it is the model's: the
+same positions replay, a crash still costs one refund, the same intents are
+recorded. Only the counting stops.
+
+Two other honest caveats. A real model costs money and answers differently every
+time, so the desk's answers will not be the sentences quoted above. And a real
+model deciding differently on a re-invoke is a fork by the rule in proof 5, which
+is the correct behavior and not a bug: the question is no longer the one the
+recorded answer was an answer to.
 
 ## Why the scripted model is hand-rolled
 
@@ -394,11 +571,14 @@ Neither app uses LangChain's own test doubles.
 `FakeStreamingChatModel` answers every turn with its first response, so a
 tool-calling agent loops on the same tool forever, and `FakeToolCallingModel`'s
 `bindTools` rebuilds itself on every call, which silently drops anything attached
-to the instance. So each app carries about thirty lines of `BaseChatModel` that
+to the instance. So each app carries a few dozen lines of `BaseChatModel` that
 decide the next turn from the messages so far: turn 0 looks the order up, turn 1
 reads that lookup out of the tool message and picks the refund tool the amount
 calls for, turn 2 reads the refund out of its tool message and closes out. A real
-model decides the same three things from the same three inputs.
+model decides the same three things from the same three inputs. The one
+exception is proof 8's ticket, which names its own amount and says the refund is
+on it twice: there the scripted turn 0 asks for the refund twice and skips the
+lookup, which is what a model reading a duplicated line item does.
 
 ## What the log holds, and what it does not
 
@@ -428,10 +608,39 @@ fork, as proof 5 does on purpose.
 sit in, so such a graph gets model recording only and its tool calls stay outside
 the ledger.
 
-The one thing the middleware refuses outright is a log whose last event is a call
-that never completed. Proof 3 meets that (the crash) and proof 6 meets it (the
-large refund), and both are settled the same way: run the call again under its
-key, or have a person resolve it.
+A log whose last event is a call that never completed is not one thing, and the
+middleware treats the kinds differently. An open `read` intent is not refused at
+all: nothing outside the process changed, so the next invoke performs that call
+again and records the answer. An open `write` on a tool the desk may close for
+itself is not refused either, and proof 3 is that path: the invoke runs the body
+again at the same position under the same key, and the key is what stops the
+duplicate. What IS refused outright is an open `write` on a tool a person must
+confirm, the shape proof 6 leaves behind. There the whole point of
+`trust_completion = false` is that this process's word is not accepted for this
+call, so running it a second time is precisely the move the declaration exists to
+rule out. The middleware stops and names the run, and a resolution over HTTP (or
+`salvor resolve`) is the only way past it.
+
+Failures are recorded, not left hanging, and which kind of failure it was decides
+what happens next. A tool body that raises is posted to salvor as that call's
+failure, recorded as the same error sentinel a native tool writes when its
+retries run out, and then rethrown unchanged, so LangChain still sees exactly
+what the tool raised. The call is closed rather than dangling, so the thread is
+not wedged. The consequence is worth being clear about: a later invoke reaching
+that position meets the recorded failure and is refused with
+`SalvorMiddlewareError` (`tool_failed`), naming the seq, without running the body
+again. A recorded failure settles the call the same way on every replay, exactly
+as a recorded success does, so a permanently failing input fails the same way
+forever. Fix the input and give it a new thread. A tool a person must confirm is
+the exception, as ever: salvor would not take this process's word for "it did not
+land" any more than for "it landed", so a throw there posts nothing and stops the
+invoke with `open_intent`, for a person to settle.
+
+A model call is the other side of it. When the provider errors, nothing is
+recorded at all: the intent is left open, and the next invoke simply performs
+that call again. That is right because a model call buys an answer and changes
+nothing in the world, which is the same reason a dangling `read` is performed
+again while a dangling `write` waits.
 
 ## What is here
 

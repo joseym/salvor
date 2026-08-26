@@ -166,6 +166,7 @@ const ORDER_BOOK: Record<string, { status: string; total_cents: number }> = {
   "ORD-3050": { status: "paid", total_cents: 2500 },
   "ORD-9002": { status: "paid", total_cents: 1500 },
   "ORD-4400": { status: "paid", total_cents: 240000 },
+  "ORD-5150": { status: "paid", total_cents: 3300 },
 };
 
 /**
@@ -216,12 +217,19 @@ const lookupOrder = tool(
  * The money, for both refund tools.
  *
  * The idempotency key comes from salvor: `currentToolCall()` hands back the key
- * it derived for this call from `(run, seq, tool)`, which is the same string on
- * every attempt at the same call. A real desk passes that key to its payment
- * provider as the provider's own idempotency token. This one has no provider,
- * so the ledger IS the provider: a key already on file returns the refund that
- * key produced, and no second line is written. That is what makes the crash
- * proof in `run.sh` cost one refund rather than two.
+ * it derived for this call, and what it derived it from is the operator's
+ * choice, not the desk's. `refund_large` names no key fields, so its key is
+ * positional, a hash of `(run, seq, tool)`: an attempt identifier, the same
+ * string on every attempt at that one call. `refund_order` declares
+ * `idempotency_key = ["order_id"]`, so its key is a hash of
+ * `(run, tool, order_id)` with no position in it, and the same order refunded
+ * twice in one run derives one key both times.
+ *
+ * A real desk passes that key to its payment provider as the provider's own
+ * idempotency token. This one has no provider, so the ledger IS the provider: a
+ * key already on file returns the refund that key produced, and no second line
+ * is written. That is what makes the crash proof in `run.sh` cost one refund
+ * rather than two.
  */
 async function performRefund(
   toolName: string,
@@ -310,12 +318,40 @@ function lastToolResult(messages: BaseMessage[]): Record<string, unknown> {
  * Turn 2 reads the refund out of its tool message and closes out. A real model
  * would decide the same three things from the same three inputs, which is why
  * swapping `ChatAnthropic` in below changes nothing else.
+ *
+ * One question takes a shorter path: a ticket that names its own amount and
+ * says the refund is on it twice. There is nothing to look up, and a model
+ * reading a duplicated line item asks for the refund twice in the one turn.
+ * That is the shape `refund_order`'s declared `idempotency_key` exists for.
  */
 function nextTurn(messages: BaseMessage[]): Turn {
   const question = String(messages.find((m) => m.getType() === "human")?.content ?? "");
   const orderId = question.match(/ORD-\d+/)?.[0] ?? "ORD-0000";
   const wantsRefund = /refund/i.test(question);
+  const listedTwice = /\btwice\b/i.test(question);
+  const statedCents = Number(question.match(/(\d+) cents/)?.[1] ?? 0);
   const turn = messages.filter((m) => m.getType() === "ai").length;
+
+  if (turn === 0 && wantsRefund && listedTwice && statedCents > 0) {
+    return {
+      content: `Refunding ${orderId}; the ticket lists it twice.`,
+      toolCalls: [
+        {
+          name: "refund_order",
+          args: { order_id: orderId, amount_cents: statedCents },
+          id: "call-refund-first",
+        },
+        // The same arguments, a second time. The two calls need distinct ids
+        // because that is how LangChain tells one tool call from another, and
+        // how the middleware ranks them within the turn.
+        {
+          name: "refund_order",
+          args: { order_id: orderId, amount_cents: statedCents },
+          id: "call-refund-again",
+        },
+      ],
+    };
+  }
 
   if (turn === 0) {
     return {
@@ -324,7 +360,7 @@ function nextTurn(messages: BaseMessage[]): Turn {
     };
   }
 
-  if (turn === 1) {
+  if (turn === 1 && !listedTwice) {
     const order = lastToolResult(messages);
     const total = Number(order.total_cents ?? 0);
     if (!wantsRefund) {

@@ -1,23 +1,27 @@
 #!/usr/bin/env bash
 # Drive the same LangChain support desk twice, once in TypeScript and once in
-# Python, and prove seven things about what salvor recorded each time.
+# Python, and prove eight things about what salvor recorded each time.
 #
 #   1. a first invoke records the desk's model calls and its one refund
 #   2. a second invoke replays: no model call, no tool body, every marker `replayed`
 #   3. a crash inside `refund_order` costs one refund, not two
 #   4. a second copy of the desk on a held thread is refused before it runs anything
 #   5. a new question down an old thread forks, once, and says where
-#   6. a refund the operator will not let the desk close stops for a person
+#   6. a refund the operator will not let the desk close stops for a person, and
+#      a resolution with the wrong amount is refused before the right one lands
 #   7. a finished thread takes no more invokes
+#   8. the same refund asked for twice in one turn settles from the first call
 #
 # Nothing here needs an API key or a network. The model is a scripted stand-in
 # inside each app that reads the conversation so far, so every model call is
-# free and every answer is the same on every machine.
+# free and every answer is the same on every machine. That is also why the
+# proofs below can count model calls at all: under a real provider the apps
+# print `unavailable` rather than a number.
 #
 # Usage, from anywhere:
 #     bash examples/langchain/run.sh
 #
-# It exits 0 only if all fourteen proofs hold. Every check that does not hold
+# It exits 0 only if all sixteen proofs hold. Every check that does not hold
 # prints a `FAILED: expected ...` line naming what it wanted and what it found,
 # so a run that stopped early can never be mistaken for one that passed.
 set -euo pipefail
@@ -58,19 +62,35 @@ fi
 NODE="${SALVOR_EXAMPLE_NODE:-node}"
 NPM="${SALVOR_EXAMPLE_NPM:-npm}"
 
+# The scripted model, always, whatever the shell that started this already had
+# set. Both apps pick their scripted stand-in only when there is no key, and the
+# proofs below assert exact model-call counts, which an app cannot report for a
+# call a provider made on its behalf: under a key it prints `unavailable (real
+# provider)` and those proofs could not be checked at all. Swapping a real model
+# in is a thing to do by hand, one invoke at a time, not inside a proof script.
+if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+  echo "ANTHROPIC_API_KEY is set; unsetting it for this script, which proves things about counted model calls."
+fi
+unset ANTHROPIC_API_KEY
+
 DECLS=(
   --client-tool examples/langchain/tools/lookup-order.toml
   --client-tool examples/langchain/tools/refund-order.toml
   --client-tool examples/langchain/tools/refund-large.toml
 )
 
-# The five questions, and the orders behind them. Each proof gets its own order
+# The six questions, and the orders behind them. Each proof gets its own order
 # so a ledger line count is that proof's own answer.
 ASK_7781="Refund ORD-7781, the item arrived damaged."
 ASK_8120="Refund ORD-8120, a duplicate charge on one renewal."
 ASK_3050="Refund ORD-3050, the customer never received it."
 ASK_9002="How is ORD-9002 doing?"
 ASK_4400="Refund ORD-4400, the card expired before the refund window."
+# The one ticket that names its own amount and says the refund is on it twice.
+# The scripted model reads that as two calls in one turn, which is what proof 8
+# needs; there is nothing to look up, so the only tool body in that invoke is
+# the refund itself.
+ASK_5150="Refund ORD-5150 for 3300 cents. The ticket lists it twice."
 
 FAIL=0
 SERVE_PID=""
@@ -139,11 +159,13 @@ count_matching() {
 # What a run's recorded log says about one tool, read out of the durable log
 # itself rather than out of anything the desk printed:
 #
-#     intents=1 completions=1 keys=sha256:07513bd5...
+#     intents=1 completions=1 dedup=0 distinct_keys=1 keys=sha256:07513bd5...
 #
 # `intents` counts the ToolCallRequested events naming the tool, `completions`
-# counts the ToolCallCompleted events sitting on those intents, and `keys` is
-# the set of distinct idempotency keys across them.
+# counts the ToolCallCompleted events sitting on those intents, `dedup` counts
+# how many of those completions salvor copied from an earlier call rather than
+# the desk reporting them, `distinct_keys` is how many different idempotency
+# keys the intents carry, and `keys` lists them.
 tool_facts() { # <store> <run> <tool>
   local json="$SCRATCH/salvor-langchain-history.json"
   "$SALVOR" --store "$1" history "$2" --json >"$json"
@@ -158,14 +180,18 @@ for envelope in events:
     payload = event.get("payload", {})
     if event["kind"] == "ToolCallRequested" and payload.get("tool") == tool:
         intents[payload["seq"]] = payload.get("idempotency_key", "")
-completions = sum(
-    1
+completions = [
+    envelope["event"].get("payload", {})
     for envelope in events
     if envelope["event"]["kind"] == "ToolCallCompleted"
     and envelope["event"].get("payload", {}).get("seq") in intents
+]
+dedup = sum(1 for payload in completions if payload.get("deduplicated_from"))
+distinct = sorted(set(intents.values()))
+print(
+    "intents=%d completions=%d dedup=%d distinct_keys=%d keys=%s"
+    % (len(intents), len(completions), dedup, len(distinct), ",".join(distinct) or "none")
 )
-keys = ",".join(sorted(set(intents.values()))) or "none"
-print("intents=%d completions=%d keys=%s" % (len(intents), completions, keys))
 ' "$json" "$3"
 }
 
@@ -247,7 +273,7 @@ run_language() { # <typescript|python> <port> <ledger prefix>
   # A clean store and clean ledgers, so every count below means what it says.
   # Only files this script owns, by exact path, are removed.
   rm -f "$STORE" "$STORE-wal" "$STORE-shm" "$lookups" "$refunds" "$large" \
-     "$SCRATCH/salvor-langchain-history.json" "$out"-*.out
+     "$SCRATCH/salvor-langchain-history.json" "$out"-*.out "$out"-*.json
 
   echo "== starting salvor serve on 127.0.0.1:$port (store $STORE) =="
   echo "  salvor --store $STORE serve --bind 127.0.0.1:$port ${DECLS[*]}"
@@ -281,7 +307,8 @@ run_language() { # <typescript|python> <port> <ledger prefix>
              "every answer marked live, at seqs 1, 5 and 9" \
      && want "$(count_lines "$refunds")" "1" "1 line in the refunds ledger" \
      && want "$(tool_facts "$STORE" "$run_7781" refund_order | sed 's/ keys=.*//')" \
-             "intents=1 completions=1" "one refund intent and one completion in the log"; then
+             "intents=1 completions=1 dedup=0 distinct_keys=1" \
+             "one refund intent and one completion in the log"; then
     echo "PROOF: $DESK_LANG, first invoke: 3 model calls, 2 tool bodies, one line in the refunds ledger, and a log holding one refund intent with one completion on it."
   fi
 
@@ -319,7 +346,7 @@ run_language() { # <typescript|python> <port> <ledger prefix>
      && want "$(count_matching "$refunds" ORD-8120)" "1" \
              "1 line for ORD-8120 in the refunds ledger, across both attempts" \
      && want "$(tool_facts "$STORE" "$run_8120" refund_order | sed 's/ keys=.*//')" \
-             "intents=1 completions=1" \
+             "intents=1 completions=1 dedup=0 distinct_keys=1" \
              "one refund intent and one completion in the log after the crash"; then
     echo "PROOF: $DESK_LANG, crash inside refund_order: the body ran twice under one key, the ledger holds 1 line for ORD-8120, and the log holds one intent with one completion. $(tool_facts "$STORE" "$run_8120" refund_order)"
   fi
@@ -382,7 +409,27 @@ run_language() { # <typescript|python> <port> <ledger prefix>
   local run_4400 refund_output
   run_4400=$(printf '%s' "$stopped" | python3 -c 'import json,sys; print(json.load(sys.stdin)["run"])')
   refund_output=$(printf '%s' "$stopped" | python3 -c 'import json,sys; print(json.dumps({"output": json.load(sys.stdin)["output"]}))')
-  echo "  == a person confirms the transfer at the provider, then records what they saw =="
+  # The resolver is held to the declaration too. `refund-large.toml` names
+  # `amount_cents` in require_equal, so an amount that is not the one the intent
+  # recorded is refused and nothing is written: a typo cannot become the run's
+  # own history. A tenth of the real amount is the typo a dropped zero makes.
+  echo "  == first, a resolution with a dropped zero in the amount =="
+  local typo_output typo_status
+  typo_output=$(printf '%s' "$stopped" | python3 -c '
+import json, sys
+
+stop = json.load(sys.stdin)
+output = dict(stop["output"])
+output["amount_cents"] = int(output["amount_cents"]) // 10
+print(json.dumps({"output": output}))')
+  echo "  curl -X POST $BASE/v1/runs/$run_4400/resolve -d '$typo_output'"
+  typo_status=$(curl -sS -o "$out-6-typo.json" -w '%{http_code}' \
+    -X POST "$BASE/v1/runs/$run_4400/resolve" \
+    -H 'content-type: application/json' -d "$typo_output") \
+    || die "the mistyped resolve to reach the server" "curl exited nonzero"
+  echo "  $typo_status $(cat "$out-6-typo.json")"
+
+  echo "  == now the amount the intent actually recorded =="
   echo "  curl -X POST $BASE/v1/runs/$run_4400/resolve -d '$refund_output'"
   local resolved
   resolved=$(curl -sS -X POST "$BASE/v1/runs/$run_4400/resolve" \
@@ -393,6 +440,11 @@ run_language() { # <typescript|python> <port> <ledger prefix>
   if want "$(count_matching "$out-6a.out" "trust_completion = false")" "1" \
           "the stop to name the declaration that caused it" \
      && want "$(count_lines "$large")" "1" "1 line in the large-refunds ledger" \
+     && want "$typo_status" "400" "the mistyped resolution to be refused with 400" \
+     && want "$(count_matching "$out-6-typo.json" "amount_cents")" "1" \
+             "the refusal to name the field it would not let through" \
+     && want "$(count_matching "$out-6-typo.json" '"code":"bad_request"')" "1" \
+             "the refusal to carry the bad_request code" \
      && want "$(grep -c -F -- '"resolved":true' <<<"$resolved" || true)" "1" "the resolve to be accepted" \
      && want "$APP_EXIT" "0" "the invoke after the resolve to exit 0" \
      && want "$(field "$out-6b.out" 'TOOL BODIES')" "0" \
@@ -400,7 +452,7 @@ run_language() { # <typescript|python> <port> <ledger prefix>
      && want "$(field "$out-6b.out" MARKERS)" "replayed@1,replayed@5,live@9" \
              "the resolved position to replay and only the closing turn to be live" \
      && want "$(count_lines "$large")" "1" "the large-refunds ledger still at 1 line"; then
-    echo "PROOF: $DESK_LANG, a \`trust_completion = false\` refund stopped for a person, was resolved over HTTP, and replayed on the next invoke with the tool body not run."
+    echo "PROOF: $DESK_LANG, a \`trust_completion = false\` refund stopped for a person; a resolution with the wrong amount was refused 400 naming \`amount_cents\`, the right one was recorded over HTTP, and the next invoke replayed it with the tool body not run."
   fi
 
   # -- 7. finishing the thread ----------------------------------------------
@@ -417,6 +469,31 @@ run_language() { # <typescript|python> <port> <ledger prefix>
      && want "$(grep -c "REFUSED thread_finished.*orders-7781" "$out-7b.out" || true)" "1" \
              "the refusal to name the thread it refused"; then
     echo "PROOF: $DESK_LANG, the thread was closed at $(field "$out-7a.out" FINISHED), and the next invoke was refused by name, naming the thread."
+  fi
+
+  # -- 8. the same refund twice in one turn ---------------------------------
+  #
+  # Proof 3 is about the same call retried. This is about two calls, at two
+  # positions, that are the same refund. A positional key would call them two
+  # refunds and the desk would move the money twice; `refund-order.toml` names
+  # `idempotency_key = ["order_id"]`, so both intents derive one key, the second
+  # finds the first already settled, and the desk performs nothing for it.
+  echo
+  echo "-- 8. the same refund asked for twice in one turn --"
+  desk "$out-8.out" --thread orders-5150 --ask "$ASK_5150"
+  local run_5150
+  run_5150=$(field "$out-8.out" RUN)
+  if want "$APP_EXIT" "0" "the duplicated-refund invoke to exit 0" \
+     && want "$(field "$out-8.out" 'MODEL CALLS')" "2" \
+             "2 model calls: the turn that asked twice, and the one that closed out" \
+     && want "$(field "$out-8.out" 'TOOL BODIES')" "1" \
+             "exactly one refund body to run for the two calls" \
+     && want "$(count_matching "$refunds" ORD-5150)" "1" \
+             "1 line for ORD-5150 in the refunds ledger" \
+     && want "$(tool_facts "$STORE" "$run_5150" refund_order | sed 's/ keys=.*//')" \
+             "intents=2 completions=2 dedup=1 distinct_keys=1" \
+             "two refund intents under one key, both completed, one of them copied"; then
+    echo "PROOF: $DESK_LANG, the same refund asked for twice in one turn: two intents sharing one derived key, the second settled from the first without the desk running its body, and one line in the ledger. $(tool_facts "$STORE" "$run_5150" refund_order)"
   fi
 
   echo

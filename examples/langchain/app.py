@@ -130,6 +130,7 @@ ORDER_BOOK = {
     "ORD-3050": {"status": "paid", "total_cents": 2500},
     "ORD-9002": {"status": "paid", "total_cents": 1500},
     "ORD-4400": {"status": "paid", "total_cents": 240000},
+    "ORD-5150": {"status": "paid", "total_cents": 3300},
 }
 
 # The desk's own limit, matching the `maximum` on `refund-order.toml` and the
@@ -174,12 +175,19 @@ def perform_refund(tool_name: str, ledger: str, order_id: str, amount_cents: int
     """The money, for both refund tools.
 
     The idempotency key comes from salvor: ``current_tool_call()`` hands back the
-    key it derived for this call from ``(run, seq, tool)``, which is the same
-    string on every attempt at the same call. A real desk passes that key to its
-    payment provider as the provider's own idempotency token. This one has no
-    provider, so the ledger IS the provider: a key already on file returns the
-    refund that key produced, and no second line is written. That is what makes
-    the crash proof in ``run.sh`` cost one refund rather than two.
+    key it derived for this call, and what it derived it from is the operator's
+    choice, not the desk's. ``refund_large`` names no key fields, so its key is
+    positional, a hash of ``(run, seq, tool)``: an attempt identifier, the same
+    string on every attempt at that one call. ``refund_order`` declares
+    ``idempotency_key = ["order_id"]``, so its key is a hash of
+    ``(run, tool, order_id)`` with no position in it, and the same order refunded
+    twice in one run derives one key both times.
+
+    A real desk passes that key to its payment provider as the provider's own
+    idempotency token. This one has no provider, so the ledger IS the provider: a
+    key already on file returns the refund that key produced, and no second line
+    is written. That is what makes the crash proof in ``run.sh`` cost one refund
+    rather than two.
     """
     global TOOL_BODIES
     TOOL_BODIES += 1
@@ -257,12 +265,33 @@ def next_turn(messages: list) -> dict:
     reads the refund out of its tool message and closes out. A real model would
     decide the same three things from the same three inputs, which is why
     swapping ``ChatAnthropic`` in below changes nothing else.
+
+    One question takes a shorter path: a ticket that names its own amount and
+    says the refund is on it twice. There is nothing to look up, and a model
+    reading a duplicated line item asks for the refund twice in the one turn.
+    That is the shape ``refund_order``'s declared ``idempotency_key`` exists for.
     """
     question = next((str(m.content) for m in messages if m.type == "human"), "")
     found = re.search(r"ORD-\d+", question)
     order_id = found.group(0) if found else "ORD-0000"
     wants_refund = "refund" in question.lower()
+    listed_twice = "twice" in question.lower()
+    stated = re.search(r"(\d+) cents", question)
+    stated_cents = int(stated.group(1)) if stated else 0
     turn = len([m for m in messages if m.type == "ai"])
+
+    if turn == 0 and wants_refund and listed_twice and stated_cents > 0:
+        args = {"order_id": order_id, "amount_cents": stated_cents}
+        return {
+            "content": "Refunding {}; the ticket lists it twice.".format(order_id),
+            "tool_calls": [
+                {"name": "refund_order", "args": args, "id": "call-refund-first"},
+                # The same arguments, a second time. The two calls need distinct
+                # ids because that is how LangChain tells one tool call from
+                # another, and how the middleware ranks them within the turn.
+                {"name": "refund_order", "args": dict(args), "id": "call-refund-again"},
+            ],
+        }
 
     if turn == 0:
         return {
@@ -272,7 +301,7 @@ def next_turn(messages: list) -> dict:
             ],
         }
 
-    if turn == 1:
+    if turn == 1 and not listed_twice:
         order = last_tool_result(messages)
         total = int(order.get("total_cents", 0))
         if not wants_refund:
