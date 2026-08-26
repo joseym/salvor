@@ -38,6 +38,19 @@ import { canonicalJson } from "./hash.js";
  *
  * A fork is deliberately not in this list: leaving the recorded path is not an
  * error, it is reported through `onFork` and the messages' own markers.
+ *
+ * None of the above is the control plane's own refusal reaching you unnamed.
+ * A `SalvorApiError` that escapes a hook without being translated into one of
+ * the codes above keeps its own code here instead: `bad_request` (a call's
+ * input, or a reported output, failed its declared schema),
+ * `client_completion_refused` (a `require_equal` field was reported
+ * differently than the intent recorded, or the declaration refuses
+ * self-completion outright), `divergence`, `unknown_tool`, or whatever else
+ * the server answers with. `cause` is always the `SalvorApiError` itself, so
+ * an application that already matches on the server's own vocabulary does not
+ * have to learn a second one. This union cannot enumerate that whole
+ * vocabulary, so it stays open to any string rather than pretending to be
+ * closed.
  */
 export type SalvorErrorCode =
   | "lease_held"
@@ -53,7 +66,9 @@ export type SalvorErrorCode =
   | "thread_never_invoked"
   | "tool_returned_command"
   | "call_unranked"
-  | "unreadable_record";
+  | "unreadable_record"
+  // Deliberately open, not a closed set: see the paragraph above.
+  | (string & {});
 
 /** What a {@link SalvorMiddlewareError} is told about itself when it is raised. */
 export interface SalvorMiddlewareErrorDetails {
@@ -163,9 +178,9 @@ export interface ToolNeedsResolutionDetails {
  * a person looks at `output` and records it by hand.
  *
  * That hand-off is `POST /v1/runs/{id}/resolve` against the running server,
- * `salvor resolve <run> --store <path> --output <json>` against its store, the
- * Inspector, or {@link ClientRunDriver.resolve}, any of which append the one
- * completion this middleware would not. Both are named in the message, because
+ * `salvor resolve <run> --store <path> --output <json>` against its store, or
+ * {@link ClientRunDriver.resolve}, any of which append the one completion
+ * this middleware would not. Both are named in the message, because
  * whoever reads it may have neither: a container running this agent often has
  * no store path at all, only the server's URL, and an operator at a shell often
  * has the store and not a live server. They differ in one way worth knowing:
@@ -208,7 +223,7 @@ export class ToolNeedsResolution extends SalvorMiddlewareError {
         `{"output": ${canonicalJson(details.output)}} (which also frees the run's lease ` +
         `at once), or \`salvor resolve ${details.run} --store <the server's store> ` +
         `--output '${canonicalJson(details.output)}'\` on the store (after which the lease ` +
-        "lapses on its own), or the Inspector, or `driver.resolve(...)`. " +
+        "lapses on its own), or `driver.resolve(...)`. " +
         "Then invoke the thread again: the resolved output replays in this call's place.",
       { code: "tool_needs_resolution" },
     );

@@ -344,7 +344,7 @@ export class RunTape {
    * throws {@link ToolNeedsResolution} carrying the unrecorded output, and the
    * intent is left open exactly as a crash between intent and completion
    * would leave it, for a person to settle with {@link ClientRunDriver.resolve}
-   * (or the CLI, or the Inspector) before the thread is invoked again.
+   * (or the CLI) before the thread is invoked again.
    *
    * A LATER invoke that meets that same open intent, still unresolved, does
    * not run the body a second time: for an untrusted write, retrying the
@@ -396,8 +396,8 @@ export class RunTape {
               "`trust_completion = false`, so that call's result was never reported and it " +
               "is a call that was never completed. Settle it first (`salvor resolve " +
               `${this.runId} --store <the server's store> --output '<json the tool ` +
-              `returned>'\`, \`POST /v1/runs/${this.runId}/resolve\` on the server, the ` +
-              "Inspector, or `driver.resolve(...)`) and invoke again.",
+              `returned>'\`, \`POST /v1/runs/${this.runId}/resolve\` on the server, ` +
+              "or `driver.resolve(...)`) and invoke again.",
             { code: "open_intent" },
           );
         }
@@ -662,7 +662,7 @@ export class RunTape {
    */
   private oneDriverError(cause: unknown): SalvorMiddlewareError {
     return new SalvorMiddlewareError(
-      `run ${this.runId} (thread \`${this.threadId}\`) is no longer this invoke's to ` +
+      `thread \`${this.threadId}\` (run ${this.runId}) is no longer this invoke's to ` +
         "drive: another driver holds its lease now. One driver per thread at a time. " +
         "Invoke a given thread id from one process at a time, and give work that must " +
         "run alongside it a thread id of its own.",

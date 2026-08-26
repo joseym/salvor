@@ -434,10 +434,14 @@ export function salvorMiddleware(options: SalvorMiddlewareOptions) {
       } catch (error) {
         // An error here leaves the invoke: LangGraph does not catch what a
         // model wrapper throws, so this hook is one of the two places an
-        // invoke actually ends when it ends badly. Hand the lease back on the
-        // way out, unless the error IS the lease being somebody else's.
-        await letGo(tape, error);
-        throw error;
+        // invoke actually ends when it ends badly. A raw refusal from the
+        // control plane is named before it leaves, so it reaches the caller
+        // through `salvorError` instead of as a bare `SalvorApiError` nobody
+        // can catch by code. Hand the lease back on the way out, unless the
+        // error IS the lease being somebody else's.
+        const refusal = serverRefusalError(error, tape);
+        await letGo(tape, refusal);
+        throw refusal;
       }
     },
 
@@ -466,11 +470,14 @@ export function salvorMiddleware(options: SalvorMiddlewareOptions) {
         return await recordToolCall(tape, request, handler);
       } catch (error) {
         // The other place an invoke ends badly: a tool body that threw, a
-        // `ToolNeedsResolution` stop, an undeclared tool. All of them leave
-        // the invoke, and all of them should leave the run free for the next
-        // process. The exception, as ever, is a lease that was never ours.
-        await letGo(tape, error);
-        throw error;
+        // `ToolNeedsResolution` stop, an undeclared tool, or a completion the
+        // control plane refused outright (a schema violation, a
+        // `require_equal` mismatch). All of them leave the invoke, and all of
+        // them should leave the run free for the next process. The exception,
+        // as ever, is a lease that was never ours.
+        const refusal = serverRefusalError(error, tape);
+        await letGo(tape, refusal);
+        throw refusal;
       }
     },
   });
@@ -804,5 +811,40 @@ function undeclaredToolError(error: unknown, tool: string): unknown {
       "with an `[output_schema]`. Then start the server with `salvor serve " +
       "--client-tool <FILE>`. See examples/client-tools/refund-card.toml.",
     { code: "tool_undeclared", cause: error },
+  );
+}
+
+/**
+ * The catch-all for a `SalvorApiError` that reaches the edge of a hook without
+ * having already been translated into one of this middleware's own codes: a
+ * `bad_request` from an intent's input or a reported output that failed its
+ * declared schema, a `client_completion_refused` from a `require_equal`
+ * mismatch or a declaration that refuses self-completion outright, a
+ * `divergence`, or any other code the server answers with.
+ *
+ * Left alone, that refusal would tear through `wrapToolCall` or
+ * `wrapModelCall` as a bare `SalvorApiError`: `salvorError(e)` would return
+ * `undefined` for it, and an application catching by code would never see it
+ * coming, even though the server said exactly what went wrong. Wrapping it
+ * here, at the one place every hook's error passes through on its way out, is
+ * what makes it reachable the same way every other refusal is. The server's
+ * own code is kept unchanged on `.code` and the `SalvorApiError` itself on
+ * `.cause`, so an application that already matches on the server's vocabulary
+ * (`bad_request`, `client_completion_refused`, ...) does not have to learn a
+ * second one.
+ *
+ * Every refusal this middleware already gives its own name to is a
+ * `SalvorMiddlewareError` (not a `SalvorApiError`) by the time it reaches
+ * here (`lease_held`, `lease_lost`, `reopen_refused`, `run_exists`,
+ * `tool_undeclared`, `open_intent`; `invalid_drive_token` and `unknown_run`
+ * are resolved inside the tape's own `lease()` before either surfaces at
+ * all), so this never overrides one of those; it only ever fires on the codes
+ * nothing above has a name for yet.
+ */
+function serverRefusalError(error: unknown, tape: RunTape): unknown {
+  if (!(error instanceof SalvorApiError)) return error;
+  return new SalvorMiddlewareError(
+    `thread \`${tape.threadId}\` (run ${tape.runId}): ${error.message}`,
+    { code: error.code, cause: error },
   );
 }

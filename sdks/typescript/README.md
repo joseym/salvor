@@ -357,6 +357,11 @@ The codes are: `lease_held`, `lease_lost`, `reopen_refused`, `thread_finished`,
 message. A fork is not among them: leaving the recorded path is not an error
 (see `onFork` below). `ToolNeedsResolution` is still its own class, so
 `salvorError(e) instanceof ToolNeedsResolution` works as well as its code does.
+A refusal the control plane itself made (an output that fails a tool's
+declared schema, a `require_equal` mismatch, and so on) arrives with the
+server's own code (`bad_request`, `client_completion_refused`, ...) rather
+than one of the codes above, and `cause` on it is the `SalvorApiError`
+underneath.
 
 ### Try it without a key
 
@@ -578,7 +583,11 @@ A run that died between a tool's intent and its completion is the case the whole
 design is for. The log ends at the intent, which is exactly what an unfinished
 write looks like, and the next invoke replays everything before it for free,
 performs that one call again under the same derived key, and records the
-completion. One intent, one completion, no second charge.
+completion. One intent, one completion, no second charge. A model call the
+provider itself failed on works the same way: the intent is already recorded
+by the time the provider throws, nothing records a completion for the failed
+attempt, and the next invoke meets that same open intent and performs the call
+again.
 
 Parallel tool calls in one model turn are serialised rather than refused. A
 turnstile inside the middleware admits one open intent per run at a time,
@@ -682,8 +691,8 @@ server's URL, which is why the HTTP endpoint is named first. The two differ in
 one way worth knowing: the HTTP resolve clears the run's lease along with the
 resolution, so the thread re-opens at once, while `salvor resolve` writes the
 store directly and cannot reach a live server's memory, so a lease held there
-survives it and lapses on its own (at most the TTL, 60 seconds by default). The
-Inspector and `driver.resolve(output)` go through the server too.
+survives it and lapses on its own (at most the TTL, 60 seconds by default).
+`driver.resolve(output)` goes through the server too.
 
 `--store` has to name the SERVER's store file; this middleware only ever
 speaks HTTP to that server, so it has no way to know that path itself, which
