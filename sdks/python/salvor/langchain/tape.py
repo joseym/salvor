@@ -520,7 +520,7 @@ def recorded_tool_failure(
 
 
 def untrusted_tool_raised(
-    thread_id: str, run_id: str, tool: str, seq: int
+    thread_id: str, run_id: str, tool: str, seq: int, message: str
 ) -> SalvorMiddlewareError:
     """The refusal when a tool this operator settles by hand raises on this
     very invoke, rather than returning.
@@ -535,25 +535,28 @@ def untrusted_tool_raised(
     what the provider shows, so the sentence names the other honest ending
     too: a call that never reached the provider has no output anybody could
     record, and the run is abandoned rather than resolved.
+
+    ``message`` is what the tool itself threw, named early in the sentence so
+    a person reading the refusal does not have to go find it on ``__cause__``.
     """
     return SalvorMiddlewareError(
-        "run {run} (thread `{thread}`) ran the tool `{tool}` at seq {seq} and "
-        "it raised, but its declaration sets `trust_completion = false`: this "
-        "middleware cannot report that failure any more than it could report "
-        "a success, so nothing was posted and the call's intent is left open. "
-        "Confirm with the tool's own provider what the call actually did, "
-        "then settle it (`POST /v1/runs/{run}/resolve` on the live server, "
-        "which clears the run's lease too; `salvor resolve {run} --store "
-        "<path to the server's store> --output '<json the call produced, or "
-        "an empty object if it produced nothing>'`, which leaves the lease "
-        "to lapse on its own; or `driver.resolve(...)` on a driver holding "
-        "the run's lease) and invoke again. If the provider shows the call "
-        "never happened, or did something this thread cannot carry on from, "
-        "there is nothing to record: abandon the run instead (`POST "
+        "the tool `{tool}` threw `{message}` while running under an intent "
+        "this middleware may not self-complete: its declaration sets "
+        "`trust_completion = false`, so neither a result nor a failure may be "
+        "reported on the tool's own say-so. Run {run} (thread `{thread}`) is "
+        "stopped at seq {seq} until a person confirms what actually happened "
+        "and records it by hand (`POST /v1/runs/{run}/resolve` on the live "
+        "server, which clears the run's lease too; `salvor resolve {run} "
+        "--store <path to the server's store> --output '<json the call "
+        "produced, or an empty object if it produced nothing>'`, which leaves "
+        "the lease to lapse on its own; or `driver.resolve(...)` on a driver "
+        "holding the run's lease) and invoke again. If the provider shows the "
+        "call never happened, or did something this thread cannot carry on "
+        "from, there is nothing to record: abandon the run instead (`POST "
         "/v1/runs/{run}/abandon` on the server, or `salvor abandon {run} "
         "--store <path to the server's store>`) and give the next task a new "
         "thread id.".format(
-            run=run_id, thread=thread_id, tool=tool, seq=seq
+            tool=tool, message=message, run=run_id, thread=thread_id, seq=seq
         ),
         code="open_intent",
     )

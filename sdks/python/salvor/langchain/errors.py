@@ -182,8 +182,9 @@ def thread_abandoned_error(thread_id: str, run_id: str) -> SalvorMiddlewareError
     """
     return SalvorMiddlewareError(
         "thread `{thread}` (run {run}) was abandoned: a `RunAbandoned` is "
-        "recorded on its run, and an abandoned run takes no more invokes. "
-        "Give the next task a new thread id.".format(thread=thread_id, run=run_id),
+        "recorded on its run, and an abandoned run takes nothing more, "
+        "neither an invoke nor a finish. Give the next task a new thread "
+        "id.".format(thread=thread_id, run=run_id),
         code="thread_abandoned",
     )
 

@@ -19,9 +19,9 @@ import { canonicalJson } from "./hash.js";
  *   up again was refused too, so the run cannot be driven from here at all.
  * - `thread_finished`: `finishThread` closed this thread's run. Give the next
  *   task a new thread id.
- * - `thread_abandoned`: this thread's run was abandoned, so it takes no more
- *   invokes. Nothing was replayed and nothing ran. Give the next task a new
- *   thread id.
+ * - `thread_abandoned`: this thread's run was abandoned, so it takes nothing
+ *   more, neither an invoke nor a finish. Nothing was replayed and nothing
+ *   ran. Give the next task a new thread id.
  * - `thread_id_missing`: the invoke carried no `configurable.thread_id`.
  * - `thread_id_invalid`: it carried one that is not a non-empty string.
  * - `tool_undeclared`: the tool the model called has no client-tool
@@ -179,8 +179,8 @@ export function threadAbandonedError(
 ): SalvorMiddlewareError {
   return new SalvorMiddlewareError(
     `thread \`${threadId}\` (run ${runId}) was abandoned: a \`RunAbandoned\` is ` +
-      "recorded on its run, and an abandoned run takes no more invokes. Give the next " +
-      "task a new thread id.",
+      "recorded on its run, and an abandoned run takes nothing more, neither an invoke " +
+      "nor a finish. Give the next task a new thread id.",
     { code: "thread_abandoned" },
   );
 }

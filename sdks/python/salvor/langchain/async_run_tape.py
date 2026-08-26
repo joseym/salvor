@@ -284,7 +284,7 @@ class AsyncRunTape:
                     raise
                 if not trust_completion:
                     raise untrusted_tool_raised(
-                        self._drive.thread_id, self.run_id, tool, seq
+                        self._drive.thread_id, self.run_id, tool, seq, str(error)
                     ) from error
                 await self._guarded(
                     lambda: self._driver.client_tool_failure(seq, str(error))

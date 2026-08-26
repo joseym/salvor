@@ -454,10 +454,12 @@ export class RunTape {
           // call the provider never received has no output to record, and the
           // only true ending for that thread is a terminal `RunAbandoned`.
           if (!trustCompletion) {
+            const message = thrown instanceof Error ? thrown.message : String(thrown);
             throw new SalvorMiddlewareError(
-              `the tool \`${tool}\` threw while running under an intent this middleware may ` +
-                "not self-complete: its declaration sets `trust_completion = false`, so " +
-                "neither a result nor a failure may be reported on the tool's own say-so. Run " +
+              `the tool \`${tool}\` threw \`${message}\` while running under an intent this ` +
+                "middleware may not self-complete: its declaration sets `trust_completion = " +
+                "false`, so neither a result nor a failure may be reported on the tool's own " +
+                "say-so. Run " +
                 `${this.runId} (thread \`${this.threadId}\`) is stopped at seq ${seq} until a ` +
                 "person confirms what actually happened and records it by hand (`salvor " +
                 `resolve ${this.runId} --store <the server's store> --output '<json the call ` +
