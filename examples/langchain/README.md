@@ -197,6 +197,15 @@ changing the declaration and the next call is refused; change the declaration
 without changing the app and the model keeps producing arguments the server will
 not take.
 
+Fixing that disagreement is itself a fork. The app's `z.object({...})` / typed
+schema is part of what the model request is hashed from, so changing it
+changes the hash the next invoke opens its first model call with, and the
+thread's recorded first position no longer matches. Invoking the same thread
+again does not resume it; it forks, the whole conversation runs again from
+there, and every model call before the fork is paid for a second time (the
+rule is stated in [The honest limits](#the-honest-limits)). Give the corrected
+task a new thread id unless that fork is what you want.
+
 ## Running it
 
 ```

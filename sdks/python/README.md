@@ -886,6 +886,8 @@ The codes:
 | `tool_undeclared` | The tool has no client-tool declaration on this server. |
 | `tool_needs_resolution` | The tool ran and its operator settles such a call by hand. This one is the typed `ToolNeedsResolution`, with the result on `.output`. |
 | `tool_returned_command` | A tool answered with a LangGraph `Command`, which is control flow, not a result to record. |
+| `call_unranked` | A tool call's id is not among the ones the last recorded model turn listed, so its position in the run cannot be pinned. This SDK never raises it: when a call's turn can't be found in state, the tape admits the call on arrival instead of ordering it. Only the TypeScript middleware treats this as a refusal. |
+| `tool_failed` | The log already holds a recorded failure at this position: an earlier invoke's tool body raised, this middleware reported it, and salvor settled the call on it. Fails the same way on every further invoke, because it is settled, not retried; fix the input, or start a new thread. |
 | `open_intent` | The log holds a call recorded as requested and never completed. Settle it and invoke again. |
 | `unreadable_record` | A model answer is missing or does not read back as one. |
 | `wrong_client` | The middleware was given the wrong client for the way the agent is being driven. |
@@ -1002,10 +1004,13 @@ saying which of the three things happened to it: `{"replayed": True, "seq":
 ...}` when the answer came from the log, `{"live": True, "seq": ...}` when it
 was a real call on a path the log still agrees with, and `{"forked": {"at":
 ..., "thread": ..., "run": ...}}` on every message from the point the invoke
-actually forked onward. A fork also calls `on_fork` once per invoke, naming
-the thread, the run and the seq it forked at. That seq is the first recorded position that no longer matches, so when several things changed between invokes it points at the earliest of them, not necessarily the one you meant. By default it logs a warning,
-and you can pass your own callback to route that wherever your app already
-logs.
+actually forked onward. A fork also calls `on_fork` once per invoke with a
+`ForkInfo`, naming the log position it forked at (`at`), the thread
+(`thread`), the run (`run`), and the sentence the default handler warns with
+(`message`). That `at` is the first recorded position that no longer matches,
+so when several things changed between invokes it points at the earliest of
+them, not necessarily the one you meant. By default it logs a warning, and you
+can pass your own callback to route that wherever your app already logs.
 
 The one case it refuses is a log whose last event is a call that never
 completed: settle that first (`POST /v1/runs/{id}/resolve`, or `salvor

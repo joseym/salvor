@@ -354,19 +354,36 @@ middleware error now carries a `cause` of its own (the `SalvorApiError`
 underneath), so reaching one level in by hand can land on the server's error
 rather than the middleware's.
 
-The codes are: `lease_held`, `lease_lost`, `reopen_refused`, `thread_finished`,
-`thread_abandoned`, `thread_id_missing`, `thread_id_invalid`, `tool_undeclared`,
-`tool_needs_resolution`, `open_intent`, and then `run_exists`,
-`thread_never_invoked`, `tool_returned_command`, `call_unranked` and
-`unreadable_record` for conditions there is nothing to do about but read the
-message. A fork is not among them: leaving the recorded path is not an error
-(see `onFork` below). `ToolNeedsResolution` is still its own class, so
+The codes:
+
+| `code` | What happened |
+| --- | --- |
+| `lease_held` | Another driver holds this thread's run right now. `lapsesInSeconds` says how long their hold has left. |
+| `lease_lost` | This invoke stopped being the driver: its token is no longer the current lease, or the lease went twice in one invoke. |
+| `reopen_refused` | The lease was lost and the server would not hand the run back at all. The log is intact; this server is not the one to drive it from. |
+| `run_exists` | The thread maps to a run id salvor's other, server-driven mode already started. Give the thread an id of its own. |
+| `thread_finished` | `finishThread` closed this thread's run, and a completed run takes no more events. |
+| `thread_abandoned` | Somebody recorded a terminal `RunAbandoned` on this thread's run (`POST /v1/runs/{id}/abandon`, or `salvor abandon`). Nothing was replayed and nothing ran; give the next task a new thread id. |
+| `thread_never_invoked` | `finishThread` was asked to close a thread that has no run yet. |
+| `thread_id_missing` | The invoke passed no `thread_id`. |
+| `thread_id_invalid` | It passed one that is not a non-empty string. The message says what arrived. |
+| `tool_undeclared` | The tool has no client-tool declaration on this server. |
+| `tool_needs_resolution` | The tool ran and its operator settles such a call by hand. This one is the typed `ToolNeedsResolution`, with the result on `.output`. |
+| `tool_returned_command` | A tool answered with a LangGraph `Command`, which is control flow, not a result to record. |
+| `call_unranked` | The call's id is not among the ones the model's last recorded turn listed, so its position in the run cannot be pinned: either that turn was never recorded, or a middleware ahead of this one changed the call's id. |
+| `tool_failed` | The log already holds a recorded failure at this position: an earlier invoke's tool body threw, this middleware reported it, and salvor settled the call on it. Carries `seq`, the position it was recorded at. Fails the same way on every replay, because it is settled, not retried; fix the input, or start a new thread. |
+| `open_intent` | The log holds a call recorded as requested and never completed. Settle it and invoke again. |
+| `unreadable_record` | A model answer is missing or does not read back as one. |
+| `bad_request` | The server's own refusal, unwrapped: a reported tool output failed the declared schema. |
+| `client_completion_refused` | The server's own refusal: a `require_equal` field's reported value differed from the intent's, or the declaration refuses self-completion outright. |
+
+A fork is not among them: leaving the recorded path is not an error (see
+`onFork` below). `ToolNeedsResolution` is still its own class, so
 `salvorError(e) instanceof ToolNeedsResolution` works as well as its code does.
-A refusal the control plane itself made (an output that fails a tool's
-declared schema, a `require_equal` mismatch, and so on) arrives with the
-server's own code (`bad_request`, `client_completion_refused`, ...) rather
-than one of the codes above, and `cause` on it is the `SalvorApiError`
-underneath.
+The last two rows are the control plane's own refusal, unwrapped rather than
+translated: `cause` on that error is the `SalvorApiError` underneath, and the
+server can answer with codes beyond those two (`divergence`, `unknown_tool`,
+and so on) that arrive exactly the same way.
 
 ### Try it without a key
 
@@ -748,9 +765,13 @@ saying which of the three things happened to it: `{ replayed: true, seq }`
 when the answer came from the log, `{ live: true, seq }` when it was a real
 call on a path the log still agrees with, and `{ forked: { at, thread, run } }`
 on every message from the point the invoke actually forked onward. A fork also
-calls `onFork` once per invoke, naming the thread, the run and the seq it
-forked at. That seq is the first recorded position that no longer matches, so when several things changed between invokes it points at the earliest of them, not necessarily the one you meant. The default is `console.warn`, and it is the hook to point at your
-own logging instead.
+calls `onFork` once per invoke with a `SalvorForkNotice`, naming the log
+position it forked at (`at`), the thread (`thread`), the run (`run`), and the
+sentence the default handler warns with (`message`). That `at` is the first
+recorded position that no longer matches, so when several things changed
+between invokes it points at the earliest of them, not necessarily the one you
+meant. The default is `console.warn`, and it is the hook to point at your own
+logging instead.
 
 The one case it refuses is a log whose last event is a call that never
 completed: settle that first, then invoke again.
