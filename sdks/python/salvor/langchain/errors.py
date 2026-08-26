@@ -87,6 +87,27 @@ class SalvorMiddlewareError(SalvorError):
                 is being driven (or something that is not a salvor client). The
                 one code with no twin in the TypeScript SDK, which has a single
                 client and so cannot be given the wrong one.
+            ``bad_request``
+                The control plane's own refusal, unwrapped rather than
+                translated: a client-reported tool output failed the
+                operator's declared ``output_schema``. :attr:`cause` is the
+                :class:`~salvor.errors.SalvorAPIError` this code came from,
+                and its message says which field and why.
+            ``client_completion_refused``
+                The control plane's own refusal: a reported ``require_equal``
+                field differed from the value the intent recorded, or the
+                tool's declaration has no ``output_schema`` to check a
+                completion against at all. (A tool declared
+                ``trust_completion = false`` never reaches the server this
+                way: this middleware stops for a person first, as
+                ``tool_needs_resolution``.)
+            *anything else*
+                Any other code a driving call inside a hook meets is not
+                translated either, and is not left to escape bare: the
+                server's own ``code`` and sentence ride along unchanged, with
+                the thread and the run named and :attr:`cause` set to the
+                :class:`~salvor.errors.SalvorAPIError` itself. Match it the
+                way you would match ``SalvorAPIError.code`` outside a hook.
         cause: The error underneath this one, when there was one. The same
             object as ``__cause__``; the second name is what the TypeScript
             middleware calls it, so a handler written against one SDK reads the

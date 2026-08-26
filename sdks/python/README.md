@@ -663,7 +663,10 @@ A run that died between a tool's intent and its completion is the case the whole
 design is for. The log ends at the intent, which is exactly what an unfinished
 write looks like, and the next invoke replays everything before it for free,
 performs that one call again under the same derived key, and records the
-completion. One intent, one completion, no second charge.
+completion. One intent, one completion, no second charge. A provider error
+between a model call's intent and its completion leaves the same kind of gap:
+nothing is recorded for the failed attempt, the intent stays open, and the
+next invoke posts it again and performs that call once more.
 
 Parallel tool calls in one model turn are serialised rather than refused. A
 turnstile inside the middleware admits one open intent per run at a time, in the
@@ -760,10 +763,10 @@ live server's memory survives it and lapses on its own, and the next invoke
 waits up to the lease TTL. The command also always carries a `--store <path to
 the server's store>` placeholder rather than a real path, because the
 middleware only ever holds a base URL, never the file path `salvor serve
---store` was started with. The Inspector's resolve, and
-`driver.resolve(output)` on a client run driver holding the run's own lease,
-settle it too. `examples/client-tools/refund-card.toml` is the fully commented
-version of the declaration file.
+--store` was started with. `driver.resolve(output)` on a client run driver
+holding the run's own lease settles it too.
+`examples/client-tools/refund-card.toml` is the fully commented version of
+the declaration file.
 
 The recorded output is the tool's own result, which is what the output schema
 describes. LangChain builds a tool message by stringifying whatever the tool
@@ -851,10 +854,17 @@ The codes:
 | `open_intent` | The log holds a call recorded as requested and never completed. Settle it and invoke again. |
 | `unreadable_record` | A model answer is missing or does not read back as one. |
 | `wrong_client` | The middleware was given the wrong client for the way the agent is being driven. |
+| `bad_request` | The server's own refusal, unwrapped: a reported tool output failed the declared `output_schema`. |
+| `client_completion_refused` | The server's own refusal: a `require_equal` field's reported value differed from the intent's, or the declaration has no `output_schema` to check against. |
 
 Refusals that come from the control plane rather than from the middleware stay
 `SalvorAPIError`, with their own stable `code` (see [Errors](#errors) above), so
-`except SalvorAPIError` still catches those on their own terms.
+`except SalvorAPIError` still catches those on their own terms. A driving call
+the middleware makes inside a hook is different: when the server refuses it,
+`salvor_error(e)` still finds a `SalvorMiddlewareError`, but its `code` is the
+server's own (`bad_request`, `client_completion_refused`, and so on) and
+`cause` is the `SalvorAPIError` underneath, so server refusals arrive with the
+server's own code either way.
 
 ### The lease
 

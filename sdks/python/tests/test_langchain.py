@@ -189,6 +189,9 @@ class ScriptedModel(BaseChatModel):
         )
         turn = self.turns[index]
         self.calls["count"] += 1
+        if model_raises_once["on"]:
+            model_raises_once["on"] = False
+            raise RuntimeError("the model provider died mid-call")
         message = AIMessage(
             content=turn["content"],
             id="scripted-{index}".format(index=index),
@@ -233,6 +236,15 @@ ran = {
 counting = threading.Lock()
 #: Set to make the next `stamp_ledger` body raise, standing in for a crash.
 stamp_crashes = {"on": False}
+#: Set to make the next `stamp_ledger` body report an output the server
+#: refuses to record: `"schema"` drops the required `entry_id` (`bad_request`
+#: against the declared `output_schema`), `"mismatch"` reports a different
+#: `order_id` than the intent recorded (`client_completion_refused` against
+#: the declaration's `require_equal`). `None` is the ordinary, accepted output.
+stamp_bad_output = {"kind": None}  # type: Dict[str, Optional[str]]
+#: Set to make the very next scripted model call raise, standing in for a
+#: provider dying after its intent was already posted but before it answered.
+model_raises_once = {"on": False}
 #: Something for a `lookup_order` body to do to the world while the middleware
 #: holds that call's intent open: take the run's lease from under this drive, or
 #: stop the server altogether. The cases that need one set it; every other case
@@ -368,6 +380,17 @@ def stamp_body(order_id: str, note: str) -> Dict[str, Any]:
         count("stamp")
         if stamp_crashes["on"]:
             raise RuntimeError("the ledger writer died mid-call")
+        kind = stamp_bad_output["kind"]
+        if kind == "schema":
+            # No `entry_id`: fails the declaration's `output_schema`.
+            return {"order_id": order_id}
+        if kind == "mismatch":
+            # A different `order_id` than the intent recorded: fails the
+            # declaration's `require_equal`.
+            return {
+                "order_id": "ORD-NOT-THE-ONE-CALLED",
+                "entry_id": "entry-{n}".format(n=len(note)),
+            }
         return {"order_id": order_id, "entry_id": "entry-{n}".format(n=len(note))}
     finally:
         leave()
@@ -428,6 +451,8 @@ def reset() -> None:
         }
     )
     stamp_crashes["on"] = False
+    stamp_bad_output["kind"] = None
+    model_raises_once["on"] = False
     meddling["do"] = None
     dawdle["seconds"] = 0.0
     dawdle["midway"] = None
@@ -826,6 +851,71 @@ class MiddlewareScenarios:
 
         self.drive(body)
 
+    # -- (c2) a provider error between a model call's intent and its completion --
+
+    def test_a_provider_error_mid_model_call_leaves_the_intent_open_for_the_next_invoke(
+        self,
+    ) -> None:
+        """The model half of the crash-mid-write case above.
+
+        The intent is posted, the provider raises before answering, and
+        nothing is recorded for that attempt: the log ends at the intent, the
+        error is the application's own (`salvor_error` finds nothing of
+        salvor's in it), and the lease goes back the same way a raising tool
+        body's does. The next invoke meets the same open intent, posts it
+        again, performs the call once more, and this time records the
+        completion.
+        """
+        thread_id = "thread-provider-error-mid-model-call"
+        run_id = run_id_for_thread(thread_id)
+        script = [{"content": "the answer, once the provider cooperates"}]
+        ask = {"messages": [{"role": "user", "content": "hello"}]}
+
+        async def body(client: Any) -> None:
+            model_raises_once["on"] = True
+            first, first_model = self.agent_for(script, client)
+            with self.assertRaises(RuntimeError) as caught:
+                await self.invoke(first, ask, self.thread(thread_id))
+            self.assertIn("provider died mid-call", str(caught.exception))
+            self.assertIsNone(
+                salvor_error(caught.exception),
+                "a provider's own error is not salvor's to report",
+            )
+            self.assertEqual(first_model.calls["count"], 1, "the one call that raised")
+            self.assertEqual(
+                await self.kinds_of(client, thread_id),
+                ["RunStarted", "ModelCallRequested"],
+                "the intent went in; nothing was recorded for the failed attempt",
+            )
+
+            # The lease came back with the failed step, so a stranger opens the
+            # run at once rather than meeting `lease_held`.
+            stranger = self.CLIENT(self.base)
+            try:
+                taken = await call(stranger.open_client_run, run_id=run_id)
+                self.assertEqual(taken.run_id, run_id, "the run was free at once")
+                await call(taken.release)
+            finally:
+                await call(stranger.close)
+
+            # The next invoke meets the same open intent, posts it again, and
+            # this time the provider answers: one call, one completion.
+            second, second_model = self.agent_for(script, client)
+            answer = await self.invoke(second, ask, self.thread(thread_id))
+            self.assertEqual(
+                second_model.calls["count"], 1, "the model was called once more"
+            )
+            self.assertEqual(
+                self.text_of(answer["messages"][-1]),
+                "the answer, once the provider cooperates",
+            )
+            kinds = await self.kinds_of(client, thread_id)
+            self.assertEqual(kinds, ["RunStarted", "ModelCallRequested", "ModelCallCompleted"])
+            self.assertEqual(kinds.count("ModelCallRequested"), 1, "exactly one intent")
+            self.assertEqual(kinds.count("ModelCallCompleted"), 1, "exactly one completion")
+
+        self.drive(body)
+
     # -- (d) two tool calls in one model turn ---------------------------------
 
     def test_two_parallel_tool_calls_are_serialised_by_the_turnstile(self) -> None:
@@ -990,6 +1080,101 @@ class MiddlewareScenarios:
             self.assertIn("send_email", text, "the error names the tool")
             self.assertIn("client-tool declaration", text, "and the declaration it needs")
             self.assertIn("--client-tool", text, "and how to load it")
+
+        self.drive(body)
+
+    # -- (f2) a server refusal escaping a hook is wrapped, not left bare ------
+
+    def _stamp_script(self, order_id: str) -> Any:
+        return [
+            {
+                "content": "stamping the ledger",
+                "tool_calls": [
+                    {
+                        "name": "stamp_ledger",
+                        "args": {"order_id": order_id, "note": "seen"},
+                        "id": "call-stamp",
+                    }
+                ],
+            },
+            {"content": "Stamped {order}.".format(order=order_id)},
+        ]
+
+    def test_an_output_schema_violation_surfaces_through_salvor_error_named_bad_request(
+        self,
+    ) -> None:
+        """A tool's own reported output can fail the operator's schema, and
+        salvor refuses to record it: `400 bad_request`. Left alone that
+        refusal would tear through the graph as a bare `SalvorAPIError`
+        naming no thread at all; the middleware wraps it like every other
+        escaping refusal, keeping the server's own code and sentence.
+        """
+        thread_id = "thread-bad-output-schema"
+        order_id = "ORD-9301"
+
+        async def body(client: Any) -> None:
+            stamp_bad_output["kind"] = "schema"
+            agent, _ = self.agent_for(self._stamp_script(order_id), client)
+            with self.assertRaises(SalvorMiddlewareError) as caught:
+                await self.invoke(
+                    agent,
+                    {"messages": [{"role": "user", "content": "stamp it"}]},
+                    self.thread(thread_id),
+                )
+            refusal = caught.exception
+            self.assertIs(salvor_error(caught.exception), refusal, "it arrived bare")
+            self.assertEqual(refusal.code, "bad_request")
+            self.assertIsInstance(
+                refusal.cause, SalvorAPIError, "the server's own refusal is underneath it"
+            )
+            self.assertEqual(refusal.cause.code, "bad_request")
+            self.assertIn(thread_id, str(refusal), "the error names the thread")
+            self.assertIn(
+                refusal.cause.message, str(refusal), "and keeps the server's own sentence"
+            )
+            self.assertEqual(
+                (await self.kinds_of(client, thread_id))[-1],
+                "ToolCallRequested",
+                "the refused completion recorded nothing",
+            )
+
+        self.drive(body)
+
+    def test_a_require_equal_mismatch_surfaces_through_salvor_error_named_client_completion_refused(
+        self,
+    ) -> None:
+        """A tool that reports a `require_equal` field differently from what
+        its intent recorded is refused the same way, `403
+        client_completion_refused`, and the middleware wraps it identically.
+        """
+        thread_id = "thread-require-equal-mismatch"
+        order_id = "ORD-9302"
+
+        async def body(client: Any) -> None:
+            stamp_bad_output["kind"] = "mismatch"
+            agent, _ = self.agent_for(self._stamp_script(order_id), client)
+            with self.assertRaises(SalvorMiddlewareError) as caught:
+                await self.invoke(
+                    agent,
+                    {"messages": [{"role": "user", "content": "stamp it"}]},
+                    self.thread(thread_id),
+                )
+            refusal = caught.exception
+            self.assertIs(salvor_error(caught.exception), refusal, "it arrived bare")
+            self.assertEqual(refusal.code, "client_completion_refused")
+            self.assertIsInstance(
+                refusal.cause, SalvorAPIError, "the server's own refusal is underneath it"
+            )
+            self.assertEqual(refusal.cause.code, "client_completion_refused")
+            self.assertIn(thread_id, str(refusal), "the error names the thread")
+            self.assertIn(
+                refusal.cause.message, str(refusal), "and keeps the server's own sentence"
+            )
+            self.assertEqual(
+                (await self.kinds_of(client, thread_id))[-1],
+                "ToolCallRequested",
+                "the refused completion recorded nothing",
+            )
 
         self.drive(body)
 
@@ -1503,6 +1688,11 @@ class MiddlewareScenarios:
             text = str(error)
             self.assertIn(thread_id, text, "the error names the thread")
             self.assertIn(run_id, text, "and the run")
+            self.assertLess(
+                text.index(thread_id),
+                text.index(run_id),
+                "the thread leads, then the run, matching the TypeScript twin",
+            )
             self.assertIn("lapses in", text, "and how long the hold has left")
 
             self.assertEqual(
@@ -1577,6 +1767,11 @@ class MiddlewareScenarios:
             text = str(caught.exception)
             self.assertIn(thread_id, text, "the error names the thread")
             self.assertIn(run_id, text, "and the run")
+            self.assertLess(
+                text.index(thread_id),
+                text.index(run_id),
+                "the thread leads, then the run, matching the TypeScript twin",
+            )
             self.assertNotIn(
                 "lapses in",
                 text,

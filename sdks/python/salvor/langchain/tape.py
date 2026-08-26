@@ -366,7 +366,7 @@ def one_driver_error(
     else:
         when = "presenting that driver's own token is the only way in until its lease lapses"
     return SalvorMiddlewareError(
-        "run {run} (thread `{thread}`) is already being driven by another "
+        "thread `{thread}` (run {run}) is already being driven by another "
         "instance right now: {when}. Salvor allows one driver per thread at a "
         "time, so a second instance invoking this thread while the first is "
         "active is refused before it runs anything, rather than racing the "
