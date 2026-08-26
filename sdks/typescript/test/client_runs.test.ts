@@ -276,6 +276,51 @@ test("clientToolIntent surfaces settled true on a re-post", async () => {
   }
 });
 
+test("clientToolIntent surfaces the recorded output on a settled call, and omits it while open", async () => {
+  // A settled reply carries everything a caller needs to replay a call
+  // without a second read of the log.
+  const s = stub({
+    [`/v1/client-runs/${RUN_ID}/client-tool-intent`]: (_req, res) =>
+      res.json(200, {
+        seq: 5,
+        idempotency_key: "sha256:derived",
+        effect: "write",
+        settled: true,
+        output: { charge_id: "ch_1" },
+      }),
+  });
+  const base = await s.ready;
+  try {
+    const result = await driverAt(base).clientToolIntent(5, "charge_card", {
+      amount_cents: 500,
+    });
+    deepStrictEqual(result.output, { charge_id: "ch_1" });
+  } finally {
+    s.server.close();
+  }
+});
+
+test("clientToolIntent leaves output undefined when the call is still open", async () => {
+  const s = stub({
+    [`/v1/client-runs/${RUN_ID}/client-tool-intent`]: (_req, res) =>
+      res.json(200, {
+        seq: 5,
+        idempotency_key: "sha256:derived",
+        effect: "write",
+        settled: false,
+      }),
+  });
+  const base = await s.ready;
+  try {
+    const result = await driverAt(base).clientToolIntent(5, "charge_card", {
+      amount_cents: 500,
+    });
+    strictEqual(result.output, undefined);
+  } finally {
+    s.server.close();
+  }
+});
+
 test("clientToolIntent on an undeclared tool throws SalvorApiError with code unknown_tool", async () => {
   const s = stub({
     [`/v1/client-runs/${RUN_ID}/client-tool-intent`]: (_req, res) =>
@@ -326,6 +371,66 @@ test("clientToolCompletion refused (trust_completion=false) throws SalvorApiErro
     const driver = driverAt(base);
     await rejects(
       () => driver.clientToolCompletion(5, { charge_id: "ch_1" }),
+      (error: unknown) =>
+        error instanceof SalvorApiError && error.code === "client_completion_refused",
+    );
+  } finally {
+    s.server.close();
+  }
+});
+
+test("clientToolFailure sends seq and the error's message and kind under the lease", async () => {
+  const s = stub({
+    [`/v1/client-runs/${RUN_ID}/client-tool-completion`]: (_req, res) =>
+      res.json(200, { seq: 5, completed: true }),
+  });
+  const base = await s.ready;
+  try {
+    await driverAt(base).clientToolFailure(5, {
+      message: "the provider timed out",
+      kind: "handler",
+    });
+    const last = s.requests.at(-1)!;
+    deepStrictEqual(last.body, {
+      seq: 5,
+      error: { message: "the provider timed out", kind: "handler" },
+    });
+    strictEqual(last.headers["x-drive-token"], "dt_test");
+  } finally {
+    s.server.close();
+  }
+});
+
+test("clientToolFailure omits kind on the wire when none is given", async () => {
+  const s = stub({
+    [`/v1/client-runs/${RUN_ID}/client-tool-completion`]: (_req, res) =>
+      res.json(200, { seq: 5, completed: true }),
+  });
+  const base = await s.ready;
+  try {
+    await driverAt(base).clientToolFailure(5, { message: "the tool threw" });
+    const last = s.requests.at(-1)!;
+    deepStrictEqual(last.body, { seq: 5, error: { message: "the tool threw" } });
+  } finally {
+    s.server.close();
+  }
+});
+
+test("clientToolFailure refused (trust_completion=false) throws SalvorApiError with code client_completion_refused", async () => {
+  const s = stub({
+    [`/v1/client-runs/${RUN_ID}/client-tool-completion`]: (_req, res) =>
+      res.json(403, {
+        error: {
+          code: "client_completion_refused",
+          message: "tool `charge_card` is declared with trust_completion = false",
+        },
+      }),
+  });
+  const base = await s.ready;
+  try {
+    const driver = driverAt(base);
+    await rejects(
+      () => driver.clientToolFailure(5, { message: "the provider timed out" }),
       (error: unknown) =>
         error instanceof SalvorApiError && error.code === "client_completion_refused",
     );

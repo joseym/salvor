@@ -654,6 +654,16 @@ every call for that tool to be settled by hand with `resolve`, once someone has
 verified it externally. `examples/client-tools/refund-card.toml` is the fully
 commented version of the same file.
 
+A call's idempotency key is positional by default (one identity per position
+in the run) unless the declaration names `idempotency_key` fields, in which
+case the key is derived from those fields' values instead. With fields
+declared, two calls in the same run whose named fields carry the same values
+share one key, and the second one settles from the first's recorded result
+rather than performing the call again. So a model that emits the same write
+twice in one turn runs it once when the declared fields match between the two
+calls, and twice when the declaration names no fields at all, unless the
+provider underneath happens to dedupe such a retry on its own.
+
 The recorded output is the tool's own result, which is what the output schema
 describes. LangChain builds a tool message by stringifying whatever the tool
 returned, so the result is recovered by parsing that content back when the parse
@@ -801,6 +811,19 @@ charges the card a second time is the provider's decision, made on that key.
 So the key has to reach the provider as its idempotency token, not sit in a log
 line: pass it, and the duplicate collapses into the first write; leave it out,
 and the write can happen twice, with salvor's log recording it once either way.
+
+That dangling-intent case is what a process dying mid-write leaves behind. A
+tool body that instead throws is not dangling at all: the middleware records
+the thrown message as the call's failure, the same way salvor itself records
+a native tool's exhausted retries, and the invoke rejects with the tool's own
+error. Re-invoking the thread does not run that body again; it meets the
+recorded failure and rejects with `tool_failed` on the spot, carrying the
+message that was recorded. A permanently failing input fails the same way on
+every replay from here on: fix the input, or start a new thread. A tool
+declared `trust_completion = false` is the one exception, because it may not
+report even a failure on its own say-so any more than it may report a
+result: it stops with the same open-intent refusal `ToolNeedsResolution`
+gives a successful untrusted call, and a person settles it by hand.
 
 ## Graphs
 

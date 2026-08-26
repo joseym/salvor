@@ -87,7 +87,7 @@
  */
 
 import type { ClientRunDriver } from "../client_runs.js";
-import { SalvorApiError } from "../errors.js";
+import { SalvorApiError, SalvorError } from "../errors.js";
 import type { SalvorEvent, Usage } from "../types.js";
 import { SalvorMiddlewareError, ToolNeedsResolution } from "./errors.js";
 import { canonicalJson } from "./hash.js";
@@ -353,6 +353,22 @@ export class RunTape {
    * mismatched replay throws (see `slot`), because that is what this is: a
    * call recorded as requested with nothing this tape may treat as its
    * completion.
+   *
+   * A thrown tool body is a completion too, mirroring how salvor itself
+   * records a native tool's exhausted retries: when `perform` throws
+   * something that is not already one of this SDK's own errors, and
+   * `trustCompletion` is `true`, the thrown message is posted as the call's
+   * recorded failure (`ClientRunDriver.clientToolFailure`) before the
+   * original error is rethrown unchanged, so LangChain still sees exactly
+   * what the tool raised. A LATER invoke that reaches this same call meets
+   * that recorded failure on `clientToolIntent` and throws
+   * `SalvorMiddlewareError` (`tool_failed`) in its place, without running the
+   * body again: a permanently failing input fails the same way on every
+   * invoke, the same as any other settled call. An untrusted tool
+   * (`trustCompletion` is `false`) that throws posts nothing at all: there is
+   * no result to hand a person the way `ToolNeedsResolution` does, only the
+   * fact that the call was asked for and nothing followed. It stops the
+   * invoke with the same `open_intent` refusal a mismatched replay throws.
    */
   toolCall(
     tool: string,
@@ -381,10 +397,24 @@ export class RunTape {
           this.driver.clientToolIntent(seq, tool, input),
         );
         if (opened.settled) {
+          const failure = recordedFailure(opened.output);
+          if (failure) {
+            throw new SalvorMiddlewareError(
+              `run ${this.runId} (thread \`${this.threadId}\`) already recorded a failure for ` +
+                `this exact call to \`${tool}\` at seq ${seq}: ${failure.message}. A recorded ` +
+                "failure settles the call the same way on every replay, the same as any other " +
+                "recorded output: fix the input, or start a new thread.",
+              { code: "tool_failed", seq },
+            );
+          }
           return {
             seq,
             replayed: true,
-            output: await this.recordedOutput(seq + 1),
+            // The intent's own response already carries the recorded output,
+            // so replaying it costs nothing beyond the intent call above:
+            // no second read of the log to learn what a settled call
+            // returned.
+            output: opened.output,
             effect: opened.effect,
             idempotencyKey: opened.idempotencyKey,
           };
@@ -405,9 +435,52 @@ export class RunTape {
         // is the longest stretch of an invoke that presents the drive token
         // nowhere, and a body of minutes must not lose the run it is working
         // on to the next opener.
-        const output = await this.keepAlive(() =>
-          perform({ seq, idempotencyKey: opened.idempotencyKey }),
-        );
+        let output: unknown;
+        try {
+          output = await this.keepAlive(() =>
+            perform({ seq, idempotencyKey: opened.idempotencyKey }),
+          );
+        } catch (thrown) {
+          // A `trust_completion = false` tool's own report is never trusted,
+          // failure or success alike: salvor refuses a reported error for it
+          // exactly as it refuses a reported result (see
+          // `clientToolCompletion`'s doc), so there is nothing to post here.
+          // Unlike a successful call, there is also no output to hand a
+          // person through `ToolNeedsResolution`: the tool did not return
+          // one. So this names the same open intent and the same fix, on the
+          // one fact that IS known: the call was asked for, and nothing this
+          // tape may treat as its completion followed.
+          if (!trustCompletion) {
+            throw new SalvorMiddlewareError(
+              `the tool \`${tool}\` threw while running under an intent this middleware may ` +
+                "not self-complete: its declaration sets `trust_completion = false`, so " +
+                "neither a result nor a failure may be reported on the tool's own say-so. Run " +
+                `${this.runId} (thread \`${this.threadId}\`) is stopped at seq ${seq} until a ` +
+                "person confirms what actually happened and records it by hand (`salvor " +
+                `resolve ${this.runId} --store <the server's store> --output '<json the call ` +
+                `returned>'\`, \`POST /v1/runs/${this.runId}/resolve\` on the server, or ` +
+                "`driver.resolve(...)`) and invoke again.",
+              { code: "open_intent", cause: thrown },
+            );
+          }
+          // A throw that is already one of this SDK's own errors (the tool
+          // returned a Command instead of a message, a control-plane refusal
+          // reaching up through a nested salvor call) is not the tool body
+          // failing; it is this middleware or the server saying something
+          // else, and posting a failure completion over it would misrecord
+          // what actually happened. Only a throw that is the tool's own gets
+          // turned into a recorded failure.
+          if (thrown instanceof SalvorError) throw thrown;
+          const message = thrown instanceof Error ? thrown.message : String(thrown);
+          await this.lease(() =>
+            this.driver.clientToolFailure(seq, { message, kind: "handler" }),
+          );
+          // The original error, unwrapped: LangChain, and whatever is above
+          // it, sees exactly what the tool body raised, not a translation of
+          // it. The recording above is the only side effect; the throw itself
+          // is unchanged.
+          throw thrown;
+        }
         if (!trustCompletion) {
           throw new ToolNeedsResolution({
             run: this.runId,
@@ -733,25 +806,30 @@ export class RunTape {
     return seq;
   }
 
-  /**
-   * The output recorded at `seq`, from this invoke's snapshot of the log when it
-   * is there and from a fresh read when it is not (a completion another drive
-   * wrote after this one opened the run).
-   */
-  private async recordedOutput(seq: number): Promise<unknown> {
-    const known = this.recorded.get(seq);
-    if (known?.kind === "ToolCallCompleted") return known.payload.output;
-    const tail = await this.lease(() => this.driver.log(seq));
-    const completion = tail[0];
-    if (completion?.seq !== seq || completion.kind !== "ToolCallCompleted") {
-      throw new SalvorMiddlewareError(
-        `run ${this.runId} reports the tool call at seq ${seq - 1} settled, but ` +
-          `seq ${seq} holds no completion to replay.`,
-        { code: "unreadable_record" },
-      );
-    }
-    return completion.payload.output;
-  }
+}
+
+/**
+ * What `clientToolIntent`'s recorded `output` is, when it is the
+ * `__salvor_error` sentinel a reported (or exhausted-retry) failure records
+ * rather than an ordinary result: `{ message, kind }`, or `undefined` when
+ * `output` is a genuine result and not this sentinel at all.
+ *
+ * `message` and `kind` are read permissively (missing or wrong-typed fields
+ * fall back rather than throw) because this is reading the server's own
+ * recorded shape, not a client's claim to be validated: a value that merely
+ * looks close enough to the sentinel to be worth naming as a failure is worth
+ * naming as one.
+ */
+function recordedFailure(output: unknown): { message: string; kind: string } | undefined {
+  if (!output || typeof output !== "object") return undefined;
+  const wrapper = (output as Record<string, unknown>).__salvor_error;
+  if (!wrapper || typeof wrapper !== "object") return undefined;
+  const w = wrapper as Record<string, unknown>;
+  if (w.is_error !== true) return undefined;
+  return {
+    message: typeof w.message === "string" ? w.message : "the recorded call failed",
+    kind: typeof w.kind === "string" ? w.kind : "handler",
+  };
 }
 
 /**

@@ -28,6 +28,11 @@ import { canonicalJson } from "./hash.js";
  *   the unrecorded output).
  * - `open_intent`: the run's log ends at a call that was requested and never
  *   completed. Settle it, then invoke again.
+ * - `tool_failed`: the run's log already holds a recorded failure for this
+ *   exact call (a thrown tool body, from this invoke or an earlier one).
+ *   Carries {@link SalvorMiddlewareError.seq}, the position the failure was
+ *   recorded at. It fails the same way on every replay, because the log
+ *   already answered "what happened": fix the input, or start a new thread.
  *
  * The rest name conditions an application cannot usually do anything about
  * except read the message: `run_exists` (the thread id already names a
@@ -62,6 +67,7 @@ export type SalvorErrorCode =
   | "tool_undeclared"
   | "tool_needs_resolution"
   | "open_intent"
+  | "tool_failed"
   | "run_exists"
   | "thread_never_invoked"
   | "tool_returned_command"
@@ -78,6 +84,8 @@ export interface SalvorMiddlewareErrorDetails {
   cause?: unknown;
   /** For `lease_held`: whole seconds until the other driver's hold lapses. */
   lapsesInSeconds?: number;
+  /** For `tool_failed`: the log position the recorded failure sits at. */
+  seq?: number;
 }
 
 /**
@@ -101,12 +109,15 @@ export class SalvorMiddlewareError extends SalvorError {
   readonly cause?: unknown;
   /** For `lease_held`: whole seconds until the other driver's hold lapses. */
   readonly lapsesInSeconds?: number;
+  /** For `tool_failed`: the log position the recorded failure sits at. */
+  readonly seq?: number;
 
   constructor(message: string, details: SalvorMiddlewareErrorDetails) {
     super(message);
     this.code = details.code;
     this.cause = details.cause;
     this.lapsesInSeconds = details.lapsesInSeconds;
+    this.seq = details.seq;
   }
 }
 

@@ -128,26 +128,50 @@ function parseModelStepResult(obj: Record<string, unknown>): ModelStepResult {
  * recorded, `false` otherwise. A payments caller retrying `clientToolIntent`
  * after a dropped response gets back the same key either way; `settled` is
  * what lets it tell "safe to perform the call" from "already done, do not
- * perform it again" without separately reading the log.
+ * perform it again" without separately reading the log. `output` rides along
+ * on a settled answer, the same recorded value {@link ClientRunDriver.log}
+ * would show at this position's completion: a settled reply already carries
+ * everything a caller needs, so nothing here has to read the log a second
+ * time to learn what the call returned. `output` is present only when
+ * `settled` is `true`; it is the failure sentinel, not a thrown error, when
+ * the call this position recorded is the one a tool body raised (see
+ * {@link ClientRunDriver.clientToolFailure}).
  */
 export interface ClientToolIntentResult {
   seq: number;
   idempotencyKey: string;
   effect: string;
   settled: boolean;
+  output?: unknown;
   raw: Record<string, unknown>;
 }
 
 function parseClientToolIntentResult(
   obj: Record<string, unknown>,
 ): ClientToolIntentResult {
+  const settled = obj.settled as boolean;
   return {
     seq: obj.seq as number,
     idempotencyKey: obj.idempotency_key as string,
     effect: obj.effect as string,
-    settled: obj.settled as boolean,
+    settled,
+    output: settled ? obj.output : undefined,
     raw: obj,
   };
+}
+
+/** The dispatch layer a reported client-tool failure names, on the wire in
+ * {@link ClientRunDriver.clientToolFailure}'s `error.kind`. Absent means
+ * `"handler"`: a tool that ran and threw, the ordinary case. */
+export type ClientToolFailureKind = "invalid_input" | "handler" | "output_serialization";
+
+/** What {@link ClientRunDriver.clientToolFailure} reports about a call that
+ * did not return a value because it failed. */
+export interface ClientToolFailure {
+  /** Recorded verbatim, in full. */
+  message: string;
+  /** The dispatch layer that failed. Defaults to `"handler"` on the wire when omitted. */
+  kind?: ClientToolFailureKind;
 }
 
 /**
@@ -517,6 +541,37 @@ export class ClientRunDriver {
       "POST",
       `/v1/client-runs/${this.runId}/client-tool-completion`,
       { seq, output },
+    );
+  }
+
+  /**
+   * Report that a client-performed tool call returned nothing because it
+   * failed. `seq` must name the pending intent at the end of the log, exactly
+   * as for {@link clientToolCompletion}; `error.message` is recorded verbatim,
+   * in full, and `error.kind` names the dispatch layer that failed (default
+   * `"handler"`, which is what a tool that ran and threw is).
+   *
+   * The server records the same `__salvor_error` sentinel a native tool's
+   * exhausted retries record, byte for byte: the call is closed, the run
+   * carries on, and a later replay reads the failure back rather than
+   * performing the call again. A subsequent {@link clientToolIntent} at this
+   * `seq` comes back `settled: true` with that sentinel as `output`.
+   *
+   * Refused, recording nothing, with the same `client_completion_refused`
+   * {@link clientToolCompletion} is refused with: a `trust_completion = false`
+   * declaration holds for a reported failure exactly as it does for a
+   * reported result, since "it did not land" is a claim made by the party
+   * that benefits from it being believed. There the fix is the same one:
+   * settle the call by hand with {@link resolve} once you have verified it
+   * externally.
+   */
+  async clientToolFailure(seq: number, error: ClientToolFailure): Promise<void> {
+    const wire: Record<string, unknown> = { message: error.message };
+    if (error.kind !== undefined) wire.kind = error.kind;
+    await this.send(
+      "POST",
+      `/v1/client-runs/${this.runId}/client-tool-completion`,
+      { seq, error: wire },
     );
   }
 
