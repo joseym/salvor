@@ -69,6 +69,7 @@ runs     = client.list_runs()                       # -> list[RunSummary]
 stream   = client.stream_events(run_id, from_seq=None)  # -> EventStream
 result   = client.resume(run_id, input=None)        # -> ResumeResult
 state    = client.resolve(run_id, output)           # record a dangling write
+result   = client.abandon(run_id, reason=None)      # retire a run by hand; the dangling write stays named
 projected = client.replay(run_id)                   # -> ReplayState (dry run)
 ```
 

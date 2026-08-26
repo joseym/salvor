@@ -79,6 +79,7 @@ const runs   = await client.listRuns();                    // -> RunSummary[]
 const stream = client.streamEvents(runId, { fromSeq });    // -> EventStream
 const result = await client.resume(runId, input);          // -> ResumeResult
 const after  = await client.resolve(runId, output);        // record a dangling write
+const status = await client.abandon(runId, reason);        // retire a run by hand; the dangling write stays named
 const proj   = await client.replay(runId);                 // -> ReplayState (dry run)
 ```
 
