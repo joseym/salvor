@@ -33,5 +33,8 @@ export function startRefusal(err: unknown): string {
       `them; publishing the identical document again mints the identical hash.`
     );
   }
+  if (code) {
+    return `start refused: ${code}: ${message}`;
+  }
   return `start refused: ${message}`;
 }
