@@ -119,10 +119,15 @@ class ClientRunDriver:
         log: list[Event],
         owns_http: bool,
         stream_timeout: httpx.Timeout,
+        on_release: Optional[Callable[[str], None]] = None,
     ) -> None:
         self._http = http
         self._owns_http = owns_http
         self._stream_timeout = stream_timeout
+        # Told the run id when this driver hands the lease back, so the client
+        # that opened it stops remembering a token that no longer opens
+        # anything. See :meth:`release` and :attr:`salvor.Client._client_run_tokens`.
+        self._on_release = on_release
         self.run_id = run_id
         self.drive_token = drive_token
         #: The envelopes returned when this run was opened. Empty for a fresh
@@ -201,6 +206,7 @@ class ClientRunDriver:
         run_id: Optional[str],
         record_prompts: bool,
         drive_token: Optional[str] = None,
+        on_release: Optional[Callable[[str], None]] = None,
     ) -> "ClientRunDriver":
         call = rules.open_run(agent, input, run_id, record_prompts, drive_token)
         resp = http.request(call.method, call.path, **wire.request_kwargs(call))
@@ -212,6 +218,7 @@ class ClientRunDriver:
             log=opened.log,
             owns_http=owns_http,
             stream_timeout=stream_timeout,
+            on_release=on_release,
         )
 
     def close(self) -> None:
@@ -224,6 +231,56 @@ class ClientRunDriver:
 
     def __exit__(self, *exc: Any) -> None:
         self.close()
+
+    # -- the lease ------------------------------------------------------------
+
+    def release(self) -> bool:
+        """Hand the lease back, so the next open takes the run at once.
+
+        Returns ``True`` when a lease was given back, ``False`` when there was
+        none to give (released already, lapsed, or a run this server never
+        opened): the call is idempotent, and finding nothing to hand back is
+        not an error, because the caller's goal is already true. A lease that
+        stands and is not this driver's raises ``SalvorAPIError`` with code
+        ``invalid_drive_token``, and nothing is dropped.
+
+        Lapsing is the safety net, not how a drive ends. Without this, a
+        short-lived process locks the process after it out for up to the lease
+        TTL for nothing: an invoke returns, the process exits, and the next one
+        is refused ``lease_held`` for a minute. Call it when a drive is over,
+        in the success path and the error path alike.
+
+        The client that opened this run forgets the token here too, so its next
+        ``open_client_run`` for this run presents nothing rather than a token
+        the server has already dropped.
+
+        Only the lease goes. The log is untouched and the run stays
+        client-driven, so the next open adopts it exactly as it would after a
+        restart, and :meth:`log` still reads it back: that endpoint serves any
+        client-driven run, held or not.
+        """
+        try:
+            return self._send(rules.release(self.run_id, self.drive_token))
+        finally:
+            if self._on_release is not None:
+                self._on_release(self.run_id)
+
+    def heartbeat(self) -> int:
+        """Say "still here" without driving the run, and hear how long the
+        lease has left.
+
+        Returns the whole seconds until the hold lapses if this driver goes
+        quiet from now (never below ``1``), which is what a driver picks its
+        beat interval from. Every driving call already refreshes the lease;
+        this is for the driver that makes none for longer than the TTL because
+        it is inside one long body (a tool that takes minutes, a model call it
+        is streaming itself).
+
+        Raises ``SalvorAPIError`` with code ``invalid_drive_token`` when this
+        token is no longer the run's lease, and ``unknown_run`` when this
+        server holds no such client-driven run.
+        """
+        return self._send(rules.heartbeat(self.run_id, self.drive_token))
 
     # -- building envelopes ---------------------------------------------------
 

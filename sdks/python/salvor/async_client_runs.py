@@ -84,10 +84,14 @@ class AsyncClientRunDriver:
         log: list[Event],
         owns_http: bool,
         stream_timeout: httpx.Timeout,
+        on_release: Optional[Callable[[str], None]] = None,
     ) -> None:
         self._http = http
         self._owns_http = owns_http
         self._stream_timeout = stream_timeout
+        # Told the run id when this driver hands the lease back; see
+        # :meth:`salvor.ClientRunDriver.release`.
+        self._on_release = on_release
         self.run_id = run_id
         self.drive_token = drive_token
         #: The envelopes returned when this run was opened. Empty for a fresh
@@ -150,6 +154,7 @@ class AsyncClientRunDriver:
         run_id: Optional[str],
         record_prompts: bool,
         drive_token: Optional[str] = None,
+        on_release: Optional[Callable[[str], None]] = None,
     ) -> "AsyncClientRunDriver":
         call = rules.open_run(agent, input, run_id, record_prompts, drive_token)
         resp = await http.request(call.method, call.path, **wire.request_kwargs(call))
@@ -161,6 +166,7 @@ class AsyncClientRunDriver:
             log=opened.log,
             owns_http=owns_http,
             stream_timeout=stream_timeout,
+            on_release=on_release,
         )
 
     async def close(self) -> None:
@@ -176,6 +182,23 @@ class AsyncClientRunDriver:
 
     async def __aexit__(self, *exc: Any) -> None:
         await self.close()
+
+    # -- the lease ------------------------------------------------------------
+
+    async def release(self) -> bool:
+        """Await :meth:`salvor.ClientRunDriver.release`: hand the lease back so
+        the next open takes the run at once, and let the client that opened it
+        forget the token."""
+        try:
+            return await self._send(rules.release(self.run_id, self.drive_token))
+        finally:
+            if self._on_release is not None:
+                self._on_release(self.run_id)
+
+    async def heartbeat(self) -> int:
+        """Await :meth:`salvor.ClientRunDriver.heartbeat`: say "still here"
+        without driving, and hear the whole seconds the lease has left."""
+        return await self._send(rules.heartbeat(self.run_id, self.drive_token))
 
     # -- building envelopes ---------------------------------------------------
 

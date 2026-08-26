@@ -423,8 +423,14 @@ The client-driven tool below needs a declaration before the model can call
 it: its effect class, its schemas and its idempotency key are the operator's,
 never the middleware's, and they come from a client-tool declaration the
 server was started with. Skip this and the first call fails with
-`unknown_tool: no client-performed tool named "lookup_order" is declared on
-this server`.
+
+```
+unknown_tool: no client-performed tool named `lookup_order` is declared on this
+server; declarations are loaded by the operator (`salvor serve --client-tool
+<FILE>`) and are never registered over HTTP
+```
+
+Save the declaration as `lookup-order.toml`:
 
 ```toml
 name = "lookup_order"
@@ -443,13 +449,15 @@ type = "object"
 required = ["order_id", "status", "total_cents"]
 ```
 
+and start a server over a throwaway store with it loaded:
+
 ```sh
-salvor serve --client-tool lookup-order.toml
+salvor serve --store ./try-salvor.db --client-tool lookup-order.toml
 ```
 
 The rest below runs the same middleware end to end with no provider key and no
 network: a scripted model stands in for whatever provider your app actually
-uses.
+uses. Save it as `try_salvor.py`:
 
 ```python
 from langchain.agents import create_agent
@@ -517,6 +525,23 @@ answer = agent.invoke(
 print(answer["messages"][-1].content)
 ```
 
+Run it in a second terminal, with the server still up:
+
+```sh
+pip install 'salvor[langchain]'
+python try_salvor.py
+```
+
+It prints `Order ORD-7781 is paid, 4200 cents.`. Run it again and it prints the
+same line without calling the model or the tool at all: the second invoke of
+the thread replays what the first one recorded. `salvor history <run> --store
+./try-salvor.db` shows the seven events behind that, and the run id for thread
+`order-7781` is what `run_id_for_thread("order-7781")` returns.
+
+When you are done, stop the server and delete `try-salvor.db` along with its
+`try-salvor.db-wal` and `try-salvor.db-shm` side files: SQLite writes all three,
+and deleting only the first leaves a store that can still be read back.
+
 A real app replaces `ScriptedModel` with its provider model (`ChatAnthropic`,
 `ChatOpenAI`, and so on) and nothing else changes.
 
@@ -544,8 +569,11 @@ request hashes, the same derived keys, so a thread recorded under one client can
 be resumed under the other. Driving the agent the way the client does not
 support is refused by name, and the refusal says which client to pass, rather
 than quietly recording nothing. Under the synchronous client nothing here starts
-an event loop and nothing starts a thread of its own: the calls to the control
-plane are made on whichever thread LangChain is already running the agent on.
+an event loop: the calls to the control plane are made on whichever thread
+LangChain is already running the agent on. One background thread does get
+started, and only while a tool body or a live model call is running: the
+heartbeat that keeps the run's lease alive (see [The lease](#the-lease) below).
+Under the asynchronous client that is a task on your loop instead.
 
 ### What gets recorded
 
@@ -588,6 +616,21 @@ async def refund_card(charge_id: str) -> dict:
     call = current_tool_call()
     return await payments.refund(charge_id, idempotency_key=call.key)
 ```
+
+What salvor guarantees about that key is worth stating plainly, because the
+part it does not cover is the part that costs money. Salvor records the call
+exactly once and derives the key from the run, the position and the tool, so
+the key is stable: every attempt at that call, on this invoke or any later one,
+is handed the same string. What salvor cannot make exactly-once is your
+provider's side of it. A crash between the provider's success and salvor
+recording the completion leaves the log ending at the intent, which is a call
+that was asked for and never reported, and the next invoke runs the tool body
+again under that same key. So the write happens twice unless the provider
+treats the key as its idempotency token and collapses the second one. Pass
+`call.key` to whatever your provider calls that (Stripe's `Idempotency-Key`,
+your own API's dedupe column). A provider that ignores it, or a tool that never
+passes it on, is a tool that can charge twice, and no ledger on this side
+changes that.
 
 ### What replay means
 
@@ -687,27 +730,188 @@ tool and the declaration it needs rather than quietly recording the call as a
 harmless read. `trust_completion = true` with an `[output_schema]` is what lets
 the middleware record what the tool returned; a declaration without them leaves
 every call for that tool to be settled by hand, once someone has verified it
-externally:
+externally. Two ways, and the `ToolNeedsResolution` error this middleware
+raises for such a call prints both:
 
 ```sh
-salvor resolve <run> --store <path to the server's store> --output '<json the tool returned>'
+# against the live server, over HTTP
+curl -X POST http://127.0.0.1:8080/v1/runs/$RUN/resolve \
+    -H 'content-type: application/json' \
+    -d '{"output": <json the tool returned>}'
+
+# or against the store, with the server up or down
+salvor resolve $RUN --store <path to the server's store> --output '<json the tool returned>'
 ```
 
-That command, printed by the `ToolNeedsResolution` error this middleware raises
-for such a call, always carries a `--store <path to the server's store>`
-placeholder rather than a real path: `resolve` reads and writes the SQLite
-store directly, not over HTTP, and the middleware only ever holds a base URL,
-never the file path `salvor serve --store` was started with. Fill in that same
-path (or the Inspector's resolve, or `driver.resolve(output)` on a client run
-driver already holding the run's lease) to settle it.
-`examples/client-tools/refund-card.toml` is the fully commented version of the
-declaration file.
+They differ in one way worth knowing before you pick. `POST
+/v1/runs/{id}/resolve` also clears the run's lease, because unsticking a
+dangling write says the driver that opened it is gone, so the thread can be
+invoked again on the very next request. `salvor resolve` cannot: it reads and
+writes the SQLite store directly rather than over HTTP, so a lease held in a
+live server's memory survives it and lapses on its own, and the next invoke
+waits up to the lease TTL. The command also always carries a `--store <path to
+the server's store>` placeholder rather than a real path, because the
+middleware only ever holds a base URL, never the file path `salvor serve
+--store` was started with. The Inspector's resolve, and
+`driver.resolve(output)` on a client run driver holding the run's own lease,
+settle it too. `examples/client-tools/refund-card.toml` is the fully commented
+version of the declaration file.
 
 The recorded output is the tool's own result, which is what the output schema
 describes. LangChain builds a tool message by stringifying whatever the tool
 returned, so the result is recovered by parsing that content back when the parse
 round-trips exactly; when it does not, the content is recorded as the string it
 is, and an object schema will refuse it and say so.
+
+### Catching a refusal
+
+Every refusal the middleware raises carries a `code`, and `salvor_error(e)` is
+how you get to it. It answers with the `SalvorMiddlewareError` inside whatever
+you caught, or `None` when the error has nothing to do with salvor, which is
+your signal to re-raise:
+
+```python
+import time
+from salvor.langchain import salvor_error
+
+try:
+    agent.invoke(ask, {"configurable": {"thread_id": thread}})
+except Exception as error:
+    refusal = salvor_error(error)
+    if refusal is None:
+        raise                      # not ours; let it go past
+    if refusal.code == "lease_held":
+        # Somebody else is driving this thread right now. The refusal says how
+        # long their hold has left, so wait it out rather than hammering.
+        time.sleep(refusal.lapses_in_seconds + 1)
+        agent.invoke(ask, {"configurable": {"thread_id": thread}})
+    elif refusal.code == "open_intent":
+        alert_an_operator(refusal)  # a call was made and never reported
+    else:
+        raise
+```
+
+**Bare or wrapped, the helper covers both.** As of LangChain 1.3,
+`create_agent` re-raises what a middleware hook raises exactly as it was
+raised: a refusal from `before_agent`, `wrap_model_call`, `wrap_tool_call` or
+`after_agent` reaches the caller of `invoke` bare, and so does an exception
+your own tool body raised, and a parallel tool turn raises one of its failures
+rather than a group of them. So `salvor_error(e)` usually hands back the same
+object you caught. That is not a promise LangChain makes, though, and your own
+retry wrapper or executor may put something around it later, so the helper
+walks `__cause__`, `__context__` and the members of an exception group instead
+of trusting the top of the chain. Catch `Exception`, call `salvor_error`, and
+you do not have to care which shape arrived.
+
+Each refusal also carries `cause`, the error underneath it when there was one
+(the same object as `__cause__`; the second name is what the TypeScript
+middleware calls it, so one handler reads the same against either SDK). A
+`tool_undeclared` refusal, for instance, has the server's own `unknown_tool` on
+its `cause`.
+
+The codes:
+
+| `code` | What happened |
+| --- | --- |
+| `lease_held` | Another driver holds this thread's run right now. `lapses_in_seconds` says how long their hold has left. |
+| `lease_lost` | This invoke stopped being the driver: its token is no longer the current lease, or the lease went twice in one invoke. |
+| `reopen_refused` | The lease was lost and the server would not hand the run back at all. The log is intact; this server is not the one to drive it from. |
+| `run_exists` | The thread maps to a run id salvor's other, server-driven mode already started. Give the thread an id of its own. |
+| `thread_finished` | `finish_thread` closed this thread's run, and a completed run takes no more events. |
+| `thread_never_invoked` | `finish_thread` was asked to close a thread that has no run yet. |
+| `thread_id_missing` | The invoke passed no `thread_id`. |
+| `thread_id_invalid` | It passed one that is not a non-empty string. The message says what arrived. |
+| `tool_undeclared` | The tool has no client-tool declaration on this server. |
+| `tool_needs_resolution` | The tool ran and its operator settles such a call by hand. This one is the typed `ToolNeedsResolution`, with the result on `.output`. |
+| `tool_returned_command` | A tool answered with a LangGraph `Command`, which is control flow, not a result to record. |
+| `open_intent` | The log holds a call recorded as requested and never completed. Settle it and invoke again. |
+| `unreadable_record` | A model answer is missing or does not read back as one. |
+| `wrong_client` | The middleware was given the wrong client for the way the agent is being driven. |
+
+Refusals that come from the control plane rather than from the middleware stay
+`SalvorAPIError`, with their own stable `code` (see [Errors](#errors) above), so
+`except SalvorAPIError` still catches those on their own terms.
+
+### The lease
+
+One driver per thread at a time, and the drive token is how salvor says so. The
+lease lives in the server's memory, not on disk, and it is HELD rather than
+handed to whoever asks last: while a driver's lease on a thread's run is
+current, a second instance invoking that same thread is refused at once, before
+it runs a single model or tool call, naming the thread and how many seconds
+until the hold lapses on its own (`lease_held`). A lease taken out from under an
+active invoke mid-step means a second driver is live on the thread right now;
+that is refused too (`invalid_drive_token`), by the same one-driver error, and
+neither case is ever retried by re-opening, because there is no order in which
+two live drivers can both be right about what comes next.
+
+Four things end a hold, and only one of them is a timer.
+
+**An invoke that ends releases it.** Success or failure, the middleware hands
+the lease back on its way out (`POST /v1/client-runs/{id}/release`), so the
+next process to invoke that thread takes it on the very next request. A
+worker that picks the job up, a second replica, the same app after a redeploy:
+none of them waits out a TTL for a drive that is already over. An invoke that
+dies inside a tool body releases too, which matters more, because the thread a
+crash touched is the thread somebody is about to retry.
+
+**A long step keeps it alive.** A tool that takes minutes, or a model call your
+app is streaming itself, makes no call to salvor while it works, and a lease
+with no call inside its TTL lapses. So while a tool body or a live model call
+is running, the middleware says "still here" (`POST
+/v1/client-runs/{id}/heartbeat`) on the interval the server's own answer names:
+a probe a quarter of a second in, then a third of the reported
+`lapses_in_seconds` from there. Nothing beats for a tool that returns inside
+that quarter second, which is nearly all of them. Under `invoke` that is one
+daemon thread; under `ainvoke`, one task on your loop; both stop when the body
+does.
+
+**An HTTP resolve clears it.** Unsticking a run by hand with `POST
+/v1/runs/{id}/resolve` says the driver that opened the dangling write is gone,
+so the lease it left behind is dropped with the resolution and the thread is
+invocable again at once. `salvor resolve` on the command line cannot do that:
+it writes the store directly and never reaches a live server's memory, so a
+lease held there survives the CLI resolve and lapses on its own instead.
+
+**And a crash lets it lapse.** A driver that dies without releasing stops
+presenting its token, and the hold ends when the TTL runs out
+(`SALVOR_CLIENT_LEASE_TTL_SECS`, 60 seconds by default). That is the safety
+net, not the way a drive is meant to end.
+
+`Client` and `AsyncClient` each remember the last token they saw for a run and
+present it back automatically on a later `open_client_run`, so your own app
+re-invoking a thread it drove a moment ago is not what triggers either refusal;
+each forgets a run's token the moment its lease is released, because a released
+token opens nothing.
+
+If salvor itself restarts mid-invoke, none of this applies: the lease registry
+dies with the process but the log does not, so the middleware notices its open
+run is gone (`unknown_run`), re-opens it once, and continues from the log as if
+the restart had not happened. A restart is still survived.
+
+### Reading a thread's log
+
+Two ways, and they print the same envelopes:
+
+```sh
+# over HTTP, from the server
+curl http://127.0.0.1:8080/v1/client-runs/$RUN/log
+
+# off the store the server writes, with the server up or down
+salvor history $RUN --store /path/to/store.db --json
+```
+
+`GET /v1/client-runs/{id}/log` is the read for a client-driven run. It needs no
+drive token and no lease: it serves the run whether its driver is mid-invoke,
+released the lease when the invoke ended, went quiet until the lease lapsed, or
+was driving before the server last restarted. `?from_seq=<n>` fetches just the
+tail. A run that is not client-driven is `404 unknown_run`.
+
+`salvor history` reads the same log off the SQLite store instead, which is
+where it actually lives, so it works with no server running at all;
+`--json` prints the envelopes verbatim rather than the pretty log. In both,
+`$RUN` is the run id the thread maps to, which is
+`run_id_for_thread(thread_id)`.
 
 ### The honest limits
 
@@ -735,34 +939,12 @@ and you can pass your own callback to route that wherever your app already
 logs.
 
 The one case it refuses is a log whose last event is a call that never
-completed: settle that first, then invoke again.
+completed: settle that first (`POST /v1/runs/{id}/resolve`, or `salvor
+resolve`, as above), then invoke again.
 
 A thread is one task. Re-invoking it replays it; sending a genuinely new turn
 down the same thread is a fork by the rule above, and pays for the calls the new
 turn makes. Give a new task a new thread id.
-
-The run's lease lives in the server's memory, not on disk, and is HELD, not
-handed to whoever asks last: while a driver's lease on a thread's run is
-current, a second instance invoking that same thread is refused at once,
-before it runs a single model or tool call, naming the thread and how many
-seconds until the hold lapses on its own (`lease_held`; a driver that goes
-quiet for the lease TTL, 60 seconds by default, stops holding it). A lease
-taken out from under an active invoke mid-step, by contrast, means a second
-driver is live on the thread right now; that is refused too
-(`invalid_drive_token`), by the same one-driver error, and neither case is
-ever retried by re-opening, because there is no order in which two live
-drivers can both be right about what comes next.
-
-`Client` and `AsyncClient` each remember the last token they saw for a run and
-present it back automatically on a later `open_client_run`, so your own app
-re-invoking a thread it drove a moment ago is not what triggers either
-refusal: it takes a genuinely different instance, or a different
-`Client`/`AsyncClient` object, to be refused.
-
-If salvor itself restarts mid-invoke, none of this applies: the lease registry
-dies with the process but the log does not, so the middleware notices its open
-run is gone (`unknown_run`), re-opens it once, and continues from the log as if
-the restart had not happened. A restart is still survived.
 
 `wrap_tool_call` exists only inside `create_agent`. A hand-built `StateGraph`
 that calls tools from its own node has no hook for the middleware to sit in, so

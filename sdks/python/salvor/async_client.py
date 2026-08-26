@@ -101,7 +101,8 @@ class AsyncClient:
         # live tail waits between events, so the read timeout is disabled while
         # connect/write stay bounded.
         self._stream_timeout = httpx.Timeout(timeout, read=None)
-        #: The last drive token this client saw for a run it opened. See
+        #: The last drive token this client saw for a run it opened, forgotten
+        #: when that run's lease is released. See
         #: :attr:`salvor.Client._client_run_tokens`; the rule is identical.
         self._client_run_tokens: dict[str, str] = {}
 
@@ -334,6 +335,12 @@ class AsyncClient:
             run_id=run_id,
             record_prompts=record_prompts,
             drive_token=drive_token,
+            on_release=self._forget_drive_token,
         )
         self._client_run_tokens[driver.run_id] = driver.drive_token
         return driver
+
+    def _forget_drive_token(self, run_id: str) -> None:
+        """Stop remembering a run's drive token once its lease is handed back.
+        See :meth:`salvor.Client._forget_drive_token`; the rule is identical."""
+        self._client_run_tokens.pop(run_id, None)

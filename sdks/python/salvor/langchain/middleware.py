@@ -54,6 +54,8 @@ from .tape import (
     TurnPosition,
     held_by_another_driver,
     one_driver_error,
+    server_driven_run,
+    still_ours,
 )
 
 __all__ = ["SalvorMiddleware", "salvor_middleware", "warn_of_fork"]
@@ -117,9 +119,13 @@ class SalvorMiddleware(AgentMiddleware):
     synchronous client under ``ainvoke``, or an asynchronous one under
     ``invoke``, is refused with a sentence naming the client to pass, because a
     middleware that recorded nothing would be worse than one that says what it
-    needs. Under the synchronous client nothing here starts an event loop and
-    nothing starts a thread: the calls to the control plane are made on
-    whichever thread LangChain is already running the agent on.
+    needs. Under the synchronous client nothing here starts an event loop: the
+    calls to the control plane are made on whichever thread LangChain is already
+    running the agent on. One background thread does get started, and only while
+    a tool body or a live model call is running: the heartbeat that keeps the
+    run's lease from lapsing under a driver that never went anywhere (see
+    :meth:`salvor.langchain.RunTape._beating`). Under the asynchronous client
+    that is a task on the loop instead.
 
     ``wrap_tool_call`` exists only inside ``create_agent``. A hand-built
     ``StateGraph`` calling tools in its own node has no hook for the middleware
@@ -167,7 +173,8 @@ class SalvorMiddleware(AgentMiddleware):
                 "SalvorMiddleware records over a salvor client: pass "
                 "`Client(...)` to record under `agent.invoke`, or "
                 "`AsyncClient(...)` to record under `await agent.ainvoke`. It "
-                "was given a {kind}.".format(kind=type(client).__name__)
+                "was given a {kind}.".format(kind=type(client).__name__),
+                code="wrong_client",
             )
         self._client = client
         #: True when the client is asynchronous, which is what decides whether
@@ -212,9 +219,20 @@ class SalvorMiddleware(AgentMiddleware):
         return None
 
     def after_agent(self, state: Any, runtime: Any) -> None:
-        """Let go of the run. The log is the durable part; the cursor is not."""
+        """Let go of the run: hand the lease back, and forget the cursor.
+
+        The log is the durable part; the cursor is not, and neither is the
+        lease. Releasing here is what lets the next process (or the next
+        invoke, from anywhere) take this thread up immediately instead of
+        being refused `lease_held` for the rest of the lease TTL over a drive
+        that is already finished. An invoke that ends by raising never reaches
+        this hook at all, which is why the steps release too (see
+        :meth:`salvor.langchain.RunTape.step`).
+        """
         self._blocking_hook()
-        self._tapes.pop(self._identify(runtime)["run_id"], None)
+        tape = self._tapes.pop(self._identify(runtime)["run_id"], None)
+        if tape is not None:
+            tape.release()
         return None
 
     def wrap_model_call(self, request: Any, handler: Any) -> Any:
@@ -234,16 +252,22 @@ class SalvorMiddleware(AgentMiddleware):
             live["response"] = response
             return _answer_of(response, tape.run_id)
 
-        outcome = tape.model_call(
-            request_hash(request), canonical_request(request), perform
-        )
-        if not outcome.replayed and "response" in live:
-            return _marked_live(live["response"], outcome, tape.run_id)
-        # The recorded answer goes back through LangChain's own handler, with a
-        # stand-in model in the provider's place, so a streaming caller sees the
-        # replayed turn arrive whole instead of seeing nothing at all. See
-        # `replay_model.py` for why that indirection is worth having.
-        return handler(_replaying(request, outcome, tape.run_id))
+        # `step` is what hands the lease back when this call is where the
+        # invoke dies: a provider error, a refusal from salvor, anything the
+        # graph raises through here. `after_agent` never runs after one of
+        # those.
+        with tape.step():
+            outcome = tape.model_call(
+                request_hash(request), canonical_request(request), perform
+            )
+            if not outcome.replayed and "response" in live:
+                return _marked_live(live["response"], outcome, tape.run_id)
+            # The recorded answer goes back through LangChain's own handler,
+            # with a stand-in model in the provider's place, so a streaming
+            # caller sees the replayed turn arrive whole instead of seeing
+            # nothing at all. See `replay_model.py` for why that indirection is
+            # worth having.
+            return handler(_replaying(request, outcome, tape.run_id))
 
     def wrap_tool_call(self, request: Any, handler: Any) -> Any:
         """Record the tool call, or return the recorded result.
@@ -274,19 +298,23 @@ class SalvorMiddleware(AgentMiddleware):
 
             return run_with_tool_call(_context(opened, tape.run_id, name), body)
 
-        try:
-            outcome = tape.tool_call(
-                name, _tool_args(request), perform, _turn_position(request), trusted
-            )
-        except SalvorAPIError as error:
-            undeclared = _undeclared_tool_error(error, name)
-            if undeclared is None:
-                raise
-            raise undeclared from error
+        # A tool body that raises, and a `ToolNeedsResolution` that stops for a
+        # person, both leave the invoke through here, and `after_agent` runs
+        # for neither: `step` is what gives the lease back on those paths.
+        with tape.step():
+            try:
+                outcome = tape.tool_call(
+                    name, _tool_args(request), perform, _turn_position(request), trusted
+                )
+            except SalvorAPIError as error:
+                undeclared = _undeclared_tool_error(error, name)
+                if undeclared is None:
+                    raise
+                raise undeclared from error
 
-        if not outcome.replayed and "message" in live:
-            return mark(live["message"], outcome.marker)
-        return _replayed_tool_message(outcome, request, name)
+            if not outcome.replayed and "message" in live:
+                return mark(live["message"], outcome.marker)
+            return _replayed_tool_message(outcome, request, name)
 
     # -- the awaited hooks ------------------------------------------------------
 
@@ -299,10 +327,12 @@ class SalvorMiddleware(AgentMiddleware):
         return None
 
     async def aafter_agent(self, state: Any, runtime: Any) -> None:
-        """:meth:`after_agent`, awaited."""
+        """:meth:`after_agent`, awaited: the lease goes back here too."""
         self._awaited_hook()
         identity = await self._aidentify(runtime)
-        self._tapes.pop(identity["run_id"], None)
+        tape = self._tapes.pop(identity["run_id"], None)
+        if tape is not None:
+            await tape.release()
         return None
 
     async def awrap_model_call(self, request: Any, handler: Any) -> Any:
@@ -316,12 +346,13 @@ class SalvorMiddleware(AgentMiddleware):
             live["response"] = response
             return _answer_of(response, tape.run_id)
 
-        outcome = await tape.model_call(
-            request_hash(request), canonical_request(request), perform
-        )
-        if not outcome.replayed and "response" in live:
-            return _marked_live(live["response"], outcome, tape.run_id)
-        return await handler(_replaying(request, outcome, tape.run_id))
+        async with tape.step():
+            outcome = await tape.model_call(
+                request_hash(request), canonical_request(request), perform
+            )
+            if not outcome.replayed and "response" in live:
+                return _marked_live(live["response"], outcome, tape.run_id)
+            return await handler(_replaying(request, outcome, tape.run_id))
 
     async def awrap_tool_call(self, request: Any, handler: Any) -> Any:
         """:meth:`wrap_tool_call`, awaited. The turn's calls arrive as tasks on
@@ -342,19 +373,20 @@ class SalvorMiddleware(AgentMiddleware):
 
             return await arun_with_tool_call(_context(opened, tape.run_id, name), body)
 
-        try:
-            outcome = await tape.tool_call(
-                name, _tool_args(request), perform, _turn_position(request), trusted
-            )
-        except SalvorAPIError as error:
-            undeclared = _undeclared_tool_error(error, name)
-            if undeclared is None:
-                raise
-            raise undeclared from error
+        async with tape.step():
+            try:
+                outcome = await tape.tool_call(
+                    name, _tool_args(request), perform, _turn_position(request), trusted
+                )
+            except SalvorAPIError as error:
+                undeclared = _undeclared_tool_error(error, name)
+                if undeclared is None:
+                    raise
+                raise undeclared from error
 
-        if not outcome.replayed and "message" in live:
-            return mark(live["message"], outcome.marker)
-        return _replayed_tool_message(outcome, request, name)
+            if not outcome.replayed and "message" in live:
+                return mark(live["message"], outcome.marker)
+            return _replayed_tool_message(outcome, request, name)
 
     # -- the run, blocking -------------------------------------------------------
 
@@ -367,7 +399,8 @@ class SalvorMiddleware(AgentMiddleware):
                 "`thread_id_to_run_id` returned something to await, and this "
                 "middleware was given salvor's synchronous `Client`, which has "
                 "nothing to await it with. Return the run id itself, or pass an "
-                "`AsyncClient` and drive the agent with `ainvoke`."
+                "`AsyncClient` and drive the agent with `ainvoke`.",
+                code="wrong_client",
             )
         return {"thread_id": thread_id, "run_id": run_id}
 
@@ -387,16 +420,24 @@ class SalvorMiddleware(AgentMiddleware):
             try:
                 driver = self._open(run_id)
             except SalvorAPIError as error:
-                _reraise_if_held(identity["thread_id"], run_id, error)
+                _refusal_of_an_open(identity["thread_id"], run_id, error)
                 raise
-            _refuse_a_finished_run(
-                driver.log_envelopes, identity["thread_id"], run_id
-            )
-            tape = RunTape.open(
-                driver,
-                _started(identity["thread_id"]),
-                self._drive(identity["thread_id"], run_id),
-            )
+            # From here the lease is held, and no tape owns it yet: a run this
+            # invoke may not drive (a finished thread) or a first append that
+            # is refused would otherwise leave the thread locked until the
+            # lease lapsed, over an invoke that never started.
+            try:
+                _refuse_a_finished_run(
+                    driver.log_envelopes, identity["thread_id"], run_id
+                )
+                tape = RunTape.open(
+                    driver,
+                    _started(identity["thread_id"]),
+                    self._drive(identity["thread_id"], run_id),
+                )
+            except BaseException as error:
+                _hand_back(driver, error)
+                raise
             self._tapes[run_id] = tape
             return tape
 
@@ -467,12 +508,18 @@ class SalvorMiddleware(AgentMiddleware):
         try:
             driver = await self._open(run_id)
         except SalvorAPIError as error:
-            _reraise_if_held(thread_id, run_id, error)
+            _refusal_of_an_open(thread_id, run_id, error)
             raise
-        _refuse_a_finished_run(driver.log_envelopes, thread_id, run_id)
-        return await AsyncRunTape.open(
-            driver, _started(thread_id), self._drive(thread_id, run_id)
-        )
+        # The lease is held from here and no tape owns it yet; see
+        # :meth:`_tape_for` for why it goes back by hand on these two paths.
+        try:
+            _refuse_a_finished_run(driver.log_envelopes, thread_id, run_id)
+            return await AsyncRunTape.open(
+                driver, _started(thread_id), self._drive(thread_id, run_id)
+            )
+        except BaseException as error:
+            await _ahand_back(driver, error)
+            raise
 
     # -- what the operator declared -------------------------------------------------
 
@@ -514,7 +561,8 @@ class SalvorMiddleware(AgentMiddleware):
                 "`AsyncClient`, so this agent has to be driven asynchronously: "
                 "`await agent.ainvoke(...)` or `agent.astream(...)` rather than "
                 "`agent.invoke(...)`. To drive it synchronously, give the "
-                "middleware salvor's synchronous `Client(...)` instead."
+                "middleware salvor's synchronous `Client(...)` instead.",
+                code="wrong_client",
             )
 
     def _awaited_hook(self) -> None:
@@ -525,7 +573,8 @@ class SalvorMiddleware(AgentMiddleware):
                 "this agent has to be driven synchronously: `agent.invoke(...)` "
                 "or `agent.stream(...)` rather than `await "
                 "agent.ainvoke(...)`. To drive it asynchronously, give the "
-                "middleware salvor's asynchronous `AsyncClient(...)` instead."
+                "middleware salvor's asynchronous `AsyncClient(...)` instead.",
+                code="wrong_client",
             )
 
 
@@ -561,14 +610,20 @@ def _started(thread_id: str) -> Dict[str, Any]:
     }
 
 
-def _reraise_if_held(thread_id: str, run_id: str, error: SalvorAPIError) -> None:
-    """Turn `lease_held` (another driver's current lease refused this open
-    outright) into the one-driver refusal, naming the thread, the run, and how
-    long the hold has left. Every other refusal from an open, `run_exists`
-    among them, bubbles unchanged: this middleware did not cause it and cannot
-    fix it by naming a lease that was never the problem."""
+def _refusal_of_an_open(thread_id: str, run_id: str, error: SalvorAPIError) -> None:
+    """Name the two refusals an open has that the thread explains.
+
+    `lease_held` (another driver's current lease refused this open outright)
+    becomes the one-driver refusal, naming the thread, the run, and how long
+    the hold has left. `run_exists` becomes the other-mode refusal, naming the
+    thread whose id collided. Every other refusal bubbles unchanged: this
+    middleware did not cause it and cannot fix it by putting a thread id in
+    front of it.
+    """
     if held_by_another_driver(error):
         raise one_driver_error(thread_id, run_id, error) from error
+    if error.code == "run_exists":
+        raise server_driven_run(thread_id, run_id, error) from error
 
 
 def _refuse_a_finished_run(log: List[Event], thread_id: str, run_id: str) -> None:
@@ -580,29 +635,60 @@ def _refuse_a_finished_run(log: List[Event], thread_id: str, run_id: str) -> Non
             "recorded its `RunCompleted`, and a completed run cannot be "
             "appended to. Give the next task a new thread id.".format(
                 thread=thread_id, run=run_id
-            )
+            ),
+            code="thread_finished",
         )
 
 
 def _required_thread_id(runtime: Any) -> str:
-    """The LangGraph thread id this hook is running for, refused when absent."""
+    """The LangGraph thread id this hook is running for, refused when it is not
+    a usable one.
+
+    Two refusals, not one, because the two have different fixes. Nothing passed
+    at all is ``thread_id_missing``: add the config. Something passed that this
+    middleware cannot use as a run id is ``thread_id_invalid``, and the sentence
+    says what arrived, because the usual cause is an application whose own ids
+    are integers or an empty string standing in for "no thread".
+    """
     thread_id = _thread_id(runtime)
-    if not isinstance(thread_id, str) or not thread_id:
+    if thread_id is None:
         raise SalvorMiddlewareError(
             "SalvorMiddleware needs a thread id: invoke the agent with "
             '`config={"configurable": {"thread_id": "..."}}`. The thread id '
             "is the run id, so without one there is nothing for a later "
-            "invoke to resume."
+            "invoke to resume.",
+            code="thread_id_missing",
+        )
+    if not isinstance(thread_id, str) or not thread_id:
+        raise SalvorMiddlewareError(
+            "SalvorMiddleware was given a thread id of {received}, and needs a "
+            "non-empty string: `config={{\"configurable\": {{\"thread_id\": "
+            '"order-7781"}}}}`. The thread id is the run id (a UUID is used '
+            "unchanged, anything else is hashed into one), so an id of another "
+            "type has to be spelled as a string by the application that owns "
+            "it: `str(order_id)` records the same thread every "
+            "time.".format(received=_describe(thread_id)),
+            code="thread_id_invalid",
         )
     return thread_id
 
 
-def _thread_id(runtime: Any) -> Optional[str]:
-    """The LangGraph thread id, from wherever this hook can reach it.
+def _describe(thread_id: Any) -> str:
+    """What arrived where a thread id was wanted, for the refusal to name."""
+    if isinstance(thread_id, str):
+        return "an empty string"
+    return "{kind} ({value!r})".format(kind=type(thread_id).__name__, value=thread_id)
+
+
+def _thread_id(runtime: Any) -> Any:
+    """The LangGraph thread id, from wherever this hook can reach it, as it was
+    passed rather than as this middleware wishes it had been.
 
     A tool call's runtime carries the ``RunnableConfig`` itself; a model call's
     does not, so the config is read from the ambient one LangGraph sets around
-    every node it runs.
+    every node it runs. ``None`` means no thread id was passed at all, which is
+    a different refusal from one of the wrong type (see
+    :func:`_required_thread_id`), so the value comes back unfiltered.
     """
     config = getattr(runtime, "config", None)
     if not isinstance(config, dict):
@@ -617,8 +703,33 @@ def _thread_id(runtime: Any) -> Optional[str]:
     configurable = config.get("configurable")
     if not isinstance(configurable, dict):
         return None
-    thread_id = configurable.get("thread_id")
-    return thread_id if isinstance(thread_id, str) else None
+    return configurable.get("thread_id")
+
+
+def _hand_back(driver: Any, error: BaseException) -> None:
+    """Give back a lease no tape ever took up, on the way out of ``error``.
+
+    The one-driver refusals are left alone: the lease they name is another
+    driver's, and this one has none to hand back. Nothing raised here reaches
+    the caller, because the error already on its way out is the one worth
+    seeing.
+    """
+    if not still_ours(error):
+        return
+    try:
+        driver.release()
+    except Exception as refused:  # noqa: BLE001 - the lease lapses either way
+        LOG.debug("salvor: run %s kept its lease: %s", driver.run_id, refused)
+
+
+async def _ahand_back(driver: Any, error: BaseException) -> None:
+    """:func:`_hand_back`, awaited."""
+    if not still_ours(error):
+        return
+    try:
+        await driver.release()
+    except Exception as refused:  # noqa: BLE001 - the lease lapses either way
+        LOG.debug("salvor: run %s kept its lease: %s", driver.run_id, refused)
 
 
 def _tool_args(request: Any) -> Dict[str, Any]:
@@ -756,7 +867,8 @@ def _tool_message_of(result: Any, tool: str) -> ToolMessage:
             "the tool `{tool}` returned a LangGraph Command rather than a tool "
             "message. A Command is graph control flow, not a recorded result, "
             "so this middleware cannot put it in the log. Return a value or a "
-            "ToolMessage from tools you want recorded.".format(tool=tool)
+            "ToolMessage from tools you want recorded.".format(tool=tool),
+            code="tool_returned_command",
         )
     return result
 
@@ -805,7 +917,8 @@ def _ai_message_of(response: Any, run: str) -> AIMessage:
         "run {run} performed a model call that produced no AI message, so "
         "there is nothing to record at this position. A model whose handler "
         "answers with something else cannot be recorded by this "
-        "middleware.".format(run=run)
+        "middleware.".format(run=run),
+        code="unreadable_record",
     )
 
 
@@ -829,5 +942,6 @@ def _undeclared_tool_error(
         "so the middleware may record what the tool returned, "
         "`trust_completion = true` with an `[output_schema]`. Then start the "
         "server with `salvor serve --client-tool <FILE>`. See "
-        "examples/client-tools/refund-card.toml.".format(tool=tool)
+        "examples/client-tools/refund-card.toml.".format(tool=tool),
+        code="tool_undeclared",
     )

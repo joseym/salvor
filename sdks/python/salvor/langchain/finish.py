@@ -17,6 +17,7 @@ letting the append fail somewhere less legible.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, List, Tuple, Union
 
@@ -28,6 +29,10 @@ from .hash import run_id_for_thread
 from .messages import stored_ai_message
 
 __all__ = ["FinishedThread", "finish_thread"]
+
+#: Where a lease this module could not hand back is mentioned; see
+#: :data:`salvor.langchain.run_tape.LOG`.
+LOG = logging.getLogger("salvor.langchain")
 
 ThreadIdToRunId = Callable[[str], Union[str, Awaitable[str]]]
 
@@ -102,11 +107,21 @@ def _finish_thread(
             "`thread_id_to_run_id` returned something to await, and "
             "`finish_thread` was given salvor's synchronous `Client`, which "
             "has nothing to await it with. Return the run id itself, or pass "
-            "an `AsyncClient`."
+            "an `AsyncClient`.",
+            code="wrong_client",
         )
     driver = client.open_client_run(run_id=run_id)
-    seq, resolved = _completion(driver.log_envelopes, thread_id, run_id, output)
-    appended = driver.append([driver.envelope(seq, "RunCompleted", output=resolved)])
+    try:
+        seq, resolved = _completion(driver.log_envelopes, thread_id, run_id, output)
+        appended = driver.append(
+            [driver.envelope(seq, "RunCompleted", output=resolved)]
+        )
+    finally:
+        # Closing a thread takes the run's lease to do it, and a refusal takes
+        # it just as surely as a success. Either way this drive is over, so the
+        # lease goes straight back rather than locking the thread out of an
+        # operator's next attempt for the rest of the TTL.
+        _hand_back(driver)
     return _receipt(run_id, seq, appended)
 
 
@@ -121,10 +136,13 @@ async def _afinish_thread(
     if not isinstance(run_id, str):
         run_id = await run_id
     driver = await client.open_client_run(run_id=run_id)
-    seq, resolved = _completion(driver.log_envelopes, thread_id, run_id, output)
-    appended = await driver.append(
-        [driver.envelope(seq, "RunCompleted", output=resolved)]
-    )
+    try:
+        seq, resolved = _completion(driver.log_envelopes, thread_id, run_id, output)
+        appended = await driver.append(
+            [driver.envelope(seq, "RunCompleted", output=resolved)]
+        )
+    finally:
+        await _ahand_back(driver)
     return _receipt(run_id, seq, appended)
 
 
@@ -140,7 +158,8 @@ def _completion(
     if not log:
         raise SalvorMiddlewareError(
             "thread `{thread}` (run {run}) has never been invoked, so there is "
-            "no run to finish.".format(thread=thread_id, run=run_id)
+            "no run to finish.".format(thread=thread_id, run=run_id),
+            code="thread_never_invoked",
         )
 
     tail = log[-1]
@@ -148,19 +167,45 @@ def _completion(
         raise SalvorMiddlewareError(
             "thread `{thread}` (run {run}) is already finished.".format(
                 thread=thread_id, run=run_id
-            )
+            ),
+            code="thread_finished",
         )
     if tail.kind in ("ModelCallRequested", "ToolCallRequested"):
         what = "a model call" if tail.kind == "ModelCallRequested" else "a tool call"
         raise SalvorMiddlewareError(
             "run {run} (thread `{thread}`) ends at {what} (seq {seq}) that was "
-            "requested and never completed. Settle it first (`salvor run resolve "
-            "{run} <output>`, or the resolve endpoint) and finish the thread "
-            "again.".format(run=run_id, thread=thread_id, what=what, seq=tail.seq)
+            "requested and never completed. Settle it first (`POST "
+            "/v1/runs/{run}/resolve` on the live server, or `salvor resolve "
+            "{run} --store <path to the server's store> --output '<json>'`) and "
+            "finish the thread again.".format(
+                run=run_id, thread=thread_id, what=what, seq=tail.seq
+            ),
+            code="open_intent",
         )
 
     resolved = output if output is not None else _last_ai_message_content(log)
     return tail.seq + 1, resolved
+
+
+def _hand_back(driver: Any) -> None:
+    """Give the run's lease back, whatever happened to the close attempt.
+
+    Never raises: a release that fails leaves the lease to lapse the way it
+    would have anyway, and this runs while the refusal that says why the thread
+    could not be closed is on its way out.
+    """
+    try:
+        driver.release()
+    except Exception as refused:  # noqa: BLE001 - the lease lapses either way
+        LOG.debug("salvor: run %s kept its lease: %s", driver.run_id, refused)
+
+
+async def _ahand_back(driver: Any) -> None:
+    """:func:`_hand_back`, awaited."""
+    try:
+        await driver.release()
+    except Exception as refused:  # noqa: BLE001 - the lease lapses either way
+        LOG.debug("salvor: run %s kept its lease: %s", driver.run_id, refused)
 
 
 def _receipt(run_id: str, seq: int, appended: List[int]) -> FinishedThread:

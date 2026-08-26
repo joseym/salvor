@@ -85,7 +85,7 @@ except ImportError:  # pragma: no cover - depends on what is installed
         "(pip install -e 'sdks/python[langchain]')"
     ) from None
 
-from salvor import AsyncClient, Client, ClientRunDriver, Event, SalvorAPIError
+from salvor import AsyncClient, Client, Event, SalvorAPIError
 from salvor.langchain import (
     SalvorMiddleware,
     SalvorMiddlewareError,
@@ -97,6 +97,7 @@ from salvor.langchain import (
     is_uuid,
     request_hash,
     run_id_for_thread,
+    salvor_error,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -275,6 +276,14 @@ def capture_call(order_id: str) -> None:
         )
 
 
+#: How long a `lookup_order` body should take, and what to do halfway through
+#: it. The short-lease case sets both: a body that outlives the whole lease TTL,
+#: with a rival's attempt to take the run landing after the lease would have
+#: lapsed if nothing were beating. Every other case leaves it at zero and the
+#: bodies are as quick as they ever were.
+dawdle = {"seconds": 0.0, "midway": None}  # type: Dict[str, Any]
+
+
 def meddle() -> None:
     """Do whatever this case wants done between a tool's intent and its
     completion, which is where a lost lease actually hurts."""
@@ -283,12 +292,28 @@ def meddle() -> None:
         interference()
 
 
+def dawdle_halves() -> float:
+    """Half of however long this case wants the tool body to take."""
+    return float(dawdle["seconds"]) / 2.0
+
+
+def dawdle_midway() -> None:
+    """What happens at the halfway mark of a deliberately long body."""
+    if dawdle["midway"] is not None:
+        dawdle["midway"]()
+
+
 def lookup_body(order_id: str) -> Dict[str, Any]:
     """Look up an order that has already been placed."""
     enter()
     try:
         capture_call(order_id)
         meddle()
+        half = dawdle_halves()
+        if half:
+            time.sleep(half)
+            dawdle_midway()
+            time.sleep(half)
         time.sleep(0.015)
         count("lookup")
         return {"order_id": order_id, "status": "paid", "total_cents": 4200}
@@ -301,6 +326,14 @@ async def alookup_body(order_id: str) -> Dict[str, Any]:
     try:
         capture_call(order_id)
         meddle()
+        half = dawdle_halves()
+        if half:
+            # Awaited, not slept through: a body that blocked the loop for
+            # longer than the lease would block the heartbeat task with it, and
+            # the point of this case is the beating, not the blocking.
+            await asyncio.sleep(half)
+            dawdle_midway()
+            await asyncio.sleep(half)
         await asyncio.sleep(0.015)
         count("lookup")
         return {"order_id": order_id, "status": "paid", "total_cents": 4200}
@@ -396,6 +429,8 @@ def reset() -> None:
     )
     stamp_crashes["on"] = False
     meddling["do"] = None
+    dawdle["seconds"] = 0.0
+    dawdle["midway"] = None
     captured["call"] = None
     captured["calls"] = []
 
@@ -440,12 +475,19 @@ def free_port() -> int:
         return sock.getsockname()[1]
 
 
-def serve(port: int, store: str) -> subprocess.Popen:
+def serve(port: int, store: str, environment: Optional[Dict[str, str]] = None) -> subprocess.Popen:
     """One `salvor serve` on ``port`` over ``store``, with this suite's
-    client-tool declarations loaded."""
+    client-tool declarations loaded.
+
+    ``environment`` adds to the server's environment, which is how the
+    short-lease case asks for a `SALVOR_CLIENT_LEASE_TTL_SECS` a test can
+    actually outlive.
+    """
     declarations = []  # type: List[str]
     for path in DECLS:
         declarations += ["--client-tool", str(path)]
+    env = {"PATH": "/usr/bin:/bin"}
+    env.update(environment or {})
     return subprocess.Popen(
         [
             str(SALVOR),
@@ -458,7 +500,7 @@ def serve(port: int, store: str) -> subprocess.Popen:
         + declarations,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        env={"PATH": "/usr/bin:/bin"},
+        env=env,
     )
 
 
@@ -486,30 +528,37 @@ def wait_until_up(base: str) -> bool:
     return False
 
 
-def _read_log(base: str, thread_id: str) -> List[Event]:
-    """Read a client-driven run's recorded log for pure inspection, over
-    ``log()`` on a driver built directly rather than through ``open`` at all.
+def _read_log(store: str, thread_id: str) -> List[Event]:
+    """Read a thread's recorded log for pure inspection, off the store itself.
 
     A test that wants to see what a run recorded is not driving it, so this
-    never opens the run: opening asks for (or presents) the lease, and a run
-    an invoke just finished with may still be held under it for up to the
-    lease TTL. The read endpoint needs no token (see
-    :meth:`salvor.ClientRunDriver.log`), so a driver built by hand, with no
-    open call and a throwaway token nothing checks, reads it exactly as an
-    operator's dashboard would.
+    never opens the run: opening asks for (or presents) the lease, and a case
+    that took one would be interfering with the very thing it is checking. It
+    reads the store instead of ``GET /v1/client-runs/{id}/log``, and off the
+    same file the server writes: what these cases assert is what was durably
+    recorded, not what a live server chose to serve back, and a read off the
+    store holds whether the server is up, down, or holding the run. `salvor
+    history --json` prints exactly the envelope wire shape the endpoint
+    returns, so nothing about the assertions changes. The TypeScript suite's
+    own log helper reads the same way.
     """
-    driver = ClientRunDriver(
-        httpx.Client(base_url=base, timeout=10),
-        run_id=run_id_for_thread(thread_id),
-        drive_token="",
-        log=[],
-        owns_http=True,
-        stream_timeout=httpx.Timeout(10, read=None),
+    printed = subprocess.run(
+        [str(SALVOR), "history", run_id_for_thread(thread_id), "--store", store, "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+        env={"PATH": "/usr/bin:/bin"},
     )
-    try:
-        return driver.log()
-    finally:
-        driver.close()
+    return [Event.from_envelope(envelope) for envelope in json.loads(printed.stdout)]
+
+
+def _grouped(errors: List[BaseException]) -> Any:
+    """One exception group over ``errors``, or ``None`` on a Python without
+    them (3.11 added the type; this suite still runs on 3.9)."""
+    maker = getattr(__import__("builtins"), "ExceptionGroup", None)
+    if maker is None:  # pragma: no cover - depends on the interpreter
+        return None
+    return maker("several things failed", errors)
 
 
 ONE_TOOL_SCRIPT = [
@@ -556,6 +605,7 @@ class MiddlewareScenarios:
 
     proc: subprocess.Popen
     base: str
+    store: str
     #: This class's own directory under the system temp dir, holding the store
     #: the server writes and nothing else, removed however the class ends.
     workspace: str
@@ -569,7 +619,10 @@ class MiddlewareScenarios:
         port = free_port()
         cls.base = "http://127.0.0.1:{port}".format(port=port)
         cls.workspace = tempfile.mkdtemp(prefix="salvor-py-")
-        cls.proc = serve(port, str(Path(cls.workspace) / "langchain.db"))
+        #: The store this class's server writes, which is also where a test
+        #: reads a run's log back from (see :func:`_read_log`).
+        cls.store = str(Path(cls.workspace) / "langchain.db")
+        cls.proc = serve(port, cls.store)
         if not wait_until_up(cls.base):
             cls.tearDownClass()
             raise unittest.SkipTest("salvor serve did not come up")
@@ -634,13 +687,21 @@ class MiddlewareScenarios:
         )
         return agent, model
 
-    async def kinds_of(self, client: Any, thread_id: str) -> List[str]:
-        return [event.kind for event in _read_log(client.base_url, thread_id)]
+    async def kinds_of(
+        self, client: Any, thread_id: str, store: Optional[str] = None
+    ) -> List[str]:
+        """Every event kind this thread's run recorded, in order.
+
+        Read off the store rather than over HTTP (see :func:`_read_log`).
+        ``store`` names a different one for the two cases that run a server of
+        their own; every other case reads the class's.
+        """
+        return [event.kind for event in _read_log(store or self.store, thread_id)]
 
     async def intents_of(self, client: Any, thread_id: str) -> List[Any]:
         return [
             event
-            for event in _read_log(client.base_url, thread_id)
+            for event in _read_log(self.store, thread_id)
             if event.kind == "ToolCallRequested"
         ]
 
@@ -909,7 +970,23 @@ class MiddlewareScenarios:
                     {"messages": [{"role": "user", "content": "email ops"}]},
                     self.thread("thread-undeclared-tool"),
                 )
-            text = str(caught.exception)
+            refusal = caught.exception
+            self.assertEqual(refusal.code, "tool_undeclared")
+            self.assertIsInstance(
+                refusal.cause,
+                SalvorAPIError,
+                "the server's `unknown_tool` is underneath it",
+            )
+            self.assertEqual(refusal.cause.code, "unknown_tool")
+            self.assertEqual(
+                refusal.cause.message,
+                "no client-performed tool named `send_email` is declared on "
+                "this server; declarations are loaded by the operator (`salvor "
+                "serve --client-tool <FILE>`) and are never registered over "
+                "HTTP",
+                "the sentence the README quotes, verbatim",
+            )
+            text = str(refusal)
             self.assertIn("send_email", text, "the error names the tool")
             self.assertIn("client-tool declaration", text, "and the declaration it needs")
             self.assertIn("--client-tool", text, "and how to load it")
@@ -1225,10 +1302,20 @@ class MiddlewareScenarios:
                 (await self.intents_of(client, thread_id))[0].payload["idempotency_key"],
                 "the key the call was performed under, to look it up by",
             )
+            self.assertEqual(error.code, "tool_needs_resolution")
             text = str(error)
             self.assertIn("wire_payout", text, "the error names the tool")
             self.assertIn("trust_completion", text, "and the rule it broke")
-            self.assertIn("salvor resolve {run}".format(run=run_id), text, "and how")
+            self.assertIn(
+                "POST /v1/runs/{run}/resolve".format(run=run_id),
+                text,
+                "and the endpoint that settles it on a live server",
+            )
+            self.assertIn(
+                "salvor resolve {run}".format(run=run_id),
+                text,
+                "and the command that settles it off the store",
+            )
 
             self.assertEqual(
                 await self.kinds_of(client, thread_id),
@@ -1241,14 +1328,14 @@ class MiddlewareScenarios:
                 "the log ends at the intent: a write nobody has confirmed yet",
             )
 
-            # A person confirms what the payout did and records it, which is the
-            # one way this run moves again. The failed invoke's tape is still
-            # sitting in the middleware (`after_agent` never ran), holding a
-            # lease that is still current, so this reuses that SAME driver
-            # rather than opening the run again, which the held lease would
-            # now refuse from anywhere else.
-            driver = self.last_middleware._tapes[run_id].run
-            await call(driver.resolve, error.output)
+            # A person confirms what the payout did and records it, which is
+            # the one way this run moves again. `after_agent` never ran (the
+            # invoke raised), but the step that raised handed the lease back on
+            # its way out, so this is an ordinary operator resolve over HTTP
+            # from a caller holding no drive token at all: `POST
+            # /v1/runs/{id}/resolve`, which is also what the error's own text
+            # names first.
+            await call(client.resolve, run_id, error.output)
 
             reset()
             again, model = self.agent_for(script, client, tools=[wire_payout])
@@ -1315,6 +1402,7 @@ class MiddlewareScenarios:
             again, _ = self.agent_for(script, client, tools=[wire_payout])
             with self.assertRaises(SalvorMiddlewareError) as caught2:
                 await self.invoke(again, ask, self.thread(thread_id))
+            self.assertEqual(caught2.exception.code, "open_intent")
             text = str(caught2.exception)
             self.assertIn("wire_payout", text, "the error names the tool")
             self.assertIn("trust_completion", text, "and the rule it broke")
@@ -1335,10 +1423,9 @@ class MiddlewareScenarios:
             )
 
             # (3) A person confirms what the call did and records it, over the
-            # driver the refused re-invoke's own tape is still holding open
-            # (the exception skipped `after_agent`, same as case (k2) above).
-            driver = self.last_middleware._tapes[run_id].run
-            await call(driver.resolve, error.output)
+            # same operator endpoint as case (k2): both invokes gave the lease
+            # back as they died, so nothing is holding the run.
+            await call(client.resolve, run_id, error.output)
 
             # (4) Now a further invoke replays the resolved completion, and
             # the tool runs no further.
@@ -1407,6 +1494,11 @@ class MiddlewareScenarios:
                 error,
                 SalvorMiddlewareError,
                 "the second instance's own open was refused outright",
+            )
+            self.assertIs(salvor_error(error), error, "and it arrived bare")
+            self.assertEqual(error.code, "lease_held")
+            self.assertGreaterEqual(
+                error.lapses_in_seconds, 1, "carrying how long the hold has left"
             )
             text = str(error)
             self.assertIn(thread_id, text, "the error names the thread")
@@ -1477,6 +1569,11 @@ class MiddlewareScenarios:
                 await self.invoke(agent, ASK, self.thread(thread_id))
             meddling["do"] = None
 
+            self.assertEqual(caught.exception.code, "lease_lost")
+            self.assertIsNone(
+                caught.exception.lapses_in_seconds,
+                "invalid_drive_token carries no lapse figure to report",
+            )
             text = str(caught.exception)
             self.assertIn(thread_id, text, "the error names the thread")
             self.assertIn(run_id, text, "and the run")
@@ -1550,7 +1647,7 @@ class MiddlewareScenarios:
                     "the invoke completed across the restart",
                 )
                 self.assertEqual(ran["lookup"], 1, "the tool body ran exactly once")
-                kinds = await self.kinds_of(own, thread_id)
+                kinds = await self.kinds_of(own, thread_id, store=store)
                 self.assertEqual(
                     kinds,
                     [
@@ -1616,9 +1713,17 @@ class MiddlewareScenarios:
             await call(client.start_run, agent_hash, {"q": "hi"}, run_id=thread_id)
 
             agent, model = self.agent_for(ONE_TOOL_SCRIPT, client)
-            with self.assertRaises(SalvorAPIError) as caught:
+            with self.assertRaises(SalvorMiddlewareError) as caught:
                 await self.invoke(agent, ASK, self.thread(thread_id))
-            text = str(caught.exception)
+            refusal = caught.exception
+            self.assertEqual(refusal.code, "run_exists")
+            self.assertIsInstance(
+                refusal.cause,
+                SalvorAPIError,
+                "the server's own refusal is underneath it",
+            )
+            self.assertEqual(refusal.cause.code, "run_exists")
+            text = str(refusal)
             self.assertIn(
                 thread_id, text, "the error names the thread (its run id, unchanged)"
             )
@@ -1661,6 +1766,7 @@ class MiddlewareScenarios:
             second, _ = self.agent_for(ONE_TOOL_SCRIPT, client)
             with self.assertRaises(SalvorMiddlewareError) as caught:
                 await self.invoke(second, ASK, self.thread(thread_id))
+            self.assertEqual(caught.exception.code, "thread_finished")
             text = str(caught.exception)
             self.assertIn("thread-finish", text, "the error names the thread")
             self.assertIn("finish", text.lower(), "and says it is finished")
@@ -1737,6 +1843,7 @@ class MiddlewareScenarios:
             run_id = run_id_for_thread(thread_id)
             with self.assertRaises(SalvorMiddlewareError) as caught:
                 await call(finish_thread, client, thread_id)
+            self.assertEqual(caught.exception.code, "open_intent")
             text = str(caught.exception)
             self.assertIn(run_id, text, "the error names the run")
             self.assertIn("never completed", text, "and says the call was never completed")
@@ -1750,6 +1857,317 @@ class MiddlewareScenarios:
 
         self.drive(body)
 
+    # -- (i2) finish_thread on a thread nobody ever invoked --------------------
+
+    def test_finish_thread_on_a_thread_never_invoked_is_refused(self) -> None:
+        """There is nothing to close, and saying so beats appending a
+        `RunCompleted` to a run that has no `RunStarted` under it."""
+
+        async def body(client: Any) -> None:
+            thread_id = "thread-never-invoked"
+            with self.assertRaises(SalvorMiddlewareError) as caught:
+                await call(finish_thread, client, thread_id)
+            refusal = caught.exception
+            self.assertEqual(refusal.code, "thread_never_invoked")
+            self.assertIn(thread_id, str(refusal), "the refusal names the thread")
+            self.assertIn("never been invoked", str(refusal))
+
+        self.drive(body)
+
+    # -- (o) the lease goes back when an invoke ends --------------------------
+
+    def test_an_invoke_that_ends_hands_the_lease_back_for_the_next_opener(
+        self,
+    ) -> None:
+        """A drive that is over stops holding the run, immediately.
+
+        Lapsing is the safety net, not how a drive ends. Without a release, an
+        invoke that returns leaves its lease standing for the rest of the TTL,
+        and the next process to invoke that thread (a worker that picked the
+        job up, a second replica, the same app after a redeploy) is refused
+        `lease_held` for up to a minute over a drive that finished. So the
+        middleware hands the lease back in `after_agent`, and a stranger with
+        no memory of any token for this run takes it on the very next request.
+        """
+        thread_id = "thread-release-on-finish"
+        run_id = run_id_for_thread(thread_id)
+
+        async def body(client: Any) -> None:
+            agent, _ = self.agent_for(ONE_TOOL_SCRIPT, client)
+            await self.invoke(agent, ASK, self.thread(thread_id))
+
+            self.assertNotIn(
+                run_id,
+                client._client_run_tokens,
+                "the client stopped remembering a token that now opens nothing",
+            )
+
+            # A different client object entirely, so nothing is being carried
+            # by the token memory `Client` keeps for its own re-opens: this is
+            # the bare open a second process would make.
+            stranger = self.CLIENT(self.base)
+            try:
+                taken = await call(stranger.open_client_run, run_id=run_id)
+                self.assertEqual(taken.run_id, run_id)
+                self.assertEqual(
+                    len(taken.log_envelopes),
+                    7,
+                    "the recorded log came back with the fresh lease",
+                )
+                self.assertIs(
+                    await call(taken.release),
+                    True,
+                    "and this holder gives it back the same way",
+                )
+            finally:
+                await call(stranger.close)
+
+        self.drive(body)
+
+    # -- (o2) and it goes back when the invoke dies instead -------------------
+
+    def test_a_raising_tool_body_hands_the_lease_back_on_its_way_out(self) -> None:
+        """An invoke that dies inside a tool body releases too.
+
+        `after_agent` does not run when a hook or a tool raises: LangChain
+        re-raises and the graph stops there. If the lease only went back from
+        that hook, the thread every crash touched would be locked for the rest
+        of the TTL, which is exactly the thread somebody is about to retry. So
+        the step that raised gives it back on its way out, and the log still
+        says what it should: the intent went in before the body ran, and no
+        completion followed it.
+        """
+        thread_id = "thread-release-after-a-crash"
+        run_id = run_id_for_thread(thread_id)
+        script = [
+            {
+                "content": "stamping the ledger",
+                "tool_calls": [
+                    {
+                        "name": "stamp_ledger",
+                        "args": {"order_id": "ORD-9119", "note": "seen"},
+                        "id": "call-stamp",
+                    }
+                ],
+            },
+            {"content": "Stamped ORD-9119."},
+        ]
+
+        async def body(client: Any) -> None:
+            stamp_crashes["on"] = True
+            agent, _ = self.agent_for(script, client)
+            with self.assertRaises(RuntimeError):
+                await self.invoke(
+                    agent,
+                    {"messages": [{"role": "user", "content": "stamp ORD-9119"}]},
+                    self.thread(thread_id),
+                )
+            stamp_crashes["on"] = False
+            self.assertEqual(ran["stamp"], 1, "the body ran and died")
+            self.assertEqual(
+                (await self.kinds_of(client, thread_id))[-1],
+                "ToolCallRequested",
+                "the log ends at the intent the crash left open",
+            )
+
+            stranger = self.CLIENT(self.base)
+            try:
+                taken = await call(stranger.open_client_run, run_id=run_id)
+                self.assertEqual(taken.run_id, run_id, "the run was free at once")
+                await call(taken.release)
+            finally:
+                await call(stranger.close)
+
+        self.drive(body)
+
+    # -- (o3) a body longer than the whole lease --------------------------------
+
+    def test_a_tool_body_longer_than_the_lease_keeps_the_run_by_beating(self) -> None:
+        """A driver inside a long body says "still here" and keeps its run.
+
+        A lease lapses when its driver makes no call for the TTL, and a tool
+        body is exactly that: the intent goes in, the body runs for minutes,
+        and nothing touches salvor until the completion. Without a heartbeat
+        the lease lapses mid-body, another opener takes a run whose driver
+        never went anywhere, and the completion is refused after the work was
+        already done.
+
+        So this runs a tool body three times the length of the whole lease
+        (against a server started with `SALVOR_CLIENT_LEASE_TTL_SECS=1`) and
+        asks two things of it: a rival invoking the same thread halfway
+        through, well past the point the lease would have lapsed, is still
+        refused `lease_held`; and the invoke itself finishes normally, with one
+        intent and one completion recorded for the call.
+        """
+        thread_id = "thread-long-tool-body"
+        port = free_port()
+        base = "http://127.0.0.1:{port}".format(port=port)
+        workspace = tempfile.mkdtemp(prefix="salvor-py-")
+        self.addCleanup(shutil.rmtree, workspace, ignore_errors=True)
+        store = str(Path(workspace) / "short-lease.db")
+        proc = serve(port, store, {"SALVOR_CLIENT_LEASE_TTL_SECS": "1"})
+        self.addCleanup(lambda: stop(proc))
+        if not wait_until_up(base):
+            raise unittest.SkipTest("salvor serve did not come up")
+
+        rival = {}  # type: Dict[str, Any]
+
+        def rival_attempt() -> None:
+            """A second instance invoking the same thread, halfway through the
+            first one's tool body. Always the synchronous surface, for the same
+            reason case (l) gives: the refusal happens in the open, before any
+            model or tool call, and needs no second event loop to prove."""
+            # Once, whatever happens: were the rival ever to get the run (which
+            # is the failure this case is here to catch), its own tool body
+            # would reach this same hook and start a third instance, and so on.
+            dawdle["midway"] = None
+            second_client = Client(base)
+            try:
+                second_agent, _ = self.agent_for(ONE_TOOL_SCRIPT, second_client)
+                try:
+                    second_agent.invoke(ASK, self.thread(thread_id))
+                    rival["took_it"] = True
+                except Exception as error:  # noqa: BLE001 - captured, not raised
+                    rival["error"] = error
+            finally:
+                second_client.close()
+
+        async def body(_class_client: Any) -> None:
+            own = self.CLIENT(base)
+            try:
+                dawdle["seconds"] = 3.0
+                dawdle["midway"] = rival_attempt
+                agent, _ = self.agent_for(ONE_TOOL_SCRIPT, own)
+                started = time.monotonic()
+                answer = await self.invoke(agent, ASK, self.thread(thread_id))
+                took = time.monotonic() - started
+            finally:
+                dawdle["seconds"] = 0.0
+                dawdle["midway"] = None
+
+            try:
+                self.assertGreater(
+                    took, 3.0, "the body really did outlive the one-second lease"
+                )
+                self.assertEqual(
+                    self.text_of(answer["messages"][-1]),
+                    "Order ORD-7781 is paid, 4200 cents.",
+                    "the invoke finished, its lease kept alive under it",
+                )
+                self.assertEqual(ran["lookup"], 1, "the tool body ran once")
+
+                self.assertNotIn(
+                    "took_it", rival, "the rival did not take the run mid-body"
+                )
+                refusal = salvor_error(rival.get("error"))
+                self.assertIsNotNone(refusal, "the rival was refused by name")
+                self.assertEqual(refusal.code, "lease_held")
+                self.assertGreaterEqual(
+                    refusal.lapses_in_seconds, 1, "and told how long the hold has"
+                )
+                self.assertIn(thread_id, str(refusal), "naming the thread it wanted")
+                self.assertIn(run_id_for_thread(thread_id), str(refusal))
+
+                self.assertEqual(
+                    await self.kinds_of(own, thread_id, store=store),
+                    [
+                        "RunStarted",
+                        "ModelCallRequested",
+                        "ModelCallCompleted",
+                        "ToolCallRequested",
+                        "ToolCallCompleted",
+                        "ModelCallRequested",
+                        "ModelCallCompleted",
+                    ],
+                    "one intent, one completion: nothing was refused after the work",
+                )
+            finally:
+                await call(own.close)
+
+        self.drive(body)
+
+    # -- (o4) catching a refusal, bare or wrapped -----------------------------
+
+    def test_salvor_error_finds_the_refusal_bare_and_wrapped(self) -> None:
+        """`salvor_error` is the one way an application catches these.
+
+        LangChain re-raises what a middleware hook raises exactly as it was
+        raised, so today the refusal arrives bare and `salvor_error` hands the
+        same object back. That is not a promise, and an application's own retry
+        or executor may wrap it, so the helper is written to find it under a
+        wrapper, under an implicit context, and inside an exception group too.
+        Anything with no salvor refusal in it at all answers `None`, which is
+        what tells a handler to re-raise.
+        """
+
+        async def body(client: Any) -> None:
+            agent, _ = self.agent_for(ONE_TOOL_SCRIPT, client)
+            with self.assertRaises(SalvorMiddlewareError) as caught:
+                await call(getattr(agent, self.INVOKE), ASK)
+            refusal = caught.exception
+
+            self.assertIs(
+                salvor_error(refusal), refusal, "the shape LangChain raises today"
+            )
+            self.assertEqual(refusal.code, "thread_id_missing")
+
+            wrapped = RuntimeError("the app's own retry gave up")
+            wrapped.__cause__ = refusal
+            self.assertIs(salvor_error(wrapped), refusal, "found under a wrapper")
+
+            try:
+                try:
+                    raise refusal
+                except SalvorMiddlewareError:
+                    raise RuntimeError("raised while handling it")
+            except RuntimeError as chained:
+                self.assertIs(
+                    salvor_error(chained), refusal, "found under an implicit context"
+                )
+
+            grouped = _grouped([ValueError("unrelated"), refusal])
+            if grouped is not None:
+                self.assertIs(
+                    salvor_error(grouped), refusal, "found inside an exception group"
+                )
+
+            self.assertIsNone(
+                salvor_error(ValueError("nothing to do with salvor")),
+                "an unrelated error is not claimed",
+            )
+
+        self.drive(body)
+
+    # -- (o5) a thread id of the wrong type -----------------------------------
+
+    def test_a_thread_id_that_is_not_a_string_is_refused_by_name(self) -> None:
+        """An id this middleware cannot use is a different refusal from no id.
+
+        The two have different fixes, so they are told apart: nothing passed is
+        `thread_id_missing` (add the config), while an integer, or the empty
+        string an app uses for "no thread yet", is `thread_id_invalid`, and the
+        sentence says what arrived so the reader is not left guessing which of
+        their ids reached it.
+        """
+
+        async def body(client: Any) -> None:
+            for given, said in ((7781, "int"), ("", "an empty string")):
+                agent, _ = self.agent_for(ONE_TOOL_SCRIPT, client)
+                with self.assertRaises(SalvorMiddlewareError) as caught:
+                    await call(
+                        getattr(agent, self.INVOKE),
+                        ASK,
+                        {"configurable": {"thread_id": given}},
+                    )
+                refusal = salvor_error(caught.exception)
+                self.assertEqual(refusal.code, "thread_id_invalid")
+                self.assertIn(said, str(refusal), "the refusal says what arrived")
+                self.assertIn(
+                    "non-empty string", str(refusal), "and what it needed instead"
+                )
+
+        self.drive(body)
+
     # -- a thread id is required ----------------------------------------------
 
     def test_an_invoke_with_no_thread_id_is_refused(self) -> None:
@@ -1757,6 +2175,7 @@ class MiddlewareScenarios:
             agent, _ = self.agent_for(ONE_TOOL_SCRIPT, client)
             with self.assertRaises(SalvorMiddlewareError) as caught:
                 await call(getattr(agent, self.INVOKE), ASK)
+            self.assertEqual(caught.exception.code, "thread_id_missing")
             self.assertIn("thread id", str(caught.exception))
 
         self.drive(body)
@@ -1775,6 +2194,7 @@ class MiddlewareScenarios:
 
             with self.assertRaises(SalvorMiddlewareError) as caught:
                 self.drive(body)
+            self.assertEqual(caught.exception.code, "wrong_client")
             self.assertIn(self.NAMES_CLIENT, str(caught.exception))
         finally:
             self.dispose(wrong)

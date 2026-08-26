@@ -11,11 +11,14 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from typing import Any, Awaitable, Callable, Dict, Optional, TypeVar
+import logging
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Optional, TypeVar
 
 from ..async_client_runs import AsyncClientRunDriver
 from ..errors import SalvorAPIError
 from .tape import (
+    MINIMUM_BEAT_SECONDS,
     Drive,
     ModelAnswer,
     ModelOutcome,
@@ -23,6 +26,7 @@ from .tape import (
     Tape,
     ToolOutcome,
     TurnPosition,
+    beat_interval,
     cannot_reopen,
     dangling_untrusted_call,
     held_by_another_driver,
@@ -30,10 +34,15 @@ from .tape import (
     lease_taken,
     one_driver_error,
     start_events,
+    still_ours,
     usage_payload,
 )
 
 __all__ = ["AsyncRunTape"]
+
+#: Where a lease this tape could not hand back is mentioned. See
+#: :data:`salvor.langchain.run_tape.LOG`; the reasoning is identical.
+LOG = logging.getLogger("salvor.langchain")
 
 T = TypeVar("T")
 
@@ -78,6 +87,76 @@ class AsyncRunTape:
         """The driver underneath, for a caller that wants the log or the lease."""
         return self._driver
 
+    # -- the lease -------------------------------------------------------------
+
+    @asynccontextmanager
+    async def step(self) -> AsyncIterator[None]:
+        """:meth:`salvor.langchain.RunTape.step`, awaited: one hook's use of
+        this tape, handing the lease back if the invoke dies here.
+
+        No lock guards the counting, because a turn's calls are tasks on one
+        event loop and neither :meth:`salvor.langchain.tape.Tape.entered` nor
+        :meth:`~salvor.langchain.tape.Tape.left` awaits anything in between.
+        """
+        self._tape.entered()
+        failed = False
+        try:
+            yield
+        except BaseException as error:
+            failed = still_ours(error)
+            raise
+        finally:
+            if self._tape.left(failed):
+                await self.release()
+
+    async def release(self) -> None:
+        """:meth:`salvor.langchain.RunTape.release`, awaited: hand the run's
+        lease back, once, and never raise doing it."""
+        if not self._tape.releasing():
+            return
+        try:
+            await self._driver.release()
+        except Exception as refused:  # noqa: BLE001 - the lease lapses either way
+            LOG.debug("salvor: run %s kept its lease: %s", self.run_id, refused)
+
+    @asynccontextmanager
+    async def _beating(self) -> AsyncIterator[None]:
+        """:meth:`salvor.langchain.RunTape._beating`, awaited: keep the lease
+        alive while a body this invoke cannot hurry runs.
+
+        A task on this loop rather than a thread, and cancelled in the
+        ``finally``: a long tool body here is one that awaits, so the beats
+        happen in the gaps it leaves. A body that blocks the loop instead
+        blocks this too, which is the honest behaviour, and the same body would
+        block everything else the application is running on that loop.
+        """
+        beater = asyncio.ensure_future(self._beat())
+        try:
+            yield
+        finally:
+            beater.cancel()
+            try:
+                await beater
+            except asyncio.CancelledError:
+                pass
+
+    async def _beat(self) -> None:
+        """Say "still here" until this task is cancelled, learning the interval
+        from the answer.
+
+        The same schedule the synchronous tape keeps (see
+        :meth:`salvor.langchain.RunTape._beat`): a probe at a fixed quarter
+        second, because opening a run says nothing about the lease TTL, then a
+        third of whatever the server last answered.
+        """
+        interval = MINIMUM_BEAT_SECONDS
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                interval = beat_interval(await self._driver.heartbeat())
+            except Exception:  # noqa: BLE001 - the step underway reports this
+                return
+
     async def model_call(
         self,
         request_hash: str,
@@ -102,7 +181,8 @@ class AsyncRunTape:
             )
             if opened.settled:
                 return self._tape.model_replayed(seq, opened)
-            response, usage = await perform()
+            async with self._beating():
+                response, usage = await perform()
             await self._guarded(
                 lambda: self._driver.client_model_completion(
                     seq, response, usage_payload(usage)
@@ -178,7 +258,8 @@ class AsyncRunTape:
             raise dangling_untrusted_call(
                 self._drive.thread_id, self.run_id, tool, seq
             )
-        output = await perform(self._tape.opened_call(seq, opened))
+        async with self._beating():
+            output = await perform(self._tape.opened_call(seq, opened))
         await self._guarded(
             lambda: self._driver.client_tool_completion(seq, output)
         )

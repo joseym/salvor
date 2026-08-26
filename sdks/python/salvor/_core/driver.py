@@ -185,6 +185,47 @@ def open_run(
     return Call("POST", "/v1/client-runs", parse=parse, json_body=body, headers=headers)
 
 
+def release(run_id: str, drive_token: str) -> Call:
+    """Hand the drive-token lease back, so the next open takes the run at once.
+
+    Answers ``True`` when a lease was given back and ``False`` when there was
+    none to give: released already, lapsed, or a run this server never opened.
+    Finding nothing is not an error, because the caller's goal (a run nobody
+    holds) is already true. A lease that stands and is not this caller's is
+    ``403 invalid_drive_token``, a missing token included, and nothing is
+    dropped.
+
+    Lapsing is the safety net, not how a drive ends: without this call a
+    short-lived process locks out the process after it for up to the lease TTL
+    for nothing. Only the lease goes; the log stays readable and the run stays
+    client-driven, so the next open adopts it as it would after a restart.
+    """
+    return Call(
+        "POST",
+        f"/v1/client-runs/{run_id}/release",
+        parse=lambda obj: bool(obj.get("released", False)),
+        headers=lease(drive_token),
+    )
+
+
+def heartbeat(run_id: str, drive_token: str) -> Call:
+    """Say "still here" without driving the run, and hear how long the lease has.
+
+    Answers the whole seconds until the lease lapses if this driver goes quiet
+    from now (rounded up, never below ``1``), so a driver picks its interval
+    from the answer rather than being told the server's configuration some
+    other way. For the driver that makes no drive call for longer than the TTL
+    because it is inside one long body: a tool that takes minutes, a model call
+    it is streaming to its own screen.
+    """
+    return Call(
+        "POST",
+        f"/v1/client-runs/{run_id}/heartbeat",
+        parse=lambda obj: int(obj.get("lapses_in_seconds", 0)),
+        headers=lease(drive_token),
+    )
+
+
 def read_log(run_id: str, from_seq: int) -> Call:
     return Call(
         "GET",

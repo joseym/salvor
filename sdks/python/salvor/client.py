@@ -98,11 +98,14 @@ class Client:
         #: lease back rather than asking with no token and being refused
         #: `lease_held` by a lease this same client minted a moment ago (a
         #: lease is held until it lapses, not until a newer caller asks for
-        #: it; see ``API.md``'s drive-token section). Never cleared: a stale
-        #: entry is harmless (an open honours it only when it is the run's
-        #: CURRENT lease, and ignores it otherwise), while forgetting it would
-        #: needlessly refuse this same client's own next open of an idle
-        #: thread until the lease it minted lapsed on its own. Passing
+        #: it; see ``API.md``'s drive-token section). Cleared in one place
+        #: only: when the driver hands that lease back with
+        #: :meth:`~salvor.ClientRunDriver.release`, after which the token opens
+        #: nothing and the server does not even hold the run any more. A stale
+        #: entry is otherwise harmless (an open honours a token only when it is
+        #: the run's CURRENT lease, and ignores it otherwise), while forgetting
+        #: it any earlier would needlessly refuse this same client's own next
+        #: open of an idle thread until the lease it minted lapsed. Passing
         #: ``drive_token`` explicitly always wins over what is remembered
         #: here; the underlying :class:`~salvor.client_runs.ClientRunDriver`
         #: stays stateless, so a genuinely different client (or the driver
@@ -506,6 +509,14 @@ class Client:
             run_id=run_id,
             record_prompts=record_prompts,
             drive_token=drive_token,
+            on_release=self._forget_drive_token,
         )
         self._client_run_tokens[driver.run_id] = driver.drive_token
         return driver
+
+    def _forget_drive_token(self, run_id: str) -> None:
+        """Stop remembering a run's drive token, which the driver calls when it
+        hands the lease back: a released token opens nothing, and presenting it
+        on the next open would only ask the server about a lease neither side
+        holds any more."""
+        self._client_run_tokens.pop(run_id, None)

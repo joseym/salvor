@@ -55,6 +55,16 @@ Both stop the invoke immediately, by name, before running a tool body for a
 step that was never going to be recorded (:func:`held_by_another_driver`,
 :func:`one_driver_error`).
 
+A hold ends four ways, and only one of them is the TTL. The middleware releases
+it when an invoke ends (``after_agent``, and the step that raised when the
+invoke ends by raising: see :meth:`salvor.langchain.RunTape.step`); a heartbeat
+keeps it alive while a tool body or a live model call runs, so a driver that
+never went anywhere does not lose the run it is inside of
+(:meth:`salvor.langchain.RunTape._beating`, :func:`beat_interval`); an operator
+resolving a dangling write over HTTP clears it; and a driver that dies without
+releasing lets it lapse, which is the safety net rather than the way a drive is
+meant to end.
+
 The one refusal worth retrying is ``unknown_run``, which is what a restarted
 salvor answers with, because it holds its client-driven leases in memory but
 not the log itself. Losing the lease this way once is recoverable and nothing
@@ -74,10 +84,12 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..errors import SalvorAPIError
 from ..models import Event, Usage
-from .errors import SalvorMiddlewareError
+from .errors import SalvorMiddlewareError, salvor_error
 from .hash import canonical_json
 
 __all__ = [
+    "BEATS_PER_LEASE",
+    "MINIMUM_BEAT_SECONDS",
     "Drive",
     "ForkInfo",
     "ModelAnswer",
@@ -87,13 +99,16 @@ __all__ = [
     "ToolOutcome",
     "TurnPosition",
     "ZERO_USAGE",
+    "beat_interval",
     "cannot_reopen",
     "dangling_untrusted_call",
     "held_by_another_driver",
     "lease_lost",
     "lease_taken",
     "one_driver_error",
+    "server_driven_run",
     "start_events",
+    "still_ours",
     "usage_payload",
 ]
 
@@ -277,6 +292,56 @@ def held_by_another_driver(error: Exception) -> bool:
     return isinstance(error, SalvorAPIError) and error.code in ONE_DRIVER
 
 
+#: The codes that mean this invoke is not the run's driver any more, so there is
+#: no lease of its own to hand back: another driver was already holding it
+#: (``lease_held``) or has taken it since (``lease_lost``).
+NOT_OURS = ("lease_held", "lease_lost")
+
+
+def still_ours(error: BaseException) -> bool:
+    """Whether the lease is still this invoke's to hand back after ``error``.
+
+    An invoke that ends any other way still holds the run and releases it, which
+    is what lets the next process take the thread up at once instead of waiting
+    out the TTL. The one-driver refusals are the exception: the lease they name
+    belongs to somebody else, and a release presenting a token that is not the
+    current lease is refused anyway. So they are left alone, rather than
+    answered with a call whose only possible outcome is a 403 nobody reads.
+    """
+    refusal = salvor_error(error)
+    return refusal is None or refusal.code not in NOT_OURS
+
+
+#: How many heartbeats a driver fits inside one lease. Three, so two beats can
+#: be lost to a slow network or a busy loop and the lease still stands.
+BEATS_PER_LEASE = 3
+
+#: How long a body waits before its first beat, and the shortest any interval
+#: after it is allowed to get. Opening a run answers with no TTL at all, so the
+#: first beat is the probe that asks for one, and every beat after it is spaced
+#: by what the answer said. A tool that returns inside this quarter second
+#: never beats at all, which is nearly all of them, and a lease TTL of one
+#: second (which a test sets, and nothing else should) still gets its probe
+#: comfortably inside the hold. The TypeScript middleware uses the same
+#: quarter second for the same reason.
+MINIMUM_BEAT_SECONDS = 0.25
+
+
+def beat_interval(lapses_in_seconds: Any) -> float:
+    """How long to wait before the next heartbeat, from what the last one said.
+
+    The server answers every heartbeat with the whole seconds the lease has left
+    (see ``API.md``'s heartbeat endpoint), so a driver reads its interval off
+    the answer rather than being told the server's configuration some other way.
+    A third of it, so two lost beats still leave the lease standing.
+    """
+    try:
+        lapses = float(lapses_in_seconds)
+    except (TypeError, ValueError):  # pragma: no cover - a server that says something else
+        lapses = 0.0
+    return max(lapses / BEATS_PER_LEASE, MINIMUM_BEAT_SECONDS)
+
+
 def one_driver_error(
     thread_id: str, run_id: str, error: SalvorAPIError
 ) -> SalvorMiddlewareError:
@@ -305,7 +370,35 @@ def one_driver_error(
         "instance right now: {when}. Salvor allows one driver per thread at a "
         "time, so a second instance invoking this thread while the first is "
         "active is refused before it runs anything, rather than racing the "
-        "first for the lease.".format(run=run_id, thread=thread_id, when=when)
+        "first for the lease.".format(run=run_id, thread=thread_id, when=when),
+        code="lease_held" if error.code == "lease_held" else "lease_lost",
+        cause=error,
+        lapses_in_seconds=int(lapses) if lapses is not None else None,
+    )
+
+
+def server_driven_run(
+    thread_id: str, run_id: str, error: SalvorAPIError
+) -> SalvorMiddlewareError:
+    """The refusal for a thread whose run id salvor's OTHER mode already
+    started.
+
+    ``open_client_run`` knows a client-driven run two ways: this server's lease
+    registry, or ``driven_by: "client"`` on the recorded ``RunStarted``. A run
+    started with ``start_run`` carries neither, so the open is refused
+    ``run_exists``, before any model or tool call. Nothing the middleware can
+    do fixes it, but the sentence can say which thread caused it, which the
+    server's own (which knows only run ids) cannot.
+    """
+    return SalvorMiddlewareError(
+        "thread `{thread}` maps to run {run}, which salvor's other mode "
+        "already started: {reason}. A server-driven run and a client-driven "
+        "one cannot share an id, so give this thread an id of its own, or map "
+        "it to a different run id with `thread_id_to_run_id`.".format(
+            thread=thread_id, run=run_id, reason=error.message
+        ),
+        code="run_exists",
+        cause=error,
     )
 
 
@@ -319,7 +412,8 @@ def lease_taken(thread_id: str, run_id: str) -> SalvorMiddlewareError:
         "Salvor allows one driver per thread at a time, so two app instances "
         "invoking the same thread will go on taking the run from each other "
         "and neither will finish. Invoke a thread from one place, or give the "
-        "other task a thread id of its own.".format(thread=thread_id, run=run_id)
+        "other task a thread id of its own.".format(thread=thread_id, run=run_id),
+        code="lease_lost",
     )
 
 
@@ -341,10 +435,14 @@ def dangling_untrusted_call(
         "run {run} (thread `{thread}`) met the intent for `{tool}` at seq "
         "{seq} that an earlier invoke left open: its declaration sets "
         "`trust_completion = false`, so that call's result was never reported "
-        "and it is a call that was never completed. Settle it first (`salvor "
-        "resolve {run} --store <path to the server's store> --output '<json "
-        "the tool returned>'`, the Inspector, or `driver.resolve(...)`) and "
-        "invoke again.".format(run=run_id, thread=thread_id, tool=tool, seq=seq)
+        "and it is a call that was never completed. Settle it first (`POST "
+        "/v1/runs/{run}/resolve` on the live server, which clears the run's "
+        "lease too; `salvor resolve {run} --store <path to the server's store> "
+        "--output '<json "
+        "the tool returned>'`, which leaves the lease to lapse on its own; or "
+        "`driver.resolve(...)` on a driver holding the run's lease) and invoke "
+        "again.".format(run=run_id, thread=thread_id, tool=tool, seq=seq),
+        code="open_intent",
     )
 
 
@@ -366,7 +464,9 @@ def cannot_reopen(
         "restarted salvor loses. Drive the thread against the server that "
         "opened it, or start the next task on a new thread id.".format(
             thread=thread_id, run=run_id, reason=refused.message
-        )
+        ),
+        code="reopen_refused",
+        cause=refused,
     )
 
 
@@ -395,6 +495,12 @@ class Tape:
         self._unreported = None  # type: Optional[ForkInfo]
         #: Per-turn admission order, keyed by turn: which rank goes next.
         self._turns = {}  # type: Dict[str, int]
+        #: How many of this invoke's steps are inside the tape right now, and
+        #: whether one of them has already failed. See :meth:`entered`.
+        self._live = 0
+        self._failing = False
+        #: True once the lease has been handed back, so it is handed back once.
+        self.released = False
         self._take_up(log)
 
     def _take_up(self, log: List[Event]) -> None:
@@ -475,15 +581,18 @@ class Tape:
                         "run {run} asked for {what} at seq {cursor}, but the log "
                         "holds a {kind} there, and its last event (seq {tail_seq}, "
                         "{tail_kind}) is a call that was never completed. Settle "
-                        "that call first (`salvor run resolve {run} <output>`, or "
-                        "the resolve endpoint) and invoke again.".format(
+                        "that call first (`POST /v1/runs/{run}/resolve` on the "
+                        "live server, or `salvor resolve {run} --store <path to "
+                        "the server's store> --output '<json>'`) and invoke "
+                        "again.".format(
                             run=self.run_id,
                             what=what,
                             cursor=self._cursor,
                             kind=recorded.kind,
                             tail_seq=tail.seq,
                             tail_kind=tail.kind,
-                        )
+                        ),
+                        code="open_intent",
                     )
                 self._forked_at(self._cursor)
                 self._cursor = self._recorded_length
@@ -518,6 +627,49 @@ class Tape:
         """
         info, self._unreported = self._unreported, None
         return info
+
+    # -- when the lease goes back -----------------------------------------------
+
+    def entered(self) -> None:
+        """One of this invoke's steps has come inside the tape."""
+        self._live += 1
+
+    def left(self, failed: bool) -> bool:
+        """One step leaves; ``True`` when the lease should go back with it.
+
+        Answering ``True`` asks for the release; the handing back itself, and
+        the once-only flag that goes with it, is :meth:`releasing`.
+
+        An invoke that ends normally hands the lease back from ``after_agent``.
+        An invoke that ends by raising never reaches ``after_agent`` at all
+        (LangChain skips it), so the step that raised has to do it, and the
+        lease would otherwise be held until it lapsed, locking the thread for
+        the rest of the TTL over an error the application has already been told
+        about.
+
+        The counting is what keeps that safe for a parallel turn. A model turn's
+        other tool calls are still live when one of them raises: LangGraph runs
+        them anyway, and handing the lease back under them would turn their own
+        result into a one-driver refusal about a lease this invoke gave away.
+        So the failure is remembered and the lease goes back with the LAST step
+        out, whichever one that is.
+        """
+        self._live -= 1
+        if failed:
+            self._failing = True
+        return self._live <= 0 and self._failing and not self.released
+
+    def releasing(self) -> bool:
+        """``True`` once, when nothing has handed this run's lease back yet.
+
+        What ``after_agent`` asks on the ordinary path, so an invoke whose last
+        step already released (see :meth:`left`) does not ask the server to
+        release a lease it no longer holds.
+        """
+        if self.released:
+            return False
+        self.released = True
+        return True
 
     # -- what a message says about itself ---------------------------------------
 
@@ -656,7 +808,8 @@ class Tape:
                 "run {run} reports the tool call at seq {intent} settled, but seq "
                 "{seq} holds no completion to replay.".format(
                     run=self.run_id, intent=seq - 1, seq=seq
-                )
+                ),
+                code="open_intent",
             )
         return completion.payload.get("output")
 

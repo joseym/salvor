@@ -56,6 +56,33 @@ warning to the ``salvor.langchain`` logger), because the usual cause is a tool
 whose result differs between invokes or a graph branching on the clock, and
 neither shows up anywhere else.
 
+When something is refused
+-------------------------
+
+Everything this middleware refuses is a :class:`SalvorMiddlewareError` carrying
+a stable ``code``, and :func:`salvor_error` is how an application gets to one::
+
+    try:
+        agent.invoke(ask, {"configurable": {"thread_id": thread}})
+    except Exception as error:
+        refusal = salvor_error(error)
+        if refusal is None:
+            raise
+        if refusal.code == "lease_held":
+            time.sleep(refusal.lapses_in_seconds + 1)
+
+LangChain re-raises a middleware's error exactly as it was raised, so the
+refusal usually arrives bare; the helper looks under a wrapper, an implicit
+context and an exception group all the same, so one handler covers both shapes.
+See :mod:`salvor.langchain.errors` for the codes.
+
+The lease is part of the same story. One driver per thread at a time, so a
+second instance invoking a thread the first is still driving is refused
+``lease_held`` before it runs anything. An invoke hands its lease back when it
+ends, raising or returning, so the next process takes the thread up at once;
+while a tool body or a live model call runs, a heartbeat keeps that lease from
+lapsing under a driver that never went anywhere.
+
 What the operator has to declare
 --------------------------------
 
@@ -84,7 +111,7 @@ from __future__ import annotations
 
 from .async_run_tape import AsyncRunTape
 from .current_call import ToolCallContext, current_tool_call
-from .errors import SalvorMiddlewareError, ToolNeedsResolution
+from .errors import SalvorMiddlewareError, ToolNeedsResolution, salvor_error
 from .hash import canonical_json, hash_value, is_uuid, run_id_for_thread, sha256_hex
 from .request import canonical_request, request_hash
 from .run_tape import RunTape
@@ -127,6 +154,7 @@ __all__ = [
     "is_uuid",
     "request_hash",
     "run_id_for_thread",
+    "salvor_error",
     "salvor_middleware",
     "sha256_hex",
     "warn_of_fork",

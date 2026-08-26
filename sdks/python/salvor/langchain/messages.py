@@ -61,14 +61,16 @@ def stored_ai_message(stored: Any, run: Optional[str] = None) -> AIMessage:
             "run {run} recorded a model response this middleware cannot read "
             'back. It expects a LangChain stored message (`{{"type": "ai", '
             '"data": {{...}}}}`), which is what it writes; a run driven by '
-            "other code records other shapes.".format(run=run or "?")
+            "other code records other shapes.".format(run=run or "?"),
+            code="unreadable_record",
         )
     message = messages_from_dict([stored])[0]
     if not isinstance(message, AIMessage):  # pragma: no cover - guarded above
         raise SalvorMiddlewareError(
             "run {run} recorded a {kind} message where a model answer belongs.".format(
                 run=run or "?", kind=getattr(message, "type", "?")
-            )
+            ),
+            code="unreadable_record",
         )
     return message
 

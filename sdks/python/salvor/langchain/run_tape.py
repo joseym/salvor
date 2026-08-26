@@ -9,19 +9,25 @@ Read :class:`salvor.langchain.AsyncRunTape` for the same thing awaited.
 The waiting is the one real difference between the two. LangChain's synchronous
 ``ToolNode`` runs a model turn's tool calls on a thread pool, so the ranks that
 have to wait are threads, and they wait on a ``threading.Condition`` rather than
-an ``asyncio.Condition``. Nothing here starts a thread of its own and nothing
-here starts an event loop: a synchronous agent stays on the threads LangChain
-gave it.
+an ``asyncio.Condition``. Nothing here starts an event loop: a synchronous agent
+stays on the threads LangChain gave it. The one thread this file starts of its
+own accord is the heartbeat (:meth:`RunTape._beating`), a daemon that says
+"still here" to salvor while a tool body or a live model call runs, because a
+lease with no call inside its TTL lapses under a driver that never went
+anywhere.
 """
 
 from __future__ import annotations
 
+import logging
 import threading
-from typing import Any, Callable, Dict, Optional, TypeVar
+from contextlib import contextmanager
+from typing import Any, Callable, Dict, Iterator, Optional, TypeVar
 
 from ..client_runs import ClientRunDriver
 from ..errors import SalvorAPIError
 from .tape import (
+    MINIMUM_BEAT_SECONDS,
     Drive,
     ModelAnswer,
     ModelOutcome,
@@ -29,6 +35,7 @@ from .tape import (
     Tape,
     ToolOutcome,
     TurnPosition,
+    beat_interval,
     cannot_reopen,
     dangling_untrusted_call,
     held_by_another_driver,
@@ -36,10 +43,17 @@ from .tape import (
     lease_taken,
     one_driver_error,
     start_events,
+    still_ours,
     usage_payload,
 )
 
 __all__ = ["RunTape"]
+
+#: Where a lease this tape could not hand back is mentioned. Debug, not warning:
+#: a release that fails changes nothing an application can act on (the lease
+#: lapses on its own), and it usually happens while a real error is on its way
+#: out, where a second line about the lease would only be noise.
+LOG = logging.getLogger("salvor.langchain")
 
 T = TypeVar("T")
 
@@ -60,6 +74,9 @@ class RunTape:
         #: True once this invoke has taken the run's lease back, which it may do
         #: once. See :func:`salvor.langchain.tape.lease_taken`.
         self._reopened = False
+        #: Guards the live-step count, which a parallel turn's pool threads
+        #: change at the same moment.
+        self._counting = threading.Lock()
 
     @classmethod
     def open(
@@ -83,6 +100,98 @@ class RunTape:
     def run(self) -> ClientRunDriver:
         """The driver underneath, for a caller that wants the log or the lease."""
         return self._driver
+
+    # -- the lease -------------------------------------------------------------
+
+    @contextmanager
+    def step(self) -> Iterator[None]:
+        """One hook's use of this tape, handing the lease back if it dies here.
+
+        An invoke that ends normally releases from ``after_agent``. An invoke
+        that ends by raising never reaches ``after_agent``, so the lease has to
+        go back from the step that raised, or the thread stays locked for the
+        rest of the lease TTL over an error the application already knows
+        about. The one-driver refusals are left alone: the lease they name is
+        somebody else's (see :func:`~salvor.langchain.tape.still_ours`).
+
+        A parallel turn's other calls may still be live when one of them
+        raises, so the release goes with the last step out rather than the first
+        (see :meth:`salvor.langchain.tape.Tape.left`).
+        """
+        with self._counting:
+            self._tape.entered()
+        failed = False
+        try:
+            yield
+        except BaseException as error:
+            failed = still_ours(error)
+            raise
+        finally:
+            with self._counting:
+                hand_back = self._tape.left(failed)
+            if hand_back:
+                self.release()
+
+    def release(self) -> None:
+        """Hand the run's lease back, once, so the next invoke takes the thread
+        up at once instead of waiting out the TTL.
+
+        Never raises: a release that fails leaves the lease to lapse the way it
+        would have anyway, and this is called on the way out of an invoke that
+        may already be carrying an error worth more than this one.
+        """
+        with self._counting:
+            going = self._tape.releasing()
+        if not going:
+            return
+        try:
+            self._driver.release()
+        except Exception as refused:  # noqa: BLE001 - the lease lapses either way
+            LOG.debug("salvor: run %s kept its lease: %s", self.run_id, refused)
+
+    @contextmanager
+    def _beating(self) -> Iterator[None]:
+        """Keep the lease alive while a body this invoke cannot hurry runs.
+
+        A tool that takes minutes, or a model call the application is streaming
+        itself, makes no call to salvor while it works, and a lease with no
+        driving call inside its TTL lapses. So a daemon thread says "still
+        here" (``POST /v1/client-runs/{id}/heartbeat``) on the interval the
+        server's own answer names, and is stopped in the ``finally`` below.
+
+        The thread is a daemon and is not joined: a beat already in flight when
+        the body finishes lands on a run this invoke either still holds (a
+        no-op) or has just released (a refusal the beater swallows), and
+        neither is worth making the tool call wait for.
+        """
+        stop = threading.Event()
+        beater = threading.Thread(
+            target=self._beat, args=(stop,), name="salvor-heartbeat", daemon=True
+        )
+        beater.start()
+        try:
+            yield
+        finally:
+            stop.set()
+
+    def _beat(self, stop: threading.Event) -> None:
+        """Say "still here" until the body is done, learning the interval from
+        the answer.
+
+        The first beat is a probe: opening a run says nothing about the lease
+        TTL, and the heartbeat's own answer is where that number comes from, so
+        the first one waits a fixed quarter second and every one after it waits
+        a third of what the server last said. A body shorter than that probe
+        beats not at all, which is nearly every tool call. A refusal means the
+        lease is gone or the server is, and the step underway will say so, so
+        this just stops.
+        """
+        interval = MINIMUM_BEAT_SECONDS
+        while not stop.wait(interval):
+            try:
+                interval = beat_interval(self._driver.heartbeat())
+            except Exception:  # noqa: BLE001 - the step underway reports this
+                return
 
     def model_call(
         self,
@@ -108,7 +217,8 @@ class RunTape:
             )
             if opened.settled:
                 return self._tape.model_replayed(seq, opened)
-            response, usage = perform()
+            with self._beating():
+                response, usage = perform()
             self._guarded(
                 lambda: self._driver.client_model_completion(
                     seq, response, usage_payload(usage)
@@ -184,7 +294,8 @@ class RunTape:
             raise dangling_untrusted_call(
                 self._drive.thread_id, self.run_id, tool, seq
             )
-        output = perform(self._tape.opened_call(seq, opened))
+        with self._beating():
+            output = perform(self._tape.opened_call(seq, opened))
         self._guarded(lambda: self._driver.client_tool_completion(seq, output))
         return self._tape.tool_performed(seq, opened, output)
 
