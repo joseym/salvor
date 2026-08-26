@@ -262,6 +262,9 @@ The LangChain extra is in the next release of `@salvor-run/client`; it is not
 on npm yet, so until that release ships, install the SDK from a checkout of
 this repository instead (`npm install <path-to-checkout>/sdks/typescript
 langchain @langchain/core zod`), and come back to the line above once it is.
+That checkout install works the same way from any directory, so an app of
+your own outside this repository installs against it exactly as
+`examples/langchain` does.
 
 Then add one middleware to the agent you already have:
 
@@ -342,15 +345,16 @@ shape. `createAgent` wraps an error thrown inside a graph node in its own
 instance only on `.cause`: that is how `ToolNeedsResolution` and the tool-side
 refusals (`tool_undeclared`, `open_intent`, `lease_lost`) reach you. An error
 thrown from `beforeAgent`, before any node runs, arrives **bare**: that is
-`lease_held`, `thread_finished`, `thread_id_missing`, `thread_id_invalid` and
-`run_exists`. A `catch` that checks only `e.cause` misses the second group and
-a `catch` that checks only `instanceof` misses the first; `salvorError` walks
-the `cause` chain and covers both. Note that a middleware error now carries a
-`cause` of its own (the `SalvorApiError` underneath), so reaching one level in
-by hand can land on the server's error rather than the middleware's.
+`lease_held`, `thread_finished`, `thread_abandoned`, `thread_id_missing`,
+`thread_id_invalid` and `run_exists`. A `catch` that checks only `e.cause`
+misses the second group and a `catch` that checks only `instanceof` misses the
+first; `salvorError` walks the `cause` chain and covers both. Note that a
+middleware error now carries a `cause` of its own (the `SalvorApiError`
+underneath), so reaching one level in by hand can land on the server's error
+rather than the middleware's.
 
 The codes are: `lease_held`, `lease_lost`, `reopen_refused`, `thread_finished`,
-`thread_id_missing`, `thread_id_invalid`, `tool_undeclared`,
+`thread_abandoned`, `thread_id_missing`, `thread_id_invalid`, `tool_undeclared`,
 `tool_needs_resolution`, `open_intent`, and then `run_exists`,
 `thread_never_invoked`, `tool_returned_command`, `call_unranked` and
 `unreadable_record` for conditions there is nothing to do about but read the
@@ -645,6 +649,14 @@ required = ["order_id", "status", "total_cents"]
 salvor serve --client-tool lookup-order.toml
 ```
 
+`effect` is one of three classes. `read` has no side effect, so a dangling
+intent is simply performed again on the next invoke. `write` changes the
+world in a way that is not safe to repeat blindly, so a dangling intent waits
+for a person unless `trust_completion` says the tool may close its own call.
+`idempotent` changes the world too, but under an identity safe to retry, so a
+dangling intent is performed again under the same derived key and left for
+the provider to collapse, with no person needed.
+
 The middleware sends the tool's name and the arguments the model produced, and
 nothing else. A tool with no declaration is refused, and the error names the
 tool and the declaration it needs rather than quietly recording the call as a
@@ -662,7 +674,10 @@ share one key, and the second one settles from the first's recorded result
 rather than performing the call again. So a model that emits the same write
 twice in one turn runs it once when the declared fields match between the two
 calls, and twice when the declaration names no fields at all, unless the
-provider underneath happens to dedupe such a retry on its own.
+provider underneath happens to dedupe such a retry on its own. Naming fields
+is naming what makes two calls the same call, so check the list against what
+actually varies between calls you mean to keep distinct: a field left out of
+it is a field two such calls may differ on and still collapse into one.
 
 The recorded output is the tool's own result, which is what the output schema
 describes. LangChain builds a tool message by stringifying whatever the tool
@@ -792,10 +807,13 @@ the one the recorded answer was an answer to.
 
 A tool body can read its own recorded idempotency key with `currentToolCall()`,
 returning `{ key, seq, runId, tool }` for the call `wrapToolCall` is recording
-right now. `key` is the value salvor already derived for `(run, seq, tool)`,
-the same one sitting on the intent; hand it straight to the tool's own
-provider as that provider's idempotency token, so a retried write and the
-first attempt present the same one. It works only from inside a tool body a
+right now. `key` is the value salvor already derived for this call: positional,
+a hash of `(run, seq, tool)`, unless the declaration names `idempotency_key`
+fields, in which case it is derived from the run, the tool and those fields
+instead, with no `seq` in it. Either way it is the same one sitting on the
+intent; hand it straight to the tool's own provider as that provider's
+idempotency token, so a retried write and the first attempt present the same
+one. It works only from inside a tool body a
 live `wrapToolCall` is running, and only in Node; called from anywhere else it
 returns `undefined`, and the middleware keeps recording and replaying exactly
 as it does without it.

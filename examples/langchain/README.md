@@ -109,15 +109,66 @@ it binds a person rather than the app: nothing may report on that tool, so the
 only thing those names can hold to the intent is a hand-recorded resolution.
 
 [`refund-order.toml`](tools/refund-order.toml) carries one more field,
-`idempotency_key = ["order_id"]`, which decides what a call's identity is. Left
-unset, salvor derives the key from the call's position in the
+`idempotency_key = ["order_id", "amount_cents"]`, which decides what a call's
+identity is. Left unset, salvor derives the key from the call's position in the
 run, `(run, seq, tool)`: an attempt identifier, the same on every attempt at that
-one call, which is all proof 3 needs. Naming fields makes it a hash of
-`(run, tool, order_id)` with no position in it, so the same order refunded twice
-in one run derives one key and the second call settles from the first. Every name
-must be required by `input_schema`, or the server refuses the declaration when it
-loads it. Proof 8 is that difference, and the choice is the operator's in the
-same file as everything else: an app cannot widen its own key.
+one call, which is all proof 3 needs. Naming fields makes the key what those
+fields say the call is about instead of where it sits: a hash of
+`(run, tool, order_id, amount_cents)` with no position in it, so two refunds of
+the same order in one run derive one key only when the amount also matches, and
+the second call settles from the first rather than moving money again. The field
+list is the check to run against your own tools: a field left out of it is a
+field two distinct calls may differ on and still collapse into one, so naming
+`order_id` alone once let a second call for a different amount on the same order
+silently take the first's result, with nothing telling the app a call had been
+copied except the log (`salvor history` shows it as
+`deduplicated: copied from`). Every name must be required by `input_schema`, or
+the server refuses the declaration when it loads it. Proof 8 is that difference,
+and the choice is the operator's in the same file as everything else: an app
+cannot widen its own key.
+
+Here is that file whole, with its long comments stripped down to the fields
+themselves:
+
+```toml
+name = "refund_order"
+effect = "write"
+trust_completion = true
+require_equal = ["order_id", "amount_cents"]
+idempotency_key = ["order_id", "amount_cents"]
+
+[input_schema]
+type = "object"
+required = ["order_id", "amount_cents"]
+description = "Refund an order in full, up to the desk's own limit."
+
+[input_schema.properties.order_id]
+type = "string"
+description = "The order to refund, for example ORD-7781."
+
+[input_schema.properties.amount_cents]
+type = "integer"
+minimum = 1
+maximum = 99999
+description = "The amount to refund, in cents. Refunds above 99999 go to refund_large."
+
+[output_schema]
+type = "object"
+required = ["order_id", "amount_cents", "refund_id", "status"]
+
+[output_schema.properties.order_id]
+type = "string"
+
+[output_schema.properties.amount_cents]
+type = "integer"
+
+[output_schema.properties.refund_id]
+type = "string"
+
+[output_schema.properties.status]
+type = "string"
+enum = ["succeeded"]
+```
 
 ### The app's schema and the operator's declaration
 
@@ -129,10 +180,16 @@ declaration in [`tools/`](tools/) is what the SERVER enforces: every intent's
 input is checked against `input_schema` before it becomes history, and every
 completion against `output_schema` and `require_equal` before it does.
 
+A completion that fails either check is refused before anything is written, so
+the intent stays open exactly as if the completion had never arrived. The next
+invoke does what an open intent always does next: performs the call again
+under the same key when the tool may close its own report (proof 3), or waits
+for a person when it may not (proof 6).
+
 When they disagree, the declaration wins, always, and the disagreement surfaces
-as a refusal naming the field rather than as a wrong recording. A tester who
-typed `amount` in one place and `amount_cents` in the other found out the first
-time an intent was opened, from a `400` that said so. That is the intended
+as a refusal naming the field rather than as a wrong recording. Type `amount`
+in one place and `amount_cents` in the other and the first opened intent
+answers with a `400` that says so. That is the intended
 failure mode, not an inconvenience: the app's copy is a hint to a model that may
 ignore it, and the operator's copy is a gate that cannot be. It also means
 editing a tool is editing both files. Change the arguments in the app without
@@ -190,6 +247,13 @@ Everything else is overridable too: `SALVOR_BIN` for the binary,
 `SALVOR_EXAMPLE_PYVENV` for where the venv goes. Nothing runtime is written into
 the repository except that `node_modules` directory, and no port near 8080 is
 ever bound.
+
+None of that is specific to this directory. Until the LangChain extra reaches
+the registry, an app of your own runs the same `npm install <path-to-checkout>/sdks/typescript`
+or `pip install '<path-to-checkout>/sdks/python[langchain]'` line from wherever
+that app lives, not only from inside `examples/langchain`; see the install
+notes in [`sdks/typescript/README.md`](../../sdks/typescript/README.md#langchain)
+and [`sdks/python/README.md`](../../sdks/python/README.md#langchain).
 
 Both apps take the same flags, so any step below can be run by hand:
 
@@ -318,6 +382,15 @@ answer, which is what `lookup_order` declaring `read` buys. The same split is
 the retry policy on a call recorded as having FAILED: a failed read is worth
 performing again, a failed write is worth someone looking first.
 
+Neither of this desk's tools declares the third class, `idempotent`, but it is
+worth naming here because it answers the same question differently again. A
+dangling `idempotent` intent is not a question either: the next invoke performs
+the call again, the way a dangling `read` does, but under the same derived key
+a `write` relies on `trust_completion` for, so a provider that honors that key
+collapses the retry on its own side without anyone confirming the report first.
+It is for a call with a side effect worth keeping, like sending an email, that
+still does not need a person to trust its result.
+
 The reason proof 3's re-invoke can run the body again at all is that
 `refund_order` is a write the desk may close for itself, and the key is what
 makes running it twice safe. That is not a licence the effect class grants; it
@@ -335,7 +408,10 @@ dangling write over HTTP, which drops the dead lease along with the resolution
 `lease_held`, read `lapsesInSeconds` / `lapses_in_seconds` off the refusal, and
 poll rather than wait the window out, because a live driver usually finishes
 well before its hold does. Both SDK READMEs write that handler out, and
-`desk_when_free` in `run.sh` is the same loop.
+`desk_when_free` in `run.sh` is the same loop. That lease lives in this one
+server's memory, which is also why `run.sh` runs one `salvor serve` per store
+and never two against the same file; see
+[`docs/OPERATIONS.md`](../../docs/OPERATIONS.md#one-salvor-serve-per-store).
 
 ### 4. Two copies of the desk, one thread
 
@@ -514,8 +590,10 @@ where the second one went:
 
 Both intents are recorded, because both were genuinely asked for and a log that
 hid the second one would be lying about what the run did. Both carry the same
-key, because `refund-order.toml` declares `idempotency_key = ["order_id"]` and
-the derivation has no `seq` in it. When the second intent was opened, salvor
+key, because `refund-order.toml` declares
+`idempotency_key = ["order_id", "amount_cents"]`, both calls name the same
+order and the same amount, and the derivation has no `seq` in it. When the
+second intent was opened, salvor
 found that identity already claimed by a call this run had finished, so it
 copied that call's completion onto the new position, named what it copied, and
 answered the middleware `settled: true`. The desk's tool body was never called
@@ -634,7 +712,11 @@ as a recorded success does, so a permanently failing input fails the same way
 forever. Fix the input and give it a new thread. A tool a person must confirm is
 the exception, as ever: salvor would not take this process's word for "it did not
 land" any more than for "it landed", so a throw there posts nothing and stops the
-invoke with `open_intent`, for a person to settle.
+invoke with `open_intent`, for a person to settle. "Settle" is not always
+"resolve": if what the provider actually shows is that the call never happened,
+there is nothing to resolve, and the honest move is to abandon the run
+(`POST /v1/runs/{id}/abandon`, or `salvor abandon`) and give the next task a new
+thread id.
 
 A model call is the other side of it. When the provider errors, nothing is
 recorded at all: the intent is left open, and the next invoke simply performs

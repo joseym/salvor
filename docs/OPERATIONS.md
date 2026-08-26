@@ -148,6 +148,17 @@ acknowledged. `WAL` means the store is really three files while a
 writer holds it open: `salvor.db`, `salvor.db-wal`, and
 `salvor.db-shm`. Both facts shape the procedure below.
 
+### One `salvor serve` per store
+
+Run one `salvor serve` per store file. A client-driven run's lease lives in
+the server process's memory, not in the store, so two servers pointed at the
+same file each think they are the only driver and each lets its own driver
+into a thread the other server already believes it holds. The store itself
+still refuses a second append at a taken position, so the log stays
+consistent either way, but the one-driver-per-thread refusal only holds
+behind one server: point a second `salvor serve` at the same file and that
+guarantee is gone.
+
 ### With the writer stopped
 
 The safest backup, and the one to prefer when a short pause is

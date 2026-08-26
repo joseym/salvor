@@ -399,7 +399,9 @@ pip install 'salvor[langchain]'
 The LangChain extra is in the next release of `salvor`; it is not on PyPI yet,
 so until that release ships, install the SDK from a checkout of this
 repository instead (`pip install '<path-to-checkout>/sdks/python[langchain]'`),
-and come back to the line above once it is.
+and come back to the line above once it is. That checkout install works the
+same way from any directory, so an app of your own outside this repository
+installs against it exactly as `examples/langchain` does.
 
 Then add one middleware to the agent you already have:
 
@@ -627,9 +629,11 @@ async def refund_card(charge_id: str) -> dict:
 
 What salvor guarantees about that key is worth stating plainly, because the
 part it does not cover is the part that costs money. Salvor records the call
-exactly once and derives the key from the run, the position and the tool, so
-the key is stable: every attempt at that call, on this invoke or any later one,
-is handed the same string. What salvor cannot make exactly-once is your
+exactly once and derives the key from the run, the tool and the position, by
+default; a declaration that names `idempotency_key` fields derives it from the
+run, the tool and those fields instead, with no position in it. Either way the
+key is stable: every attempt at that call, on this invoke or any later one, is
+handed the same string. What salvor cannot make exactly-once is your
 provider's side of it. A crash between the provider's success and salvor
 recording the completion leaves the log ending at the intent, which is a call
 that was asked for and never reported, and the next invoke runs the tool body
@@ -743,6 +747,14 @@ required = ["order_id", "status", "total_cents"]
 salvor serve --client-tool lookup-order.toml
 ```
 
+`effect` is one of three classes. `read` has no side effect, so a dangling
+intent is simply performed again on the next invoke. `write` changes the
+world in a way that is not safe to repeat blindly, so a dangling intent waits
+for a person unless `trust_completion` says the tool may close its own call.
+`idempotent` changes the world too, but under an identity safe to retry, so a
+dangling intent is performed again under the same derived key and left for
+the provider to collapse, with no person needed.
+
 Keys are positional unless the declaration names `idempotency_key` fields
 (`idempotency_key = ["order_id", "amount_cents"]`); the default is a hash of the
 run, the position and the tool, so only the exact same call retried at the exact
@@ -751,7 +763,10 @@ for those fields match share a key regardless of position, and the second's
 intent comes back already settled, carrying the first's recorded result rather
 than running its tool body. So a model that emits the same write twice in one
 turn runs it once when those fields match and twice when they do not, unless
-the provider's own idempotency handling dedupes it first.
+the provider's own idempotency handling dedupes it first. Naming fields is
+naming what makes two calls the same call, so check the list against what
+actually varies between calls you mean to keep distinct: a field left out of
+it is a field two such calls may differ on and still collapse into one.
 
 The middleware sends the tool's name and the arguments the model produced, and
 nothing else. A tool with no declaration is refused, and the error names the
@@ -863,6 +878,7 @@ The codes:
 | `reopen_refused` | The lease was lost and the server would not hand the run back at all. The log is intact; this server is not the one to drive it from. |
 | `run_exists` | The thread maps to a run id salvor's other, server-driven mode already started. Give the thread an id of its own. |
 | `thread_finished` | `finish_thread` closed this thread's run, and a completed run takes no more events. |
+| `thread_abandoned` | Somebody recorded a terminal `RunAbandoned` on this thread's run (`POST /v1/runs/{id}/abandon`, or `salvor abandon`). Nothing was replayed and nothing ran; give the next task a new thread id. |
 | `thread_never_invoked` | `finish_thread` was asked to close a thread that has no run yet. |
 | `thread_id_missing` | The invoke passed no `thread_id`. |
 | `thread_id_invalid` | It passed one that is not a non-empty string. The message says what arrived. |

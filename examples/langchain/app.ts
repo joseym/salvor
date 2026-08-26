@@ -181,6 +181,11 @@ function dollars(cents: number): string {
 }
 
 // --- the tools --------------------------------------------------------------
+//
+// A tool body that throws is recorded as this call's failure; the next invoke
+// that reaches this position meets that recorded failure and fails with
+// `tool_failed` rather than running the body again. See README.md, "The
+// honest limits".
 
 /** How many tool bodies this process actually ran. Replay leaves it at zero. */
 let toolBodies = 0;
@@ -221,9 +226,11 @@ const lookupOrder = tool(
  * choice, not the desk's. `refund_large` names no key fields, so its key is
  * positional, a hash of `(run, seq, tool)`: an attempt identifier, the same
  * string on every attempt at that one call. `refund_order` declares
- * `idempotency_key = ["order_id"]`, so its key is a hash of
- * `(run, tool, order_id)` with no position in it, and the same order refunded
- * twice in one run derives one key both times.
+ * `idempotency_key = ["order_id", "amount_cents"]`, so its key is a hash of
+ * `(run, tool, order_id, amount_cents)` with no position in it, and the same
+ * order refunded for the same amount twice in one run derives one key both
+ * times; the same order refunded for a DIFFERENT amount derives a different
+ * key, because amount is one of the fields the identity is checked against.
  *
  * A real desk passes that key to its payment provider as the provider's own
  * idempotency token. This one has no provider, so the ledger IS the provider: a
