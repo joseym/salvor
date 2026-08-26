@@ -564,8 +564,41 @@ drives nothing.
 ```
 
 - `409 wrong_state` when the run does not need reconciliation (there is no
-  dangling write to resolve).
+  dangling write to resolve). On a client-driven run the message says what the
+  unfinished call actually needs: an unfinished read or model call is performed
+  again by the client on its next drive, and needs nobody. It never names
+  `recover`, which is a server-driven verb that `POST /v1/runs/{id}/resume`
+  refuses a client-driven run outright.
 - `404 unknown_run` when the id has no history.
+
+**The output is checked against the declaration, when the call was the
+client's.** A dangling `ToolCallRequested` carrying `performed_by: "client"` is
+a call this server never witnessed, and the operator's declaration is the only
+thing that says what a finished one looks like. So the same rules the completion
+boundary applies to a client's own report apply to a hand-recorded output
+before it is written:
+
+- no declaration loaded for the tool: `400 bad_request`, naming the tool and
+  `--client-tool`. A stale registry is the operator's to fix, and recording an
+  unexamined output is the one thing this path must not do;
+- the output fails the declaration's `output_schema`: `400 bad_request`;
+- a `require_equal` field's value differs from the one the intent recorded: `400
+  bad_request`, naming the tool and the field. A run whose log says a 5000 payout
+  was authorized must not end up carrying 50000 as its result, whoever typed it.
+
+`trust_completion` is NOT checked here. It answers "may the client close this
+call", and the point of a `false` is that a person closes it instead, which is
+what this path is. A call salvor performed itself is not checked at all: this
+server witnessed it and holds no declaration for it.
+
+**The recorded completion names its settler.** It carries `settled_by:
+"operator"`, the one thing a hand-recorded completion says that an ordinary one
+does not: a person put this output here, over the run's head, and nothing in
+this process witnessed the call it closes. Replay never reads the field and a
+resolved completion replays as the output it records, exactly as it did before
+the field existed; `salvor log` renders it as `[Operator]`, in the same
+bracketed register a client-performed intent renders as `[Client]`. The app's
+own completions omit the key entirely.
 
 **It clears a client-driven run's lease.** A dangling write is a driver that
 never came back to record what its write did, and this caller presents no drive
@@ -925,11 +958,18 @@ behind only the bearer-auth layer every other `/v1` route sits behind.
       "effect": "write",
       "input_schema": { "type": "object", "required": ["amount_cents"], "...": "..." },
       "output_schema": { "type": "object", "required": ["charge_id"], "...": "..." },
-      "trust_completion": true
+      "trust_completion": true,
+      "idempotency_key": ["order_id", "amount_cents"]
     }
   ]
 }
 ```
+
+`idempotency_key` is present only when the declaration names key fields, and it
+says what this server derives the call's key from (see `client-tool-intent`
+below). It is published for the reason `input_schema` is: a client that wants to
+derive the key itself, to check this server's work, has to know what the
+derivation is over.
 
 `output_schema` is present only when the declaration carries one, following
 the zero-vs-absent rule `GET /v1/agents` already applies to `name`: a tool
@@ -1427,37 +1467,70 @@ write-ahead rule demands of a call it performs itself. Requires the
 { "seq": 5, "tool": "charge_card", "input": <any json> }
 ```
 
-- Response `200`:
+- Response `200`, a call that still has to be performed:
 
 ```json
 { "seq": 5, "idempotency_key": "sha256:...", "effect": "write", "settled": false }
+```
+
+- Response `200`, a call whose completion is already recorded:
+
+```json
+{ "seq": 5, "idempotency_key": "sha256:...", "effect": "write", "settled": true,
+  "output": <the recorded output> }
 ```
 
 Notice what the request does NOT carry, compared with `tool-step` above: no
 `effect` and no `idempotency_key`.
 
 `settled` is `true` when the intent at this position already has its
-completion recorded, `false` otherwise. It matters most to a caller re-posting
-an intent it believes it already opened: a payments caller retrying after a
-dropped response gets back the same `200` and the same key either way, and
-without `settled` it cannot tell "safe to perform the call" from "already
-performed and completed, do not do it again" without separately reading the
-log. A freshly-recorded intent is always `false`.
+completion recorded, `false` otherwise, and a settled answer carries that
+completion's `output`. It matters most to a caller re-posting an intent it
+believes it already opened: a payments caller retrying after a dropped response
+gets back the same `200` and the same key either way, and without `settled` it
+cannot tell "safe to perform the call" from "already performed and completed, do
+not do it again" without separately reading the log. `output` is omitted while
+the call is open.
 
 The effect is the operator's, from the declaration, for the same reason
 `tool-step` refuses a client-declared effect: a caller must not be able to
 up- or down-grade its own write into a freely retried read.
 
-The idempotency key is DERIVED by the server, a canonical hash of `{ run, seq,
-tool }`, and this deliberately differs from `tool-step`, where the client
-supplies it. There, salvor performs the call, so the party choosing the key is
-not the party making the write. Here the client both chooses and performs, which
-is the one case where the party choosing the key is also the party who benefits
-from a duplicate landing. Deriving it removes the choice: the same `(run, seq,
-tool)` always derives the same key, so an honest retry after a dropped response
-presents the identical key and the provider collapses the pair, and a second
-attempt cannot mint itself a fresh one. A client can derive the key
-independently, with any canonical-JSON SHA-256, to check the server's work.
+The idempotency key is DERIVED by the server, and this deliberately differs from
+`tool-step`, where the client supplies it. There, salvor performs the call, so
+the party choosing the key is not the party making the write. Here the client
+both chooses and performs, which is the one case where the party choosing the
+key is also the party who benefits from a duplicate landing. Deriving it removes
+the choice. What the key is derived FROM is the operator's, from the
+declaration's `idempotency_key`:
+
+- **No fields declared** (the default): a canonical hash of `{ run, seq, tool }`.
+  The call's position in the run. This is an attempt identifier and promises one
+  thing: the same position, retried, presents the same key, so an honest retry
+  after a dropped response presents the identical key and the provider collapses
+  the pair. Two calls at two positions are two calls, however alike their
+  arguments.
+- **Fields declared**, `idempotency_key = ["order_id", "amount_cents"]`: a
+  canonical hash of `{ run, tool, order_id, amount_cents }`, with the values
+  taken from this intent's input. `seq` is deliberately absent, which is the
+  whole difference: the same refund asked for twice in one run derives one key
+  both times. The order the fields are named in does not change the hash, since
+  the canonical form sorts object keys.
+
+The run id is on both shapes, so a declared key is an identity within one run and
+never collides with another run's. A client can derive either key independently,
+with any canonical-JSON SHA-256, to check the server's work.
+
+**A declared key deduplicates.** For a `write` or an `idempotent` call carrying a
+declared key, the server claims the identity in the store before the intent is
+written, exactly as the runtime does for a tool that declares its own key. A
+second intent whose key fields match a call this run already completed does not
+open new work: the completion is copied to the new position, carrying a
+`deduplicated_from` naming what it copied, and the response comes back
+`settled: true` with that output. **The client performs nothing.** A `read`
+never deduplicates, whatever it declares: a read has no effect worth an identity,
+and answering a repeated read from an older call would freeze a loop that is
+polling for a change on purpose.
 
 The input is validated against the declaration's `input_schema` before anything
 is written, so a malformed call never becomes history. The intent then goes
@@ -1467,8 +1540,13 @@ Refusals, each of which writes nothing:
 
 - an undeclared tool is `404 unknown_tool`;
 - an input failing `input_schema` is `400 bad_request`;
+- an input missing a field the declared `idempotency_key` derives from is `400
+  bad_request`, naming the field;
 - a `seq` the log is not ready for, or a different event already recorded
-  there, is `409 divergence`.
+  there, is `409 divergence`;
+- a declared key held by a call that is open and unfinished is `409 divergence`.
+  Nothing is recorded, so the call can simply be opened again once the holder is
+  settled.
 
 A byte-identical re-post at an already-recorded position is a `200` that
 re-derives the same key and writes nothing: the safe retry a dropped response
@@ -1486,17 +1564,50 @@ Record what a client-performed tool call returned. The client ran the call;
 salvor did not witness it, so everything this endpoint can check, it checks
 before the report becomes history. Requires the `X-Drive-Token` header.
 
-- Request:
+- Request, a call that returned something:
 
 ```json
 { "seq": 5, "output": <the json the client says the call returned> }
 ```
 
-- Response `200`:
+- Request, a call that returned nothing because it failed:
+
+```json
+{ "seq": 5, "error": { "message": "the provider timed out", "kind": "handler" } }
+```
+
+- Response `200`, for either:
 
 ```json
 { "seq": 5, "completed": true }
 ```
+
+Exactly one of `output` and `error`. A body carrying both, or neither, is `400
+bad_request`: they say opposite things about the same call and this server has no
+way to pick between them.
+
+**A failure is a completion, not a new state.** A reported `error` records the
+same `__salvor_error` sentinel output the runtime records when a NATIVE tool
+exhausts its retries, byte for byte, so a log written through this endpoint means
+to a replay exactly what a natively recorded one means: the call is closed, the
+run carries on, and a later replay reads the failure back rather than performing
+the call again. The recorded output is
+
+```json
+{"__salvor_error": {"is_error": true, "kind": "handler",
+                    "message": "the provider timed out", "attempts": 1}}
+```
+
+`message` is recorded verbatim, in full. `kind` is optional on the wire and is
+one of `invalid_input`, `handler`, or `output_serialization`, the dispatch layer
+that failed; absent means `handler`, which is what a client tool that ran and
+threw is. Any other value is `400 bad_request`. `attempts` is not on the wire and
+is always `1`: it counts executions inside salvor's own retry loop, and salvor
+ran no loop over a call it did not dispatch.
+
+The declared `output_schema` and every `require_equal` field are skipped on the
+`error` shape, because there is no reported value for either to look at. The
+trust rules are not: see the refusals below.
 
 Refusals, each of which records nothing:
 
@@ -1506,10 +1617,15 @@ Refusals, each of which records nothing:
   client_completion_refused`. A client must not close a call salvor made, since
   salvor holds the real result;
 - the declaration says `trust_completion = false`: `403
-  client_completion_refused`;
-- the declaration carries no `output_schema`: `403 client_completion_refused`.
-  With nothing to check the report against, the completion is unfalsifiable,
-  which is exactly what the schema exists to prevent;
+  client_completion_refused`. This holds for a reported failure too. "It did not
+  land" is a claim about money made by the party that benefits from it being
+  believed, so an untrusted write is left dangling for a person exactly as an
+  untrusted result is;
+- the declaration carries no `output_schema` **and** the body reports an
+  `output`: `403 client_completion_refused`. With nothing to check the report
+  against, the completion is unfalsifiable, which is exactly what the schema
+  exists to prevent. A reported `error` is unaffected, since it carries no value
+  to check;
 - the output fails the declared `output_schema`: `400 bad_request`.
 
 A refusal is not a dead end, and it needed no new run state. The log still ends
@@ -1668,6 +1784,13 @@ output to that intent, and it dispatches nothing. After it records the completio
 the run is drivable again, so the client re-fetches the log and its cursor sails
 past the once-dangling intent.
 
+Declaration-validated exactly like it too, through the same code: a client
+performed call's output is checked against the declaration's `output_schema` and
+its `require_equal` fields before anything is written, and an undeclared tool is
+refused. See `POST /v1/runs/{id}/resolve` above for the full list and the
+reasoning. The completion this endpoint records carries `settled_by: "operator"`
+for the same reason.
+
 **This one keeps the caller's lease**, unlike `POST /v1/runs/{id}/resolve`, which
 drops it. Getting in here at all means presenting the run's current drive token,
 which is the driver saying it is right here, so there is no dead lease to clear
@@ -1675,7 +1798,10 @@ and revoking a live one would strand the very caller that just proved it is
 alive.
 
 - `409 wrong_state` when the run does not need reconciliation (there is no
-  dangling write to resolve).
+  dangling write to resolve). The message says what the unfinished call needs
+  instead, and never names `recover`.
+- `400 bad_request` when the output does not satisfy the declaration for a
+  client-performed call, or the tool is no longer declared here.
 - `401 missing_drive_token` / `403 invalid_drive_token` on a missing or superseded
   lease; `404 unknown_run` when the id is not a client-driven run this server
   opened.

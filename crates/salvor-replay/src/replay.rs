@@ -1882,6 +1882,7 @@ impl ToolCallPermit<'_> {
             seq: self.correlation,
             output,
             deduplicated_from: None,
+            settled_by: None,
         })
     }
 
@@ -1904,6 +1905,7 @@ impl ToolCallPermit<'_> {
             seq: self.correlation,
             output,
             deduplicated_from: Some(origin),
+            settled_by: None,
         })
     }
 }

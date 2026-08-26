@@ -18,7 +18,7 @@
 use serde_json::Value;
 use time::OffsetDateTime;
 
-use crate::event::{BudgetKind, Event, Performer};
+use crate::event::{BudgetKind, Event, Performer, SettledBy};
 #[cfg(test)]
 use crate::id::{RunId, SequenceNumber};
 
@@ -110,6 +110,7 @@ pub fn event_detail(event: &Event) -> String {
         Event::ToolCallCompleted {
             output,
             deduplicated_from,
+            settled_by,
             ..
         } => {
             // Absent (the field's default, and every completion recorded before
@@ -123,19 +124,25 @@ pub fn event_detail(event: &Event) -> String {
                     origin.seq
                 )
             });
+            // Who settled the call, when it was not the run itself. It reads
+            // in the same bracketed register the intent line uses for
+            // `[Client]`, and it goes on every shape a completion can take,
+            // because a hand-recorded completion is a hand-recorded completion
+            // whatever output it carries.
+            let settler = settled_by_marker(*settled_by);
             if let Some(reason) = suspension_reason(output) {
-                format!("suspends: {reason}{copied}")
+                format!("suspends: {reason}{settler}{copied}")
             } else if let Some(wake_at) = sleep_wake_at(output) {
-                format!("sleeps until {}{copied}", format_ts(wake_at))
+                format!("sleeps until {}{settler}{copied}", format_ts(wake_at))
             } else if let Some(failure) = recorded_failure(output) {
                 format!(
-                    "error ({}, {} attempt(s)): {}{copied}",
+                    "error ({}, {} attempt(s)): {}{settler}{copied}",
                     failure.kind,
                     failure.attempts,
                     truncate_str(failure.message)
                 )
             } else {
-                format!("output {}{copied}", truncate_json(output))
+                format!("output {}{settler}{copied}", truncate_json(output))
             }
         }
         Event::NowObserved { now } => format_ts(*now),
@@ -309,6 +316,21 @@ fn performer_marker(performed_by: Option<Performer>) -> &'static str {
     }
 }
 
+/// The bracketed marker naming who settled a completion, for the detail line.
+///
+/// Absent (the field's default, and every completion recorded before the field
+/// existed) means the run recorded what it saw, which is the overwhelmingly
+/// common case, so it renders nothing. Only a completion a person recorded by
+/// hand gets a marker, in the same bracketed register
+/// [`performer_marker`] uses on the intent line, so "who did this" reads the
+/// same way on both halves of a call.
+fn settled_by_marker(settled_by: Option<SettledBy>) -> &'static str {
+    match settled_by {
+        Some(SettledBy::Operator) => " [Operator]",
+        None => "",
+    }
+}
+
 /// Shortens a `sha256:...` hash to its prefix and the first seven hex digits,
 /// so a line names a request without a 64-character wall of hex.
 fn short_hash(hash: &str) -> String {
@@ -401,6 +423,7 @@ mod tests {
             seq: SequenceNumber::new(1),
             output: json!({"charge_id": "po_1"}),
             deduplicated_from: None,
+            settled_by: None,
         });
         assert_eq!(executed, r#"output {"charge_id":"po_1"}"#);
 
@@ -408,10 +431,41 @@ mod tests {
             seq: SequenceNumber::new(1),
             output: json!({"charge_id": "po_1"}),
             deduplicated_from: Some(origin),
+            settled_by: None,
         });
         assert_eq!(
             copied,
             r#"output {"charge_id":"po_1"} (deduplicated: copied from run 00000000-0000-4000-8000-0000000000aa seq 4)"#
+        );
+    }
+
+    /// A completion a person recorded by hand says so, in the same bracketed
+    /// register the intent line says `[Client]` in. A completion the run
+    /// recorded itself says nothing extra, so every line ever rendered before
+    /// this field existed reads exactly as it did.
+    #[test]
+    fn a_hand_recorded_completion_names_its_settler() {
+        let resolved = event_detail(&Event::ToolCallCompleted {
+            seq: SequenceNumber::new(1),
+            output: json!({"charge_id": "po_1"}),
+            deduplicated_from: None,
+            settled_by: Some(crate::event::SettledBy::Operator),
+        });
+        assert_eq!(resolved, r#"output {"charge_id":"po_1"} [Operator]"#);
+
+        // The same marker on the intent half of the call, so a client-performed
+        // write an operator resolved reads as both facts in one log.
+        let intent = event_detail(&Event::ToolCallRequested {
+            seq: SequenceNumber::new(1),
+            tool: "charge_card".into(),
+            input: json!({"amount_cents": 500}),
+            effect: crate::effect::Effect::Write,
+            idempotency_key: None,
+            performed_by: Some(Performer::Client),
+        });
+        assert_eq!(
+            intent,
+            r#"charge_card [Write] [Client] input {"amount_cents":500}"#
         );
     }
 

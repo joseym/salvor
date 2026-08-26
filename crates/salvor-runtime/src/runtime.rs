@@ -31,7 +31,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use salvor_core::{
-    Event, EventEnvelope, PendingCall, RunId, RunStatus, UnresolvedWrite, derive_state,
+    Event, EventEnvelope, PendingCall, RunId, RunStatus, SettledBy, UnresolvedWrite, derive_state,
 };
 use salvor_store::{CallClaimant, EventStore};
 use serde_json::Value;
@@ -288,6 +288,12 @@ impl Runtime {
             // A human reconciled this write by hand. Nothing was copied from
             // another run, so there is no origin to name.
             deduplicated_from: None,
+            // The one place a completion is not the run recording what it saw.
+            // Every caller of this method is a person acting over the run's
+            // head (`salvor resolve`, and both resolve endpoints), and the
+            // output below is their report of an effect nothing in this
+            // process witnessed, so the completion says who recorded it.
+            settled_by: Some(SettledBy::Operator),
         };
         let envelope = EventEnvelope::new(run_id, state.next_seq, (self.clock)(), completion);
 

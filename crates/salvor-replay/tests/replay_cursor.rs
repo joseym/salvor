@@ -552,6 +552,7 @@ fn dangling_idempotent_intent_retries_under_recorded_key() {
             seq: SequenceNumber::new(1),
             output: json!({"stored": true}),
             deduplicated_from: None,
+            settled_by: None,
         }
     );
 }
@@ -925,6 +926,7 @@ fn dangling_intent_reports_the_gap_without_advancing() {
             seq: SequenceNumber::new(1),
             output: json!({"charge_id": "po_1"}),
             deduplicated_from: None,
+            settled_by: None,
         },
     );
     let mut cursor = ReplayCursor::new(vec![started, intent(1), completed]).expect("log is valid");
@@ -1018,6 +1020,7 @@ fn a_proven_unexecuted_intent_records_a_deduplicated_completion() {
         seq,
         output,
         deduplicated_from,
+        ..
     } = emitted.event
     else {
         panic!("expected a tool completion");

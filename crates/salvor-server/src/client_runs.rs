@@ -130,13 +130,15 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use salvor_core::{
-    Effect, Event, EventEnvelope, LogValidator, Performer, RunId, RunStatus, SequenceNumber,
-    TokenUsage, derive_state,
+    DedupOrigin, Effect, Event, EventEnvelope, LogValidator, Performer, RunId, RunStatus,
+    SequenceNumber, TokenUsage, derive_state,
 };
 use salvor_llm::{ContentDelta, MessageAccumulator, StreamEvent};
 use salvor_runtime::{
-    RuntimeError, hash_value, response_value, usage_of, validate_against_schema, validate_labels,
+    RuntimeError, ToolFailure, ToolFailureKind, encode_failure, hash_value, response_value,
+    usage_of, validate_against_schema, validate_labels,
 };
+use salvor_store::{CallClaim, CallClaimant};
 use salvor_tools::{ToolCtx, ToolOutcome};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -255,13 +257,44 @@ struct ClientToolIntentRequest {
 }
 
 /// The body of `POST /v1/client-runs/{id}/client-tool-completion`.
+///
+/// Two shapes, and exactly one of them: `output` for a call that returned a
+/// result, `error` for a call that did not. A body carrying both, or neither,
+/// is refused, because the two say opposite things about the same call and this
+/// server has no way to pick.
 #[derive(Debug, Deserialize)]
 struct ClientToolCompletionRequest {
     /// The intent's position, which must be the pending intent at the log's end.
     seq: u64,
     /// What the client reports the call returned, checked against the declared
     /// `output_schema` before it is recorded.
-    output: Value,
+    #[serde(default)]
+    output: Option<Value>,
+    /// What the client reports went wrong instead, when the call produced no
+    /// result at all.
+    #[serde(default)]
+    error: Option<ReportedFailure>,
+}
+
+/// A failure a client reports for a call it performed, the `error` half of
+/// [`ClientToolCompletionRequest`].
+///
+/// It carries what the client can honestly say and nothing more. `attempts` is
+/// not on the wire: it counts executions inside salvor's own retry loop, and
+/// there is no such loop here, so the recorded failure says one attempt rather
+/// than taking a number from a caller that could say anything.
+#[derive(Debug, Deserialize)]
+struct ReportedFailure {
+    /// The failure, in full. Recorded verbatim as the sentinel's `message`, the
+    /// same field a native tool's error chain lands in.
+    message: String,
+    /// Which dispatch layer failed, one of `invalid_input`, `handler`, or
+    /// `output_serialization`. Absent means `handler`, which is what a client
+    /// tool that ran and threw is: the layers either side of it are salvor's
+    /// own argument checking and result decoding, and neither exists for a call
+    /// salvor never dispatched.
+    #[serde(default)]
+    kind: Option<String>,
 }
 
 /// The body of `POST /v1/client-runs/{id}/client-model-intent`.
@@ -1211,7 +1244,7 @@ pub async fn tool_step(
                     )));
                 }
             };
-            append_tool_completion(&state, run_id, seq, &output).await?;
+            append_tool_completion(&state, run_id, seq, &output, None).await?;
             Ok(tool_output_body(&output))
         }
     }
@@ -1344,11 +1377,32 @@ fn intent_evidence(envelope: &EventEnvelope) -> Value {
 
 /// Records the `ToolCallCompleted` at `seq + 1`, correlated to the intent at
 /// `seq`, after validating it is the legal next event.
+///
+/// `deduplicated_from` names the completion this output was copied from, on the
+/// one path that copies one (a repeated call under a declared idempotency key);
+/// every other caller passes `None`, and the recorded bytes are then exactly
+/// what this helper wrote before the field existed.
+///
+/// `settled_by` is never stamped here. This is the run recording what it was
+/// told; only `Runtime::resolve`, where a person records a completion over the
+/// run's head, names a settler.
+///
+/// # It settles the store's claim, when this call holds one
+///
+/// A call opened under a DECLARED idempotency key claimed that identity in the
+/// store before its intent was written (see [`client_tool_intent`]). The
+/// completion has to release it, in the same atomic step the event is appended,
+/// or the store would go on saying the call is in flight while its result sits
+/// recorded, and every later call under that key would be refused forever with
+/// nothing anywhere to say why. This is the same reconciliation
+/// `Runtime::resolve` performs for the hand-recorded path, and it is a no-op
+/// for a positional key, which claims nothing.
 async fn append_tool_completion(
     state: &AppState,
     run_id: RunId,
     seq: u64,
     output: &Value,
+    deduplicated_from: Option<DedupOrigin>,
 ) -> Result<(), ApiError> {
     let completion = EventEnvelope::new(
         run_id,
@@ -1357,19 +1411,76 @@ async fn append_tool_completion(
         Event::ToolCallCompleted {
             seq: SequenceNumber::new(seq),
             output: output.clone(),
-            deduplicated_from: None,
+            deduplicated_from,
+            settled_by: None,
         },
     );
     let log = state.store().read_log(run_id).await.map_err(store_error)?;
+    let held = held_claim(state, &log, run_id, seq).await?;
     let mut validator = LogValidator::new(log);
     validator
         .push(completion.clone())
         .map_err(|error| ApiError::Divergence(error.to_string()))?;
-    state
+    match held {
+        Some(key) => state
+            .store()
+            .append_settling_call(
+                &completion,
+                CallClaimant {
+                    tool: &key.0,
+                    idempotency_key: &key.1,
+                    run_id,
+                    intent_seq: SequenceNumber::new(seq),
+                },
+            )
+            .await
+            .map_err(append_error),
+        None => state
+            .store()
+            .append(&completion)
+            .await
+            .map_err(append_error),
+    }
+}
+
+/// The `(tool, idempotency key)` this run's intent at `seq` holds an unsettled
+/// claim on, if it holds one at all.
+///
+/// Mirrors the lookup `Runtime::resolve` does before it settles: a commitment
+/// that names this exact run and this exact intent, and is not already settled,
+/// is one this completion owns and must close. Anything else (no commitment,
+/// somebody else's, one already settled) is left alone, because settling a
+/// commitment one does not own is refused by the store and would be a bug here
+/// rather than a race.
+async fn held_claim(
+    state: &AppState,
+    log: &[EventEnvelope],
+    run_id: RunId,
+    seq: u64,
+) -> Result<Option<(String, String)>, ApiError> {
+    let Some(EventEnvelope {
+        event:
+            Event::ToolCallRequested {
+                tool,
+                idempotency_key: Some(key),
+                ..
+            },
+        ..
+    }) = log.get(seq as usize)
+    else {
+        return Ok(None);
+    };
+    let commitment = state
         .store()
-        .append(&completion)
+        .lookup_call(tool, key)
         .await
-        .map_err(append_error)
+        .map_err(store_error)?;
+    let ours = commitment.is_some_and(|commitment| {
+        commitment.run_id == run_id
+            && commitment.intent_seq.get() == seq
+            && commitment.completion_seq.is_none()
+    });
+    Ok(ours.then(|| (tool.clone(), key.clone())))
 }
 
 /// The `200` tool-step body, `{ "output": <json> }`.
@@ -1415,6 +1526,13 @@ pub async fn resolve(
     let lease = authorize_drive(&state, run_id, &headers)?;
     let request: ResolveRequest = parse_body(&body)?;
 
+    // The same declaration check the operator's resolve endpoint makes, through
+    // the same helper, so a hand-recorded output meets one set of rules however
+    // it arrives. Salvor witnessed neither the call nor the resolution, and the
+    // declaration is the only thing that says what a finished call looks like.
+    let log = state.store().read_log(run_id).await.map_err(store_error)?;
+    crate::client_tools::check_client_resolution(&state.client_tools(), &log, &request.output)?;
+
     match state.runtime().resolve(run_id, request.output).await {
         Ok(_) => {
             // The resolve rule, with this caller's own lease held back from
@@ -1429,12 +1547,72 @@ pub async fn resolve(
                 "resolved": true,
             })))
         }
-        Err(RuntimeError::NotReconcilable { status, .. }) => Err(ApiError::WrongState(format!(
-            "run {} does not need reconciliation (status: {status}); there is no dangling write \
-             to resolve",
-            run_id.as_uuid()
-        ))),
+        Err(RuntimeError::NotReconcilable { status, .. }) => {
+            // Always a client-driven run: getting in here meant presenting its
+            // drive token.
+            Err(resolve_refusal(run_id, &log, &status, true))
+        }
         Err(error) => Err(ApiError::Internal(error.to_string())),
+    }
+}
+
+/// The `409 wrong_state` a resolve answers when the run has no dangling write
+/// to settle, shared by both resolve endpoints.
+///
+/// # Why a client-driven run gets its own sentence
+///
+/// The generic form quotes the runtime's status name, and two of those names
+/// end in "use recover". `recover` is a server-driven verb: it spawns a driver
+/// task over the run, which is exactly what must never happen to a run whose
+/// client holds the single-writer lease, and `POST /v1/runs/{id}/resume`
+/// refuses such a run for that reason. Telling an operator to reach for it is
+/// telling them to do the one thing the next endpoint will refuse.
+///
+/// What a client-driven run's unfinished call actually needs is either nothing
+/// or a resolve, and which one is a fact about the call, so the message says
+/// it: an unfinished read or model call is re-performed by the client on its
+/// next drive, with no operator action at all, while a dangling write is the
+/// one thing this endpoint settles (and a run holding one never reaches this
+/// refusal, because it folds to `needs_reconciliation` and the resolve
+/// succeeds).
+pub(crate) fn resolve_refusal(
+    run_id: RunId,
+    log: &[EventEnvelope],
+    status: &str,
+    client_driven: bool,
+) -> ApiError {
+    if client_driven && let Some(unfinished) = unfinished_call_sentence(log) {
+        return ApiError::WrongState(format!(
+            "run {} has no dangling write to settle: {unfinished}. A write recorded with no \
+             completion after it is the one thing this endpoint records by hand",
+            run_id.as_uuid()
+        ));
+    }
+    ApiError::WrongState(format!(
+        "run {} does not need reconciliation (status: {status}); there is no dangling write to \
+         resolve",
+        run_id.as_uuid()
+    ))
+}
+
+/// How a client-driven run's unfinished call reads in a refusal, or `None` when
+/// the log does not end at one (the run finished, parked, or never started, all
+/// of which the status name already describes honestly).
+fn unfinished_call_sentence(log: &[EventEnvelope]) -> Option<String> {
+    match &log.last()?.event {
+        Event::ToolCallRequested {
+            seq, tool, effect, ..
+        } if !matches!(effect, Effect::Write) => Some(format!(
+            "its log ends at an unfinished {effect:?} call to `{tool}` at seq {}, which the client \
+             performs again on its next drive rather than by being resolved",
+            seq.get()
+        )),
+        Event::ModelCallRequested { seq, .. } => Some(format!(
+            "its log ends at an unfinished model call at seq {}, which the client performs again \
+             on its next drive rather than by being resolved",
+            seq.get()
+        )),
+        _ => None,
     }
 }
 
@@ -1464,12 +1642,68 @@ pub async fn resolve(
 /// of a small JSON object, using the same `hash_value` the rest of the workspace
 /// hashes with, so the key is reproducible across processes and languages and a
 /// client can derive it independently to check the server's work.
-fn client_tool_idempotency_key(run_id: RunId, seq: u64, tool: &str) -> String {
-    hash_value(&json!({
-        "run": run_id.as_uuid().to_string(),
-        "seq": seq,
-        "tool": tool,
-    }))
+///
+/// # What the hash is over, and who chooses
+///
+/// The client never chooses, on either shape. What the OPERATOR chooses, in the
+/// declaration's [`idempotency_key`](crate::client_tools::ClientToolDecl::idempotency_key),
+/// is what the hash is over:
+///
+/// - **No fields declared: `{ run, seq, tool }`.** The call's position in the
+///   run. This is an attempt identifier and promises exactly one thing: the
+///   same position, retried, presents the same key. Two calls at two positions
+///   are two calls, however alike their arguments.
+/// - **Fields declared: `{ run, tool, <field>: <value>, ... }`.** The call's
+///   content. `seq` is deliberately absent, which is the whole difference: the
+///   same refund asked for twice in one run derives one key both times, so the
+///   second is the same call rather than a second refund. Each value is the
+///   intent's own recorded input, so the key is a fact about what was
+///   authorized. The order the operator wrote the names in does not change the
+///   key: `hash_value` canonicalizes, which sorts object keys, so a
+///   reordered declaration derives the identical hash and a client deriving it
+///   independently need not mirror the file's ordering.
+///
+/// The run id is on both shapes, so a declared key is an identity within one
+/// run and never collides with another run's. That is deliberate. Only a tool
+/// can honestly say two calls in different runs are the same effect, and a
+/// declaration is the operator's word about a tool this server holds no code
+/// for; scoping the identity to the run keeps the claim to something the
+/// operator can actually know.
+///
+/// # Errors
+///
+/// [`ApiError::BadRequest`] naming the field when a declared key field is
+/// absent from the input. The load-time rule makes every key field required by
+/// the input schema, so an input that passed validation carries them all; this
+/// is the check that the two rules stay in step rather than deriving a key over
+/// a missing value and collapsing two calls onto one identity.
+fn client_tool_idempotency_key(
+    run_id: RunId,
+    seq: u64,
+    tool: &str,
+    key_fields: &[String],
+    input: &Value,
+) -> Result<String, ApiError> {
+    if key_fields.is_empty() {
+        return Ok(hash_value(&json!({
+            "run": run_id.as_uuid().to_string(),
+            "seq": seq,
+            "tool": tool,
+        })));
+    }
+    let mut identity = serde_json::Map::new();
+    identity.insert("run".to_owned(), json!(run_id.as_uuid().to_string()));
+    identity.insert("tool".to_owned(), json!(tool));
+    for field in key_fields {
+        let value = input.get(field).ok_or_else(|| {
+            ApiError::BadRequest(format!(
+                "tool `{tool}` derives its idempotency key from `{field}`, but the input carries \
+                 no `{field}`; the key names what the call is, so it cannot be derived without it"
+            ))
+        })?;
+        identity.insert(field.clone(), value.clone());
+    }
+    Ok(hash_value(&Value::Object(identity)))
 }
 
 /// `POST /v1/client-runs/{id}/client-tool-intent`: open a client-performed tool
@@ -1542,8 +1776,15 @@ pub async fn client_tool_intent(
         ))
     })?;
     let effect = decl.effect;
+    let key_fields = decl.idempotency_key.clone();
 
-    let key = client_tool_idempotency_key(run_id, request.seq, &request.tool);
+    let key = client_tool_idempotency_key(
+        run_id,
+        request.seq,
+        &request.tool,
+        &key_fields,
+        &request.input,
+    )?;
     let intent = EventEnvelope::new(
         run_id,
         SequenceNumber::new(request.seq),
@@ -1564,15 +1805,16 @@ pub async fn client_tool_intent(
     let log = state.store().read_log(run_id).await.map_err(store_error)?;
     if (request.seq as usize) < log.len() {
         // An already-recorded position. The derivation is a pure function of
-        // (run, seq, tool), so an identical re-post re-derives the recorded key
-        // and can simply be handed it back: the client retries its own call
+        // the position or of the input, never of anything this request could
+        // vary independently, so an identical re-post re-derives the recorded
+        // key and can simply be handed it back: the client retries its own call
         // under the same key and the provider collapses the duplicate. Compare
         // the events rather than the envelopes, because `recorded_at` is this
         // store's stamp from the first attempt and would never match a fresh one.
         let recorded = &log[request.seq as usize];
         if recorded.event == intent.event {
-            let settled = intent_is_settled(&log, request.seq);
-            return Ok(Json(intent_body(request.seq, &key, effect, settled)));
+            let output = recorded_tool_output(&log, request.seq);
+            return Ok(Json(intent_body(request.seq, &key, effect, output)));
         }
         return Err(ApiError::Divergence(format!(
             "seq {} already holds a different event; it is not this client-tool intent's position",
@@ -1581,74 +1823,269 @@ pub async fn client_tool_intent(
     }
 
     // The same append-guard the generic append and both server-performed steps
-    // push through: it decides whether this is the legal next event.
+    // push through: it decides whether this is the legal next event. It runs
+    // before the claim below, and the order matters: a claim is permanent and
+    // nothing releases it, so claiming an identity for an intent that then
+    // turns out to be illegal would strand that key forever over a call that
+    // was never recorded.
     let mut validator = LogValidator::new(log);
     validator
         .push(intent.clone())
         .map_err(|error| ApiError::Divergence(error.to_string()))?;
+
+    // A declared key is an identity, not an attempt number, so this is the
+    // moment to find out whether the call it names has already happened. It
+    // mirrors `RunCtx::tool_call` exactly: the store's claim is the arbiter,
+    // asked live, before the write-ahead intent is persisted and before the
+    // client is told it may perform anything.
+    //
+    // Only a Write or an Idempotent call asks. A Read has no effect worth an
+    // identity, and answering a repeated read from an older call would quietly
+    // freeze a loop that is polling for a change on purpose.
+    let identity = (!key_fields.is_empty() && deduplicates(effect)).then_some(CallClaimant {
+        tool: &request.tool,
+        idempotency_key: &key,
+        run_id,
+        intent_seq: SequenceNumber::new(request.seq),
+    });
+    let mut copied = None;
+    if let Some(claimant) = identity {
+        match state
+            .store()
+            .claim_call(claimant)
+            .await
+            .map_err(store_error)?
+        {
+            // This position is the one execution of the call.
+            CallClaim::Claimed => {}
+            CallClaim::Held(commitment) if commitment.completion_seq.is_some() => {
+                copied = Some(committed_output(&state, commitment).await?);
+            }
+            // Held by a call that has not finished. Within one run the
+            // append-guard's one-pending-call rule refuses the second intent
+            // before it ever gets here, so this is the guard for the case the
+            // rule cannot see, and it refuses rather than guessing: nothing is
+            // recorded, and the run is drivable again the moment the holder is
+            // settled.
+            CallClaim::Held(commitment) => {
+                return Err(ApiError::Divergence(format!(
+                    "the call `{}` names is already open at seq {} of run {} and has not \
+                     finished; settle that call before opening the same one again",
+                    request.tool,
+                    commitment.intent_seq.get(),
+                    commitment.run_id.as_uuid()
+                )));
+            }
+        }
+    }
+
+    // Write-ahead on both paths. An intent that resolves as a duplicate is
+    // still an honest record of what this run asked for, which is the rule
+    // `RunCtx::tool_call` follows for the same case.
     state.store().append(&intent).await.map_err(append_error)?;
+
+    if let Some((output, origin)) = copied {
+        // The call already happened, so nothing performs it a second time: the
+        // completion is written here, correlated to the intent just recorded
+        // and naming what it copied.
+        append_tool_completion(&state, run_id, request.seq, &output, Some(origin)).await?;
+        return Ok(Json(intent_body(request.seq, &key, effect, Some(output))));
+    }
     // A freshly-recorded intent can never already be settled: the append above
     // just placed it at the log's new end, with nothing after it yet.
-    Ok(Json(intent_body(request.seq, &key, effect, false)))
+    Ok(Json(intent_body(request.seq, &key, effect, None)))
 }
 
-/// Whether the tool intent at `seq` already has its `ToolCallCompleted`
-/// recorded in `log`. The append-guard only ever admits a completion for the
-/// same `seq` immediately after its intent (see [`append_tool_completion`]),
-/// so it is enough to check the very next slot.
-fn intent_is_settled(log: &[EventEnvelope], seq: u64) -> bool {
-    log.get(seq as usize + 1).is_some_and(|envelope| {
-        matches!(
-            &envelope.event,
-            Event::ToolCallCompleted { seq: completed_seq, .. } if completed_seq.get() == seq
-        )
-    })
+/// Whether a call with this effect carries an identity worth deduplicating on,
+/// the same rule `RunCtx::tool_call` applies to a tool's declared key.
+fn deduplicates(effect: Effect) -> bool {
+    matches!(effect, Effect::Write | Effect::Idempotent)
+}
+
+/// The recorded output of the completion a settled commitment points at, and
+/// the origin to name on the copy.
+///
+/// The output is read back through `read_log`, so the origin run's hash chain
+/// is verified before a single byte is copied, exactly as the runtime's own
+/// deduplication reads it.
+async fn committed_output(
+    state: &AppState,
+    commitment: salvor_store::CallCommitment,
+) -> Result<(Value, DedupOrigin), ApiError> {
+    let origin_log = state
+        .store()
+        .read_log(commitment.run_id)
+        .await
+        .map_err(store_error)?;
+    let output = recorded_tool_output(&origin_log, commitment.intent_seq.get()).ok_or_else(|| {
+        ApiError::Internal(format!(
+            "the store says run {} settled this call at seq {}, but that log holds no completion \
+             there",
+            commitment.run_id.as_uuid(),
+            commitment.intent_seq.get()
+        ))
+    })?;
+    Ok((
+        output,
+        DedupOrigin {
+            run_id: commitment.run_id,
+            seq: commitment.intent_seq,
+        },
+    ))
+}
+
+/// The output recorded for the tool intent at `seq`, when its
+/// `ToolCallCompleted` is already in `log`; `None` while the call is still
+/// open.
+///
+/// The append-guard only ever admits a completion for the same `seq`
+/// immediately after its intent (see [`append_tool_completion`]), so it is
+/// enough to check the very next slot.
+fn recorded_tool_output(log: &[EventEnvelope], seq: u64) -> Option<Value> {
+    match &log.get(seq as usize + 1)?.event {
+        Event::ToolCallCompleted {
+            seq: completed_seq,
+            output,
+            ..
+        } if completed_seq.get() == seq => Some(output.clone()),
+        _ => None,
+    }
 }
 
 /// The `200` client-tool-intent body: the position, the DERIVED idempotency key
 /// the client must perform under, the operator-declared effect it was
-/// recorded with, and whether this position's completion is ALREADY recorded.
+/// recorded with, whether this position's completion is ALREADY recorded, and
+/// that completion's output when it is.
 ///
 /// `settled` exists for a caller re-posting an intent it already believes it
 /// opened, most pointedly a payments caller checking a write before it acts on
 /// the response: without it, a retried intent and a fresh one look identical
 /// (same `200`, same key), and a caller cannot tell "safe to perform" from
 /// "already done, do not perform it again" without separately reading the log.
-/// On a freshly-recorded intent it is always `false`; on a byte-identical
-/// re-post it reflects whether the completion has landed since.
-fn intent_body(seq: u64, idempotency_key: &str, effect: Effect, settled: bool) -> Value {
-    json!({
+///
+/// The recorded `output` rides along on a settled answer, the same way
+/// [`client_model_intent_body`] carries a recorded response, and for a sharper
+/// reason here: a call answered from a DECLARED idempotency key is settled the
+/// instant its intent is opened, without the client having performed anything,
+/// so this response is the only place the client learns what the call it just
+/// asked for returned. The key is omitted entirely while the call is open, so
+/// an unsettled answer is byte for byte what it was before there was an output
+/// to carry.
+fn intent_body(seq: u64, idempotency_key: &str, effect: Effect, output: Option<Value>) -> Value {
+    let mut body = json!({
         "seq": seq,
         "idempotency_key": idempotency_key,
         "effect": effect,
-        "settled": settled,
-    })
+        "settled": output.is_some(),
+    });
+    if let Some(output) = output {
+        body.as_object_mut()
+            .expect("the intent body is a JSON object")
+            .insert("output".to_owned(), output);
+    }
+    body
+}
+
+/// Which of the two shapes a client-tool completion arrived in, after the
+/// either-or rule has been applied to the request body.
+enum Reported {
+    /// The call returned this.
+    Output(Value),
+    /// The call produced nothing and failed like this.
+    Error(ReportedFailure),
+}
+
+/// Records a client-reported failure as the completion for the intent at `seq`.
+///
+/// The recorded output is the `__salvor_error` sentinel, built by
+/// `salvor_runtime::wire`'s own [`encode_failure`], so the bytes are the ones
+/// the runtime writes when a native tool exhausts its retries. That parity is
+/// the whole point: a failure is not a new kind of event and not a new run
+/// state, it is the outcome a completion is allowed to carry, and a log written
+/// through this endpoint has to mean to a replay exactly what a natively
+/// recorded one means.
+///
+/// # Errors
+///
+/// [`ApiError::BadRequest`] for a `kind` that is not one of the three recorded
+/// layers, and whatever [`append_tool_completion`] reports.
+async fn record_reported_failure(
+    state: &AppState,
+    run_id: RunId,
+    seq: u64,
+    failure: ReportedFailure,
+) -> Result<Json<Value>, ApiError> {
+    let kind = match failure.kind.as_deref() {
+        None => ToolFailureKind::Handler,
+        Some(named) => ToolFailureKind::from_wire(named).ok_or_else(|| {
+            ApiError::BadRequest(format!(
+                "`{named}` is not a failure kind; use `invalid_input`, `handler`, or \
+                 `output_serialization`, or omit it for `handler`"
+            ))
+        })?,
+    };
+    let output = encode_failure(&ToolFailure {
+        kind,
+        message: failure.message,
+        // One attempt. `attempts` counts executions inside salvor's own retry
+        // loop, and salvor ran no loop over a call it did not dispatch, so a
+        // number taken from the wire would be the client describing machinery
+        // that never touched its call.
+        attempts: 1,
+    });
+    append_tool_completion(state, run_id, seq, &output, None).await?;
+    Ok(Json(json!({ "seq": seq, "completed": true })))
 }
 
 /// `POST /v1/client-runs/{id}/client-tool-completion`: record that a
 /// client-performed tool call finished.
 ///
-/// The client ran the call in its own process and is now reporting the result.
-/// Salvor did not witness it, so everything this endpoint can check, it checks
-/// before the report becomes history. Requires the `X-Drive-Token` header.
+/// The client ran the call in its own process and is now reporting what
+/// happened. Salvor did not witness it, so everything this endpoint can check,
+/// it checks before the report becomes history. Requires the `X-Drive-Token`
+/// header.
+///
+/// # Two shapes, and exactly one of them
+///
+/// The body carries `output`, what the call returned, or `error`, what went
+/// wrong instead when it returned nothing at all. Both, or neither, is a `400`:
+/// they say opposite things about the same call and this server has no way to
+/// pick between them.
+///
+/// The `error` shape records the same `__salvor_error` sentinel completion the
+/// runtime records when a NATIVE tool exhausts its retries, through
+/// `salvor_runtime::wire`'s own encoder, so the bytes match (see
+/// [`record_reported_failure`]). A failure is not a new event and not a new run
+/// state: it is an outcome a completion is allowed to carry, so a recorded
+/// failure SETTLES the call exactly as a native one does, and the run carries on
+/// with the failure replaying from the log rather than the call happening again.
 ///
 /// It refuses, recording nothing, when:
 ///
+/// - the body carries both `output` and `error`, or neither (`400`);
 /// - the log does not end at a tool intent, or ends at one whose `seq` is not
 ///   the one this request names (`409 divergence`);
 /// - the pending intent was performed by the SERVER (`403`): a client must not
 ///   close a call salvor made, since salvor holds the real result;
-/// - the declaration says `trust_completion = false` (`403`);
-/// - the declaration carries no `output_schema` (`403`): with nothing to check
-///   the report against, the completion is unfalsifiable, which is exactly what
-///   the schema exists to prevent;
+/// - the declaration says `trust_completion = false` (`403`), for a reported
+///   failure as much as for a reported result. "It did not land" is a claim
+///   about money made by the party that benefits from it being believed, so an
+///   untrusted write is left dangling for a person either way;
+/// - the declaration carries no `output_schema` AND the body reports an output
+///   (`403`): with nothing to check the report against, the completion is
+///   unfalsifiable, which is exactly what the schema exists to prevent. A
+///   reported failure carries no value to check and is unaffected;
 /// - the reported output fails the declared `output_schema` (`400`);
 /// - a `require_equal` field's reported value differs from the value the intent
 ///   recorded (`403`): the output schema is a shape check and cannot know what
-///   was authorized, so a client report may not alter a pinned field.
+///   was authorized, so a client report may not alter a pinned field;
+/// - a reported `kind` names no recorded failure layer (`400`).
 ///
-/// The checks run in that order: the trust refusal fires before any value is
-/// compared, then the output shape, then the per-field equality.
+/// The checks run in that order: the either-or rule first, then correlation,
+/// then the trust refusal before any value is compared, then the output shape,
+/// then the per-field equality. The `output_schema`, `require_equal`, and
+/// value-shape checks are skipped on the `error` path, which is the absence of a
+/// value for them to look at rather than a relaxation of the rules.
 ///
 /// # Where a refused completion leaves the run, and why nothing else changes
 ///
@@ -1683,6 +2120,24 @@ pub async fn client_tool_completion(
         )));
     }
     let request: ClientToolCompletionRequest = parse_body(&body)?;
+    let reported = match (request.output, request.error) {
+        (Some(output), None) => Reported::Output(output),
+        (None, Some(error)) => Reported::Error(error),
+        (Some(_), Some(_)) => {
+            return Err(ApiError::BadRequest(
+                "a completion carries `output` or `error`, never both: they say opposite things \
+                 about the same call"
+                    .to_owned(),
+            ));
+        }
+        (None, None) => {
+            return Err(ApiError::BadRequest(
+                "a completion must carry `output` (what the call returned) or `error` (what went \
+                 wrong instead)"
+                    .to_owned(),
+            ));
+        }
+    };
 
     // A completion settles the log's LAST event, which must be the intent this
     // request names. Anything else and the client and the log disagree about
@@ -1739,19 +2194,33 @@ pub async fn client_tool_completion(
         return Err(ApiError::ClientCompletionRefused(format!(
             "tool `{tool}` is declared with trust_completion = false, so a client may not record \
              its own completion for it; verify the call externally, then settle it by hand with \
-             POST /v1/client-runs/{}/resolve",
+             POST /v1/runs/{}/resolve or `salvor resolve`",
             run_id.as_uuid()
         )));
     }
+    // A reported failure stops here, on the checks that are about trust rather
+    // than about a value. There is no output to hold against the declared
+    // shape, and no field to pin to what was authorized, so the two remaining
+    // guards have nothing to say: skipping them is the absence of a value, not
+    // a relaxation of the rules. What IS recorded is byte for byte what the
+    // runtime records when a native tool exhausts its retries, so a log replays
+    // identically whichever side the call was performed on.
+    let output = match reported {
+        Reported::Output(output) => output,
+        Reported::Error(failure) => {
+            return record_reported_failure(&state, run_id, request.seq, failure).await;
+        }
+    };
+
     let Some(output_schema) = &decl.output_schema else {
         return Err(ApiError::ClientCompletionRefused(format!(
             "tool `{tool}` declares no output_schema, so a client-reported completion carries \
              nothing this server can check; declare an output_schema for it, or settle the call \
-             by hand with POST /v1/client-runs/{}/resolve",
+             by hand with POST /v1/runs/{}/resolve or `salvor resolve`",
             run_id.as_uuid()
         )));
     };
-    validate_against_schema(&request.output, output_schema).map_err(|error| {
+    validate_against_schema(&output, output_schema).map_err(|error| {
         ApiError::BadRequest(format!(
             "the reported output does not match the declared output_schema for `{tool}`: {error}"
         ))
@@ -1764,13 +2233,13 @@ pub async fn client_tool_completion(
     // field is required on both sides, so both values are present to compare.
     for field in &decl.require_equal {
         let authorized = intent_input.get(field).unwrap_or(&Value::Null);
-        let reported = request.output.get(field).unwrap_or(&Value::Null);
-        if authorized != reported {
+        let claimed = output.get(field).unwrap_or(&Value::Null);
+        if authorized != claimed {
             return Err(ApiError::ClientCompletionRefused(format!(
-                "tool `{tool}` reported `{field}` as {reported} for the intent at seq {}, but the \
+                "tool `{tool}` reported `{field}` as {claimed} for the intent at seq {}, but the \
                  intent recorded {authorized}; a client report may not alter a require_equal field. \
                  If the provider genuinely did something different, settle it by hand with POST \
-                 /v1/client-runs/{}/resolve",
+                 /v1/runs/{}/resolve or `salvor resolve`",
                 request.seq,
                 run_id.as_uuid()
             )));
@@ -1780,7 +2249,7 @@ pub async fn client_tool_completion(
     // The completion goes through the same guard and the same helper the
     // server-performed tool step records its own completion with, so the two
     // surfaces write byte-identical `ToolCallCompleted` events.
-    append_tool_completion(&state, run_id, request.seq, &request.output).await?;
+    append_tool_completion(&state, run_id, request.seq, &output, None).await?;
     Ok(Json(json!({
         "seq": request.seq,
         "completed": true,

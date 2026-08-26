@@ -10,6 +10,14 @@
 //! the existing `tool-step` endpoint through a real (failing) registered tool,
 //! so the test proves the refusal against a genuinely server-performed intent
 //! rather than a hand-seeded one.
+//!
+//! Four groups of tests sit here, and they run in this order: the declaration
+//! and the end-to-end call, then the resolve tests (a hand-recorded output meets
+//! the same declaration a client's report does, and the completion it writes
+//! names its settler), then the failure tests (a client-reported error records
+//! the sentinel a native tool records, byte for byte), then the declared-key
+//! tests (an idempotency key derived from named input fields makes a repeated
+//! call one call).
 
 mod common;
 
@@ -20,8 +28,10 @@ use common::{
 };
 use reqwest::StatusCode;
 use salvor_core::{
-    Effect, Event, EventEnvelope, Performer, RunId, RunStatus, SequenceNumber, derive_state,
+    Effect, Event, EventEnvelope, Performer, RunId, RunStatus, SequenceNumber, SettledBy,
+    derive_state,
 };
+use salvor_runtime::{ToolFailure, ToolFailureKind, decode_failure, encode_failure};
 use salvor_server::{ClientToolDecl, ClientToolRegistry};
 use salvor_tools::{DynTool, ToolCtx, ToolError, ToolOutcome};
 use serde_json::{Value, json};
@@ -102,6 +112,7 @@ fn decl(
         output_schema,
         trust_completion,
         require_equal: Vec::new(),
+        idempotency_key: Vec::new(),
     }
 }
 
@@ -490,8 +501,13 @@ async fn an_untrusted_tool_refuses_a_self_completion() {
         "the refusal names the declaration that caused it: {message}"
     );
     assert!(
-        message.contains(&format!("/v1/client-runs/{run}/resolve")),
-        "the refusal names the endpoint that settles it: {message}"
+        message.contains(&format!("/v1/runs/{run}/resolve")) && message.contains("salvor resolve"),
+        "the refusal names a path that does not need the lease this client is about to drop: \
+         {message}"
+    );
+    assert!(
+        !message.contains("/v1/client-runs/"),
+        "the lease-gated resolve is not the way out of a refused completion: {message}"
     );
 
     let log = read_log(&client, &server.base, &run).await;
@@ -544,8 +560,13 @@ async fn a_tool_without_an_output_schema_refuses_a_completion() {
         "the refusal names the missing schema: {message}"
     );
     assert!(
-        message.contains(&format!("/v1/client-runs/{run}/resolve")),
-        "the refusal names the endpoint that settles it: {message}"
+        message.contains(&format!("/v1/runs/{run}/resolve")) && message.contains("salvor resolve"),
+        "the refusal names a path that does not need the lease this client is about to drop: \
+         {message}"
+    );
+    assert!(
+        !message.contains("/v1/client-runs/"),
+        "the lease-gated resolve is not the way out of a refused completion: {message}"
     );
     assert_eq!(
         read_log(&client, &server.base, &run).await.len(),
@@ -822,6 +843,7 @@ async fn a_require_equal_mismatch_is_refused_and_the_honest_report_is_accepted()
         })),
         trust_completion: true,
         require_equal: vec!["amount_cents".to_owned()],
+        idempotency_key: Vec::new(),
     };
     let server = client_tool_server(vec![pinned], vec![]).await;
     let client = reqwest::Client::new();
@@ -855,8 +877,9 @@ async fn a_require_equal_mismatch_is_refused_and_the_honest_report_is_accepted()
     );
     assert!(
         message.contains("require_equal")
-            && message.contains(&format!("/v1/client-runs/{run}/resolve")),
-        "the refusal explains the rule and points at resolve: {message}"
+            && message.contains(&format!("/v1/runs/{run}/resolve"))
+            && message.contains("salvor resolve"),
+        "the refusal explains the rule and points at a resolve the caller can reach: {message}"
     );
     assert_eq!(
         read_log(&client, &server.base, &run).await.len(),
@@ -897,6 +920,7 @@ async fn require_equal_appears_in_the_listing_only_when_set() {
         output_schema: Some(json!({ "type": "object", "required": ["amount_cents"] })),
         trust_completion: true,
         require_equal: vec!["amount_cents".to_owned()],
+        idempotency_key: Vec::new(),
     };
     let server = client_tool_server(vec![pinned, charge_card_decl()], vec![]).await;
     let client = reqwest::Client::new();
@@ -923,5 +947,772 @@ async fn require_equal_appears_in_the_listing_only_when_set() {
     assert!(
         unpinned_entry.get("require_equal").is_none(),
         "an unpinned declaration carries no require_equal key: {unpinned_entry}"
+    );
+}
+
+/// The pinned-write declaration the resolve tests settle by hand: a write the
+/// client performs, whose completion must carry the provider's own id and may
+/// not restate the amount as anything but what was authorized, and which the
+/// client is NOT trusted to close itself.
+fn wire_payout_decl() -> ClientToolDecl {
+    ClientToolDecl {
+        name: "wire_payout".to_owned(),
+        effect: Effect::Write,
+        input_schema: json!({
+            "type": "object",
+            "required": ["amount_cents"],
+            "properties": { "amount_cents": { "type": "integer" } }
+        }),
+        output_schema: Some(json!({
+            "type": "object",
+            "required": ["payout_id", "amount_cents"],
+            "properties": {
+                "payout_id": { "type": "string" },
+                "amount_cents": { "type": "integer" }
+            }
+        })),
+        trust_completion: false,
+        require_equal: vec!["amount_cents".to_owned()],
+        idempotency_key: Vec::new(),
+    }
+}
+
+/// Opens a run whose log ends at a dangling `wire_payout` intent for
+/// `amount_cents`, the state both resolve endpoints exist to settle.
+async fn run_awaiting_a_payout(
+    client: &reqwest::Client,
+    base: &str,
+    amount_cents: i64,
+) -> (String, String) {
+    let (run, token) = started_run(client, base).await;
+    let (status, opened) = intent(
+        client,
+        base,
+        &run,
+        Some(&token),
+        json!({ "seq": 1, "tool": "wire_payout", "input": { "amount_cents": amount_cents } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "intent: {opened}");
+    (run, token)
+}
+
+/// A resolve against the operator's endpoint, which presents no drive token.
+async fn resolve(
+    client: &reqwest::Client,
+    base: &str,
+    run: &str,
+    output: Value,
+) -> (StatusCode, Value) {
+    post(
+        client,
+        &format!("{base}/v1/runs/{run}/resolve"),
+        json!({ "output": output }),
+        None,
+    )
+    .await
+}
+
+/// A hand-recorded output may not restate a pinned field as something other
+/// than what the intent authorized. The operator resolving is not the client,
+/// but the output is still nobody's witnessed fact, and a run whose log said a
+/// 5000 payout was authorized must not end up carrying 50000 as its result.
+#[tokio::test]
+async fn a_resolution_may_not_alter_a_pinned_field() {
+    let server = client_tool_server(vec![wire_payout_decl()], vec![]).await;
+    let client = reqwest::Client::new();
+    let (run, _token) = run_awaiting_a_payout(&client, &server.base, 5000).await;
+
+    let (status, body) = resolve(
+        &client,
+        &server.base,
+        &run,
+        json!({ "payout_id": "po_1", "amount_cents": 50000 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "resolve: {body}");
+    assert_eq!(body["error"]["code"], "bad_request");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("wire_payout") && message.contains("amount_cents"),
+        "the refusal names the tool and the field: {message}"
+    );
+
+    let log = read_log(&client, &server.base, &run).await;
+    assert_eq!(log.len(), 2, "the refusal recorded nothing");
+    assert_eq!(
+        derive_state(&log).status,
+        RunStatus::NeedsReconciliation,
+        "the write is still outstanding"
+    );
+}
+
+/// An output missing a field the declaration requires is refused by the same
+/// `output_schema` check a client's own report meets. `payout_id` is the one
+/// field a report could not have invented, so a resolution without it is a
+/// claim rather than a result.
+#[tokio::test]
+async fn a_resolution_missing_a_required_field_is_refused() {
+    let server = client_tool_server(vec![wire_payout_decl()], vec![]).await;
+    let client = reqwest::Client::new();
+    let (run, _token) = run_awaiting_a_payout(&client, &server.base, 5000).await;
+
+    let (status, body) =
+        resolve(&client, &server.base, &run, json!({ "amount_cents": 5000 })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "resolve: {body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("wire_payout") && message.contains("payout_id"),
+        "the refusal names the tool and the missing field: {message}"
+    );
+    assert_eq!(
+        read_log(&client, &server.base, &run).await.len(),
+        2,
+        "the refusal recorded nothing"
+    );
+}
+
+/// The honest resolution passes both checks, records exactly one completion,
+/// and stamps who settled it: the log now says an operator closed this call by
+/// hand, which is not a thing the run could have said for itself.
+#[tokio::test]
+async fn a_good_resolution_is_accepted_and_names_its_settler() {
+    let server = client_tool_server(vec![wire_payout_decl()], vec![]).await;
+    let client = reqwest::Client::new();
+    let (run, _token) = run_awaiting_a_payout(&client, &server.base, 5000).await;
+
+    let (status, body) = resolve(
+        &client,
+        &server.base,
+        &run,
+        json!({ "payout_id": "po_1", "amount_cents": 5000 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "resolve: {body}");
+    assert_eq!(body["resolved"], json!(true));
+
+    let log = read_log(&client, &server.base, &run).await;
+    assert_eq!(log.len(), 3, "exactly one completion was appended");
+    let Event::ToolCallCompleted {
+        seq,
+        output,
+        settled_by,
+        ..
+    } = &log[2].event
+    else {
+        panic!("seq 2 holds the completion, got {:?}", log[2].event);
+    };
+    assert_eq!(seq.get(), 1, "it correlates to the dangling intent");
+    assert_eq!(
+        output,
+        &json!({ "payout_id": "po_1", "amount_cents": 5000 })
+    );
+    assert_eq!(
+        *settled_by,
+        Some(SettledBy::Operator),
+        "a hand-recorded completion says who recorded it"
+    );
+    assert_eq!(
+        derive_state(&log).status,
+        RunStatus::Running,
+        "the run is drivable again"
+    );
+}
+
+/// A run whose tool this server no longer declares is refused rather than
+/// resolved unchecked. A stale registry is the operator's to fix, and the
+/// message says how, because recording an unexamined output is the one thing
+/// this path must not do.
+#[tokio::test]
+async fn a_resolution_for_an_undeclared_tool_is_refused() {
+    let declaring = client_tool_server(vec![wire_payout_decl()], vec![]).await;
+    let client = reqwest::Client::new();
+    let (run, _token) = run_awaiting_a_payout(&client, &declaring.base, 5000).await;
+
+    // The same store, served by a process that was started without the
+    // declaration: exactly what an operator meets after dropping a
+    // `--client-tool` file from the command line.
+    let forgetful = TestServer::spawn(
+        app_state(
+            declaring.state.store(),
+            agent_factory(
+                MockServer::start().await.uri(),
+                "record",
+                Effect::Read,
+                CountBehavior::Record,
+                counter(),
+            ),
+        )
+        .with_client_tools(Arc::new(ClientToolRegistry::new())),
+    )
+    .await;
+
+    let (status, body) = resolve(
+        &client,
+        &forgetful.base,
+        &run,
+        json!({ "payout_id": "po_1", "amount_cents": 5000 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "resolve: {body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("wire_payout") && message.contains("--client-tool"),
+        "the refusal names the tool and how to declare it: {message}"
+    );
+    assert_eq!(
+        read_log(&client, &declaring.base, &run).await.len(),
+        2,
+        "the refusal recorded nothing"
+    );
+}
+
+/// A read the client never finished is not an operator's problem, and the
+/// refusal says so. `recover` is a server-driven verb, and the resume endpoint
+/// refuses a client-driven run outright, so naming it would send an operator at
+/// a door that is already locked.
+#[tokio::test]
+async fn a_resolve_refusal_never_sends_a_client_driven_run_to_recover() {
+    let lookup = decl(
+        "lookup_order",
+        Effect::Read,
+        json!({ "type": "object" }),
+        Some(json!({ "type": "object" })),
+        true,
+    );
+    let server = client_tool_server(vec![lookup], vec![]).await;
+    let client = reqwest::Client::new();
+    let (run, token) = started_run(&client, &server.base).await;
+    let (status, opened) = intent(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        json!({ "seq": 1, "tool": "lookup_order", "input": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "intent: {opened}");
+
+    let (status, body) = resolve(&client, &server.base, &run, json!({ "found": true })).await;
+    assert_eq!(status, StatusCode::CONFLICT, "resolve: {body}");
+    assert_eq!(body["error"]["code"], "wrong_state");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        !message.contains("recover"),
+        "a client-driven run has no recover to reach for: {message}"
+    );
+    assert!(
+        message.contains("lookup_order") && message.contains("performs again on its next drive"),
+        "the refusal says what actually settles this call: {message}"
+    );
+}
+
+/// A client tool whose call threw records that, and what lands in the log is
+/// byte for byte the sentinel `salvor_runtime` writes when a NATIVE tool
+/// exhausts its retries. A failure is not a new event and not a new run state;
+/// it is an outcome a completion is allowed to carry, and a log written through
+/// this endpoint has to mean to a replay exactly what a natively recorded one
+/// means. The declaration carries no `output_schema`, which the value path
+/// refuses outright: with no value reported there is nothing for a shape check
+/// to look at.
+#[tokio::test]
+async fn a_reported_failure_records_the_native_sentinel_for_a_read() {
+    let lookup = decl(
+        "lookup_order",
+        Effect::Read,
+        json!({ "type": "object" }),
+        None,
+        true,
+    );
+    let server = client_tool_server(vec![lookup], vec![]).await;
+    let client = reqwest::Client::new();
+    let (run, token) = started_run(&client, &server.base).await;
+    let (status, opened) = intent(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        json!({ "seq": 1, "tool": "lookup_order", "input": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "intent: {opened}");
+
+    let (status, done) = completion(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        json!({ "seq": 1, "error": { "message": "the order service was unreachable" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "failure completion: {done}");
+    assert_eq!(done["completed"], json!(true));
+
+    let log = read_log(&client, &server.base, &run).await;
+    assert_eq!(log.len(), 3, "RunStarted, intent, failure completion");
+    let Event::ToolCallCompleted { seq, output, .. } = &log[2].event else {
+        panic!("seq 2 holds the completion, got {:?}", log[2].event);
+    };
+    assert_eq!(seq.get(), 1, "it correlates to the intent");
+    assert_eq!(
+        output,
+        &encode_failure(&ToolFailure {
+            kind: ToolFailureKind::Handler,
+            message: "the order service was unreachable".to_owned(),
+            attempts: 1,
+        }),
+        "the recorded bytes are the runtime's own, not this endpoint's idea of them"
+    );
+    assert_eq!(
+        decode_failure(output).map(|failure| failure.kind),
+        Some(ToolFailureKind::Handler),
+        "an unnamed kind records as the layer a client tool fails at"
+    );
+
+    // A recorded failure SETTLES the call, exactly as it does for a native
+    // tool: the intent is closed, the run carries on, and a replay reads the
+    // failure back rather than performing the call a second time.
+    assert_eq!(derive_state(&log).status, RunStatus::Running);
+    let (status, reopened) = intent(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        json!({ "seq": 1, "tool": "lookup_order", "input": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "re-post: {reopened}");
+    assert_eq!(
+        reopened["settled"],
+        json!(true),
+        "the position is answered from the log, not performed again: {reopened}"
+    );
+}
+
+/// The same for a write the operator trusts the client to close, and with a
+/// `kind` named on the wire. A trusted write's failure is the client's word
+/// like any other completion for it, and the recorded bytes are the runtime's.
+#[tokio::test]
+async fn a_reported_failure_records_the_native_sentinel_for_a_write() {
+    let server = client_tool_server(vec![charge_card_decl()], vec![]).await;
+    let client = reqwest::Client::new();
+    let (run, token) = started_run(&client, &server.base).await;
+    let (status, opened) = intent(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        json!({ "seq": 1, "tool": "charge_card", "input": { "amount_cents": 2500 } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "intent: {opened}");
+
+    let (status, done) = completion(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        json!({
+            "seq": 1,
+            "error": { "message": "card declined", "kind": "invalid_input" }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "failure completion: {done}");
+
+    let log = read_log(&client, &server.base, &run).await;
+    let Event::ToolCallCompleted { output, .. } = &log[2].event else {
+        panic!("seq 2 holds the completion, got {:?}", log[2].event);
+    };
+    assert_eq!(
+        output,
+        &encode_failure(&ToolFailure {
+            kind: ToolFailureKind::InvalidInput,
+            message: "card declined".to_owned(),
+            attempts: 1,
+        }),
+        "the named kind is recorded and the bytes are the runtime's"
+    );
+    assert_eq!(
+        derive_state(&log).status,
+        RunStatus::Running,
+        "a recorded failure closes the call, so the write no longer dangles"
+    );
+}
+
+/// The trust rule holds for a failure exactly as it holds for a result. A
+/// write the operator did not trust the client to close is not closed by the
+/// client saying it failed either: "it did not land" is a claim about money,
+/// made by the party that would benefit from it being believed. The intent
+/// stands, the run needs reconciliation, and the operator's resolve settles it.
+#[tokio::test]
+async fn an_untrusted_tool_refuses_a_reported_failure_and_resolve_settles_it() {
+    let server = client_tool_server(vec![wire_payout_decl()], vec![]).await;
+    let client = reqwest::Client::new();
+    let (run, token) = run_awaiting_a_payout(&client, &server.base, 5000).await;
+
+    let (status, body) = completion(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        json!({ "seq": 1, "error": { "message": "the bank timed out" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "failure completion: {body}");
+    assert_eq!(body["error"]["code"], "client_completion_refused");
+
+    let log = read_log(&client, &server.base, &run).await;
+    assert_eq!(log.len(), 2, "the refusal recorded nothing");
+    assert_eq!(
+        derive_state(&log).status,
+        RunStatus::NeedsReconciliation,
+        "the write is outstanding, which is what a person has to settle"
+    );
+
+    let (status, body) = resolve(
+        &client,
+        &server.base,
+        &run,
+        json!({ "payout_id": "po_1", "amount_cents": 5000 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "resolve: {body}");
+    assert_eq!(
+        derive_state(&read_log(&client, &server.base, &run).await).status,
+        RunStatus::Running,
+        "the operator's resolution is what unsticks it"
+    );
+}
+
+/// A body carrying both halves, or neither, is refused before anything is
+/// looked at: `output` and `error` say opposite things about the same call and
+/// this server has no way to pick between them.
+#[tokio::test]
+async fn a_completion_carries_a_result_or_a_failure_never_both() {
+    let server = client_tool_server(vec![charge_card_decl()], vec![]).await;
+    let client = reqwest::Client::new();
+    let (run, token) = started_run(&client, &server.base).await;
+    let (status, opened) = intent(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        json!({ "seq": 1, "tool": "charge_card", "input": { "amount_cents": 2500 } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "intent: {opened}");
+
+    for body in [
+        json!({
+            "seq": 1,
+            "output": { "charge_id": "ch_9" },
+            "error": { "message": "it also failed" }
+        }),
+        json!({ "seq": 1 }),
+    ] {
+        let (status, refused) = completion(&client, &server.base, &run, Some(&token), body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "completion: {refused}");
+        assert_eq!(refused["error"]["code"], "bad_request");
+    }
+    assert_eq!(
+        read_log(&client, &server.base, &run).await.len(),
+        2,
+        "neither refusal recorded anything"
+    );
+}
+
+/// A `kind` that names no recorded layer is refused, naming the three that are
+/// legal. The strings are a stable format replay parses, so an unrecognized one
+/// must not reach the log.
+#[tokio::test]
+async fn an_unknown_failure_kind_is_refused() {
+    let server = client_tool_server(vec![charge_card_decl()], vec![]).await;
+    let client = reqwest::Client::new();
+    let (run, token) = started_run(&client, &server.base).await;
+    let (status, opened) = intent(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        json!({ "seq": 1, "tool": "charge_card", "input": { "amount_cents": 2500 } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "intent: {opened}");
+
+    let (status, body) = completion(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        json!({ "seq": 1, "error": { "message": "boom", "kind": "network" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "completion: {body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("network") && message.contains("handler"),
+        "the refusal names the bad kind and the legal ones: {message}"
+    );
+    assert_eq!(
+        read_log(&client, &server.base, &run).await.len(),
+        2,
+        "the refusal recorded nothing"
+    );
+}
+
+/// A declaration whose key names the fields that say what one call IS: a refund
+/// of an amount against an order is one refund, wherever in the run it is asked
+/// for.
+fn refund_card_decl() -> ClientToolDecl {
+    ClientToolDecl {
+        name: "refund_card".to_owned(),
+        effect: Effect::Write,
+        input_schema: json!({
+            "type": "object",
+            "required": ["order_id", "amount_cents"],
+            "properties": {
+                "order_id": { "type": "string" },
+                "amount_cents": { "type": "integer" }
+            }
+        }),
+        output_schema: Some(json!({
+            "type": "object",
+            "required": ["provider_refund_id"],
+            "properties": { "provider_refund_id": { "type": "string" } }
+        })),
+        trust_completion: true,
+        require_equal: Vec::new(),
+        idempotency_key: vec!["order_id".to_owned(), "amount_cents".to_owned()],
+    }
+}
+
+/// Two intents whose declared key fields are equal derive one key, and the
+/// second is answered from the first rather than performed again. This is the
+/// whole point of a declared key: a loop that asks for the same refund twice
+/// gets the first refund's result back, and the log says where the answer came
+/// from instead of pretending a second call happened.
+#[tokio::test]
+async fn equal_key_fields_settle_the_second_intent_from_the_first() {
+    let server = client_tool_server(vec![refund_card_decl()], vec![]).await;
+    let client = reqwest::Client::new();
+    let (run, token) = started_run(&client, &server.base).await;
+    let call = json!({ "order_id": "ORD-7781", "amount_cents": 5000 });
+
+    let (status, first) = intent(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        json!({ "seq": 1, "tool": "refund_card", "input": call }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "first intent: {first}");
+    assert_eq!(first["settled"], json!(false), "nothing has happened yet");
+    let key = first["idempotency_key"].as_str().expect("key").to_owned();
+
+    let (status, done) = completion(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        json!({ "seq": 1, "output": { "provider_refund_id": "re_1" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "completion: {done}");
+
+    // The model asks for the same refund again, two positions later.
+    let (status, second) = intent(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        json!({ "seq": 3, "tool": "refund_card", "input": call }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "second intent: {second}");
+    assert_eq!(
+        second["idempotency_key"].as_str(),
+        Some(key.as_str()),
+        "the same call derives the same key at a different position: {second}"
+    );
+    assert_eq!(
+        second["settled"],
+        json!(true),
+        "the call already happened: {second}"
+    );
+    assert_eq!(
+        second["output"],
+        json!({ "provider_refund_id": "re_1" }),
+        "the answer is the first call's, carried on the intent response: {second}"
+    );
+
+    let log = read_log(&client, &server.base, &run).await;
+    assert_eq!(
+        log.len(),
+        5,
+        "the duplicate intent and its copied completion"
+    );
+    let Event::ToolCallCompleted {
+        seq,
+        output,
+        deduplicated_from,
+        ..
+    } = &log[4].event
+    else {
+        panic!("seq 4 holds the copied completion, got {:?}", log[4].event);
+    };
+    assert_eq!(seq.get(), 3, "it correlates to the duplicate intent");
+    assert_eq!(output, &json!({ "provider_refund_id": "re_1" }));
+    let origin = deduplicated_from.expect("a copied completion names its origin");
+    assert_eq!(origin.seq.get(), 1, "it names the call it copied");
+    assert_eq!(
+        origin.run_id.as_uuid().to_string(),
+        run,
+        "the identity is scoped to this run"
+    );
+}
+
+/// Different values under the declared fields are different calls, and get
+/// different keys. A refund of 6000 is not the refund of 5000, so the second
+/// intent is open work the client still has to perform.
+#[tokio::test]
+async fn different_key_field_values_derive_different_keys() {
+    let server = client_tool_server(vec![refund_card_decl()], vec![]).await;
+    let client = reqwest::Client::new();
+    let (run, token) = started_run(&client, &server.base).await;
+
+    let (status, first) = intent(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        json!({
+            "seq": 1,
+            "tool": "refund_card",
+            "input": { "order_id": "ORD-7781", "amount_cents": 5000 }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "first intent: {first}");
+    let (status, done) = completion(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        json!({ "seq": 1, "output": { "provider_refund_id": "re_1" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "completion: {done}");
+
+    let (status, second) = intent(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        json!({
+            "seq": 3,
+            "tool": "refund_card",
+            "input": { "order_id": "ORD-7781", "amount_cents": 6000 }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "second intent: {second}");
+    assert_ne!(
+        second["idempotency_key"], first["idempotency_key"],
+        "a different amount is a different call: {second}"
+    );
+    assert_eq!(
+        second["settled"],
+        json!(false),
+        "there is nothing recorded to answer it from: {second}"
+    );
+    assert!(
+        second.get("output").is_none(),
+        "an open call carries no output: {second}"
+    );
+    assert_eq!(
+        read_log(&client, &server.base, &run).await.len(),
+        4,
+        "the intent was recorded and nothing was copied"
+    );
+}
+
+/// With no fields declared the key stays positional, which is what every
+/// declaration written before the field meant. Two identical calls at two
+/// positions are two calls: the key is an attempt identifier, and nothing is
+/// answered from anything.
+#[tokio::test]
+async fn an_undeclared_key_stays_positional() {
+    let server = client_tool_server(vec![charge_card_decl()], vec![]).await;
+    let client = reqwest::Client::new();
+    let (run, token) = started_run(&client, &server.base).await;
+    let call = json!({ "amount_cents": 2500 });
+
+    let (status, first) = intent(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        json!({ "seq": 1, "tool": "charge_card", "input": call }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "first intent: {first}");
+    let (status, done) = completion(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        json!({ "seq": 1, "output": { "charge_id": "ch_9" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "completion: {done}");
+
+    let (status, second) = intent(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        json!({ "seq": 3, "tool": "charge_card", "input": call }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "second intent: {second}");
+    assert_ne!(
+        second["idempotency_key"], first["idempotency_key"],
+        "the position is part of the key: {second}"
+    );
+    assert_eq!(
+        second["settled"],
+        json!(false),
+        "a positional key deduplicates nothing: {second}"
+    );
+}
+
+/// The declared key is published, so a client can derive it independently and
+/// check this server's work. The tool that declares none carries no key.
+#[tokio::test]
+async fn the_declared_key_fields_are_listed() {
+    let server = client_tool_server(vec![refund_card_decl(), charge_card_decl()], vec![]).await;
+    let client = reqwest::Client::new();
+
+    let (status, body) = get_json(&client, &format!("{}/v1/client-tools", server.base), None).await;
+    assert_eq!(status, StatusCode::OK, "list: {body}");
+    let tools = body["client_tools"].as_array().expect("client_tools array");
+    let keyed = tools
+        .iter()
+        .find(|tool| tool["name"] == json!("refund_card"))
+        .expect("the keyed declaration is listed");
+    assert_eq!(
+        keyed["idempotency_key"],
+        json!(["order_id", "amount_cents"]),
+        "the derivation is published: {keyed}"
+    );
+    let positional = tools
+        .iter()
+        .find(|tool| tool["name"] == json!("charge_card"))
+        .expect("the positional declaration is listed");
+    assert!(
+        positional.get("idempotency_key").is_none(),
+        "a positional declaration carries no key field: {positional}"
     );
 }

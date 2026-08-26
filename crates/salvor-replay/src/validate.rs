@@ -444,6 +444,7 @@ mod tests {
             seq: SequenceNumber::new(seq),
             output: serde_json::json!({"ok": true}),
             deduplicated_from: None,
+            settled_by: None,
         }
     }
 

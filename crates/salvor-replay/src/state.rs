@@ -535,6 +535,7 @@ mod tests {
                 seq: SequenceNumber::new(1),
                 output: serde_json::json!({"id": "TICKET-1"}),
                 deduplicated_from: None,
+                settled_by: None,
             },
         ]));
         assert_eq!(state.status, RunStatus::Running);

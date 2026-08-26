@@ -76,6 +76,13 @@ use crate::id::{RunId, SequenceNumber};
 /// before either field existed was, and the key is omitted entirely, so those
 /// logs serialize byte for byte as they did before and the version stays 1.
 ///
+/// The optional `settled_by` on [`Event::ToolCallCompleted`] is the seventh.
+/// Absent means the completion is the run's own: the app recorded what the
+/// call returned, which is what every completion written before the field
+/// existed was. Only a completion an operator recorded by hand names its
+/// settler, so the key is omitted everywhere else and those logs serialize
+/// byte for byte as they did before, and the version stays 1.
+///
 /// # Why the durable-timer events do not bump this
 ///
 /// [`Event::SleepStarted`] and [`Event::SleepCompleted`] are two more new
@@ -163,6 +170,38 @@ pub enum SuspensionKind {
     /// callback, another service reporting back. Nobody is being asked to
     /// decide anything, so no inbox should show this run.
     Signal,
+}
+
+/// Who closed a tool call, when it was not the run itself.
+///
+/// A completion normally carries no settler, and that silence is the ordinary
+/// case: the app made the call, saw what came back, and recorded it. The
+/// exception is reconciliation. When a write's intent is recorded and nothing
+/// comes back (the process died, the client never returned), a person verifies
+/// externally what the call did and records the completion by hand through
+/// `salvor resolve` or a resolve endpoint. That completion looks exactly like
+/// an ordinary one in the log and replays exactly like one, which is right for
+/// replay and wrong for an auditor: the output is a human's report of an effect
+/// nothing in this process witnessed.
+///
+/// So the completion says so. This is a sibling of [`Performer`] and carries
+/// the same kind of fact about a different moment: `Performer` says who
+/// PERFORMED the call, this says who SETTLED it, and a completion can be both
+/// (a client-performed write an operator later resolved).
+///
+/// Nothing in replay reads it. A resolved completion replays as the output it
+/// records, exactly as it did before this field existed; the field is for a
+/// reader of the log.
+///
+/// Serializes lowercase (`"operator"`), matching the wire style [`Performer`],
+/// [`SuspensionKind`], and [`Effect`] use.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SettledBy {
+    /// A person recorded this completion by hand, over the run's head, after
+    /// verifying externally what the call did. Nothing executed when it was
+    /// recorded.
+    Operator,
 }
 
 /// Where a deduplicated tool call took its recorded output from: the run and
@@ -445,6 +484,24 @@ pub enum Event {
         /// execution it was copied from.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         deduplicated_from: Option<DedupOrigin>,
+        /// Set when a person recorded this completion by hand rather than the
+        /// run recording what it saw. See [`SettledBy`].
+        ///
+        /// `#[serde(default, skip_serializing_if = "Option::is_none")]` under
+        /// the same additive-optional contract `deduplicated_from` above sets:
+        /// a completion the run recorded itself omits the key entirely, so it
+        /// serializes byte for byte as it did before this field existed, and a
+        /// log written before the field deserializes with it defaulted to
+        /// `None`.
+        ///
+        /// It sits after `deduplicated_from` so a completion carrying both
+        /// keys writes them in the order the two fields were added, and the
+        /// pinned bytes for a deduplicated completion are untouched.
+        ///
+        /// Replay never reads this field, exactly as it never reads
+        /// `deduplicated_from`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        settled_by: Option<SettledBy>,
     },
     /// The value `ctx.now()` returned, captured once while the run executed
     /// live. On replay the recorded value is returned again, bit for bit; the
@@ -980,6 +1037,7 @@ mod tests {
             seq: SequenceNumber::new(2),
             output: serde_json::json!({"id": "TICKET-1"}),
             deduplicated_from: None,
+            settled_by: None,
         });
         assert_round_trips(Event::NowObserved {
             now: datetime!(2026-07-09 12:00:00.123456789 UTC),
@@ -1262,6 +1320,7 @@ mod tests {
             seq: SequenceNumber::new(2),
             output: serde_json::json!({"id": "TICKET-1"}),
             deduplicated_from: None,
+            settled_by: None,
         });
         let json = serde_json::to_string(&env).expect("serialize");
         assert_eq!(
@@ -1287,6 +1346,7 @@ mod tests {
                 ),
                 seq: SequenceNumber::new(7),
             }),
+            settled_by: None,
         });
         let json = serde_json::to_string(&env).expect("serialize");
         assert_eq!(
@@ -1311,6 +1371,65 @@ mod tests {
             panic!("expected ToolCallCompleted");
         };
         assert_eq!(deduplicated_from, None);
+    }
+
+    /// A completion the run recorded itself emits no `settled_by` key: byte for
+    /// byte what it produced before the field existed. This is the same pinned
+    /// JSON `tool_call_completed_without_dedup_origin_serializes_to_pinned_json`
+    /// asserts, unchanged, which is the whole claim the additive-optional
+    /// contract makes.
+    #[test]
+    fn tool_call_completed_without_a_settler_omits_the_key() {
+        let env = envelope(Event::ToolCallCompleted {
+            seq: SequenceNumber::new(2),
+            output: serde_json::json!({"id": "TICKET-1"}),
+            deduplicated_from: None,
+            settled_by: None,
+        });
+        let json = serde_json::to_string(&env).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"ToolCallCompleted","payload":{"seq":2,"output":{"id":"TICKET-1"}}}}"#
+        );
+        assert!(
+            !json.contains("settled_by"),
+            "a completion the run recorded must not emit the key: {json}"
+        );
+    }
+
+    /// A hand-recorded completion names its settler, lowercase, after the
+    /// `deduplicated_from` slot, and reads back as what was written.
+    #[test]
+    fn tool_call_completed_with_a_settler_serializes_to_pinned_json() {
+        let env = envelope(Event::ToolCallCompleted {
+            seq: SequenceNumber::new(2),
+            output: serde_json::json!({"id": "TICKET-1"}),
+            deduplicated_from: None,
+            settled_by: Some(SettledBy::Operator),
+        });
+        let json = serde_json::to_string(&env).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"ToolCallCompleted","payload":{"seq":2,"output":{"id":"TICKET-1"},"settled_by":"operator"}}}"#
+        );
+        let restored: EventEnvelope = serde_json::from_str(&json).expect("deserialize");
+        let Event::ToolCallCompleted { settled_by, .. } = restored.event else {
+            panic!("expected ToolCallCompleted");
+        };
+        assert_eq!(settled_by, Some(SettledBy::Operator));
+    }
+
+    /// A `ToolCallCompleted` JSON that predates `settled_by` deserializes with
+    /// the field defaulted to `None`: every completion recorded before the
+    /// field existed reads back as the run's own, which is what it was.
+    #[test]
+    fn tool_call_completed_without_the_settler_key_deserializes_to_none() {
+        let json = r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"ToolCallCompleted","payload":{"seq":2,"output":{"id":"TICKET-1"}}}}"#;
+        let restored: EventEnvelope = serde_json::from_str(json).expect("deserialize");
+        let Event::ToolCallCompleted { settled_by, .. } = restored.event else {
+            panic!("expected ToolCallCompleted");
+        };
+        assert_eq!(settled_by, None);
     }
 
     /// `Performer` round-trips through the envelope in both variants.

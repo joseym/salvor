@@ -202,6 +202,7 @@ fn renderer_matches_runtime_decoders() {
             seq: SequenceNumber::new(0),
             output: output.clone(),
             deduplicated_from: None,
+            settled_by: None,
         };
         assert_eq!(
             event_detail(&event),
