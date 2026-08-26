@@ -1643,6 +1643,73 @@ test("a tool declared trust_completion = false that throws stops with open_inten
   strictEqual(ran.payout, 0, "refused before the tool ran again");
 });
 
+test("an abandoned thread refuses its next invoke by name, and finishThread says the same", async (t) => {
+  if (!base) return t.skip("salvor serve not available");
+  reset();
+  const threadId = "thread-abandoned";
+  const runId = await runIdForThread(threadId);
+
+  // The shape an operator actually abandons: an untrusted tool threw, so the
+  // log ends at an intent nobody may complete, and the provider turns out to
+  // show no such call. There is no output to resolve with, so the run is
+  // retired instead. The refusal itself says so.
+  payoutThrows = true;
+  const first = agentFor(PAYOUT_SCRIPT, [wirePayout]);
+  const stopped = causeOf(await invokeRejection(first.agent, threadId)) as SalvorMiddlewareError;
+  strictEqual(stopped.code, "open_intent");
+  match(
+    stopped.message,
+    new RegExp(`POST /v1/runs/${runId}/abandon`),
+    "the refusal names abandoning the run, for a call that never happened",
+  );
+  match(stopped.message, new RegExp(`salvor abandon ${runId}`), "and the command form");
+  strictEqual(ran.payout, 1, "the body ran and threw, once");
+
+  // The operator abandons it over HTTP, exactly as the sentence said to.
+  const abandoned = await client!.abandon(runId, "the provider never saw the payout");
+  strictEqual(abandoned.status.state, "abandoned");
+  deepStrictEqual((await kindsOf(threadId)).slice(-1), ["RunAbandoned"], "the run is terminal");
+
+  // The thread is dead, and the next invoke is told so before anything runs:
+  // not the open-intent refusal, which would send a person to a resolve the
+  // server answers `wrong_state` to.
+  reset();
+  payoutThrows = true;
+  const second = agentFor(PAYOUT_SCRIPT, [wirePayout]);
+  const refused = causeOf(await invokeRejection(second.agent, threadId));
+  ok(refused instanceof SalvorMiddlewareError, "a middleware refusal, not a raw HTTP error");
+  const refusal = refused as SalvorMiddlewareError;
+  strictEqual(refusal.code, "thread_abandoned", "by code");
+  match(refusal.message, new RegExp(threadId), "the message names the thread");
+  match(refusal.message, new RegExp(runId), "and the run");
+  match(refusal.message, /was abandoned/, "and says what happened to it");
+  match(refusal.message, /new thread id/, "and what to do next");
+  strictEqual(ran.payout, 0, "no tool body ran");
+  strictEqual(second.model.calls.count, 0, "and the model was never asked");
+  deepStrictEqual(
+    (await kindsOf(threadId)).slice(-1),
+    ["RunAbandoned"],
+    "and nothing was appended to the abandoned run",
+  );
+
+  // Closing it by hand meets the same fact and says the same thing: an
+  // abandoned run is not a thread with a dangling write to settle.
+  await rejects(
+    () => finishThread(client!, threadId),
+    (error: unknown) => {
+      const closing = salvorError(error);
+      strictEqual(closing?.code, "thread_abandoned", "finishThread refuses by the same code");
+      match(closing!.message, new RegExp(threadId), "naming the thread");
+      return true;
+    },
+  );
+  deepStrictEqual(
+    (await kindsOf(threadId)).slice(-1),
+    ["RunAbandoned"],
+    "finishThread appended nothing either",
+  );
+});
+
 // -- the lease ---------------------------------------------------------------
 
 test("a second instance on a held thread is refused with lease_held before running anything", async (t) => {

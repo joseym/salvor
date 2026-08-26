@@ -30,7 +30,11 @@ from ..errors import SalvorAPIError
 from ..models import Event
 from .async_run_tape import AsyncRunTape
 from .current_call import ToolCallContext, arun_with_tool_call, run_with_tool_call
-from .errors import SalvorMiddlewareError, ToolNeedsResolution
+from .errors import (
+    SalvorMiddlewareError,
+    ToolNeedsResolution,
+    thread_abandoned_error,
+)
 from .hash import hash_value, run_id_for_thread
 from .messages import (
     as_tool_content,
@@ -635,8 +639,20 @@ def _refusal_of_an_open(
 
 
 def _refuse_a_finished_run(log: List[Event], thread_id: str, run_id: str) -> None:
-    """Refuse an invoke of a thread somebody has already finished, before
-    anything tries to append to a closed run."""
+    """Refuse an invoke of a thread somebody has already ended, before anything
+    tries to append to a closed run.
+
+    Two endings, two sentences. ``RunCompleted`` is ``finish_thread``'s: the
+    thread was closed on purpose with an answer. ``RunAbandoned`` is an
+    operator's: the run was retired by hand, usually on top of an open intent
+    that is never going to be settled, and salvor treats it as terminal (it
+    holds no lease and hands the log straight back), so this is the only place
+    an invoke of it can be stopped. Saying "settle the open intent" about a run
+    nobody is coming back to would send a person to a resolve that answers
+    ``wrong_state``.
+    """
+    if log and log[-1].kind == "RunAbandoned":
+        raise thread_abandoned_error(thread_id, run_id)
     if log and log[-1].kind == "RunCompleted":
         raise SalvorMiddlewareError(
             "thread `{thread}` (run {run}) is finished: `finish_thread` "

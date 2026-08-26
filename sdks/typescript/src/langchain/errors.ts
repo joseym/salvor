@@ -7,7 +7,7 @@ import { canonicalJson } from "./hash.js";
  * The stable token on every {@link SalvorMiddlewareError}, for a caller that
  * branches on what happened rather than on a sentence.
  *
- * The first nine are the ones an application acts on:
+ * The ones an application acts on:
  *
  * - `lease_held`: another driver holds this thread's run right now, and this
  *   invoke never started. Carries {@link SalvorMiddlewareError.lapsesInSeconds},
@@ -19,6 +19,9 @@ import { canonicalJson } from "./hash.js";
  *   up again was refused too, so the run cannot be driven from here at all.
  * - `thread_finished`: `finishThread` closed this thread's run. Give the next
  *   task a new thread id.
+ * - `thread_abandoned`: this thread's run was abandoned, so it takes no more
+ *   invokes. Nothing was replayed and nothing ran. Give the next task a new
+ *   thread id.
  * - `thread_id_missing`: the invoke carried no `configurable.thread_id`.
  * - `thread_id_invalid`: it carried one that is not a non-empty string.
  * - `tool_undeclared`: the tool the model called has no client-tool
@@ -62,6 +65,7 @@ export type SalvorErrorCode =
   | "lease_lost"
   | "reopen_refused"
   | "thread_finished"
+  | "thread_abandoned"
   | "thread_id_missing"
   | "thread_id_invalid"
   | "tool_undeclared"
@@ -156,6 +160,29 @@ export function salvorError(error: unknown): SalvorMiddlewareError | undefined {
     seen = (seen as { cause?: unknown }).cause;
   }
   return undefined;
+}
+
+/**
+ * The refusal for a thread whose run somebody abandoned: an operator recorded
+ * `RunAbandoned` on it (`POST /v1/runs/{id}/abandon`, or `salvor abandon`),
+ * and an abandoned run is terminal exactly as a completed one is.
+ *
+ * Built here rather than at either call site because both places that meet
+ * one say the same thing: `beforeAgent`, opening a run for an invoke, and
+ * {@link finishThread}, asked to close a run that is already closed. Neither
+ * appends anything, and on the invoke path nothing has run yet: no model
+ * call, no tool body.
+ */
+export function threadAbandonedError(
+  threadId: string,
+  runId: string,
+): SalvorMiddlewareError {
+  return new SalvorMiddlewareError(
+    `thread \`${threadId}\` (run ${runId}) was abandoned: a \`RunAbandoned\` is ` +
+      "recorded on its run, and an abandoned run takes no more invokes. Give the next " +
+      "task a new thread id.",
+    { code: "thread_abandoned" },
+  );
 }
 
 /** What {@link ToolNeedsResolution} carries about the call it stopped on. */

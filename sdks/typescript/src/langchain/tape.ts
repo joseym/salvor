@@ -449,7 +449,10 @@ export class RunTape {
           // person through `ToolNeedsResolution`: the tool did not return
           // one. So this names the same open intent and the same fix, on the
           // one fact that IS known: the call was asked for, and nothing this
-          // tape may treat as its completion followed.
+          // tape may treat as its completion followed. It names abandoning
+          // the run too, because "resolve it" is not always honest advice: a
+          // call the provider never received has no output to record, and the
+          // only true ending for that thread is a terminal `RunAbandoned`.
           if (!trustCompletion) {
             throw new SalvorMiddlewareError(
               `the tool \`${tool}\` threw while running under an intent this middleware may ` +
@@ -459,7 +462,11 @@ export class RunTape {
                 "person confirms what actually happened and records it by hand (`salvor " +
                 `resolve ${this.runId} --store <the server's store> --output '<json the call ` +
                 `returned>'\`, \`POST /v1/runs/${this.runId}/resolve\` on the server, or ` +
-                "`driver.resolve(...)`) and invoke again.",
+                "`driver.resolve(...)`) and invoke again. If the provider shows the call " +
+                "never happened, or did something this thread cannot carry on from, there " +
+                `is nothing to record: abandon the run instead (\`POST /v1/runs/${this.runId}` +
+                `/abandon\` on the server, or \`salvor abandon ${this.runId} --store <the ` +
+                "server's store>`) and give the next task a new thread id.",
               { code: "open_intent", cause: thrown },
             );
           }

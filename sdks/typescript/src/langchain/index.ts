@@ -57,7 +57,12 @@ import type { ClientRunDriver } from "../client_runs.js";
 import { LeaseHeldError, SalvorApiError } from "../errors.js";
 import type { ClientToolDecl, Usage } from "../types.js";
 import { runWithToolCall } from "./current_call.js";
-import { SalvorMiddlewareError, ToolNeedsResolution, salvorError } from "./errors.js";
+import {
+  SalvorMiddlewareError,
+  ToolNeedsResolution,
+  salvorError,
+  threadAbandonedError,
+} from "./errors.js";
 import { canonicalJson, hashValue, runIdForThread } from "./hash.js";
 import { ReplayChatModel } from "./replay_model.js";
 import { canonicalRequest, requestHash } from "./request.js";
@@ -278,6 +283,17 @@ export function salvorMiddleware(options: SalvorMiddlewareOptions) {
           "next task a new thread id.",
         { code: "thread_finished" },
       );
+    }
+    // The other way a thread ends: somebody retired the run by hand rather
+    // than finishing it. Salvor treats an abandoned run as terminal, so it
+    // hands the log back and lets this open through (its lease is nobody's
+    // once the run is settled), and the refusal has to happen here or the
+    // invoke would run a model call and a tool body on its way to an append
+    // the server will refuse. The open intent an abandonment often sits on
+    // top of is deliberately not what this says: there is no dangling write
+    // to resolve on a run nobody is coming back to.
+    if (tail?.kind === "RunAbandoned") {
+      throw threadAbandonedError(threadId, runId);
     }
     return RunTape.open(
       driver,

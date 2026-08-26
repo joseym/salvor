@@ -358,22 +358,34 @@ def one_driver_error(
     lapses on its own if that driver goes quiet; it rides along here when the
     error is that kind. ``invalid_drive_token`` carries no such figure, so the
     sentence names the rule instead of a number nobody sent.
+
+    The ``lease_held`` sentence is the TypeScript middleware's own, word for
+    word apart from the thread, the run and the seconds: one refusal, one
+    wording, whichever SDK an operator reads it in.
     """
     lapses = error.details.get("lapses_in_seconds")
     if lapses is not None:
-        when = (
-            "its lease lapses in {s}s if that driver goes quiet, and this "
-            "thread may be driven again then, or as soon as the run "
-            "finishes".format(s=lapses)
+        message = (
+            "thread `{thread}` (run {run}) cannot be opened: another driver "
+            "holds its lease right now, and it lapses in {s}s if that driver "
+            "goes quiet (or as soon as the run finishes). One driver per "
+            "thread at a time. Wait for the lease to lapse and invoke again, "
+            "or confirm no other process is already driving this "
+            "thread.".format(thread=thread_id, run=run_id, s=lapses)
         )
     else:
-        when = "presenting that driver's own token is the only way in until its lease lapses"
+        message = (
+            "thread `{thread}` (run {run}) is already being driven by another "
+            "instance right now: presenting that driver's own token is the "
+            "only way in until its lease lapses. Salvor allows one driver per "
+            "thread at a time, so a second instance invoking this thread while "
+            "the first is active is refused before it runs anything, rather "
+            "than racing the first for the lease.".format(
+                thread=thread_id, run=run_id
+            )
+        )
     return SalvorMiddlewareError(
-        "thread `{thread}` (run {run}) is already being driven by another "
-        "instance right now: {when}. Salvor allows one driver per thread at a "
-        "time, so a second instance invoking this thread while the first is "
-        "active is refused before it runs anything, rather than racing the "
-        "first for the lease.".format(run=run_id, thread=thread_id, when=when),
+        message,
         code="lease_held" if error.code == "lease_held" else "lease_lost",
         cause=error,
         lapses_in_seconds=int(lapses) if lapses is not None else None,
@@ -519,7 +531,10 @@ def untrusted_tool_raised(
     the party that benefits from being believed. So nothing is posted. The
     call ran once, for real, and what it did is unknown to salvor either way;
     the intent stays open, exactly as recorded, for a person to settle after
-    confirming with the provider what actually happened.
+    confirming with the provider what actually happened. That is not always
+    what the provider shows, so the sentence names the other honest ending
+    too: a call that never reached the provider has no output anybody could
+    record, and the run is abandoned rather than resolved.
     """
     return SalvorMiddlewareError(
         "run {run} (thread `{thread}`) ran the tool `{tool}` at seq {seq} and "
@@ -532,7 +547,12 @@ def untrusted_tool_raised(
         "<path to the server's store> --output '<json the call produced, or "
         "an empty object if it produced nothing>'`, which leaves the lease "
         "to lapse on its own; or `driver.resolve(...)` on a driver holding "
-        "the run's lease) and invoke again.".format(
+        "the run's lease) and invoke again. If the provider shows the call "
+        "never happened, or did something this thread cannot carry on from, "
+        "there is nothing to record: abandon the run instead (`POST "
+        "/v1/runs/{run}/abandon` on the server, or `salvor abandon {run} "
+        "--store <path to the server's store>`) and give the next task a new "
+        "thread id.".format(
             run=run_id, thread=thread_id, tool=tool, seq=seq
         ),
         code="open_intent",

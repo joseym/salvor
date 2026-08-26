@@ -2242,6 +2242,111 @@ class MiddlewareScenarios:
 
         self.drive(body)
 
+    # -- (o2b) a thread somebody abandoned ------------------------------------
+
+    def test_an_abandoned_thread_refuses_its_next_invoke_and_finish_thread(
+        self,
+    ) -> None:
+        """An abandoned run is dead, and the thread on top of it says so.
+
+        The shape an operator actually abandons: an untrusted tool raised, so
+        the log ends at an intent nobody may complete, and the provider turns
+        out to show no such call. There is no output to resolve with, so the
+        run is retired with `POST /v1/runs/{id}/abandon` (the refusal itself
+        names it). Salvor treats that as terminal but hands the log back on an
+        open, so only the middleware is in a position to stop the next invoke,
+        and it does so before a model call or a tool body runs. Saying
+        `open_intent` here instead would send a person to a resolve the server
+        answers `wrong_state` to, on a thread nobody is coming back to.
+        """
+        thread_id = "thread-abandoned"
+        run_id = run_id_for_thread(thread_id)
+        script = [
+            {
+                "content": "sending the payout",
+                "tool_calls": [
+                    {
+                        "name": "wire_payout",
+                        "args": {"order_id": "ORD-4040", "amount_cents": 7700},
+                        "id": "call-wire",
+                    }
+                ],
+            },
+            {"content": "Payout confirmed."},
+        ]
+        ask = {"messages": [{"role": "user", "content": "pay ORD-4040 out"}]}
+
+        async def body(client: Any) -> None:
+            payout_crashes["on"] = True
+            agent, _ = self.agent_for(script, client, tools=[wire_payout])
+            with self.assertRaises(SalvorMiddlewareError) as caught:
+                await self.invoke(agent, ask, self.thread(thread_id))
+            payout_crashes["on"] = False
+            stopped = caught.exception
+            self.assertEqual(stopped.code, "open_intent")
+            self.assertIn(
+                "POST /v1/runs/{run}/abandon".format(run=run_id),
+                str(stopped),
+                "the refusal names abandoning a call the provider never saw",
+            )
+            self.assertIn(
+                "salvor abandon {run}".format(run=run_id),
+                str(stopped),
+                "and the command form of it",
+            )
+            self.assertEqual(ran["payout"], 1, "the body ran and raised, once")
+
+            # The operator abandons it, exactly as that sentence said to. Over
+            # HTTP by hand: this SDK's client has no `abandon` of its own, and
+            # the endpoint needs no drive token anyway.
+            answered = httpx.post(
+                "{base}/v1/runs/{run}/abandon".format(base=self.base, run=run_id),
+                json={"reason": "the provider never saw the payout"},
+                timeout=5.0,
+            )
+            self.assertEqual(answered.status_code, 200, answered.text)
+            self.assertEqual(answered.json()["status"]["state"], "abandoned")
+            self.assertEqual(
+                (await self.kinds_of(client, thread_id))[-1],
+                "RunAbandoned",
+                "the run is terminal now",
+            )
+
+            reset()
+            payout_crashes["on"] = True
+            second, model = self.agent_for(script, client, tools=[wire_payout])
+            with self.assertRaises(SalvorMiddlewareError) as refused:
+                await self.invoke(second, ask, self.thread(thread_id))
+            payout_crashes["on"] = False
+            refusal = refused.exception
+            self.assertEqual(refusal.code, "thread_abandoned", "by code")
+            text = str(refusal)
+            self.assertIn(thread_id, text, "the message names the thread")
+            self.assertIn(run_id, text, "and the run")
+            self.assertIn("was abandoned", text, "and says what happened to it")
+            self.assertIn("new thread id", text, "and what to do next")
+            self.assertEqual(ran["payout"], 0, "no tool body ran")
+            self.assertEqual(model.calls["count"], 0, "and the model was never asked")
+            self.assertEqual(
+                (await self.kinds_of(client, thread_id))[-1],
+                "RunAbandoned",
+                "nothing was appended to the abandoned run",
+            )
+
+            # Closing it by hand meets the same fact and says the same thing:
+            # an abandoned run is not a thread with a dangling write to settle.
+            with self.assertRaises(SalvorMiddlewareError) as closing:
+                await call(finish_thread, client, thread_id)
+            self.assertEqual(closing.exception.code, "thread_abandoned")
+            self.assertIn(thread_id, str(closing.exception), "naming the thread")
+            self.assertEqual(
+                (await self.kinds_of(client, thread_id))[-1],
+                "RunAbandoned",
+                "`finish_thread` appended nothing either",
+            )
+
+        self.drive(body)
+
     # -- (o3) a body longer than the whole lease --------------------------------
 
     def test_a_tool_body_longer_than_the_lease_keeps_the_run_by_beating(self) -> None:

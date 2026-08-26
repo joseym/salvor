@@ -29,6 +29,7 @@ __all__ = [
     "SalvorMiddlewareError",
     "ToolNeedsResolution",
     "salvor_error",
+    "thread_abandoned_error",
 ]
 
 
@@ -55,6 +56,12 @@ class SalvorMiddlewareError(SalvorError):
             ``thread_finished``
                 The thread's run is closed: ``finish_thread`` recorded its
                 ``RunCompleted``, and a completed run takes no more events.
+            ``thread_abandoned``
+                The thread's run was abandoned: somebody recorded a terminal
+                ``RunAbandoned`` on it (``POST /v1/runs/{id}/abandon``, or
+                ``salvor abandon``), and an abandoned run takes no more
+                events. The invoke stopped before anything ran. Give the next
+                task a new thread id.
             ``thread_id_missing``
                 The invoke passed no ``thread_id`` at all.
             ``thread_id_invalid``
@@ -156,6 +163,29 @@ class SalvorMiddlewareError(SalvorError):
     @cause.setter
     def cause(self, error: Optional[BaseException]) -> None:
         self.__cause__ = error
+
+
+def thread_abandoned_error(thread_id: str, run_id: str) -> SalvorMiddlewareError:
+    """The refusal for a thread whose run somebody abandoned.
+
+    An operator retires a run by hand with ``POST /v1/runs/{id}/abandon`` (or
+    ``salvor abandon``), which records a terminal ``RunAbandoned``. Salvor
+    treats that as settled exactly as it treats a completed run: the lease is
+    nobody's any more and the log still reads back, so an open succeeds and
+    only the middleware is in a position to say the thread is over.
+
+    Built in one place because both callers say the same thing:
+    :class:`~salvor.langchain.SalvorMiddleware` opening the run for an invoke,
+    which refuses before a model call or a tool body runs, and
+    :func:`~salvor.langchain.finish_thread`, asked to close a run that is
+    already closed. Neither appends anything.
+    """
+    return SalvorMiddlewareError(
+        "thread `{thread}` (run {run}) was abandoned: a `RunAbandoned` is "
+        "recorded on its run, and an abandoned run takes no more invokes. "
+        "Give the next task a new thread id.".format(thread=thread_id, run=run_id),
+        code="thread_abandoned",
+    )
 
 
 class ToolNeedsResolution(SalvorMiddlewareError):
