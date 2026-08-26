@@ -1,0 +1,56 @@
+# The desk's large refund: money moves, and no report from the desk closes the
+# call.
+#
+# Loaded by the operator:
+#     salvor serve --client-tool examples/langchain/tools/refund-large.toml
+#
+# `trust_completion = false` does not stop the tool from running. Refusing to
+# run it would fix nothing: not trusting the desk's report is a different
+# decision from not sending the money. What changes is what happens next. Salvor
+# refuses a completion reported by the client that performed the write, so the
+# middleware never posts one; it raises `ToolNeedsResolution` instead, and the
+# run is left holding this call's intent with nothing after it until a person
+# checks the provider and records what they found.
+
+name = "refund_large"
+
+effect = "write"
+
+# The opt-in that `refund-order.toml` takes and this one does not. It costs a
+# person on every call, which is why it is worth setting on a rare, large,
+# externally checkable refund and not on one that fires a thousand times a day.
+trust_completion = false
+
+[input_schema]
+type = "object"
+required = ["order_id", "amount_cents"]
+description = "Refund an order too large for the desk to close on its own say-so."
+
+[input_schema.properties.order_id]
+type = "string"
+description = "The order to refund, for example ORD-4400."
+
+[input_schema.properties.amount_cents]
+type = "integer"
+# The other side of the line `refund-order.toml` draws at 99999.
+minimum = 100000
+description = "The amount to refund, in cents. Refunds below 100000 go to refund_order."
+
+# An output schema on a tool nobody may self-complete is documentation of what a
+# resolve is expected to carry, not a check the middleware ever gets to.
+[output_schema]
+type = "object"
+required = ["order_id", "amount_cents", "refund_id", "status"]
+
+[output_schema.properties.order_id]
+type = "string"
+
+[output_schema.properties.amount_cents]
+type = "integer"
+
+[output_schema.properties.refund_id]
+type = "string"
+
+[output_schema.properties.status]
+type = "string"
+enum = ["succeeded"]
