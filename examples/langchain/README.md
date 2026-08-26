@@ -485,6 +485,11 @@ A person confirms the transfer at the provider and records what they saw.
 `run.sh` does that over HTTP, because a container running an agent usually has
 the server's URL and no store path at all.
 
+Nothing times out or escalates while the run waits; it stays stopped until someone
+resolves or abandons it. Such runs show up in `salvor list --store <path> --group waiting`
+and in the [Bridge](../../README.md#the-bridge) dashboard's Inbox. Setting up
+alerting on them is the operator's job.
+
 A person's resolution is held to the declaration too, which is the thing worth
 noticing here. It is not a back door: an output that fails `output_schema` or
 that changes a `require_equal` field is refused before anything is written, so a

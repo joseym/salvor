@@ -245,6 +245,10 @@ them are worth a retry: treat it as an integrity incident and go back
 to a backup that reads clean. Restoring a store whose chain does not
 verify puts a log into service that `read_log` will keep refusing.
 
+## Runs waiting on a person
+
+A run waiting on a person, whether at a dangling write, a gate, or a budget ceiling, stays where it is until someone acts. Nothing times out and nothing escalates on its own. `salvor list --store <path> --group waiting` lists such runs; that is what to alert on.
+
 ## Waking sleeping runs
 
 A run parked on a durable timer (`sleeping`, with a `wake_at`) does not wake
