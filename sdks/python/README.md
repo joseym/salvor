@@ -650,12 +650,16 @@ salvor does with it depends on the tool's own `effect`. A `write` tool is not
 left dangling: the middleware catches the raise, reports it as the call's
 failure, and salvor records it as the call's completion the same way it would
 record a returned value. So a raised write is recorded as a failure and fails
-the same way on every replay, without running the body again; fix whatever the
-tool keeps failing on and give the thread a new turn, or start a new thread. A
-`read` or `idempotent` tool that raises posts nothing: its intent stays open,
-the same as if the process had died mid-call, and the next invoke simply
-performs the call again, so a transient error on a lookup never wedges the
-thread.
+the same way on every replay, without running the body again, and on every
+fork of this thread too, because a fork opens the same write under the same
+key: only a new thread id escapes it. A `read` or `idempotent` tool that
+raises posts nothing: its intent stays open, the same as if the process had
+died mid-call, and the next invoke simply performs the call again, so a
+transient error on a lookup never wedges the thread. A tool declared
+`trust_completion = false` is the one exception on the write side, because it
+may not report even a failure on its own say-so any more than it may report a
+result: it stops with the same open-intent refusal `ToolNeedsResolution` gives
+a successful untrusted call, and a person settles it by hand.
 
 ### What replay means
 
@@ -891,7 +895,7 @@ The codes:
 | `tool_needs_resolution` | The tool ran and its operator settles such a call by hand. This one is the typed `ToolNeedsResolution`, with the result on `.output`. |
 | `tool_returned_command` | A tool answered with a LangGraph `Command`, which is control flow, not a result to record. |
 | `call_unranked` | A tool call's id is not among the ones the last recorded model turn listed, so its position in the run cannot be pinned. This SDK never raises it: when a call's turn can't be found in state, the tape admits the call on arrival instead of ordering it. Only the TypeScript middleware treats this as a refusal. |
-| `tool_failed` | The log already holds a recorded failure at this position: an earlier invoke's `effect = "write"` tool body raised, this middleware reported it, and salvor settled the call on it. Fails the same way on every further invoke, because it is settled, not retried; fix the input, or start a new thread. |
+| `tool_failed` | The log already holds a recorded failure at this position: an earlier invoke's `effect = "write"` tool body raised, this middleware reported it, and salvor settled the call on it. Fails the same way on every further invoke and on every fork of this thread, because a fork opens the same write under the same key: give the task a new thread id. |
 | `open_intent` | The log holds a call recorded as requested and never completed. Settle it and invoke again. |
 | `unreadable_record` | A model answer is missing or does not read back as one. |
 | `wrong_client` | The middleware was given the wrong client for the way the agent is being driven. |

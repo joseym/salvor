@@ -419,8 +419,9 @@ export class RunTape {
             throw new SalvorMiddlewareError(
               `run ${this.runId} (thread \`${this.threadId}\`) already recorded a failure for ` +
                 `this exact call to \`${tool}\` at seq ${seq}: ${failure.message}. A recorded ` +
-                "failure settles the call the same way on every replay, the same as any other " +
-                "recorded output: fix the input, or start a new thread.",
+                "failure settles this call in this run, on every replay and on every fork of " +
+                "this thread, because a fork opens the same write under the same key; give " +
+                "the task a new thread id.",
               { code: "tool_failed", seq },
             );
           }

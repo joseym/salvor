@@ -36,8 +36,9 @@ import { canonicalJson } from "./hash.js";
  *   one; a thrown `read` or `idempotent` body records nothing and is
  *   performed again instead, so this always names a write). Carries
  *   {@link SalvorMiddlewareError.seq}, the position the failure was recorded
- *   at. It fails the same way on every replay, because the log already
- *   answered "what happened": fix the input, or start a new thread.
+ *   at. It fails the same way on every replay and on every fork of this
+ *   thread, because a fork opens the same write under the same key: give the
+ *   task a new thread id.
  *
  * The rest name conditions an application cannot usually do anything about
  * except read the message: `run_exists` (the thread id already names a

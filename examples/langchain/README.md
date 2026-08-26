@@ -733,8 +733,10 @@ that position meets the recorded failure and is refused with
 `SalvorMiddlewareError` (`tool_failed`), naming the seq, without running the body
 again. A recorded failure settles the call the same way on every replay, exactly
 as a recorded success does, so a permanently failing input fails the same way
-forever. Fix the input and give it a new thread. A `read` or `idempotent` body
-that raises is the opposite case: nothing is posted at all, its intent stays
+forever. It also survives a fork of the thread: a reworded ask that forks still
+opens the same write under the same key, and meets the same recorded failure.
+Only a new thread id escapes it. A `read` or `idempotent` body that raises is
+the opposite case: nothing is posted at all, its intent stays
 open exactly as it would if the process had simply died there, and the next
 invoke performs the call again, which is why a transient connection error on
 a lookup does not wedge the thread the way a failed write's record would. A

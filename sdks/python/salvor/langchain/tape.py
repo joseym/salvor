@@ -507,19 +507,17 @@ def recorded_tool_failure(
     does: nothing runs again, and the log is not asking to be retried. Handing
     the failure sentinel to the model as though it were the tool's real output
     would be the wrong kind of quiet, so this middleware raises instead,
-    naming the message the failure was recorded with. A permanently failing
-    input fails the same way on every invoke, because the call is settled, not
-    retried: fix whatever the tool keeps failing on and give the thread a new
-    turn, or start a new thread.
+    naming the message the failure was recorded with. A recorded failure
+    settles this call in this run, on every replay and on every fork of this
+    thread, because a fork opens the same write under the same key: give the
+    task a new thread id.
     """
     return SalvorMiddlewareError(
         "run {run} (thread `{thread}`) already recorded the call to `{tool}` "
-        "at seq {seq} as a failure: {message}. That recording settles the "
-        "call the same way a recorded success would, so this middleware "
-        "raises rather than handing the model a failure it was never meant "
-        "to read, and it will raise the same way on every further invoke: a "
-        "failed call is not retried. Fix the input this call keeps failing "
-        "on and give the thread a new turn, or start a new thread.".format(
+        "at seq {seq} as a failure: {message}. A recorded failure settles "
+        "this call in this run, on every replay and on every fork of this "
+        "thread, because a fork opens the same write under the same key; "
+        "give the task a new thread id.".format(
             run=run_id, thread=thread_id, tool=tool, seq=seq, message=message
         ),
         code="tool_failed",

@@ -182,10 +182,11 @@ function dollars(cents: number): string {
 
 // --- the tools --------------------------------------------------------------
 //
-// A tool body that throws is recorded as this call's failure; the next invoke
-// that reaches this position meets that recorded failure and fails with
-// `tool_failed` rather than running the body again. See README.md, "The
-// honest limits".
+// A `write` tool body that throws is recorded as this call's failure; the
+// next invoke that reaches this position meets that recorded failure and
+// fails with `tool_failed` rather than running the body again. A `read` or
+// `idempotent` tool body that throws posts nothing at all, and the next
+// invoke simply performs it again. See README.md, "The honest limits".
 
 /** How many tool bodies this process actually ran. Replay leaves it at zero. */
 let toolBodies = 0;

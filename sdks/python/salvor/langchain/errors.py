@@ -86,9 +86,9 @@ class SalvorMiddlewareError(SalvorError):
                 recorded this way (a raising ``read`` or ``idempotent`` body
                 is performed again on the next invoke instead), so a
                 ``tool_failed`` always names a write. This call fails the
-                same way on every further invoke, because it is settled, not
-                retried; fix the input it keeps failing on and give the
-                thread a new turn, or start a new thread.
+                same way on every further invoke and on every fork of this
+                thread, because a fork opens the same write under the same
+                key: give the task a new thread id.
             ``run_exists``
                 The thread maps to a run id salvor's other mode already
                 started. A server-driven run and a client-driven one cannot
