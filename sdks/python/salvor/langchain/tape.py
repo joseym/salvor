@@ -496,6 +496,13 @@ def recorded_tool_failure(
     """The refusal when a later invoke meets a call this run already recorded
     as failed.
 
+    A recorded failure is always a ``write``'s: a trusted ``read`` or
+    ``idempotent`` body that raises posts nothing, so the call it raised in is
+    performed again on the next invoke rather than settled (see
+    :meth:`salvor.langchain.RunTape.tool_call`). A write is the one effect
+    class that may have half happened, and so the one worth recording as
+    failed for a person to read.
+
     A recorded failure settles the position exactly as a recorded success
     does: nothing runs again, and the log is not asking to be retried. Handing
     the failure sentinel to the model as though it were the tool's real output

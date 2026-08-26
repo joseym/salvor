@@ -226,10 +226,23 @@ class AsyncRunTape:
         its result is then reported is the caller's call inside ``perform``
         (see ``_stop_for_a_person`` in ``middleware.py``). If ``perform``
         raises an ``Exception`` that is not this middleware's own
-        :class:`~salvor.langchain.errors.SalvorMiddlewareError`, the raise
-        itself is reported as the call's failure (for a trusted tool) or left
-        unposted and refused by name (for an untrusted one): see
-        :func:`~salvor.langchain.tape.recorded_tool_failure` and
+        :class:`~salvor.langchain.errors.SalvorMiddlewareError`, what is
+        recorded depends on the declaration's effect class (``opened.effect``,
+        the operator's word), which decides it here the same way it decides
+        what salvor's own replay does with a call whose completion never
+        arrived. For a trusted ``write``, and only for a write, the raise is
+        reported as the call's failure: a write that raised may have half
+        happened, so the position is settled where it stands and a later
+        invoke meets that recorded failure instead of running the body again
+        (:func:`~salvor.langchain.tape.recorded_tool_failure`, which is
+        therefore always a write's). For a trusted ``read`` or ``idempotent``
+        nothing is posted: the intent is left open, and the next invoke of the
+        thread performs the call again at that same position under the
+        recorded intent and the same derived key (an idempotent retry presents
+        the identical key, which is what makes it one). A read has nothing
+        outside the log to half-do, so a transient failure inside one must not
+        settle the call for ever. For an untrusted tool nothing is posted
+        either, whatever its effect, and the raise is refused by name:
         :func:`~salvor.langchain.tape.untrusted_tool_raised`. A
         ``BaseException`` that is not an ``Exception`` -- ``KeyboardInterrupt``,
         ``SystemExit``, ``GeneratorExit``, ``asyncio.CancelledError`` -- is the
@@ -286,9 +299,20 @@ class AsyncRunTape:
                     raise untrusted_tool_raised(
                         self._drive.thread_id, self.run_id, tool, seq, str(error)
                     ) from error
-                await self._guarded(
-                    lambda: self._driver.client_tool_failure(seq, str(error))
-                )
+                # Only a write's raise is recorded. The effect class is the
+                # operator's word for what an unfinished call is worth
+                # retrying, and it says the same thing here that it says to
+                # salvor's own replay: a write may have half happened, so it
+                # is settled where it stands and a person reads it; a read or
+                # an idempotent call is performed again, so nothing is posted
+                # and the intent is left open for the next invoke to meet at
+                # this exact position. Recording a read's transient failure
+                # would settle the call for ever and leave the thread with
+                # nowhere to go.
+                if opened.effect == "write":
+                    await self._guarded(
+                        lambda: self._driver.client_tool_failure(seq, str(error))
+                    )
                 raise
         await self._guarded(
             lambda: self._driver.client_tool_completion(seq, output)

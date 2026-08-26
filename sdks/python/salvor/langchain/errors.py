@@ -80,9 +80,12 @@ class SalvorMiddlewareError(SalvorError):
                 report a success, so nothing was posted.
             ``tool_failed``
                 A recorded completion at this position is the failure
-                sentinel: an earlier invoke's tool body raised, this
+                sentinel: an earlier invoke's ``write`` tool body raised, this
                 middleware reported it, and salvor settled the call on it. The
-                sentence carries the recorded message. This call fails the
+                sentence carries the recorded message. Only a write is
+                recorded this way (a raising ``read`` or ``idempotent`` body
+                is performed again on the next invoke instead), so a
+                ``tool_failed`` always names a write. This call fails the
                 same way on every further invoke, because it is settled, not
                 retried; fix the input it keeps failing on and give the
                 thread a new turn, or start a new thread.

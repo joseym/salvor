@@ -1,0 +1,39 @@
+# The suite's one `idempotent` tool: a call that does change something outside
+# the process, but that the provider collapses when the same key arrives twice.
+#
+# It is here for what happens when its body raises. An `idempotent` call sits
+# with `read` on that question and not with `write`: an intent left without a
+# completion is performed again on the next invoke, under the key the recorded
+# intent already fixed, so the provider sees one notice however many times the
+# call is attempted. See the effect-split cases in `tests/test_langchain.py`.
+
+name = "notify_shipper"
+
+effect = "idempotent"
+
+trust_completion = true
+
+# Deliberately no `idempotency_key` fields. The derived key is then a hash of
+# `{ run, seq, tool }`, the call's position in the run, which is exactly the
+# promise a retry needs: the same position, attempted again, presents the same
+# key. Declaring fields instead would make this call deduplicate against other
+# positions in the run, which is a different feature and not what is under test.
+
+[input_schema]
+type = "object"
+required = ["order_id"]
+description = "Tell the shipper an order is ready to collect."
+
+[input_schema.properties.order_id]
+type = "string"
+description = "The order the shipper is being told about, for example ORD-9002."
+
+[output_schema]
+type = "object"
+required = ["order_id", "notice_id"]
+
+[output_schema.properties.order_id]
+type = "string"
+
+[output_schema.properties.notice_id]
+type = "string"

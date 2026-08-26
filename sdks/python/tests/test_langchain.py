@@ -107,6 +107,7 @@ DECLS = [
     Path(__file__).resolve().parent / "client-tools" / "stamp-ledger.toml",
     Path(__file__).resolve().parent / "client-tools" / "track-shipment.toml",
     Path(__file__).resolve().parent / "client-tools" / "wire-payout.toml",
+    Path(__file__).resolve().parent / "client-tools" / "notify-shipper.toml",
 ]
 
 
@@ -230,6 +231,7 @@ ran = {
     "stamp": 0,
     "track": 0,
     "payout": 0,
+    "notify": 0,
     "concurrent": 0,
     "peak_concurrent": 0,
 }
@@ -243,6 +245,18 @@ stamp_crashes = {"on": False}
 #: `Exception`, which is the whole point: the middleware's failure-reporting
 #: catch must not treat a process leaving as a call failing.
 stamp_interrupts = {"on": False, "event": None}  # type: Dict[str, Any]
+#: Set to make the next `lookup_order` body raise. `lookup_order` is declared
+#: `effect = "read"`, so this is how the suite proves the other half of the
+#: effect split: nothing is posted, the intent is left open, and the next
+#: invoke performs the call again rather than meeting a settled failure.
+lookup_crashes = {"on": False}
+#: Set to make the next `notify_shipper` body raise. `notify_shipper` is
+#: declared `effect = "idempotent"`, which sits with `read` on this question:
+#: an unfinished call is attempted again, under the key its recorded intent
+#: already fixed.
+notify_crashes = {"on": False}
+#: The derived key each `notify_shipper` body ran under, in order.
+notified = []  # type: List[Optional[str]]
 #: Set to make the next `wire_payout` body raise. `wire_payout` is declared
 #: `trust_completion = false`, so this is how the suite proves the OTHER
 #: outcome a raise can have: nothing posted, the intent left open for a
@@ -340,6 +354,8 @@ def lookup_body(order_id: str) -> Dict[str, Any]:
             time.sleep(half)
         time.sleep(0.015)
         count("lookup")
+        if lookup_crashes["on"]:
+            raise RuntimeError("connect ECONNREFUSED reaching the order service")
         return {"order_id": order_id, "status": "paid", "total_cents": 4200}
     finally:
         leave()
@@ -360,6 +376,8 @@ async def alookup_body(order_id: str) -> Dict[str, Any]:
             await asyncio.sleep(half)
         await asyncio.sleep(0.015)
         count("lookup")
+        if lookup_crashes["on"]:
+            raise RuntimeError("connect ECONNREFUSED reaching the order service")
         return {"order_id": order_id, "status": "paid", "total_cents": 4200}
     finally:
         leave()
@@ -422,6 +440,29 @@ async def astamp_body(order_id: str, note: str) -> Dict[str, Any]:
     return stamp_body(order_id, note)
 
 
+def notify_body(order_id: str) -> Dict[str, Any]:
+    """Tell the shipper an order is ready to collect.
+
+    Declared `effect = "idempotent"`: a call with an effect outside the
+    process that the provider collapses on the key, so an unfinished one is
+    attempted again rather than left for a person.
+    """
+    count("notify")
+    context = current_tool_call()
+    with counting:
+        notified.append(getattr(context, "key", None))
+    if notify_crashes["on"]:
+        raise RuntimeError("the shipper's endpoint timed out")
+    return {
+        "order_id": order_id,
+        "notice_id": "notice-{order}".format(order=order_id),
+    }
+
+
+async def anotify_body(order_id: str) -> Dict[str, Any]:
+    return notify_body(order_id)
+
+
 def payout_body(order_id: str, amount_cents: int) -> Dict[str, Any]:
     """Wire a payout for an order whose card refund is not available."""
     count("payout")
@@ -460,6 +501,7 @@ lookup_order = both_ways(lookup_body, alookup_body, "lookup_order")
 stamp_ledger = both_ways(stamp_body, astamp_body, "stamp_ledger")
 track_shipment = both_ways(track_body, atrack_body, "track_shipment")
 wire_payout = both_ways(payout_body, apayout_body, "wire_payout")
+notify_shipper = both_ways(notify_body, anotify_body, "notify_shipper")
 send_email = both_ways(email_body, aemail_body, "send_email")
 
 
@@ -470,10 +512,14 @@ def reset() -> None:
             "stamp": 0,
             "track": 0,
             "payout": 0,
+            "notify": 0,
             "concurrent": 0,
             "peak_concurrent": 0,
         }
     )
+    del notified[:]
+    lookup_crashes["on"] = False
+    notify_crashes["on"] = False
     stamp_crashes["on"] = False
     stamp_interrupts["on"] = False
     stamp_interrupts["event"] = None
@@ -896,6 +942,175 @@ class MiddlewareScenarios:
                     "ToolCallCompleted",
                 ],
                 "nothing new was appended: the failure is settled, not retried",
+            )
+
+        self.drive(body)
+
+    # -- (c1) a raised read, and a raised idempotent call, record nothing ----
+
+    def test_a_raised_read_records_nothing_and_the_next_invoke_performs_it_again(
+        self,
+    ) -> None:
+        """A trusted ``read`` body that raises settles nothing.
+
+        The effect class decides what a raise is worth recording. A read has
+        nothing outside the log to half-do, so a dependency that is briefly
+        down must not settle the call for ever: nothing is posted, the intent
+        is left open exactly where it stands, and the next invoke of the
+        thread meets it at the same position, runs the body again under the
+        key the recorded intent already fixed, and finishes the thread.
+        """
+        thread_id = "thread-read-raises"
+        run_id = run_id_for_thread(thread_id)
+
+        async def body(client: Any) -> None:
+            lookup_crashes["on"] = True
+            failed, _ = self.agent_for(ONE_TOOL_SCRIPT, client)
+            with self.assertRaises(RuntimeError) as caught:
+                await self.invoke(failed, ASK, self.thread(thread_id))
+            self.assertIn("ECONNREFUSED", str(caught.exception))
+            self.assertEqual(ran["lookup"], 1, "the tool body ran once and raised")
+            first_key = captured["call"].key
+            self.assertEqual(
+                await self.kinds_of(client, thread_id),
+                [
+                    "RunStarted",
+                    "ModelCallRequested",
+                    "ModelCallCompleted",
+                    "ToolCallRequested",
+                ],
+                "the log ends at the open intent: a read's raise records no "
+                "completion at all",
+            )
+
+            # The invoke ended badly, but it is still an ending: the lease came
+            # back with the step that raised, so a stranger opens the run at
+            # once rather than meeting `lease_held`.
+            stranger = self.CLIENT(self.base)
+            try:
+                taken = await call(stranger.open_client_run, run_id=run_id)
+                self.assertEqual(taken.run_id, run_id, "the run was free at once")
+                await call(taken.release)
+            finally:
+                await call(stranger.close)
+
+            # The next invoke picks the call up where it stopped: same
+            # position, same derived key, and this time a completion.
+            reset()
+            again, model = self.agent_for(ONE_TOOL_SCRIPT, client)
+            answer = await self.invoke(again, ASK, self.thread(thread_id))
+            self.assertEqual(ran["lookup"], 1, "the body ran again, once")
+            self.assertEqual(
+                captured["call"].key, first_key, "under the identical derived key"
+            )
+            self.assertEqual(captured["call"].seq, 3, "at the identical position")
+            self.assertEqual(
+                model.calls["count"], 1, "only the answering turn was paid for"
+            )
+            self.assertEqual(
+                self.text_of(answer["messages"][-1]),
+                "Order ORD-7781 is paid, 4200 cents.",
+                "the thread finishes as though the failed attempt never happened",
+            )
+            self.assertEqual(
+                await self.kinds_of(client, thread_id),
+                [
+                    "RunStarted",
+                    "ModelCallRequested",
+                    "ModelCallCompleted",
+                    "ToolCallRequested",
+                    "ToolCallCompleted",
+                    "ModelCallRequested",
+                    "ModelCallCompleted",
+                ],
+                "one intent, now completed: the retry finished the call the "
+                "first invoke opened",
+            )
+
+        self.drive(body)
+
+    def test_a_raised_idempotent_call_is_retried_under_the_same_key(self) -> None:
+        """An ``idempotent`` body that raises is a read as far as this
+        middleware is concerned.
+
+        It does reach outside the process, unlike a read, but the provider
+        collapses two attempts carrying one key, which is what the effect
+        class means. So nothing is posted for a raise either: the intent stays
+        open and the next invoke attempts the call again under the key its
+        recorded position derives, which is the same key both times.
+        """
+        thread_id = "thread-idempotent-raises"
+        run_id = run_id_for_thread(thread_id)
+        script = [
+            {
+                "content": "telling the shipper",
+                "tool_calls": [
+                    {
+                        "name": "notify_shipper",
+                        "args": {"order_id": "ORD-9002"},
+                        "id": "call-notify",
+                    }
+                ],
+            },
+            {"content": "The shipper knows about ORD-9002."},
+        ]
+        ask = {"messages": [{"role": "user", "content": "tell the shipper about ORD-9002"}]}
+
+        async def body(client: Any) -> None:
+            notify_crashes["on"] = True
+            failed, _ = self.agent_for(script, client, tools=[notify_shipper])
+            with self.assertRaises(RuntimeError) as caught:
+                await self.invoke(failed, ask, self.thread(thread_id))
+            self.assertIn("the shipper's endpoint timed out", str(caught.exception))
+            self.assertEqual(ran["notify"], 1, "the body ran once and raised")
+            first_key = notified[0]
+            self.assertIsNotNone(first_key, "the body was told the key it ran under")
+            self.assertEqual(
+                await self.kinds_of(client, thread_id),
+                [
+                    "RunStarted",
+                    "ModelCallRequested",
+                    "ModelCallCompleted",
+                    "ToolCallRequested",
+                ],
+                "nothing was posted for it: the intent is open, exactly as a "
+                "read's would be",
+            )
+
+            stranger = self.CLIENT(self.base)
+            try:
+                taken = await call(stranger.open_client_run, run_id=run_id)
+                await call(taken.release)
+            finally:
+                await call(stranger.close)
+
+            reset()
+            again, _ = self.agent_for(script, client, tools=[notify_shipper])
+            answer = await self.invoke(again, ask, self.thread(thread_id))
+            self.assertEqual(ran["notify"], 1, "the body ran again, once")
+            self.assertEqual(
+                notified[0],
+                first_key,
+                "under the identical key: an idempotent retry is one the "
+                "provider can collapse",
+            )
+            self.assertEqual(
+                self.text_of(answer["messages"][-1]),
+                "The shipper knows about ORD-9002.",
+                "and the thread finishes normally",
+            )
+            self.assertEqual(
+                await self.kinds_of(client, thread_id),
+                [
+                    "RunStarted",
+                    "ModelCallRequested",
+                    "ModelCallCompleted",
+                    "ToolCallRequested",
+                    "ToolCallCompleted",
+                    "ModelCallRequested",
+                    "ModelCallCompleted",
+                ],
+                "the retry completed the call the first invoke opened",
             )
 
         self.drive(body)

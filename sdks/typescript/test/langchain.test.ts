@@ -87,6 +87,7 @@ const DECLS = [
   resolve(here, "client-tools", "track-parcel.toml"),
   resolve(here, "client-tools", "record-delivery.toml"),
   resolve(here, "client-tools", "wire-payout.toml"),
+  resolve(here, "client-tools", "notify-shipper.toml"),
 ];
 
 // -- the scripted model ------------------------------------------------------
@@ -197,6 +198,7 @@ const ran = {
   track: 0,
   deliver: 0,
   payout: 0,
+  notify: 0,
   concurrent: 0,
   peakConcurrent: 0,
 };
@@ -208,6 +210,22 @@ const ran = {
  * invoke of the same call meets.
  */
 let stampCrashes = false;
+/**
+ * Set to make the next `lookup_order` body throw. `lookup_order` is declared
+ * `effect = "read"`, so a throw here proves the other half of the effect
+ * split: nothing is recorded, the intent is left open, and the next invoke
+ * performs the call again rather than meeting a failure the log settled.
+ */
+let lookupCrashes = false;
+/**
+ * Set to make the next `notify_shipper` body throw. `notify_shipper` is
+ * declared `effect = "idempotent"`, which sits with `read` on this question:
+ * an unfinished call is attempted again, under the key its recorded intent
+ * already fixed.
+ */
+let notifyCrashes = false;
+/** The derived key each `notify_shipper` body ran under, in order. */
+const notifyKeys: (string | undefined)[] = [];
 /**
  * Set to make the next `wire_payout` body throw. `wire_payout` is declared
  * `trust_completion = false`, so a throw here proves the untrusted path: no
@@ -250,6 +268,7 @@ const lookupOrder = tool(
       capturedCall = currentToolCall();
       await new Promise((r) => setTimeout(r, 15));
       ran.lookup += 1;
+      if (lookupCrashes) throw new Error("connect ECONNREFUSED reaching the order service");
       const interrupt = midToolCall;
       midToolCall = undefined;
       if (interrupt) await interrupt();
@@ -344,6 +363,25 @@ const recordDelivery = tool(
     name: "record_delivery",
     description: "Record that a parcel was delivered.",
     schema: z.object({ tracking_number: z.string(), signed_by: z.string() }),
+  },
+);
+
+/**
+ * The suite's one `idempotent` tool: a call with an effect outside the
+ * process that the provider collapses on the key, so an unfinished one is
+ * attempted again rather than left for a person.
+ */
+const notifyShipper = tool(
+  async ({ order_id }: { order_id: string }) => {
+    ran.notify += 1;
+    notifyKeys.push(currentToolCall()?.key);
+    if (notifyCrashes) throw new Error("the shipper's endpoint timed out");
+    return { order_id, notice_id: `notice-${order_id}` };
+  },
+  {
+    name: "notify_shipper",
+    description: "Tell the shipper an order is ready to collect.",
+    schema: z.object({ order_id: z.string() }),
   },
 );
 
@@ -453,9 +491,13 @@ function reset(): void {
   ran.track = 0;
   ran.deliver = 0;
   ran.payout = 0;
+  ran.notify = 0;
   ran.concurrent = 0;
   ran.peakConcurrent = 0;
+  notifyKeys.length = 0;
   stampCrashes = false;
+  lookupCrashes = false;
+  notifyCrashes = false;
   payoutThrows = false;
   lookupBadStatus = false;
   stampBadOrderId = undefined;
@@ -794,6 +836,155 @@ test("a tool that throws on a bad input has the failure recorded, releases the l
       "ToolCallCompleted",
     ],
     "still exactly one intent and one completion: nothing new was appended",
+  );
+});
+
+// -- (c1) a thrown read, and a thrown idempotent call, record nothing --------
+
+test("a read tool that throws records no completion, releases the lease, and the next invoke performs the call again at the same position", async (t) => {
+  if (!base) return t.skip("salvor serve not available");
+  reset();
+  const threadId = "thread-read-throws";
+  const runId = await runIdForThread(threadId);
+  const script: Turn[] = [
+    {
+      content: "looking that up",
+      toolCalls: [{ name: "lookup_order", args: { order_id: "ORD-7781" }, id: "call-1" }],
+    },
+    { content: "Order ORD-7781 is paid, 4200 cents." },
+  ];
+
+  // `lookup_order` is declared `effect = "read"`. Its body throws the way a
+  // dependency that is briefly down makes a body throw: nothing outside the
+  // process changed, and nothing about the input is wrong.
+  lookupCrashes = true;
+  const failed = agentFor(script);
+  await rejects(
+    () =>
+      failed.agent.invoke(
+        { messages: [{ role: "user", content: "how is ORD-7781?" }] },
+        { configurable: { thread_id: threadId } },
+      ),
+    (error: unknown) => /ECONNREFUSED/.test(String(error)),
+  );
+  strictEqual(ran.lookup, 1, "the tool body ran once and threw");
+  const firstKey = capturedCall?.key;
+  ok(firstKey, "the body was told the key it ran under");
+  deepStrictEqual(
+    await kindsOf(threadId),
+    ["RunStarted", "ModelCallRequested", "ModelCallCompleted", "ToolCallRequested"],
+    "the log ends at the open intent: a read's throw records no completion at all",
+  );
+
+  // The invoke ended badly, but it is still an ending: the lease came back,
+  // so a stranger takes the run at once instead of waiting out the TTL.
+  const stranger = new SalvorClient(base!);
+  const taken = await stranger.openClientRun({ runId });
+  await taken.release();
+
+  // The next invoke meets that same open intent at the same position, runs
+  // the body again under the key the recorded intent already fixed, and this
+  // time records the completion and finishes the thread normally.
+  reset();
+  const retried = agentFor(script);
+  const answer = await retried.agent.invoke(
+    { messages: [{ role: "user", content: "how is ORD-7781?" }] },
+    { configurable: { thread_id: threadId } },
+  );
+  strictEqual(ran.lookup, 1, "the body ran again, once");
+  strictEqual(capturedCall?.key, firstKey, "under the identical derived key");
+  strictEqual(capturedCall?.seq, 3, "at the identical position");
+  strictEqual(retried.model.calls.count, 1, "only the answering turn was paid for");
+  strictEqual(
+    textOf(answer.messages.at(-1)!),
+    "Order ORD-7781 is paid, 4200 cents.",
+    "the thread finishes as though the failed attempt had never happened",
+  );
+  deepStrictEqual(
+    await kindsOf(threadId),
+    [
+      "RunStarted",
+      "ModelCallRequested",
+      "ModelCallCompleted",
+      "ToolCallRequested",
+      "ToolCallCompleted",
+      "ModelCallRequested",
+      "ModelCallCompleted",
+    ],
+    "one intent, now completed: the retry finished the call the first invoke opened",
+  );
+});
+
+test("an idempotent tool that throws behaves like the read: nothing recorded, and the next invoke retries it under the same key", async (t) => {
+  if (!base) return t.skip("salvor serve not available");
+  reset();
+  const threadId = "thread-idempotent-throws";
+  const runId = await runIdForThread(threadId);
+  const script: Turn[] = [
+    {
+      content: "telling the shipper",
+      toolCalls: [
+        { name: "notify_shipper", args: { order_id: "ORD-9002" }, id: "call-notify" },
+      ],
+    },
+    { content: "The shipper knows about ORD-9002." },
+  ];
+
+  // `notify_shipper` is declared `effect = "idempotent"`: it does reach out of
+  // the process, but the provider collapses two attempts under one key. That
+  // is the whole reason a throw here is retried rather than settled.
+  notifyCrashes = true;
+  const failed = agentFor(script, [notifyShipper]);
+  await rejects(
+    () =>
+      failed.agent.invoke(
+        { messages: [{ role: "user", content: "tell the shipper about ORD-9002" }] },
+        { configurable: { thread_id: threadId } },
+      ),
+    (error: unknown) => /the shipper's endpoint timed out/.test(String(error)),
+  );
+  strictEqual(ran.notify, 1, "the body ran once and threw");
+  const firstKey = notifyKeys[0];
+  ok(firstKey, "the body was told the key it ran under");
+  deepStrictEqual(
+    await kindsOf(threadId),
+    ["RunStarted", "ModelCallRequested", "ModelCallCompleted", "ToolCallRequested"],
+    "nothing was posted for it: the intent is open, exactly as a read's would be",
+  );
+
+  const stranger = new SalvorClient(base!);
+  const taken = await stranger.openClientRun({ runId });
+  await taken.release();
+
+  reset();
+  const retried = agentFor(script, [notifyShipper]);
+  const answer = await retried.agent.invoke(
+    { messages: [{ role: "user", content: "tell the shipper about ORD-9002" }] },
+    { configurable: { thread_id: threadId } },
+  );
+  strictEqual(ran.notify, 1, "the body ran again, once");
+  strictEqual(
+    notifyKeys[0],
+    firstKey,
+    "under the identical key: an idempotent retry is one the provider can collapse",
+  );
+  strictEqual(
+    textOf(answer.messages.at(-1)!),
+    "The shipper knows about ORD-9002.",
+    "and the thread finishes normally",
+  );
+  deepStrictEqual(
+    await kindsOf(threadId),
+    [
+      "RunStarted",
+      "ModelCallRequested",
+      "ModelCallCompleted",
+      "ToolCallRequested",
+      "ToolCallCompleted",
+      "ModelCallRequested",
+      "ModelCallCompleted",
+    ],
+    "the retry completed the call the first invoke opened",
   );
 });
 

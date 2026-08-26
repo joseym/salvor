@@ -354,21 +354,38 @@ export class RunTape {
    * call recorded as requested with nothing this tape may treat as its
    * completion.
    *
-   * A thrown tool body is a completion too, mirroring how salvor itself
-   * records a native tool's exhausted retries: when `perform` throws
-   * something that is not already one of this SDK's own errors, and
-   * `trustCompletion` is `true`, the thrown message is posted as the call's
-   * recorded failure (`ClientRunDriver.clientToolFailure`) before the
-   * original error is rethrown unchanged, so LangChain still sees exactly
-   * what the tool raised. A LATER invoke that reaches this same call meets
-   * that recorded failure on `clientToolIntent` and throws
-   * `SalvorMiddlewareError` (`tool_failed`) in its place, without running the
-   * body again: a permanently failing input fails the same way on every
-   * invoke, the same as any other settled call. An untrusted tool
-   * (`trustCompletion` is `false`) that throws posts nothing at all: there is
-   * no result to hand a person the way `ToolNeedsResolution` does, only the
-   * fact that the call was asked for and nothing followed. It stops the
-   * invoke with the same `open_intent` refusal a mismatched replay throws.
+   * What a thrown tool body settles depends on the declaration's effect
+   * class, which is the same rule salvor's own replay follows for a call
+   * whose completion never arrived (see `Effect` in `salvor-replay`), and the
+   * effect on the intent's answer (`opened.effect`) is where it comes from.
+   *
+   * - A thrown `write`, and only a `write`, is recorded as the call's failure
+   *   (`ClientRunDriver.clientToolFailure`) before the original error is
+   *   rethrown unchanged, so LangChain still sees exactly what the tool
+   *   raised. A write that threw may have half happened, and re-running it on
+   *   the next invoke would be a guess about whether it landed; recording the
+   *   failure settles the position instead, and a LATER invoke that reaches
+   *   this same call meets that recorded failure on `clientToolIntent` and
+   *   throws `SalvorMiddlewareError` (`tool_failed`) in its place, without
+   *   running the body again. Because only a write is recorded this way, a
+   *   `tool_failed` on replay is always a write's.
+   * - A thrown `read` or `idempotent` posts nothing and rethrows the original
+   *   error as it is. The intent is left open, and the next invoke of the
+   *   thread meets it at the same position and performs the call again, under
+   *   the recorded intent and the same derived key (an idempotent retry
+   *   presents the identical key, which is what makes it one). A read has
+   *   nothing outside the log to half-do, so a transient failure inside one
+   *   must not settle the call for ever: a `ECONNREFUSED` in a lookup would
+   *   otherwise leave the thread with nowhere to go but the bin.
+   *
+   * A throw that is already one of this SDK's own errors is nobody's failure
+   * to record (see the catch itself), whatever the effect is.
+   *
+   * An untrusted tool (`trustCompletion` is `false`) that throws posts
+   * nothing at all, whatever its effect: there is no result to hand a person
+   * the way `ToolNeedsResolution` does, only the fact that the call was asked
+   * for and nothing followed. It stops the invoke with the same `open_intent`
+   * refusal a mismatched replay throws.
    */
   toolCall(
     tool: string,
@@ -480,14 +497,25 @@ export class RunTape {
           // what actually happened. Only a throw that is the tool's own gets
           // turned into a recorded failure.
           if (thrown instanceof SalvorError) throw thrown;
-          const message = thrown instanceof Error ? thrown.message : String(thrown);
-          await this.lease(() =>
-            this.driver.clientToolFailure(seq, { message, kind: "handler" }),
-          );
+          // Only a write's throw is recorded. The effect class is the
+          // operator's word for what a call that did not finish is worth
+          // retrying, and it says the same thing here that it says to
+          // salvor's own replay: a write may have half happened, so it is
+          // settled where it stands and a person reads it; a read or an
+          // idempotent call is performed again, so nothing is posted and the
+          // intent is left open for the next invoke to meet at this exact
+          // position. Recording a read's transient failure would settle the
+          // call for ever and leave the thread with nowhere to go.
+          if (opened.effect === "write") {
+            const message = thrown instanceof Error ? thrown.message : String(thrown);
+            await this.lease(() =>
+              this.driver.clientToolFailure(seq, { message, kind: "handler" }),
+            );
+          }
           // The original error, unwrapped: LangChain, and whatever is above
           // it, sees exactly what the tool body raised, not a translation of
-          // it. The recording above is the only side effect; the throw itself
-          // is unchanged.
+          // it. Whatever was (or was not) recorded above is the only side
+          // effect; the throw itself is unchanged.
           throw thrown;
         }
         if (!trustCompletion) {

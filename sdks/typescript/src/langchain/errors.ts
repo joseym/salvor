@@ -32,10 +32,12 @@ import { canonicalJson } from "./hash.js";
  * - `open_intent`: the run's log ends at a call that was requested and never
  *   completed. Settle it, then invoke again.
  * - `tool_failed`: the run's log already holds a recorded failure for this
- *   exact call (a thrown tool body, from this invoke or an earlier one).
- *   Carries {@link SalvorMiddlewareError.seq}, the position the failure was
- *   recorded at. It fails the same way on every replay, because the log
- *   already answered "what happened": fix the input, or start a new thread.
+ *   exact call (a thrown `write` tool body, from this invoke or an earlier
+ *   one; a thrown `read` or `idempotent` body records nothing and is
+ *   performed again instead, so this always names a write). Carries
+ *   {@link SalvorMiddlewareError.seq}, the position the failure was recorded
+ *   at. It fails the same way on every replay, because the log already
+ *   answered "what happened": fix the input, or start a new thread.
  *
  * The rest name conditions an application cannot usually do anything about
  * except read the message: `run_exists` (the thread id already names a
