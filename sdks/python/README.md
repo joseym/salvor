@@ -396,6 +396,11 @@ an extra, so the plain `import salvor` pulls none of it in:
 pip install 'salvor[langchain]'
 ```
 
+The LangChain extra is in the next release of `salvor`; it is not on PyPI yet,
+so until that release ships, install the SDK from a checkout of this
+repository instead (`pip install '<path-to-checkout>/sdks/python[langchain]'`),
+and come back to the line above once it is.
+
 Then add one middleware to the agent you already have:
 
 ```python
@@ -525,7 +530,10 @@ answer = agent.invoke(
 print(answer["messages"][-1].content)
 ```
 
-Run it in a second terminal, with the server still up:
+Run it in a second terminal, with the server still up. The LangChain extra is
+in the next release of `salvor`, not yet on PyPI, so until then install from a
+checkout of this repository instead of the registry line below
+(`pip install '<path-to-checkout>/sdks/python[langchain]'`):
 
 ```sh
 pip install 'salvor[langchain]'
@@ -781,10 +789,26 @@ except Exception as error:
     if refusal is None:
         raise                      # not ours; let it go past
     if refusal.code == "lease_held":
-        # Somebody else is driving this thread right now. The refusal says how
-        # long their hold has left, so wait it out rather than hammering.
-        time.sleep(refusal.lapses_in_seconds + 1)
-        agent.invoke(ask, {"configurable": {"thread_id": thread}})
+        # Somebody else is driving this thread right now, and it usually finishes
+        # and releases well before its hold lapses, so poll every couple of seconds
+        # instead of sleeping out the whole window.
+        #
+        # If the holder was a process that crashed rather than one that is still working,
+        # nothing can release its lease from outside: it lapses on the timer, or sooner if
+        # the run ended at a dangling write and a person resolves it over HTTP, which clears
+        # the lease as well.
+        deadline = time.monotonic() + refusal.lapses_in_seconds + 1
+        while time.monotonic() < deadline:
+            time.sleep(2)
+            try:
+                agent.invoke(ask, {"configurable": {"thread_id": thread}})
+                break
+            except Exception as retry_error:
+                retry_refusal = salvor_error(retry_error)
+                if retry_refusal is None or retry_refusal.code != "lease_held":
+                    raise
+        else:
+            agent.invoke(ask, {"configurable": {"thread_id": thread}})
     elif refusal.code == "open_intent":
         alert_an_operator(refusal)  # a call was made and never reported
     else:

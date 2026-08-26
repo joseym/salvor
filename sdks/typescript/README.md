@@ -258,6 +258,11 @@ install LangChain alongside the client when you want it:
 npm install @salvor-run/client langchain @langchain/core zod
 ```
 
+The LangChain extra is in the next release of `@salvor-run/client`; it is not
+on npm yet, so until that release ships, install the SDK from a checkout of
+this repository instead (`npm install <path-to-checkout>/sdks/typescript
+langchain @langchain/core zod`), and come back to the line above once it is.
+
 Then add one middleware to the agent you already have:
 
 ```ts
@@ -298,10 +303,23 @@ try {
 
   switch (refusal.code) {
     case "lease_held": {
-      // Another driver has this thread right now. Wait out its hold and retry;
-      // the refusal says exactly how long that is.
-      const seconds = refusal.lapsesInSeconds ?? 1;
-      await new Promise((r) => setTimeout(r, seconds * 1000));
+      // Another driver has this thread right now. It usually finishes and releases
+      // well before its hold lapses, so poll every couple of seconds instead of
+      // sleeping out the whole window.
+      //
+      // If the holder was a process that crashed rather than one that is still working,
+      // nothing can release its lease from outside: it lapses on the timer, or sooner if
+      // the run ended at a dangling write and a person resolves it over HTTP, which clears
+      // the lease as well.
+      const deadline = Date.now() + (refusal.lapsesInSeconds ?? 1) * 1000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 2000));
+        try {
+          return await agent.invoke(input, { configurable: { thread_id: "order-7781" } });
+        } catch (retry) {
+          if (salvorError(retry)?.code !== "lease_held") throw retry;
+        }
+      }
       return agent.invoke(input, { configurable: { thread_id: "order-7781" } });
     }
     case "tool_needs_resolution":
@@ -404,6 +422,12 @@ all it takes:
 }
 ```
 
+The LangChain extra is in the next release of the SDK, not yet in `0.9.2`
+above: until it is on npm, point that first dependency at a checkout of this
+repository instead (`npm install <path-to-checkout>/sdks/typescript` in place
+of the registry line, keeping the other three), and switch back to the
+registry version once the release with the extra is out.
+
 ```ts
 import { createAgent, tool } from "langchain";
 import { AIMessage, type BaseMessage } from "@langchain/core/messages";
@@ -493,8 +517,8 @@ the server is using (`salvor.db` in the working directory unless `salvor serve
 salvor history <run> --store ./salvor.db
 ```
 
-The run id for a thread id is `runIdForThread("order-7781")`, exported from
-`@salvor-run/client/langchain`.
+The run id for a thread id is `await runIdForThread("order-7781")` (it hashes
+asynchronously), exported from `@salvor-run/client/langchain`.
 
 When you are done, the whole experiment is three files: delete `salvor.db`
 along with its `salvor.db-wal` and `salvor.db-shm` side files, which SQLite
@@ -518,9 +542,10 @@ request body on the intent as well, for an inspector to show; replay never
 reads it, because the correlation key is the hash alone.
 
 To read a thread's recorded log back: `GET /v1/client-runs/{id}/log` serves it
-(no drive token needed) while the run is one this server currently holds open,
-which after an invoke has handed its lease back it no longer is, so once the
-invoke is over read the log with `salvor history <run> --store <path>` against
+(no drive token needed) for any run the log marks as client-driven, whether
+its driver is mid-invoke, released the lease when the invoke ended, went quiet
+until the lease lapsed, or was driving before the server last restarted. The
+same log is also readable with `salvor history <run> --store <path>` against
 the store or `GET /v1/runs/{id}/events` against the server, both of which read
 the durable log rather than the lease registry.
 
