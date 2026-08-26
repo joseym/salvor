@@ -112,6 +112,18 @@ class RunStatus:
         value = self.raw.get("overdue_seconds")
         return int(value) if value is not None else None
 
+    @property
+    def unresolved_write(self) -> Optional[dict[str, Any]]:
+        """The write an abandoned run left dangling (``{"seq": ..., "tool":
+        ...}``), or ``None``.
+
+        Present only on an ``abandoned`` run that was parked at a dangling
+        write when :meth:`~salvor.Client.abandon` retired it; absent for every
+        other abandonment and every other state, so the abandonment never
+        claims a write settled that it never touched.
+        """
+        return self.raw.get("unresolved_write")
+
 
 @dataclass
 class PendingCall:
@@ -270,6 +282,29 @@ class ResumeResult:
             run=obj["run"],
             outcome=obj.get("outcome", obj.get("status", "unknown") if isinstance(obj.get("status"), str) else "unknown"),
             status=RunStatus.from_json(status) if isinstance(status, dict) else None,
+            raw=obj,
+        )
+
+
+@dataclass
+class AbandonResult:
+    """The receipt from ``POST /v1/runs/{id}/abandon``: the position the
+    terminal ``RunAbandoned`` landed at and the run's re-derived status
+    (always ``abandoned``, carrying the operator reason and any recorded
+    ``unresolved_write``). Nothing was executed."""
+
+    run: str
+    status: RunStatus
+    appended_seq: Optional[int] = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_json(cls, obj: dict[str, Any]) -> "AbandonResult":
+        appended_seq = obj.get("appended_seq")
+        return cls(
+            run=obj["run"],
+            status=RunStatus.from_json(obj.get("status", {})),
+            appended_seq=int(appended_seq) if appended_seq is not None else None,
             raw=obj,
         )
 

@@ -25,6 +25,7 @@ from ._core.wire import Call
 from .errors import SalvorAPIError
 from .graph import Graph
 from .models import (
+    AbandonResult,
     ClientToolDecl,
     EndFrame,
     Event,
@@ -216,6 +217,23 @@ class Client:
         nothing.
         """
         return self._send(api.resolve(run_id, output))
+
+    def abandon(self, run_id: str, reason: Optional[str] = None) -> AbandonResult:
+        """Abandon a run: retire it by hand, appending a terminal
+        ``RunAbandoned``.
+
+        The operator's "we do not care about this run anymore" path, for a run
+        that is dead forever or no longer worth carrying. Executes nothing and
+        drives nothing; it needs no drive token, and works for any non-terminal
+        run whatever drove it.
+
+        When the run is parked at a dangling write, the outstanding intent is
+        recorded on the terminal event and surfaced as
+        :attr:`~salvor.models.RunStatus.unresolved_write`: the abandonment
+        never claims the write settled. A run that is already terminal raises
+        :class:`~salvor.errors.SalvorAPIError` with code ``wrong_state``.
+        """
+        return self._send(api.abandon(run_id, reason))
 
     # -- graphs ---------------------------------------------------------------
 

@@ -359,9 +359,12 @@ def one_driver_error(
     error is that kind. ``invalid_drive_token`` carries no such figure, so the
     sentence names the rule instead of a number nobody sent.
 
-    The ``lease_held`` sentence is the TypeScript middleware's own, word for
-    word apart from the thread, the run and the seconds: one refusal, one
-    wording, whichever SDK an operator reads it in.
+    Both sentences are the TypeScript middleware's own, word for word apart
+    from the thread and the run (and, for ``lease_held``, the seconds): one
+    refusal, one wording, whichever SDK an operator reads it in. TypeScript
+    tells the two apart the same way, one sentence for the open-time
+    ``LeaseHeldError`` and another (``oneDriverError``) for a mid-invoke
+    ``invalid_drive_token``.
     """
     lapses = error.details.get("lapses_in_seconds")
     if lapses is not None:
@@ -375,14 +378,11 @@ def one_driver_error(
         )
     else:
         message = (
-            "thread `{thread}` (run {run}) is already being driven by another "
-            "instance right now: presenting that driver's own token is the "
-            "only way in until its lease lapses. Salvor allows one driver per "
-            "thread at a time, so a second instance invoking this thread while "
-            "the first is active is refused before it runs anything, rather "
-            "than racing the first for the lease.".format(
-                thread=thread_id, run=run_id
-            )
+            "thread `{thread}` (run {run}) is no longer this invoke's to "
+            "drive: another driver holds its lease now. One driver per thread "
+            "at a time. Invoke a given thread id from one process at a time, "
+            "and give work that must run alongside it a thread id of its "
+            "own.".format(thread=thread_id, run=run_id)
         )
     return SalvorMiddlewareError(
         message,

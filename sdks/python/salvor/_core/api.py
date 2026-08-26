@@ -13,6 +13,7 @@ from typing import Any, Optional, Union
 
 from ..graph import Graph
 from ..models import (
+    AbandonResult,
     ClientToolDecl,
     ForkPreview,
     ForkResult,
@@ -144,6 +145,17 @@ def resolve(run_id: str, output: Any) -> Call:
         f"/v1/runs/{run_id}/resolve",
         parse=parse,
         json_body={"output": output},
+    )
+
+
+def abandon(run_id: str, reason: Optional[str]) -> Call:
+    """An omitted ``reason`` sends an empty body, abandoning with none."""
+    body: dict[str, Any] = {} if reason is None else {"reason": reason}
+    return Call(
+        "POST",
+        f"/v1/runs/{run_id}/abandon",
+        parse=AbandonResult.from_json,
+        json_body=body,
     )
 
 

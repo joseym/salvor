@@ -52,6 +52,7 @@ from .graph import (
     model_decision,
 )
 from .models import (
+    AbandonResult,
     ClientToolDecl,
     EndFrame,
     Event,
@@ -105,6 +106,7 @@ __all__ = [
     "RunSummary",
     "ReplayState",
     "ResumeResult",
+    "AbandonResult",
     "PendingCall",
     "Usage",
     "GraphShape",

@@ -688,6 +688,45 @@ class AsyncDriverRealServer(unittest.TestCase):
 
         self.drive(scenario)
 
+    def test_abandon_settles_a_run_parked_at_a_dangling_write(self) -> None:
+        """``AsyncClient.abandon`` needs no drive token and works on a run
+        parked at a dangling write, which is the case it exists to serve: a
+        client-performed write's intent recorded with no completion after it.
+
+        ``refund_card`` is declared ``effect = "write"`` (see
+        ``examples/client-tools/refund-card.toml``), so posting its intent and
+        never posting a completion leaves the run's log ending at a write
+        intent with no completion, which is exactly what makes the derived
+        status ``needs_reconciliation`` -- and what abandon is the operator's
+        way past.
+        """
+
+        async def scenario() -> None:
+            async with AsyncClient(self.base, timeout=10.0) as client:
+                run = await client.open_client_run()
+                await run.append([self.started(run)])
+                refund = {
+                    "order_id": "ORD-8891",
+                    "amount_cents": 2500,
+                    "currency": "USD",
+                }
+                await run.client_tool_intent(1, "refund_card", refund)
+                # Left dangling on purpose: no completion is ever posted.
+
+                result = await client.abandon(run.run_id, "husk is dead forever")
+                self.assertEqual(result.run, run.run_id)
+                self.assertEqual(result.status.state, "abandoned")
+                self.assertEqual(
+                    result.status.unresolved_write,
+                    {"seq": 1, "tool": "refund_card"},
+                    "the abandonment names the write it never claims settled",
+                )
+
+                state = await client.get_run(run.run_id)
+                self.assertEqual(state.status.state, "abandoned")
+
+        self.drive(scenario)
+
 
 if __name__ == "__main__":
     unittest.main()
