@@ -802,6 +802,52 @@ async fn releasing_without_the_lease_is_refused_and_the_hold_stands() {
     assert_eq!(status, StatusCode::OK, "the holder keeps driving: {body}");
 }
 
+/// The log read needs no lease, so a release does not strand it. Releasing
+/// drops the in-memory lease entirely (unlike a re-open under the held token,
+/// which keeps it), so a gate that asked only the lease registry would answer
+/// `404` for a run whose recorded log plainly says it is client-driven. The
+/// read asks the log too, so it keeps answering.
+#[tokio::test]
+async fn get_log_answers_after_the_lease_is_released() {
+    let server = client_server().await;
+    let client = reqwest::Client::new();
+    let (run, token) = open_run(&client, &server.base).await;
+    let (status, body) = append(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        vec![
+            env_value(&run, 0, run_started()),
+            env_value(&run, 1, Event::NowObserved { now: ts() }),
+            env_value(&run, 2, Event::RandomObserved { value: 7 }),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the events land: {body}");
+
+    let (status, body) = post_lease(&client, &server.base, &run, "release", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "release: {body}");
+    assert_eq!(body["released"], true);
+
+    let (status, log) = get_json(
+        &client,
+        &format!("{}/v1/client-runs/{run}/log", server.base),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a released run is still a client-driven run's log: {log}"
+    );
+    assert_eq!(
+        log["log"].as_array().expect("log array").len(),
+        3,
+        "every event recorded before the release comes back: {log}"
+    );
+}
+
 /// A driver inside one long body (a tool that takes minutes, a model stream the
 /// client is rendering) makes no drive call at all while it works, so before
 /// the beat existed its lease lapsed mid-body and another opener could take a
@@ -1717,6 +1763,68 @@ async fn a_restart_re_opens_a_client_driven_run_from_its_log() {
     assert_eq!(
         body["status"]["state"], "completed",
         "the run a restart interrupted ran to completion: {body}"
+    );
+}
+
+/// A restart does not strand the log read either, and it need not go through
+/// `open` first to prove it: a fresh process that never opened this run at
+/// all, and so has no lease for it, still answers the read from the log's own
+/// `driven_by: client` marker, exactly as [`open`](salvor_server) adopts the
+/// run for driving.
+#[tokio::test]
+async fn get_log_answers_after_a_restart_from_the_log_alone() {
+    let store = memory_store();
+    let first = client_server_over(store.clone()).await;
+    let client = reqwest::Client::new();
+    let (run, token) = open_run(&client, &first.base).await;
+    let run_id = RunId::from_uuid(Uuid::parse_str(&run).expect("run id"));
+
+    let (status, body) = append(
+        &client,
+        &first.base,
+        &run,
+        Some(&token),
+        vec![
+            env_value(&run, 0, run_started()),
+            env_value(&run, 1, Event::NowObserved { now: ts() }),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the head and a clock reading: {body}"
+    );
+
+    restart(first);
+    let second = client_server_over(store.clone()).await;
+    assert!(
+        !second.state.is_client_run(run_id),
+        "the fresh process holds no lease for the run; only its log speaks"
+    );
+
+    // No open, no adoption, no lease: the read still answers from the log.
+    let (status, log) = get_json(
+        &client,
+        &format!("{}/v1/client-runs/{run}/log", second.base),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the recorded log survives the restart even though no lease does: {log}"
+    );
+    let kinds: Vec<&str> = log["log"]
+        .as_array()
+        .expect("the recorded log comes back")
+        .iter()
+        .map(|envelope| envelope["event"]["kind"].as_str().expect("a kind"))
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["RunStarted", "NowObserved"],
+        "both events: {log}"
     );
 }
 

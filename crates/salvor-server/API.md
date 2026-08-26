@@ -1195,8 +1195,11 @@ The recorded envelopes, for a refreshed tab to rebuild its cursor.
 Each envelope is exactly the pinned event-envelope wire JSON the event stream
 and `salvor history --json` use. `?from_seq=<n>` returns only envelopes at or
 after `n`, so a client that already holds a prefix fetches just the tail. The
-read needs no drive token, but it serves only client-driven runs this server
-opened. `404 unknown_run` otherwise.
+read needs no drive token, and it needs no lease either: it serves any run
+that is client-driven, whether that is known from this server's lease
+registry or from the recorded log's own `driven_by: client` marker, so it
+still answers after the driver released the lease, the lease lapsed, or the
+process restarted. A server-driven (or unknown) run is `404 unknown_run`.
 
 ### POST /v1/client-runs/{id}/events
 

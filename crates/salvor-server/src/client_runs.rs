@@ -505,18 +505,25 @@ pub async fn heartbeat(
 ///
 /// `?from_seq=<n>` returns only envelopes at or after `n`, so a resuming client
 /// that already holds a prefix fetches just the tail. The read needs no drive
-/// token (a second viewer may read), but it serves only client-driven runs this
-/// process opened, keeping the two modes' surfaces apart.
+/// token (a second viewer may read), and it needs no lease either: a run whose
+/// driver released it (see [`release`]), whose lease lapsed, or that this
+/// process only knows from a log written before a restart is still a
+/// client-driven run's log, and this is a read, not a step in driving it. So
+/// the gate asks the same two questions [`open`] does for the same reason (see
+/// [`log_is_client_driven`]): this process's lease registry, or, failing that,
+/// the log's own `driven_by: client` marker on its `RunStarted`. A run neither
+/// says is client-driven, because it is server-driven or unknown outright,
+/// still answers `404 unknown_run`.
 pub async fn get_log(
     State(state): State<AppState>,
     Path(run_id_text): Path<String>,
     Query(query): Query<LogQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let run_id = parse_run_id(&run_id_text)?;
-    if !state.is_client_run(run_id) {
+    let mut log = state.store().read_log(run_id).await.map_err(store_error)?;
+    if !state.is_client_run(run_id) && !log_is_client_driven(&log) {
         return Err(unknown_client_run(run_id));
     }
-    let mut log = state.store().read_log(run_id).await.map_err(store_error)?;
     if let Some(from) = query.from_seq {
         log.retain(|env| env.seq.get() >= from);
     }
