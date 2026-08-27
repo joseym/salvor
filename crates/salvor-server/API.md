@@ -945,6 +945,14 @@ this server checks a client-tool intent's input against, published here so a
 client never keeps a second copy of it that can quietly drift from the one
 the server validates against.
 
+Both schemas are checked against a subset of JSON Schema, not the whole of it:
+the server honours `type`, `required`, `properties`, `items`, `enum`,
+`minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum` (the draft 2019-09
+numeric forms, where the keyword's value is the bound), `minLength`,
+`maxLength`, `minItems` and `maxItems`, and every other keyword, `pattern` and
+`format` among them, is ignored without refusal, so an operator who writes one
+has written a comment rather than a rule.
+
 No drive token: this lists server configuration, not run state, so it sits
 behind only the bearer-auth layer every other `/v1` route sits behind.
 
