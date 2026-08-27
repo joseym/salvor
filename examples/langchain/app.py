@@ -405,12 +405,18 @@ FORKS = 0
 MARKERS: list = []
 
 
-def print_counts() -> None:
-    """The counts every path prints, so a refused invoke says what it did not do."""
+def print_counts(refused: bool = False) -> None:
+    """The counts every path prints, so a refused invoke says what it did not do.
+
+    `refused` is true from a caught refusal: the final messages a marker would
+    be read off never arrive, so `MARKERS` is whatever it was left at rather
+    than an honest answer, and printing it as such would misreport `none`.
+    """
     calls = "unavailable (real provider)" if os.environ.get("ANTHROPIC_API_KEY") else str(MODEL_CALLS)
     print("MODEL CALLS: " + calls, flush=True)
     print("TOOL BODIES: {}".format(TOOL_BODIES), flush=True)
-    print("MARKERS: " + (",".join(MARKERS) or "none"), flush=True)
+    markers_text = "unavailable (invoke refused)" if refused else (",".join(MARKERS) or "none")
+    print("MARKERS: " + markers_text, flush=True)
     print("FORKS: {}".format(FORKS), flush=True)
 
 
@@ -465,7 +471,7 @@ def main() -> int:
             # A `trust_completion = false` tool ran and salvor will not take this
             # process's word for what it did. The run holds the intent; a person
             # confirms the refund and records it.
-            print_counts()
+            print_counts(refused=True)
             print(
                 "NEEDS RESOLUTION: "
                 + json.dumps(
@@ -482,7 +488,7 @@ def main() -> int:
             say(one_line(refusal.message))
             return 4
 
-        print_counts()
+        print_counts(refused=True)
         print("REFUSED {}: {}".format(refusal.code, one_line(refusal.message)), flush=True)
         if refusal.lapses_in_seconds is not None:
             print("LAPSES IN: {}".format(refusal.lapses_in_seconds), flush=True)

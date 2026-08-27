@@ -463,11 +463,16 @@ function markerOf(message: BaseMessage): string {
 let forks = 0;
 let markers: string[] = [];
 
-/** The counts every path prints, so a refused invoke says what it did not do. */
-function printCounts(modelCalls: string): void {
+/**
+ * The counts every path prints, so a refused invoke says what it did not do.
+ * `refused` is true from a caught refusal: the final messages a marker would
+ * be read off never arrive, so `markers` is whatever it was left at rather
+ * than an honest answer, and printing it as such would misreport `none`.
+ */
+function printCounts(modelCalls: string, refused = false): void {
   console.log(`MODEL CALLS: ${modelCalls}`);
   console.log(`TOOL BODIES: ${toolBodies}`);
-  console.log(`MARKERS: ${markers.join(",") || "none"}`);
+  console.log(`MARKERS: ${refused ? "unavailable (invoke refused)" : markers.join(",") || "none"}`);
   console.log(`FORKS: ${forks}`);
 }
 
@@ -530,7 +535,7 @@ async function main(): Promise<void> {
       // A `trust_completion = false` tool ran and salvor will not take this
       // process's word for what it did. The run holds the intent; a person
       // confirms the refund and records it.
-      printCounts(modelCalls());
+      printCounts(modelCalls(), true);
       console.log(
         `NEEDS RESOLUTION: ${JSON.stringify({
           run: refusal.run,
@@ -544,7 +549,7 @@ async function main(): Promise<void> {
       process.exit(4);
     }
 
-    printCounts(modelCalls());
+    printCounts(modelCalls(), true);
     console.log(`REFUSED ${refusal.code}: ${oneLine(refusal.message)}`);
     if (refusal.lapsesInSeconds !== undefined) {
       console.log(`LAPSES IN: ${refusal.lapsesInSeconds}`);

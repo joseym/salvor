@@ -513,11 +513,14 @@ def recorded_tool_failure(
     task a new thread id.
     """
     return SalvorMiddlewareError(
-        "run {run} (thread `{thread}`) already recorded the call to `{tool}` "
-        "at seq {seq} as a failure: {message}. A recorded failure settles "
-        "this call in this run, on every replay and on every fork of this "
-        "thread, because a fork opens the same write under the same key; "
-        "give the task a new thread id.".format(
+        "run {run} (thread `{thread}`) meets a recorded failure for this "
+        "exact call to `{tool}` at seq {seq} (this invoke's position for "
+        "the call; `salvor history` shows where the failure was first "
+        "recorded): {message}. A recorded failure settles this call in "
+        "this run, on every replay and every fork of this thread, because "
+        "a fork opens the same write under the same key. Each further "
+        "invoke forks again and performs its live reads and model calls "
+        "before meeting this refusal. Give the task a new thread id.".format(
             run=run_id, thread=thread_id, tool=tool, seq=seq, message=message
         ),
         code="tool_failed",

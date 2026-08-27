@@ -17,6 +17,7 @@ effect = "read"
 # there is an output schema for that report to be checked against.
 trust_completion = true
 
+# Checked against a subset of JSON Schema; crates/salvor-server/API.md lists exactly which keywords the server honours.
 [input_schema]
 type = "object"
 required = ["order_id"]

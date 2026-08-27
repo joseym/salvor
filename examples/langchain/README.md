@@ -79,7 +79,8 @@ The three files in [`tools/`](tools/) are the operator's, loaded when the server
 starts:
 
 ```sh
-salvor serve --client-tool examples/langchain/tools/lookup-order.toml \
+salvor serve --bind 127.0.0.1:18401 \
+             --client-tool examples/langchain/tools/lookup-order.toml \
              --client-tool examples/langchain/tools/refund-order.toml \
              --client-tool examples/langchain/tools/refund-large.toml
 ```
@@ -128,7 +129,11 @@ and the choice is the operator's in the same file as everything else: an app
 cannot widen its own key.
 
 Here is that file whole, with its long comments stripped down to the fields
-themselves:
+themselves. Both schemas are checked against a subset of JSON Schema, not the
+whole of it: `crates/salvor-server/API.md` lists exactly which keywords the
+server honours, and everything else, `pattern` and `format` included, is
+ignored without refusal and still published to the model through `GET
+/v1/client-tools`.
 
 ```toml
 name = "refund_order"
@@ -735,7 +740,9 @@ again. A recorded failure settles the call the same way on every replay, exactly
 as a recorded success does, so a permanently failing input fails the same way
 forever. It also survives a fork of the thread: a reworded ask that forks still
 opens the same write under the same key, and meets the same recorded failure.
-Only a new thread id escapes it. A `read` or `idempotent` body that raises is
+Each further invoke of that thread forks again the same way, performing its
+live reads and its model calls before it meets that same refusal, so the log
+grows and nothing progresses. Only a new thread id escapes it. A `read` or `idempotent` body that raises is
 the opposite case: nothing is posted at all, its intent stays
 open exactly as it would if the process had simply died there, and the next
 invoke performs the call again, which is why a transient connection error on

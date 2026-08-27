@@ -417,11 +417,14 @@ export class RunTape {
           const failure = recordedFailure(opened.output);
           if (failure) {
             throw new SalvorMiddlewareError(
-              `run ${this.runId} (thread \`${this.threadId}\`) already recorded a failure for ` +
-                `this exact call to \`${tool}\` at seq ${seq}: ${failure.message}. A recorded ` +
-                "failure settles this call in this run, on every replay and on every fork of " +
-                "this thread, because a fork opens the same write under the same key; give " +
-                "the task a new thread id.",
+              `run ${this.runId} (thread \`${this.threadId}\`) meets a recorded failure for ` +
+                `this exact call to \`${tool}\` at seq ${seq} (this invoke's position for the ` +
+                `call; \`salvor history\` shows where the failure was first recorded): ` +
+                `${failure.message}. A recorded failure settles this call in this run, on ` +
+                "every replay and every fork of this thread, because a fork opens the same " +
+                "write under the same key. Each further invoke forks again and performs its " +
+                "live reads and model calls before meeting this refusal. Give the task a new " +
+                "thread id.",
               { code: "tool_failed", seq },
             );
           }

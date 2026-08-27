@@ -29,6 +29,7 @@ trust_completion = false
 # call. Each name must be required on both schemas below.
 require_equal = ["order_id", "amount_cents"]
 
+# Checked against a subset of JSON Schema; crates/salvor-server/API.md lists exactly which keywords the server honours.
 [input_schema]
 type = "object"
 required = ["order_id", "amount_cents"]

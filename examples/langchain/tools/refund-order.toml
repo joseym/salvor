@@ -51,6 +51,7 @@ require_equal = ["order_id", "amount_cents"]
 # key that is sometimes something else.
 idempotency_key = ["order_id", "amount_cents"]
 
+# Checked against a subset of JSON Schema; crates/salvor-server/API.md lists exactly which keywords the server honours.
 [input_schema]
 type = "object"
 required = ["order_id", "amount_cents"]

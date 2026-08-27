@@ -667,6 +667,11 @@ required = ["order_id", "status", "total_cents"]
 salvor serve --client-tool lookup-order.toml
 ```
 
+Both schemas are checked against a subset of JSON Schema, not the whole of it:
+`crates/salvor-server/API.md` lists exactly which keywords the server honours,
+and everything else, `pattern` and `format` included, is ignored without
+refusal and still published to the model through `GET /v1/client-tools`.
+
 `effect` is one of three classes. `read` has no side effect, so a dangling
 intent is simply performed again on the next invoke. `write` changes the
 world in a way that is not safe to repeat blindly, so a dangling intent waits
