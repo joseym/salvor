@@ -75,6 +75,13 @@ pub enum Command {
     /// Re-derive a run's state from its log without executing anything. The
     /// only mode; nothing is ever executed.
     Replay(ReplayArgs),
+    /// Take an anchor over this store: one line per run naming how many events
+    /// it holds and the hash that commits to them. Keep the file somewhere the
+    /// store cannot reach.
+    Anchor(AnchorArgs),
+    /// Check this store against an anchor taken earlier: every anchored run
+    /// must still hold, unchanged, the events it was anchored at.
+    Verify(VerifyArgs),
     /// Run the control-plane HTTP + server-sent-events server over the store.
     Serve(ServeArgs),
     /// Build the whole product from a salvor checkout: the web dashboard, then
@@ -449,6 +456,32 @@ pub struct ReplayArgs {
     /// break.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+/// Arguments to `anchor`.
+#[derive(Debug, Args)]
+pub struct AnchorArgs {
+    /// Write the anchor to this file instead of standard output.
+    ///
+    /// An existing file is overwritten, so a scheduled anchor can keep one
+    /// name. Write it somewhere the store cannot reach: an anchor kept beside
+    /// the database it describes is rewritten by whoever rewrites the
+    /// database, and answers nothing.
+    #[arg(long, value_name = "FILE")]
+    pub out: Option<PathBuf>,
+}
+
+/// Arguments to `verify`.
+#[derive(Debug, Args)]
+pub struct VerifyArgs {
+    /// The anchor file to check this store against, as `salvor anchor` wrote
+    /// it.
+    #[arg(long, value_name = "FILE")]
+    pub against: PathBuf,
+    /// Print the result as JSON instead of the human report. The exit code is
+    /// the same either way.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// Arguments to `build`.

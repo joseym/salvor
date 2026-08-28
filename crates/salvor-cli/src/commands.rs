@@ -58,11 +58,12 @@ use tokio::net::TcpListener;
 use uuid::Uuid;
 
 use crate::agent_config::{self, AgentConfig, AgentConfigExt};
+use crate::anchor;
 use crate::checkout;
 use crate::cli::{
-    AbandonArgs, AgentHashArgs, AgentValidateArgs, BuildArgs, CompletionsArgs, ForkArgs,
-    GraphRunArgs, GraphValidateArgs, HistoryArgs, ListArgs, ReplayArgs, ResolveArgs, ResumeArgs,
-    RunArgs, ServeArgs, WakeArgs,
+    AbandonArgs, AgentHashArgs, AgentValidateArgs, AnchorArgs, BuildArgs, CompletionsArgs,
+    ForkArgs, GraphRunArgs, GraphValidateArgs, HistoryArgs, ListArgs, ReplayArgs, ResolveArgs,
+    ResumeArgs, RunArgs, ServeArgs, VerifyArgs, WakeArgs,
 };
 use crate::dev_server::DevServer;
 use crate::render;
@@ -1227,6 +1228,159 @@ pub async fn abandon(store_path: &Path, args: AbandonArgs) -> Result<u8> {
             );
             Ok(1)
         }
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// `salvor anchor`: write down every run's chain head, as of now.
+///
+/// The anchor is the one thing the store cannot rewrite along with itself. A
+/// writer who can open the database can rewrite a run from its first event and
+/// recompute every hash, head included, and nothing inside the file would
+/// disagree; a copy of those heads kept elsewhere is what disagrees. See
+/// [`crate::anchor`] for what that closes and what it does not.
+///
+/// The store is opened as the concrete SQLite backend rather than through the
+/// `EventStore` trait, because a chain head is bookkeeping that backend keeps
+/// beside the rows and is deliberately not part of the trait's promise.
+///
+/// Nothing is verified here. Taking an anchor records what the store says its
+/// heads are; whether the store still agrees with itself is what
+/// `salvor verify` and every ordinary read answer.
+pub fn anchor(store_path: &Path, args: AnchorArgs) -> Result<u8> {
+    let store = SqliteStore::open(store_path)
+        .with_context(|| format!("opening store at {}", store_path.display()))?;
+    let heads = store.chain_heads()?;
+    let document = anchor::Anchor::take(
+        &store_path.display().to_string(),
+        OffsetDateTime::now_utc(),
+        heads,
+    );
+
+    let mut json = serde_json::to_string_pretty(&document).context("serializing the anchor")?;
+    json.push('\n');
+    match &args.out {
+        Some(path) => std::fs::write(path, &json)
+            .with_context(|| format!("writing the anchor to {}", path.display()))?,
+        None => print!("{json}"),
+    }
+    // On stderr: with no --out the anchor itself is on stdout, and a caller
+    // redirecting that into a file must get the file and nothing else.
+    eprintln!(
+        "{}",
+        render::anchored_line(document.runs.len(), args.out.as_deref())
+    );
+    Ok(0)
+}
+
+/// `salvor verify --against <file>`: check this store against an anchor taken
+/// earlier.
+///
+/// Every run in the anchor is read back through `read_log`, which recomputes
+/// its whole chain, and then asked the one question the anchor can answer: does
+/// the chain still carry the anchored hash at the anchored length. A run that
+/// has grown since is intact, because the anchor commits to the prefix it saw
+/// and says nothing about what came after.
+///
+/// A log the store itself refuses is a finding here, not a crash: `verify` is
+/// the command an operator reaches for when they already suspect something, so
+/// it reports every run and then exits non-zero, rather than stopping at the
+/// first bad one.
+///
+/// Exit `0` when every run passed, `1` when any is missing, shortened,
+/// rewritten, or broken. A run the anchor never saw is reported and changes
+/// nothing.
+pub async fn verify(store_path: &Path, args: VerifyArgs) -> Result<u8> {
+    let text = std::fs::read_to_string(&args.against)
+        .with_context(|| format!("reading the anchor file {}", args.against.display()))?;
+    let document: anchor::Anchor = serde_json::from_str(&text)
+        .with_context(|| format!("parsing the anchor file {}", args.against.display()))?;
+    // A document under another spec may name its fields the same way and mean
+    // something else, so it is refused before a single run is read rather than
+    // compared on a guess.
+    if let Err(refusal) = document.check_specs() {
+        bail!("{}: {refusal}", args.against.display());
+    }
+
+    let store = SqliteStore::open(store_path)
+        .with_context(|| format!("opening store at {}", store_path.display()))?;
+
+    let mut findings: Vec<anchor::RunFinding> = Vec::new();
+    let mut anchored: HashSet<String> = HashSet::new();
+    for run in &document.runs {
+        let run_id = parse_run_id(&run.run)
+            .with_context(|| format!("in the anchor file {}", args.against.display()))?;
+        anchored.insert(run.run.clone());
+        let observed = observe(&store, run_id, run.len).await?;
+        findings.push(anchor::RunFinding {
+            run: run.run.clone(),
+            finding: anchor::finding_for(run, &observed),
+        });
+    }
+
+    for (run_id, head) in store.chain_heads()? {
+        let uuid = run_id.as_uuid().to_string();
+        if anchored.contains(&uuid) {
+            continue;
+        }
+        // A run this anchor never saw is still read, because reading is what
+        // recomputes a chain: there is nothing to compare it against, and a log
+        // this store refuses is still worth saying out loud.
+        let finding = match observe(&store, run_id, head.len).await? {
+            anchor::Observed::Broken { seq, detail } => anchor::Finding::Broken { seq, detail },
+            anchor::Observed::Present { len, .. } => anchor::Finding::New { len },
+            // A recorded head with no rows under it is refused by `read_log`,
+            // so this arm is unreachable in practice; skipping is the honest
+            // answer if it ever is reached, since there is no run to report.
+            anchor::Observed::Missing => continue,
+        };
+        findings.push(anchor::RunFinding { run: uuid, finding });
+    }
+
+    let result = anchor::Verification::new(
+        &document,
+        store_path,
+        &args.against,
+        OffsetDateTime::now_utc(),
+        findings,
+    );
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&result).context("serializing the verification")?
+        );
+    } else {
+        print!("{}", render::verify_report(&result));
+    }
+    Ok(result.exit_code())
+}
+
+/// Reads one run back for `verify`: the log (which recomputes its chain) and,
+/// when it reads, the hash the chain carried at the anchored length.
+///
+/// A [`StoreError::TamperEvident`] is turned into an observation rather than
+/// propagated, because a refused log is exactly what this command exists to
+/// report.
+async fn observe(
+    store: &SqliteStore,
+    run_id: RunId,
+    anchored_len: u64,
+) -> Result<anchor::Observed> {
+    match store.read_log(run_id).await {
+        Ok(log) if log.is_empty() => Ok(anchor::Observed::Missing),
+        Ok(log) => Ok(anchor::Observed::Present {
+            len: log.len() as u64,
+            hash_at_anchored_len: store.chain_hash_at(run_id, anchored_len)?,
+        }),
+        Err(StoreError::TamperEvident {
+            seq,
+            expected,
+            found,
+            ..
+        }) => Ok(anchor::Observed::Broken {
+            seq: seq.get(),
+            detail: format!("expected {expected}, found {found}"),
+        }),
         Err(error) => Err(error.into()),
     }
 }

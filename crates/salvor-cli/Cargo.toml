@@ -195,6 +195,12 @@ path = "../../examples/graph-clients/rust/main.rs"
 
 [dev-dependencies]
 assert_cmd.workspace = true
+# The forgery behind the `salvor anchor` / `salvor verify` tests: a second
+# connection straight to the store file, rewriting rows and re-chaining them
+# the way a real attacker would, since the store itself offers no method that
+# modifies a recorded event. Test-only, and free: salvor-store already compiles
+# rusqlite into the tree.
+rusqlite.workspace = true
 predicates.workspace = true
 tempfile.workspace = true
 wiremock.workspace = true

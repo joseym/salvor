@@ -7,14 +7,17 @@
 //! salvor's output with the same code this binary does.
 //!
 //! What stays here is the `salvor serve --kill` table, because its input
-//! describes live processes on this machine, and the `agent validate` summary,
+//! describes live processes on this machine, the `agent validate` summary,
 //! because it formats a built [`salvor_runtime::Agent`] and that type is kept
 //! out of `salvor-cli-core` so the pure renderer stays buildable for
-//! `wasm32-unknown-unknown`.
+//! `wasm32-unknown-unknown`, and the `anchor`/`verify` reports, because they
+//! format [`crate::anchor`]'s documents and those describe a store on this
+//! machine.
 
 pub use salvor_cli_core::render::*;
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use salvor_runtime::Agent;
 
@@ -156,6 +159,114 @@ pub fn server_table(servers: &[RunningServer]) -> String {
             server.bind,
             server.store,
         ));
+    }
+    out
+}
+
+/// The line `salvor anchor` prints on stderr once the anchor is written: how
+/// many runs it covers and where it went.
+///
+/// On stderr, not stdout, because with no `--out` the anchor itself is on
+/// stdout and a caller redirecting it into a file must get the file and
+/// nothing else.
+#[must_use]
+pub fn anchored_line(runs: usize, out: Option<&Path>) -> String {
+    let where_to = match out {
+        Some(path) => format!("written to {}", path.display()),
+        None => "printed on stdout".to_owned(),
+    };
+    if runs == 0 {
+        return format!(
+            "anchored 0 runs ({where_to}). This store holds no runs, so the anchor commits to \
+             nothing; take one over a store that holds runs."
+        );
+    }
+    format!(
+        "anchored {runs} run(s) ({where_to}). Keep it somewhere this store cannot reach: an \
+         anchor kept beside the database it describes is rewritten by whoever rewrites the \
+         database."
+    )
+}
+
+/// The report `salvor verify` prints: one line per run, then the summary, then
+/// what to do about it when something does not match.
+///
+/// Every run is named, including the ones that are fine, because the question
+/// this command answers is "does this store still hold what it held", and an
+/// answer that lists only trouble cannot tell "nothing is wrong" from "nothing
+/// was checked".
+#[must_use]
+pub fn verify_report(result: &crate::anchor::Verification) -> String {
+    use crate::anchor::Finding;
+
+    let mut out = String::new();
+    for entry in &result.runs {
+        let run = &entry.run;
+        match &entry.finding {
+            Finding::Intact {
+                anchored_len,
+                events_since,
+                ..
+            } => {
+                out.push_str(&format!("run {run}: intact at {anchored_len} event(s)"));
+                if *events_since > 0 {
+                    out.push_str(&format!(", {events_since} recorded since the anchor"));
+                }
+                out.push('\n');
+            }
+            Finding::New { len } => {
+                out.push_str(&format!(
+                    "run {run}: new since the anchor, {len} event(s). Not covered by this \
+                     anchor; the next one covers it.\n"
+                ));
+            }
+            Finding::Missing { anchored_len } => {
+                out.push_str(&format!(
+                    "run {run}: missing. The anchor recorded {anchored_len} event(s); this store \
+                     holds none.\n"
+                ));
+            }
+            Finding::Shortened { anchored_len, len } => {
+                out.push_str(&format!(
+                    "run {run}: shortened. The anchor recorded {anchored_len} event(s); this \
+                     store holds {len}.\n"
+                ));
+            }
+            Finding::Rewritten {
+                anchored_len,
+                anchored_hash,
+                found_hash,
+            } => {
+                out.push_str(&format!(
+                    "run {run}: rewritten at event {anchored_len}. The events this anchor \
+                     covered are not the events this store now holds.\n"
+                ));
+                out.push_str(&format!("  the anchor recorded {anchored_hash}\n"));
+                match found_hash {
+                    Some(found) => out.push_str(&format!("  this store holds  {found}\n")),
+                    None => out.push_str("  this store holds no event at that position\n"),
+                }
+            }
+            Finding::Broken { seq, detail } => {
+                out.push_str(&format!(
+                    "run {run}: broken. This store refuses its own log at seq {seq}: {detail}.\n"
+                ));
+            }
+        }
+    }
+
+    out.push_str(&format!(
+        "{} run(s) anchored, {} intact, {} new since the anchor\n",
+        result.anchored, result.intact, result.new
+    ));
+
+    if !result.ok {
+        out.push_str(
+            "\nThis store no longer holds what the anchor says it held. Do not re-anchor it: a \
+             fresh anchor\nover a rewritten store records the rewrite. Go back to a backup that \
+             reads clean and verifies\nagainst this anchor. See docs/OPERATIONS.md, Anchoring \
+             the chain.\n",
+        );
     }
     out
 }
