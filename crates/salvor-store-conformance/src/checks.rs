@@ -121,6 +121,7 @@ fn all_event_kinds() -> Vec<Event> {
             seq: SequenceNumber::new(2),
             output: serde_json::json!({"id": "TICKET-1"}),
             deduplicated_from: None,
+            settled_by: None,
         },
         Event::NowObserved {
             now: OffsetDateTime::from_unix_timestamp(1_700_000_000).expect("timestamp in range"),

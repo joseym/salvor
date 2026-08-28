@@ -26,7 +26,7 @@ use common::{
     ScriptedModel, TestTool, ToolBehavior, agent_builder, fixed_clock, fixed_random, fixed_run_id,
     text_response, tool_use_response,
 };
-use salvor_core::{Effect, Event, EventEnvelope, RunId, SequenceNumber};
+use salvor_core::{Effect, Event, EventEnvelope, RunId, SequenceNumber, SettledBy};
 use salvor_runtime::{Agent, RunOutcome, Runtime, RuntimeError};
 use salvor_store::{EventStore, RunSummary, SqliteStore, StoreError};
 use serde_json::json;
@@ -182,9 +182,17 @@ async fn resolve_records_one_completion_then_recovers() {
     let log = store.read_log(run_id).await.expect("log reads");
     assert_eq!(log.len(), 6, "resolve appends exactly one event");
     match &log[5].event {
-        Event::ToolCallCompleted { seq, output, .. } => {
+        Event::ToolCallCompleted {
+            seq,
+            output,
+            settled_by,
+            ..
+        } => {
             assert_eq!(*seq, SequenceNumber::new(4), "correlates to the intent seq");
             assert_eq!(*output, json!({"echo": {"doc": "otters"}}));
+            // A human's report of an effect this process never witnessed, and
+            // the completion says so rather than passing for an ordinary one.
+            assert_eq!(*settled_by, Some(SettledBy::Operator));
         }
         other => panic!("expected a tool completion, got {other:?}"),
     }

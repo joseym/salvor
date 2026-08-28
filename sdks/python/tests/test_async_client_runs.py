@@ -446,6 +446,47 @@ class AsyncDriverRealServer(unittest.TestCase):
             settled = await run.client_tool_intent(1, "refund_card", refund)
             self.assertTrue(settled.settled)
             self.assertEqual(settled.idempotency_key, intent.idempotency_key)
+            self.assertEqual(
+                settled.output,
+                {"provider_refund_id": "re_1", "status": "succeeded", "amount_cents": 5000},
+                "a settled answer carries the recorded completion's output",
+            )
+
+        self.drive(scenario)
+
+    def test_client_tool_failure_records_the_sentinel_and_settles_the_call(
+        self,
+    ) -> None:
+        async def scenario() -> None:
+            run = await self.open()
+            await run.append([self.started(run)])
+            refund = {"order_id": "ORD-9002", "amount_cents": 1200, "currency": "USD"}
+
+            intent = await run.client_tool_intent(1, "refund_card", refund)
+            self.assertFalse(intent.settled)
+
+            await run.client_tool_failure(1, "the provider timed out")
+            self.assertEqual(
+                [e.kind for e in await run.log()],
+                ["RunStarted", "ToolCallRequested", "ToolCallCompleted"],
+            )
+
+            # The failure settles the call exactly as a reported output would:
+            # a re-post of the same intent comes back settled, carrying the
+            # sentinel a native tool's exhausted retries would have written.
+            settled = await run.client_tool_intent(1, "refund_card", refund)
+            self.assertTrue(settled.settled)
+            self.assertEqual(
+                settled.output,
+                {
+                    "__salvor_error": {
+                        "is_error": True,
+                        "kind": "handler",
+                        "message": "the provider timed out",
+                        "attempts": 1,
+                    }
+                },
+            )
 
         self.drive(scenario)
 
@@ -644,6 +685,45 @@ class AsyncDriverRealServer(unittest.TestCase):
                 )
                 state = await client.get_run(run.run_id)
                 self.assertEqual(state.status.state, "completed")
+
+        self.drive(scenario)
+
+    def test_abandon_settles_a_run_parked_at_a_dangling_write(self) -> None:
+        """``AsyncClient.abandon`` needs no drive token and works on a run
+        parked at a dangling write, which is the case it exists to serve: a
+        client-performed write's intent recorded with no completion after it.
+
+        ``refund_card`` is declared ``effect = "write"`` (see
+        ``examples/client-tools/refund-card.toml``), so posting its intent and
+        never posting a completion leaves the run's log ending at a write
+        intent with no completion, which is exactly what makes the derived
+        status ``needs_reconciliation`` -- and what abandon is the operator's
+        way past.
+        """
+
+        async def scenario() -> None:
+            async with AsyncClient(self.base, timeout=10.0) as client:
+                run = await client.open_client_run()
+                await run.append([self.started(run)])
+                refund = {
+                    "order_id": "ORD-8891",
+                    "amount_cents": 2500,
+                    "currency": "USD",
+                }
+                await run.client_tool_intent(1, "refund_card", refund)
+                # Left dangling on purpose: no completion is ever posted.
+
+                result = await client.abandon(run.run_id, "husk is dead forever")
+                self.assertEqual(result.run, run.run_id)
+                self.assertEqual(result.status.state, "abandoned")
+                self.assertEqual(
+                    result.status.unresolved_write,
+                    {"seq": 1, "tool": "refund_card"},
+                    "the abandonment names the write it never claims settled",
+                )
+
+                state = await client.get_run(run.run_id)
+                self.assertEqual(state.status.state, "abandoned")
 
         self.drive(scenario)
 

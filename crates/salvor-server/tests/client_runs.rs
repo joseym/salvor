@@ -1594,6 +1594,7 @@ async fn client_server_over(store: std::sync::Arc<dyn salvor_store::EventStore>)
         })),
         trust_completion: true,
         require_equal: Vec::new(),
+        idempotency_key: Vec::new(),
     });
     let state = app_state(store, factory).with_client_tools(std::sync::Arc::new(client_tools));
     TestServer::spawn(state).await

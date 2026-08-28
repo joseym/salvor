@@ -21,6 +21,15 @@ effect = "write"
 # externally checkable refund and not on one that fires a thousand times a day.
 trust_completion = false
 
+# The person who resolves this call is held to the declaration too. Salvor
+# compares each name here to what the intent recorded and refuses a resolution
+# that alters one, so a typo in the amount is refused rather than written into
+# the log over the run's head. A resolver's authority is to say what the
+# provider did with the call that was authorized, not to authorize a different
+# call. Each name must be required on both schemas below.
+require_equal = ["order_id", "amount_cents"]
+
+# Checked against a subset of JSON Schema; crates/salvor-server/API.md lists exactly which keywords the server honours.
 [input_schema]
 type = "object"
 required = ["order_id", "amount_cents"]
@@ -36,8 +45,11 @@ type = "integer"
 minimum = 100000
 description = "The amount to refund, in cents. Refunds below 100000 go to refund_order."
 
-# An output schema on a tool nobody may self-complete is documentation of what a
-# resolve is expected to carry, not a check the middleware ever gets to.
+# An output schema on a tool nobody may self-complete is not documentation. The
+# middleware never reaches it, because no report from the desk is accepted, but
+# the resolve endpoint does: a hand-recorded output is checked against this
+# schema and against `require_equal` above before it is written. It is the only
+# description of a finished `refund_large` anything on the server side has.
 [output_schema]
 type = "object"
 required = ["order_id", "amount_cents", "refund_id", "status"]

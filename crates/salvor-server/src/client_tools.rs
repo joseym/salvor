@@ -34,6 +34,7 @@
 //! name = "charge_card"
 //! effect = "write"
 //! trust_completion = false
+//! idempotency_key = ["order_id", "amount_cents"]
 //!
 //! [input_schema]
 //! type = "object"
@@ -59,10 +60,12 @@ use std::collections::HashMap;
 use axum::Json;
 use axum::extract::State;
 use axum::response::IntoResponse;
-use salvor_core::Effect;
+use salvor_core::{Effect, Event, EventEnvelope, Performer};
+use salvor_runtime::validate_against_schema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::error::ApiError;
 use crate::state::AppState;
 
 /// One operator-written declaration of a tool the CLIENT performs.
@@ -117,6 +120,25 @@ pub struct ClientToolDecl {
     /// completion. The output schema is a shape check and cannot know what was
     /// authorized; this is the field-level equality the shape check cannot do.
     pub require_equal: Vec<String>,
+    /// Top-level input field names that, together, say what one call for this
+    /// tool IS. Empty by default, and empty means the key stays positional.
+    ///
+    /// A client-performed call always gets a server-derived idempotency key
+    /// (see `client_tool_idempotency_key`), because the client must not be the
+    /// one choosing it. What the operator chooses here is what the derivation
+    /// is over. With no fields named, the key is derived from the call's
+    /// POSITION in the run, which is an attempt identifier: the same position
+    /// retried presents the same key, and that is all it promises. Naming
+    /// fields makes it a content identity instead: `["order_id",
+    /// "amount_cents"]` says that a refund of that amount against that order is
+    /// one refund, wherever in the run it is asked for, so a loop that asks for
+    /// it twice gets the first call's answer back rather than a second refund.
+    ///
+    /// Each name is a top-level field of the intent's input. A field the input
+    /// does not carry is refused at the intent boundary, naming it, rather than
+    /// silently deriving a key over a missing value: two different calls would
+    /// otherwise collapse onto one identity.
+    pub idempotency_key: Vec<String>,
 }
 
 /// The on-disk shape of a [`ClientToolDecl`], before its cross-field rule is
@@ -138,6 +160,10 @@ struct RawClientToolDecl {
     trust_completion: bool,
     #[serde(default)]
     require_equal: Vec<String>,
+    /// Silence keeps the positional derivation, which is what every declaration
+    /// written before this field meant.
+    #[serde(default)]
+    idempotency_key: Vec<String>,
 }
 
 impl TryFrom<RawClientToolDecl> for ClientToolDecl {
@@ -149,6 +175,15 @@ impl TryFrom<RawClientToolDecl> for ClientToolDecl {
     /// each side. A violation is refused here, naming the field and the side it
     /// is missing from, exactly as an unknown key is refused: early and precise.
     fn try_from(raw: RawClientToolDecl) -> Result<Self, Self::Error> {
+        // A key field the input is not obliged to carry would be a key that
+        // sometimes cannot be derived, and the failure would land on a client
+        // mid-run rather than on the operator at load. Same rule, same moment,
+        // same precision as the require_equal check below.
+        for field in &raw.idempotency_key {
+            if !schema_requires(&raw.input_schema, field) {
+                return Err(missing_idempotency_key_field(&raw.name, field));
+            }
+        }
         for field in &raw.require_equal {
             if !schema_requires(&raw.input_schema, field) {
                 return Err(missing_require_equal(&raw.name, field, "input_schema"));
@@ -168,6 +203,7 @@ impl TryFrom<RawClientToolDecl> for ClientToolDecl {
             output_schema: raw.output_schema,
             trust_completion: raw.trust_completion,
             require_equal: raw.require_equal,
+            idempotency_key: raw.idempotency_key,
         })
     }
 }
@@ -188,6 +224,16 @@ fn missing_require_equal(tool: &str, field: &str, side: &str) -> String {
         "tool `{tool}` names `{field}` in require_equal, but `{field}` is not in {side}.required; a \
          require_equal field must be required on both the input and the output side, so the two \
          values always exist to compare"
+    )
+}
+
+/// The load-time refusal for an `idempotency_key` field that is not required by
+/// the input schema, naming the tool and the field.
+fn missing_idempotency_key_field(tool: &str, field: &str) -> String {
+    format!(
+        "tool `{tool}` names `{field}` in idempotency_key, but `{field}` is not in \
+         input_schema.required; a field the key is derived from must be required, so every call \
+         for this tool has one to derive from"
     )
 }
 
@@ -301,10 +347,111 @@ pub async fn list(State(state): State<AppState>) -> impl IntoResponse {
                     .expect("entry is a JSON object")
                     .insert("require_equal".to_owned(), json!(decl.require_equal));
             }
+            // Published for the same reason `input_schema` is: a client that
+            // wants to derive the key itself, to check this server's work, has
+            // to know what the derivation is over.
+            if !decl.idempotency_key.is_empty() {
+                entry
+                    .as_object_mut()
+                    .expect("entry is a JSON object")
+                    .insert("idempotency_key".to_owned(), json!(decl.idempotency_key));
+            }
             entry
         })
         .collect();
     Json(json!({ "client_tools": client_tools }))
+}
+
+/// Checks a hand-recorded resolution against the operator's declaration, when
+/// the call being resolved is one the CLIENT performed.
+///
+/// Both resolve endpoints (`POST /v1/runs/{id}/resolve` and its drive-token
+/// twin `POST /v1/client-runs/{id}/resolve`) go through here before a
+/// completion is written, and they share this one function so an operator meets
+/// the same rules on either path.
+///
+/// # Why resolve is checked at all
+///
+/// Resolve records an output nothing in this process witnessed, which is
+/// exactly the situation the declaration exists for. Every guard the completion
+/// boundary applies to a client's own report applies here for the same reason:
+/// the `output_schema` says what evidence a finished call has to carry, and a
+/// `require_equal` field says a report may not change what was authorized. A
+/// resolution that skipped both could settle a refund intent for 5000 with a
+/// completion saying 50000, and the log would carry it as fact.
+///
+/// What is NOT checked here is `trust_completion`. That flag answers "may the
+/// CLIENT close this call", and the whole point of a `false` is that a person
+/// closes it instead, which is what this path is. Refusing here would leave a
+/// tool nobody could ever settle.
+///
+/// A dangling intent that salvor performed itself is left alone: this server
+/// witnessed that call, holds no declaration for it, and its output is checked
+/// by nothing today. Returns `Ok(())` for that case, and for a log that does
+/// not end at a tool intent at all (the resolve itself then refuses on state).
+///
+/// # Errors
+///
+/// [`ApiError::BadRequest`] naming the tool when no declaration for it is
+/// loaded here, when the output fails the declared `output_schema`, or when a
+/// `require_equal` field's value differs from the one the intent recorded.
+pub(crate) fn check_client_resolution(
+    registry: &ClientToolRegistry,
+    log: &[EventEnvelope],
+    output: &Value,
+) -> Result<(), ApiError> {
+    let Some(EventEnvelope {
+        event:
+            Event::ToolCallRequested {
+                tool,
+                input,
+                performed_by: Some(Performer::Client),
+                ..
+            },
+        ..
+    }) = log.last()
+    else {
+        return Ok(());
+    };
+
+    // A declaration this server no longer holds is a stale registry, not a bad
+    // request from the caller, so the message says what the operator has to fix
+    // rather than what the caller should have sent. Recording the resolution
+    // unchecked is the one thing this must not do: the shape and the pinned
+    // fields would go unexamined precisely where nobody witnessed the call.
+    let decl = registry.get(tool).ok_or_else(|| {
+        ApiError::BadRequest(format!(
+            "no client-performed tool named `{tool}` is declared on this server, so the output \
+             offered for it cannot be checked; start the server with `--client-tool <FILE>` for \
+             `{tool}` and resolve again"
+        ))
+    })?;
+
+    // A declaration with no output_schema has nothing to check the shape
+    // against, and that is a legitimate declaration: it is exactly the tool the
+    // client may not self-complete, whose calls are meant to arrive here. The
+    // load-time rule guarantees no require_equal field can be named without an
+    // output schema, so nothing below is skipped along with it.
+    if let Some(output_schema) = &decl.output_schema {
+        validate_against_schema(output, output_schema).map_err(|error| {
+            ApiError::BadRequest(format!(
+                "the output offered for `{tool}` does not match its declared output_schema: {error}"
+            ))
+        })?;
+    }
+
+    for field in &decl.require_equal {
+        let authorized = input.get(field).unwrap_or(&Value::Null);
+        let offered = output.get(field).unwrap_or(&Value::Null);
+        if authorized != offered {
+            return Err(ApiError::BadRequest(format!(
+                "the output offered for `{tool}` reports `{field}` as {offered}, but the intent \
+                 recorded {authorized}; a resolution may not alter a require_equal field. Record \
+                 what was authorized, or abandon the run if the provider did something else"
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -336,6 +483,73 @@ mod tests {
         assert!(
             decl.require_equal.is_empty(),
             "no field is pinned unless one is named"
+        );
+    }
+
+    /// A declaration silent about `idempotency_key` keeps the positional
+    /// derivation, which is what every declaration written before the field
+    /// meant.
+    #[test]
+    fn an_unset_idempotency_key_is_empty() {
+        let decl: ClientToolDecl = toml::from_str(
+            r#"
+            name = "charge_card"
+            effect = "write"
+
+            [input_schema]
+            type = "object"
+            "#,
+        )
+        .expect("the declaration parses");
+        assert!(
+            decl.idempotency_key.is_empty(),
+            "silence keeps the key positional"
+        );
+    }
+
+    /// Named key fields load in the order the operator wrote them, which is the
+    /// order the derivation reads them in.
+    #[test]
+    fn declared_key_fields_load_in_order() {
+        let decl: ClientToolDecl = toml::from_str(
+            r#"
+            name = "refund_card"
+            effect = "write"
+            idempotency_key = ["order_id", "amount_cents"]
+
+            [input_schema]
+            type = "object"
+            required = ["order_id", "amount_cents"]
+            "#,
+        )
+        .expect("the declaration parses");
+        assert_eq!(
+            decl.idempotency_key,
+            vec!["order_id".to_owned(), "amount_cents".to_owned()]
+        );
+    }
+
+    /// A key field the input schema does not require is refused at load, naming
+    /// the field: a key that sometimes cannot be derived is the operator's
+    /// mistake, and it should surface here rather than on a client mid-run.
+    #[test]
+    fn an_idempotency_key_field_not_required_by_the_input_is_refused() {
+        let error = toml::from_str::<ClientToolDecl>(
+            r#"
+            name = "refund_card"
+            effect = "write"
+            idempotency_key = ["order_id"]
+
+            [input_schema]
+            type = "object"
+            required = ["amount_cents"]
+            "#,
+        )
+        .expect_err("the declaration is refused");
+        let message = error.to_string();
+        assert!(
+            message.contains("order_id") && message.contains("input_schema.required"),
+            "the error names the field and what it is missing from: {message}"
         );
     }
 

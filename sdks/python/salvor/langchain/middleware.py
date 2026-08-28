@@ -30,7 +30,11 @@ from ..errors import SalvorAPIError
 from ..models import Event
 from .async_run_tape import AsyncRunTape
 from .current_call import ToolCallContext, arun_with_tool_call, run_with_tool_call
-from .errors import SalvorMiddlewareError, ToolNeedsResolution
+from .errors import (
+    SalvorMiddlewareError,
+    ToolNeedsResolution,
+    thread_abandoned_error,
+)
 from .hash import hash_value, run_id_for_thread
 from .messages import (
     as_tool_content,
@@ -257,9 +261,12 @@ class SalvorMiddleware(AgentMiddleware):
         # graph raises through here. `after_agent` never runs after one of
         # those.
         with tape.step():
-            outcome = tape.model_call(
-                request_hash(request), canonical_request(request), perform
-            )
+            try:
+                outcome = tape.model_call(
+                    request_hash(request), canonical_request(request), perform
+                )
+            except SalvorAPIError as error:
+                raise _escaped_api_error(error, tape.thread_id, tape.run_id) from error
             if not outcome.replayed and "response" in live:
                 return _marked_live(live["response"], outcome, tape.run_id)
             # The recorded answer goes back through LangChain's own handler,
@@ -308,9 +315,9 @@ class SalvorMiddleware(AgentMiddleware):
                 )
             except SalvorAPIError as error:
                 undeclared = _undeclared_tool_error(error, name)
-                if undeclared is None:
-                    raise
-                raise undeclared from error
+                if undeclared is not None:
+                    raise undeclared from error
+                raise _escaped_api_error(error, tape.thread_id, tape.run_id) from error
 
             if not outcome.replayed and "message" in live:
                 return mark(live["message"], outcome.marker)
@@ -347,9 +354,12 @@ class SalvorMiddleware(AgentMiddleware):
             return _answer_of(response, tape.run_id)
 
         async with tape.step():
-            outcome = await tape.model_call(
-                request_hash(request), canonical_request(request), perform
-            )
+            try:
+                outcome = await tape.model_call(
+                    request_hash(request), canonical_request(request), perform
+                )
+            except SalvorAPIError as error:
+                raise _escaped_api_error(error, tape.thread_id, tape.run_id) from error
             if not outcome.replayed and "response" in live:
                 return _marked_live(live["response"], outcome, tape.run_id)
             return await handler(_replaying(request, outcome, tape.run_id))
@@ -380,9 +390,9 @@ class SalvorMiddleware(AgentMiddleware):
                 )
             except SalvorAPIError as error:
                 undeclared = _undeclared_tool_error(error, name)
-                if undeclared is None:
-                    raise
-                raise undeclared from error
+                if undeclared is not None:
+                    raise undeclared from error
+                raise _escaped_api_error(error, tape.thread_id, tape.run_id) from error
 
             if not outcome.replayed and "message" in live:
                 return mark(live["message"], outcome.marker)
@@ -420,8 +430,7 @@ class SalvorMiddleware(AgentMiddleware):
             try:
                 driver = self._open(run_id)
             except SalvorAPIError as error:
-                _refusal_of_an_open(identity["thread_id"], run_id, error)
-                raise
+                raise _refusal_of_an_open(identity["thread_id"], run_id, error) from error
             # From here the lease is held, and no tape owns it yet: a run this
             # invoke may not drive (a finished thread) or a first append that
             # is refused would otherwise leave the thread locked until the
@@ -508,8 +517,7 @@ class SalvorMiddleware(AgentMiddleware):
         try:
             driver = await self._open(run_id)
         except SalvorAPIError as error:
-            _refusal_of_an_open(thread_id, run_id, error)
-            raise
+            raise _refusal_of_an_open(thread_id, run_id, error) from error
         # The lease is held from here and no tape owns it yet; see
         # :meth:`_tape_for` for why it goes back by hand on these two paths.
         try:
@@ -610,25 +618,41 @@ def _started(thread_id: str) -> Dict[str, Any]:
     }
 
 
-def _refusal_of_an_open(thread_id: str, run_id: str, error: SalvorAPIError) -> None:
-    """Name the two refusals an open has that the thread explains.
+def _refusal_of_an_open(
+    thread_id: str, run_id: str, error: SalvorAPIError
+) -> SalvorMiddlewareError:
+    """Name the two refusals an open has that the thread explains, and wrap
+    every other one the same way any other escaping refusal is.
 
     `lease_held` (another driver's current lease refused this open outright)
     becomes the one-driver refusal, naming the thread, the run, and how long
     the hold has left. `run_exists` becomes the other-mode refusal, naming the
-    thread whose id collided. Every other refusal bubbles unchanged: this
-    middleware did not cause it and cannot fix it by putting a thread id in
-    front of it.
+    thread whose id collided. Every other refusal did not come from this
+    middleware and cannot be fixed here, but it must not escape a hook bare
+    either, so it is wrapped by :func:`_escaped_api_error`.
     """
     if held_by_another_driver(error):
-        raise one_driver_error(thread_id, run_id, error) from error
+        return one_driver_error(thread_id, run_id, error)
     if error.code == "run_exists":
-        raise server_driven_run(thread_id, run_id, error) from error
+        return server_driven_run(thread_id, run_id, error)
+    return _escaped_api_error(error, thread_id, run_id)
 
 
 def _refuse_a_finished_run(log: List[Event], thread_id: str, run_id: str) -> None:
-    """Refuse an invoke of a thread somebody has already finished, before
-    anything tries to append to a closed run."""
+    """Refuse an invoke of a thread somebody has already ended, before anything
+    tries to append to a closed run.
+
+    Two endings, two sentences. ``RunCompleted`` is ``finish_thread``'s: the
+    thread was closed on purpose with an answer. ``RunAbandoned`` is an
+    operator's: the run was retired by hand, usually on top of an open intent
+    that is never going to be settled, and salvor treats it as terminal (it
+    holds no lease and hands the log straight back), so this is the only place
+    an invoke of it can be stopped. Saying "settle the open intent" about a run
+    nobody is coming back to would send a person to a resolve that answers
+    ``wrong_state``.
+    """
+    if log and log[-1].kind == "RunAbandoned":
+        raise thread_abandoned_error(thread_id, run_id)
     if log and log[-1].kind == "RunCompleted":
         raise SalvorMiddlewareError(
             "thread `{thread}` (run {run}) is finished: `finish_thread` "
@@ -919,6 +943,31 @@ def _ai_message_of(response: Any, run: str) -> AIMessage:
         "answers with something else cannot be recorded by this "
         "middleware.".format(run=run),
         code="unreadable_record",
+    )
+
+
+def _escaped_api_error(
+    error: SalvorAPIError, thread_id: str, run_id: str
+) -> SalvorMiddlewareError:
+    """Wrap a control-plane refusal this middleware has no name of its own
+    for, so it never tears through a hook bare.
+
+    An output-schema violation (`bad_request`), a `require_equal` mismatch or
+    a declaration with no output schema to check against
+    (`client_completion_refused`), and anything else the server refuses with
+    all reach here the same way: something a driving call inside a hook
+    asked for, refused. Left bare, none of them would name the thread they
+    happened on, and `salvor_error(e)` would have nothing of this
+    middleware's to find. So the server's own `code` and sentence ride
+    along unchanged, `error` itself sits on `.cause`, and only the thread and
+    the run are added, naming exactly where the refusal happened.
+    """
+    return SalvorMiddlewareError(
+        "thread `{thread}` (run {run}): {message}".format(
+            thread=thread_id, run=run_id, message=error.message
+        ),
+        code=error.code,
+        cause=error,
     )
 
 

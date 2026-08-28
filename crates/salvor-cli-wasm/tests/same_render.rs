@@ -879,6 +879,7 @@ fn reference_logs() -> Vec<(&'static str, Vec<EventEnvelope>)> {
                 seq: SequenceNumber::new(4),
                 output: json!({"content": [{"text": "claim recorded: ss-waratah"}]}),
                 deduplicated_from: None,
+                settled_by: None,
             },
             Event::NowObserved { now: ts(1) },
             Event::ModelCallRequested {

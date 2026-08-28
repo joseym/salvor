@@ -373,7 +373,10 @@ export interface ForksIndex {
  * `trustCompletion` is `false` unless the operator opted in: silence gets the
  * safe direction. `requireEqual` lists the fields whose reported value the
  * server pins to the intent's recorded value, and is empty unless the
- * declaration names one.
+ * declaration names one. `idempotencyKey` lists the input fields a
+ * client-tool intent's derived key is taken from, and is present only when
+ * the declaration names them; absent, the key is positional (`(run, seq,
+ * tool)`, one identity per call site) rather than by value.
  */
 export interface ClientToolDecl {
   name: string;
@@ -382,6 +385,7 @@ export interface ClientToolDecl {
   outputSchema?: unknown;
   trustCompletion: boolean;
   requireEqual: string[];
+  idempotencyKey?: string[];
   raw: Record<string, unknown>;
 }
 
@@ -678,6 +682,9 @@ export function parseClientToolDecl(obj: Json): ClientToolDecl {
     outputSchema: obj.output_schema,
     trustCompletion: Boolean(obj.trust_completion ?? false),
     requireEqual: Array.isArray(obj.require_equal) ? (obj.require_equal as string[]) : [],
+    idempotencyKey: Array.isArray(obj.idempotency_key)
+      ? (obj.idempotency_key as string[])
+      : undefined,
     raw: obj,
   };
 }

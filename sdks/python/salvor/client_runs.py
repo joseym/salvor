@@ -471,6 +471,37 @@ class ClientRunDriver:
             rules.client_tool_completion(self.run_id, self.drive_token, seq, output)
         )
 
+    def client_tool_failure(
+        self, seq: int, message: str, kind: str = "handler"
+    ) -> None:
+        """Report that a client-performed tool call failed rather than returned.
+
+        ``seq`` must name the pending intent at the end of the log; ``message``
+        is recorded verbatim, in full. The server records the same
+        ``__salvor_error`` sentinel completion a native tool's exhausted
+        retries write, so this call is a completion, not a new state: it is
+        closed, the run carries on, and a later replay of this position reads
+        the failure back rather than performing the call again.
+
+        ``kind`` is one of ``"invalid_input"``, ``"handler"`` (the default,
+        what a tool body that ran and raised is) or
+        ``"output_serialization"``, the dispatch layer that failed.
+
+        Refused, recording nothing, as a ``SalvorAPIError`` with code
+        ``client_completion_refused`` when the declaration was written with
+        ``trust_completion = False``: a claim that a write did not land is
+        made by the party that benefits from it being believed, so an
+        untrusted call is left dangling for a person to settle with
+        :meth:`resolve`, exactly as an untrusted result is. The declared
+        ``output_schema`` and ``require_equal`` are not checked here -- a
+        failure carries no value for either to look at.
+        """
+        self._send(
+            rules.client_tool_failure(
+                self.run_id, self.drive_token, seq, message, kind
+            )
+        )
+
     # -- client-performed model calls -------------------------------------------
 
     def client_model_intent(

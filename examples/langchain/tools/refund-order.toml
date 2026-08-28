@@ -28,6 +28,30 @@ trust_completion = true
 # refuses the declaration when it loads it.
 require_equal = ["order_id", "amount_cents"]
 
+# What this call's identity is derived from. Left unset, salvor derives a key
+# from the call's POSITION in the run (run, seq, tool), which is an attempt
+# identifier and promises one thing: the same call retried after a crash
+# presents the same key, which is all the crash proof needs. Naming fields here
+# says something stronger: the key names what makes two calls the same refund,
+# and a field left out of it is a field two distinct calls may differ on and
+# still collapse into one, so check the fields against what varies between
+# calls you mean to be different. Order id alone is not enough: two refunds of
+# ORD-5150 for two different amounts in one turn would share a key, and the
+# second would take the first's result with nothing telling the app a call had
+# been copied except the log. Naming amount_cents too makes the key a hash
+# of (run, tool, order_id, amount_cents) with no seq in it, so two calls
+# collapse only when both the order and the amount agree; the same order
+# refunded for a different amount in the same run opens its own intent instead
+# of vanishing into the first one's result. Proof 8 still holds, because it
+# asks for the same order and the same amount twice, which is exactly the case
+# worth collapsing.
+#
+# Each name must be required by `input_schema`, or the server refuses the
+# declaration when it loads it: a key derived from a field a call may omit is a
+# key that is sometimes something else.
+idempotency_key = ["order_id", "amount_cents"]
+
+# Checked against a subset of JSON Schema; crates/salvor-server/API.md lists exactly which keywords the server honours.
 [input_schema]
 type = "object"
 required = ["order_id", "amount_cents"]

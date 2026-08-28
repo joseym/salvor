@@ -27,6 +27,7 @@ from ._core.wire import Call
 from .errors import SalvorAPIError
 from .graph import Graph
 from .models import (
+    AbandonResult,
     ClientToolDecl,
     EndFrame,
     Event,
@@ -165,6 +166,10 @@ class AsyncClient:
     async def resolve(self, run_id: str, output: Any) -> RunState:
         """Await :meth:`salvor.Client.resolve`."""
         return await self._send(api.resolve(run_id, output))
+
+    async def abandon(self, run_id: str, reason: Optional[str] = None) -> AbandonResult:
+        """Await :meth:`salvor.Client.abandon`."""
+        return await self._send(api.abandon(run_id, reason))
 
     # -- graphs ---------------------------------------------------------------
 

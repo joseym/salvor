@@ -29,6 +29,7 @@ __all__ = [
     "SalvorMiddlewareError",
     "ToolNeedsResolution",
     "salvor_error",
+    "thread_abandoned_error",
 ]
 
 
@@ -55,6 +56,12 @@ class SalvorMiddlewareError(SalvorError):
             ``thread_finished``
                 The thread's run is closed: ``finish_thread`` recorded its
                 ``RunCompleted``, and a completed run takes no more events.
+            ``thread_abandoned``
+                The thread's run was abandoned: somebody recorded a terminal
+                ``RunAbandoned`` on it (``POST /v1/runs/{id}/abandon``, or
+                ``salvor abandon``), and an abandoned run takes no more
+                events. The invoke stopped before anything ran. Give the next
+                task a new thread id.
             ``thread_id_missing``
                 The invoke passed no ``thread_id`` at all.
             ``thread_id_invalid``
@@ -67,7 +74,21 @@ class SalvorMiddlewareError(SalvorError):
                 :class:`ToolNeedsResolution`.
             ``open_intent``
                 The log holds a call recorded as requested and never completed.
-                Settle it and invoke again.
+                Settle it and invoke again. One way there: an untrusted tool
+                (``trust_completion = false``) raised on this very invoke, and
+                this middleware cannot report a failure any more than it could
+                report a success, so nothing was posted.
+            ``tool_failed``
+                A recorded completion at this position is the failure
+                sentinel: an earlier invoke's ``write`` tool body raised, this
+                middleware reported it, and salvor settled the call on it. The
+                sentence carries the recorded message. Only a write is
+                recorded this way (a raising ``read`` or ``idempotent`` body
+                is performed again on the next invoke instead), so a
+                ``tool_failed`` always names a write. This call fails the
+                same way on every further invoke and on every fork of this
+                thread, because a fork opens the same write under the same
+                key: give the task a new thread id.
             ``run_exists``
                 The thread maps to a run id salvor's other mode already
                 started. A server-driven run and a client-driven one cannot
@@ -87,6 +108,27 @@ class SalvorMiddlewareError(SalvorError):
                 is being driven (or something that is not a salvor client). The
                 one code with no twin in the TypeScript SDK, which has a single
                 client and so cannot be given the wrong one.
+            ``bad_request``
+                The control plane's own refusal, unwrapped rather than
+                translated: a client-reported tool output failed the
+                operator's declared ``output_schema``. :attr:`cause` is the
+                :class:`~salvor.errors.SalvorAPIError` this code came from,
+                and its message says which field and why.
+            ``client_completion_refused``
+                The control plane's own refusal: a reported ``require_equal``
+                field differed from the value the intent recorded, or the
+                tool's declaration has no ``output_schema`` to check a
+                completion against at all. (A tool declared
+                ``trust_completion = false`` never reaches the server this
+                way: this middleware stops for a person first, as
+                ``tool_needs_resolution``.)
+            *anything else*
+                Any other code a driving call inside a hook meets is not
+                translated either, and is not left to escape bare: the
+                server's own ``code`` and sentence ride along unchanged, with
+                the thread and the run named and :attr:`cause` set to the
+                :class:`~salvor.errors.SalvorAPIError` itself. Match it the
+                way you would match ``SalvorAPIError.code`` outside a hook.
         cause: The error underneath this one, when there was one. The same
             object as ``__cause__``; the second name is what the TypeScript
             middleware calls it, so a handler written against one SDK reads the
@@ -124,6 +166,30 @@ class SalvorMiddlewareError(SalvorError):
     @cause.setter
     def cause(self, error: Optional[BaseException]) -> None:
         self.__cause__ = error
+
+
+def thread_abandoned_error(thread_id: str, run_id: str) -> SalvorMiddlewareError:
+    """The refusal for a thread whose run somebody abandoned.
+
+    An operator retires a run by hand with ``POST /v1/runs/{id}/abandon`` (or
+    ``salvor abandon``), which records a terminal ``RunAbandoned``. Salvor
+    treats that as settled exactly as it treats a completed run: the lease is
+    nobody's any more and the log still reads back, so an open succeeds and
+    only the middleware is in a position to say the thread is over.
+
+    Built in one place because both callers say the same thing:
+    :class:`~salvor.langchain.SalvorMiddleware` opening the run for an invoke,
+    which refuses before a model call or a tool body runs, and
+    :func:`~salvor.langchain.finish_thread`, asked to close a run that is
+    already closed. Neither appends anything.
+    """
+    return SalvorMiddlewareError(
+        "thread `{thread}` (run {run}) was abandoned: a `RunAbandoned` is "
+        "recorded on its run, and an abandoned run takes nothing more, "
+        "neither an invoke nor a finish. Give the next task a new thread "
+        "id.".format(thread=thread_id, run=run_id),
+        code="thread_abandoned",
+    )
 
 
 class ToolNeedsResolution(SalvorMiddlewareError):

@@ -118,6 +118,7 @@ class ClientAgainstStub(unittest.TestCase):
                     "output_schema": {"type": "object", "required": ["charge_id"]},
                     "trust_completion": False,
                     "require_equal": ["amount_cents"],
+                    "idempotency_key": ["order_id", "amount_cents"],
                 },
                 {
                     "name": "lookup_invoice",
@@ -138,10 +139,14 @@ class ClientAgainstStub(unittest.TestCase):
         self.assertEqual(charge.input_schema, {"type": "object", "required": ["amount_cents"]})
         self.assertEqual(charge.output_schema, {"type": "object", "required": ["charge_id"]})
         self.assertEqual(charge.require_equal, ["amount_cents"])
+        self.assertEqual(charge.idempotency_key, ["order_id", "amount_cents"])
         lookup = next(d for d in decls if d.name == "lookup_invoice")
         self.assertIsNone(lookup.output_schema)
         self.assertTrue(lookup.trust_completion)
         self.assertEqual(lookup.require_equal, [], "no require_equal decodes to an empty list")
+        self.assertEqual(
+            lookup.idempotency_key, [], "no idempotency_key decodes to an empty list"
+        )
 
     def test_list_runs_decodes_labels_when_present_and_none_otherwise(self) -> None:
         runs_body = {

@@ -23,7 +23,7 @@ use std::path::Path;
 
 use common::salvor;
 use predicates::prelude::*;
-use salvor_core::{Effect, Event, EventEnvelope, Performer, RunId, SequenceNumber};
+use salvor_core::{Effect, Event, EventEnvelope, Performer, RunId, SequenceNumber, SettledBy};
 use salvor_store::{EventStore, SqliteStore};
 use serde_json::json;
 use tempfile::tempdir;
@@ -115,9 +115,22 @@ async fn resume_reports_then_resolve_records_the_completion() {
     let log = store.read_log(run_id).await.expect("log reads");
     assert_eq!(log.len(), 3, "resolve appends exactly one event");
     match &log[2].event {
-        Event::ToolCallCompleted { seq, output, .. } => {
+        Event::ToolCallCompleted {
+            seq,
+            output,
+            settled_by,
+            ..
+        } => {
             assert_eq!(*seq, SequenceNumber::new(1), "correlates to the intent");
             assert_eq!(*output, json!({"published": true}));
+            // The one thing a hand-recorded completion says that an ordinary
+            // one does not: a person put this output here, over the run's head,
+            // and nothing in this process witnessed the call it closes.
+            assert_eq!(
+                *settled_by,
+                Some(SettledBy::Operator),
+                "the CLI's resolve names its settler too"
+            );
         }
         other => panic!("expected a tool completion, got {other:?}"),
     }

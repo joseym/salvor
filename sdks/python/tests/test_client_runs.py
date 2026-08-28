@@ -773,11 +773,33 @@ class DriverAgainstStub(unittest.TestCase):
                      "idempotency_key": "sha256:derived",
                      "effect": "write",
                      "settled": True,
+                     "output": {"charge_id": "ch_1"},
                  },
              )}
         )
         result = run.client_tool_intent(5, "charge_card", {"amount_cents": 500})
         self.assertEqual(result.settled, True)
+        self.assertEqual(
+            result.output,
+            {"charge_id": "ch_1"},
+            "a settled answer carries the recorded completion's output",
+        )
+
+    def test_client_tool_intent_output_is_none_while_the_call_is_open(self) -> None:
+        run, _ = self.make_driver(
+            {"/v1/client-runs/11111111-1111-1111-1111-111111111111/client-tool-intent":
+             lambda h, body: h._send(
+                 200,
+                 {
+                     "seq": 5,
+                     "idempotency_key": "sha256:derived",
+                     "effect": "write",
+                     "settled": False,
+                 },
+             )}
+        )
+        result = run.client_tool_intent(5, "charge_card", {"amount_cents": 500})
+        self.assertIsNone(result.output, "nothing is recorded yet")
 
     def test_client_tool_intent_undeclared_tool_raises_typed_error(self) -> None:
         run, _ = self.make_driver(
@@ -811,6 +833,42 @@ class DriverAgainstStub(unittest.TestCase):
         )
         with self.assertRaises(SalvorAPIError) as caught:
             run.client_tool_completion(5, {"charge_id": "ch_1"})
+        self.assertEqual(caught.exception.code, "client_completion_refused")
+
+    def test_client_tool_failure_sends_seq_and_error_defaulting_kind_to_handler(
+        self,
+    ) -> None:
+        run, server = self.make_driver(
+            {"/v1/client-runs/11111111-1111-1111-1111-111111111111/client-tool-completion":
+             lambda h, body: h._send(200, {"seq": 5, "completed": True})}
+        )
+        run.client_tool_failure(5, "the provider timed out")
+        _, headers, sent = server.requests[-1]
+        self.assertEqual(
+            sent,
+            {"seq": 5, "error": {"message": "the provider timed out", "kind": "handler"}},
+        )
+        self.assertEqual(headers.get("X-Drive-Token"), "dt_test")
+
+    def test_client_tool_failure_sends_a_named_kind(self) -> None:
+        run, server = self.make_driver(
+            {"/v1/client-runs/11111111-1111-1111-1111-111111111111/client-tool-completion":
+             lambda h, body: h._send(200, {"seq": 5, "completed": True})}
+        )
+        run.client_tool_failure(5, "the result would not serialize", kind="output_serialization")
+        _, _, sent = server.requests[-1]
+        self.assertEqual(sent["error"]["kind"], "output_serialization")
+
+    def test_client_tool_failure_refused_raises_typed_error(self) -> None:
+        run, _ = self.make_driver(
+            {"/v1/client-runs/11111111-1111-1111-1111-111111111111/client-tool-completion":
+             lambda h, body: h._send(403, {"error": {
+                 "code": "client_completion_refused",
+                 "message": "tool `wire_payout` is declared with trust_completion = false",
+             }})}
+        )
+        with self.assertRaises(SalvorAPIError) as caught:
+            run.client_tool_failure(5, "it did not land")
         self.assertEqual(caught.exception.code, "client_completion_refused")
 
     def test_resolve_posts_output(self) -> None:

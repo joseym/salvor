@@ -576,6 +576,25 @@ pub(crate) async fn redrive(
 /// still a client-driven run to every surface that reads the log (this endpoint
 /// included, [`resume`] still refusing it, the wake sweeper still skipping it).
 ///
+/// # The output is checked against the declaration, when the call was the client's
+///
+/// A dangling intent carrying `performed_by: client` is a call this server never
+/// witnessed, and the operator's declaration is the only thing that says what a
+/// finished one looks like. So the output offered here meets the same
+/// `output_schema` and `require_equal` rules a client's own report meets, before
+/// anything is written (see
+/// `client_tools::check_client_resolution`),
+/// and a tool this server no longer declares is refused rather than resolved
+/// unchecked. A call salvor performed itself is not checked: this server saw it.
+///
+/// # The completion says who recorded it
+///
+/// [`Runtime::resolve`](salvor_runtime::Runtime::resolve) stamps
+/// `settled_by: operator` on the completion it appends, on this path and on
+/// `salvor resolve`. Replay does not read it; it is there so a reader of the log
+/// can tell a person's report of an unwitnessed effect from a completion the run
+/// recorded for itself.
+///
 /// `salvor resolve` cannot go through here: the CLI writes the store directly
 /// and has no way to reach a running server's memory, so a lease left on a live
 /// server survives a CLI resolve and lapses on its own. The client's next open
@@ -592,6 +611,14 @@ pub async fn resolve(
     if log.is_empty() {
         return Err(unknown_run(run_id));
     }
+
+    // A call the CLIENT performed is one this server never witnessed, and the
+    // operator's declaration is the only thing that says what a finished one
+    // looks like. So the same output_schema and require_equal rules the
+    // completion boundary applies to a client's own report apply to a hand
+    // recorded output too, before anything is written. Nothing to check for a
+    // call salvor performed itself.
+    crate::client_tools::check_client_resolution(&state.client_tools(), &log, &request.output)?;
 
     // resolve records exactly one completion and drives nothing, so it runs
     // inline rather than in a task.
@@ -611,11 +638,16 @@ pub async fn resolve(
                 "status": json::status(&derived.status, state.now()),
             })))
         }
-        Err(RuntimeError::NotReconcilable { status, .. }) => Err(ApiError::WrongState(format!(
-            "run {} does not need reconciliation (status: {status}); there is no dangling write \
-             to resolve",
-            run_id.as_uuid()
-        ))),
+        Err(RuntimeError::NotReconcilable { status, .. }) => {
+            let client_driven =
+                state.is_client_run(run_id) || crate::client_runs::log_is_client_driven(&log);
+            Err(crate::client_runs::resolve_refusal(
+                run_id,
+                &log,
+                &status,
+                client_driven,
+            ))
+        }
         Err(error) => Err(ApiError::Internal(error.to_string())),
     }
 }

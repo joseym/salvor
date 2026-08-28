@@ -339,6 +339,7 @@ mod tests {
                     seq: SequenceNumber::new(4),
                     output: json!({"ok": true}),
                     deduplicated_from: None,
+                    settled_by: None,
                 },
             ),
             envelope(

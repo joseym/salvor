@@ -166,6 +166,7 @@ const ORDER_BOOK: Record<string, { status: string; total_cents: number }> = {
   "ORD-3050": { status: "paid", total_cents: 2500 },
   "ORD-9002": { status: "paid", total_cents: 1500 },
   "ORD-4400": { status: "paid", total_cents: 240000 },
+  "ORD-5150": { status: "paid", total_cents: 3300 },
 };
 
 /**
@@ -180,6 +181,12 @@ function dollars(cents: number): string {
 }
 
 // --- the tools --------------------------------------------------------------
+//
+// A `write` tool body that throws is recorded as this call's failure; the
+// next invoke that reaches this position meets that recorded failure and
+// fails with `tool_failed` rather than running the body again. A `read` or
+// `idempotent` tool body that throws posts nothing at all, and the next
+// invoke simply performs it again. See README.md, "The honest limits".
 
 /** How many tool bodies this process actually ran. Replay leaves it at zero. */
 let toolBodies = 0;
@@ -216,12 +223,21 @@ const lookupOrder = tool(
  * The money, for both refund tools.
  *
  * The idempotency key comes from salvor: `currentToolCall()` hands back the key
- * it derived for this call from `(run, seq, tool)`, which is the same string on
- * every attempt at the same call. A real desk passes that key to its payment
- * provider as the provider's own idempotency token. This one has no provider,
- * so the ledger IS the provider: a key already on file returns the refund that
- * key produced, and no second line is written. That is what makes the crash
- * proof in `run.sh` cost one refund rather than two.
+ * it derived for this call, and what it derived it from is the operator's
+ * choice, not the desk's. `refund_large` names no key fields, so its key is
+ * positional, a hash of `(run, seq, tool)`: an attempt identifier, the same
+ * string on every attempt at that one call. `refund_order` declares
+ * `idempotency_key = ["order_id", "amount_cents"]`, so its key is a hash of
+ * `(run, tool, order_id, amount_cents)` with no position in it, and the same
+ * order refunded for the same amount twice in one run derives one key both
+ * times; the same order refunded for a DIFFERENT amount derives a different
+ * key, because amount is one of the fields the identity is checked against.
+ *
+ * A real desk passes that key to its payment provider as the provider's own
+ * idempotency token. This one has no provider, so the ledger IS the provider: a
+ * key already on file returns the refund that key produced, and no second line
+ * is written. That is what makes the crash proof in `run.sh` cost one refund
+ * rather than two.
  */
 async function performRefund(
   toolName: string,
@@ -310,12 +326,40 @@ function lastToolResult(messages: BaseMessage[]): Record<string, unknown> {
  * Turn 2 reads the refund out of its tool message and closes out. A real model
  * would decide the same three things from the same three inputs, which is why
  * swapping `ChatAnthropic` in below changes nothing else.
+ *
+ * One question takes a shorter path: a ticket that names its own amount and
+ * says the refund is on it twice. There is nothing to look up, and a model
+ * reading a duplicated line item asks for the refund twice in the one turn.
+ * That is the shape `refund_order`'s declared `idempotency_key` exists for.
  */
 function nextTurn(messages: BaseMessage[]): Turn {
   const question = String(messages.find((m) => m.getType() === "human")?.content ?? "");
   const orderId = question.match(/ORD-\d+/)?.[0] ?? "ORD-0000";
   const wantsRefund = /refund/i.test(question);
+  const listedTwice = /\btwice\b/i.test(question);
+  const statedCents = Number(question.match(/(\d+) cents/)?.[1] ?? 0);
   const turn = messages.filter((m) => m.getType() === "ai").length;
+
+  if (turn === 0 && wantsRefund && listedTwice && statedCents > 0) {
+    return {
+      content: `Refunding ${orderId}; the ticket lists it twice.`,
+      toolCalls: [
+        {
+          name: "refund_order",
+          args: { order_id: orderId, amount_cents: statedCents },
+          id: "call-refund-first",
+        },
+        // The same arguments, a second time. The two calls need distinct ids
+        // because that is how LangChain tells one tool call from another, and
+        // how the middleware ranks them within the turn.
+        {
+          name: "refund_order",
+          args: { order_id: orderId, amount_cents: statedCents },
+          id: "call-refund-again",
+        },
+      ],
+    };
+  }
 
   if (turn === 0) {
     return {
@@ -324,7 +368,7 @@ function nextTurn(messages: BaseMessage[]): Turn {
     };
   }
 
-  if (turn === 1) {
+  if (turn === 1 && !listedTwice) {
     const order = lastToolResult(messages);
     const total = Number(order.total_cents ?? 0);
     if (!wantsRefund) {
@@ -419,11 +463,16 @@ function markerOf(message: BaseMessage): string {
 let forks = 0;
 let markers: string[] = [];
 
-/** The counts every path prints, so a refused invoke says what it did not do. */
-function printCounts(modelCalls: string): void {
+/**
+ * The counts every path prints, so a refused invoke says what it did not do.
+ * `refused` is true from a caught refusal: the final messages a marker would
+ * be read off never arrive, so `markers` is whatever it was left at rather
+ * than an honest answer, and printing it as such would misreport `none`.
+ */
+function printCounts(modelCalls: string, refused = false): void {
   console.log(`MODEL CALLS: ${modelCalls}`);
   console.log(`TOOL BODIES: ${toolBodies}`);
-  console.log(`MARKERS: ${markers.join(",") || "none"}`);
+  console.log(`MARKERS: ${refused ? "unavailable (invoke refused)" : markers.join(",") || "none"}`);
   console.log(`FORKS: ${forks}`);
 }
 
@@ -486,7 +535,7 @@ async function main(): Promise<void> {
       // A `trust_completion = false` tool ran and salvor will not take this
       // process's word for what it did. The run holds the intent; a person
       // confirms the refund and records it.
-      printCounts(modelCalls());
+      printCounts(modelCalls(), true);
       console.log(
         `NEEDS RESOLUTION: ${JSON.stringify({
           run: refusal.run,
@@ -500,7 +549,7 @@ async function main(): Promise<void> {
       process.exit(4);
     }
 
-    printCounts(modelCalls());
+    printCounts(modelCalls(), true);
     console.log(`REFUSED ${refusal.code}: ${oneLine(refusal.message)}`);
     if (refusal.lapsesInSeconds !== undefined) {
       console.log(`LAPSES IN: ${refusal.lapsesInSeconds}`);

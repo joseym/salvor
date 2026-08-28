@@ -20,7 +20,7 @@ import { mapStoredMessageToChatMessage } from "@langchain/core/messages";
 import type { AIMessage } from "@langchain/core/messages";
 import type { SalvorClient } from "../client.js";
 import type { SalvorEvent } from "../types.js";
-import { SalvorMiddlewareError } from "./errors.js";
+import { SalvorMiddlewareError, threadAbandonedError } from "./errors.js";
 import { runIdForThread } from "./hash.js";
 
 /** The receipt from finishing a thread: the run it closed and the seq `RunCompleted` landed at. */
@@ -41,6 +41,10 @@ export interface FinishedThread {
  * - the thread has never been invoked (its run holds no events at all);
  * - the run is already finished (its log already ends at `RunCompleted` or
  *   `RunFailed`);
+ * - the run was abandoned (its log ends at `RunAbandoned`), which is
+ *   `thread_abandoned` rather than `thread_finished`: an abandoned run was
+ *   retired by hand, often on top of an open intent nobody is going to
+ *   settle, so it is not the open-intent refusal either;
  * - the log ends at an open intent: a model or tool call salvor recorded as
  *   requested but never recorded as completed. That call has to be settled
  *   first (`salvor resolve <run> --store <path> --output <output>`, or
@@ -84,6 +88,13 @@ export async function finishThread(
     }
 
     const tail = log[log.length - 1];
+    // An abandoned run is finished too, and says so in its own words: an
+    // operator retired it, and the open intent it was probably retired on top
+    // of is not something anybody is going to resolve. Checked before the
+    // open-intent rule below for exactly that reason.
+    if (tail.kind === "RunAbandoned") {
+      throw threadAbandonedError(threadId, runId);
+    }
     if (tail.kind === "RunCompleted" || tail.kind === "RunFailed") {
       throw new SalvorMiddlewareError(
         `thread \`${threadId}\` (run ${runId}) is already finished.`,

@@ -12,3 +12,9 @@ result the middleware may not report on the tool's own say-so. Its body still
 runs, but the middleware stops with `ToolNeedsResolution` instead of posting a
 completion salvor would refuse, and the test resolves it by hand before
 re-invoking.
+
+`notify-shipper.toml` declares `effect = "idempotent"` with `trust_completion = true`:
+the one tool that tests what happens when an idempotent body throws. An intent
+left without a completion is performed again on the next invoke, under the key
+the recorded intent already fixed, so the provider sees one notice however many
+times the call is attempted. See the effect-split cases in `test/langchain.test.ts`.

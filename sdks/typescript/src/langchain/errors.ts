@@ -7,7 +7,7 @@ import { canonicalJson } from "./hash.js";
  * The stable token on every {@link SalvorMiddlewareError}, for a caller that
  * branches on what happened rather than on a sentence.
  *
- * The first nine are the ones an application acts on:
+ * The ones an application acts on:
  *
  * - `lease_held`: another driver holds this thread's run right now, and this
  *   invoke never started. Carries {@link SalvorMiddlewareError.lapsesInSeconds},
@@ -19,6 +19,9 @@ import { canonicalJson } from "./hash.js";
  *   up again was refused too, so the run cannot be driven from here at all.
  * - `thread_finished`: `finishThread` closed this thread's run. Give the next
  *   task a new thread id.
+ * - `thread_abandoned`: this thread's run was abandoned, so it takes nothing
+ *   more, neither an invoke nor a finish. Nothing was replayed and nothing
+ *   ran. Give the next task a new thread id.
  * - `thread_id_missing`: the invoke carried no `configurable.thread_id`.
  * - `thread_id_invalid`: it carried one that is not a non-empty string.
  * - `tool_undeclared`: the tool the model called has no client-tool
@@ -28,6 +31,14 @@ import { canonicalJson } from "./hash.js";
  *   the unrecorded output).
  * - `open_intent`: the run's log ends at a call that was requested and never
  *   completed. Settle it, then invoke again.
+ * - `tool_failed`: the run's log already holds a recorded failure for this
+ *   exact call (a thrown `write` tool body, from this invoke or an earlier
+ *   one; a thrown `read` or `idempotent` body records nothing and is
+ *   performed again instead, so this always names a write). Carries
+ *   {@link SalvorMiddlewareError.seq}, the position the failure was recorded
+ *   at. It fails the same way on every replay and on every fork of this
+ *   thread, because a fork opens the same write under the same key: give the
+ *   task a new thread id.
  *
  * The rest name conditions an application cannot usually do anything about
  * except read the message: `run_exists` (the thread id already names a
@@ -38,22 +49,39 @@ import { canonicalJson } from "./hash.js";
  *
  * A fork is deliberately not in this list: leaving the recorded path is not an
  * error, it is reported through `onFork` and the messages' own markers.
+ *
+ * None of the above is the control plane's own refusal reaching you unnamed.
+ * A `SalvorApiError` that escapes a hook without being translated into one of
+ * the codes above keeps its own code here instead: `bad_request` (a call's
+ * input, or a reported output, failed its declared schema),
+ * `client_completion_refused` (a `require_equal` field was reported
+ * differently than the intent recorded, or the declaration refuses
+ * self-completion outright), `divergence`, `unknown_tool`, or whatever else
+ * the server answers with. `cause` is always the `SalvorApiError` itself, so
+ * an application that already matches on the server's own vocabulary does not
+ * have to learn a second one. This union cannot enumerate that whole
+ * vocabulary, so it stays open to any string rather than pretending to be
+ * closed.
  */
 export type SalvorErrorCode =
   | "lease_held"
   | "lease_lost"
   | "reopen_refused"
   | "thread_finished"
+  | "thread_abandoned"
   | "thread_id_missing"
   | "thread_id_invalid"
   | "tool_undeclared"
   | "tool_needs_resolution"
   | "open_intent"
+  | "tool_failed"
   | "run_exists"
   | "thread_never_invoked"
   | "tool_returned_command"
   | "call_unranked"
-  | "unreadable_record";
+  | "unreadable_record"
+  // Deliberately open, not a closed set: see the paragraph above.
+  | (string & {});
 
 /** What a {@link SalvorMiddlewareError} is told about itself when it is raised. */
 export interface SalvorMiddlewareErrorDetails {
@@ -63,6 +91,8 @@ export interface SalvorMiddlewareErrorDetails {
   cause?: unknown;
   /** For `lease_held`: whole seconds until the other driver's hold lapses. */
   lapsesInSeconds?: number;
+  /** For `tool_failed`: the log position the recorded failure sits at. */
+  seq?: number;
 }
 
 /**
@@ -86,12 +116,15 @@ export class SalvorMiddlewareError extends SalvorError {
   readonly cause?: unknown;
   /** For `lease_held`: whole seconds until the other driver's hold lapses. */
   readonly lapsesInSeconds?: number;
+  /** For `tool_failed`: the log position the recorded failure sits at. */
+  readonly seq?: number;
 
   constructor(message: string, details: SalvorMiddlewareErrorDetails) {
     super(message);
     this.code = details.code;
     this.cause = details.cause;
     this.lapsesInSeconds = details.lapsesInSeconds;
+    this.seq = details.seq;
   }
 }
 
@@ -132,6 +165,29 @@ export function salvorError(error: unknown): SalvorMiddlewareError | undefined {
   return undefined;
 }
 
+/**
+ * The refusal for a thread whose run somebody abandoned: an operator recorded
+ * `RunAbandoned` on it (`POST /v1/runs/{id}/abandon`, or `salvor abandon`),
+ * and an abandoned run is terminal exactly as a completed one is.
+ *
+ * Built here rather than at either call site because both places that meet
+ * one say the same thing: `beforeAgent`, opening a run for an invoke, and
+ * {@link finishThread}, asked to close a run that is already closed. Neither
+ * appends anything, and on the invoke path nothing has run yet: no model
+ * call, no tool body.
+ */
+export function threadAbandonedError(
+  threadId: string,
+  runId: string,
+): SalvorMiddlewareError {
+  return new SalvorMiddlewareError(
+    `thread \`${threadId}\` (run ${runId}) was abandoned: a \`RunAbandoned\` is ` +
+      "recorded on its run, and an abandoned run takes nothing more, neither an invoke " +
+      "nor a finish. Give the next task a new thread id.",
+    { code: "thread_abandoned" },
+  );
+}
+
 /** What {@link ToolNeedsResolution} carries about the call it stopped on. */
 export interface ToolNeedsResolutionDetails {
   /** The run stopped waiting on a person. */
@@ -163,9 +219,9 @@ export interface ToolNeedsResolutionDetails {
  * a person looks at `output` and records it by hand.
  *
  * That hand-off is `POST /v1/runs/{id}/resolve` against the running server,
- * `salvor resolve <run> --store <path> --output <json>` against its store, the
- * Inspector, or {@link ClientRunDriver.resolve}, any of which append the one
- * completion this middleware would not. Both are named in the message, because
+ * `salvor resolve <run> --store <path> --output <json>` against its store, or
+ * {@link ClientRunDriver.resolve}, any of which append the one completion
+ * this middleware would not. Both are named in the message, because
  * whoever reads it may have neither: a container running this agent often has
  * no store path at all, only the server's URL, and an operator at a shell often
  * has the store and not a live server. They differ in one way worth knowing:
@@ -208,7 +264,7 @@ export class ToolNeedsResolution extends SalvorMiddlewareError {
         `{"output": ${canonicalJson(details.output)}} (which also frees the run's lease ` +
         `at once), or \`salvor resolve ${details.run} --store <the server's store> ` +
         `--output '${canonicalJson(details.output)}'\` on the store (after which the lease ` +
-        "lapses on its own), or the Inspector, or `driver.resolve(...)`. " +
+        "lapses on its own), or `driver.resolve(...)`. " +
         "Then invoke the thread again: the resolved output replays in this call's place.",
       { code: "tool_needs_resolution" },
     );

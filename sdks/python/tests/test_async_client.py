@@ -304,6 +304,60 @@ class TransportScenarios:
             scenario,
         )
 
+    def test_abandon_sends_reason_only_when_given(self) -> None:
+        async def scenario(client, server):
+            result = await call(client.abandon, "r1")
+            self.assertEqual(server.requests[-1][1], {}, "a bare abandon sends no reason")
+            self.assertEqual(result.run, "r1")
+            self.assertEqual(result.status.state, "abandoned")
+            self.assertEqual(result.appended_seq, 7)
+
+            await call(client.abandon, "r1", "husk is dead forever")
+            self.assertEqual(
+                server.requests[-1][1], {"reason": "husk is dead forever"}
+            )
+
+        self.drive(
+            {
+                "/v1/runs/r1/abandon": lambda h, body: h._send(
+                    200,
+                    {
+                        "run": "r1",
+                        "abandoned": True,
+                        "appended_seq": 7,
+                        "status": {"state": "abandoned"},
+                    },
+                )
+            },
+            scenario,
+        )
+
+    def test_abandon_surfaces_the_unresolved_write_of_a_dangling_run(self) -> None:
+        async def scenario(client, server):
+            result = await call(client.abandon, "r1", "husk is dead forever")
+            self.assertEqual(result.status.state, "abandoned")
+            self.assertEqual(
+                result.status.unresolved_write, {"seq": 4, "tool": "charge"}
+            )
+
+        self.drive(
+            {
+                "/v1/runs/r1/abandon": lambda h, body: h._send(
+                    200,
+                    {
+                        "run": "r1",
+                        "abandoned": True,
+                        "appended_seq": 5,
+                        "status": {
+                            "state": "abandoned",
+                            "unresolved_write": {"seq": 4, "tool": "charge"},
+                        },
+                    },
+                )
+            },
+            scenario,
+        )
+
     def test_a_refusal_decodes_into_the_typed_error(self) -> None:
         async def scenario(client, server):
             with self.assertRaises(SalvorAPIError) as caught:
@@ -600,6 +654,7 @@ class TransportScenarios:
                     "output_schema": {"type": "object", "required": ["charge_id"]},
                     "trust_completion": False,
                     "require_equal": ["amount_cents"],
+                    "idempotency_key": ["order_id", "amount_cents"],
                 },
                 {
                     "name": "lookup_invoice",
@@ -617,9 +672,11 @@ class TransportScenarios:
             self.assertEqual(charge.effect, "write")
             self.assertFalse(charge.trust_completion)
             self.assertEqual(charge.require_equal, ["amount_cents"])
+            self.assertEqual(charge.idempotency_key, ["order_id", "amount_cents"])
             lookup = next(d for d in decls if d.name == "lookup_invoice")
             self.assertIsNone(lookup.output_schema)
             self.assertEqual(lookup.require_equal, [])
+            self.assertEqual(lookup.idempotency_key, [])
 
         self.drive(
             {"/v1/client-tools": lambda h, body: h._send(200, declared)}, scenario

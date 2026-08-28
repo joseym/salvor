@@ -57,13 +57,18 @@ class ClientToolIntentResult:
     ``client_tool_intent`` after a dropped response gets back the same key
     either way; ``settled`` is what lets it tell "safe to perform the call"
     from "already done, do not perform it again" without separately reading
-    the log.
+    the log. ``output`` rides along whenever ``settled`` is ``True`` -- the
+    recorded completion's output, a normal result or the ``__salvor_error``
+    failure sentinel alike -- so a caller that only needs to know what a
+    settled call produced never has to read the log a second time to find
+    out; it is ``None`` while the call is still open.
     """
 
     seq: int
     idempotency_key: str
     effect: str
     settled: bool
+    output: Any = None
     raw: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -73,6 +78,7 @@ class ClientToolIntentResult:
             idempotency_key=obj.get("idempotency_key", ""),
             effect=obj.get("effect", ""),
             settled=bool(obj.get("settled", False)),
+            output=obj.get("output"),
             raw=obj,
         )
 
@@ -315,6 +321,31 @@ def client_tool_completion(
         f"/v1/client-runs/{run_id}/client-tool-completion",
         parse=discard,
         json_body={"seq": seq, "output": output},
+        headers=lease(drive_token),
+    )
+
+
+def client_tool_failure(
+    run_id: str, drive_token: str, seq: int, message: str, kind: str = "handler"
+) -> Call:
+    """Report that a client-performed tool call failed rather than returned.
+
+    Hits the same endpoint as :func:`client_tool_completion`, on the ``error``
+    shape rather than the ``output`` one: the server records the same
+    ``__salvor_error`` sentinel completion a native tool's exhausted retries
+    write, so the call is settled -- closed, and replayed as the failure
+    rather than performed again -- exactly as a reported output settles it.
+    ``kind`` is one of ``"invalid_input"``, ``"handler"`` or
+    ``"output_serialization"``, the dispatch layer that failed; a tool body
+    that ran and raised is ``"handler"``, the default. A declaration written
+    ``trust_completion = false`` refuses this the same way it refuses a
+    reported output.
+    """
+    return Call(
+        "POST",
+        f"/v1/client-runs/{run_id}/client-tool-completion",
+        parse=discard,
+        json_body={"seq": seq, "error": {"message": message, "kind": kind}},
         headers=lease(drive_token),
     )
 

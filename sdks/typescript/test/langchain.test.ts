@@ -87,6 +87,7 @@ const DECLS = [
   resolve(here, "client-tools", "track-parcel.toml"),
   resolve(here, "client-tools", "record-delivery.toml"),
   resolve(here, "client-tools", "wire-payout.toml"),
+  resolve(here, "client-tools", "notify-shipper.toml"),
 ];
 
 // -- the scripted model ------------------------------------------------------
@@ -144,6 +145,50 @@ class ScriptedModel extends BaseChatModel {
   }
 }
 
+/**
+ * A model that throws instead of answering, standing in for a provider outage
+ * mid model call: by the time this runs, `wrapModelCall` has already recorded
+ * the intent, and there is nothing this middleware can do to complete it once
+ * the handler throws.
+ *
+ * `_llmType` deliberately answers the same string `ScriptedModel` does. The
+ * request hash a model call is recorded under includes the model's own
+ * identity (see `request.ts`), so a retry with a real `ScriptedModel` has to
+ * hash identically to the call this model failed, or the next invoke would
+ * see a different request at that position and fork instead of completing the
+ * same open intent.
+ */
+class ThrowingModel extends BaseChatModel {
+  readonly calls: { count: number };
+  private readonly error: Error;
+  private bound: unknown[] = [];
+
+  constructor(error: Error, calls: { count: number } = { count: 0 }) {
+    super({});
+    this.error = error;
+    this.calls = calls;
+  }
+
+  _llmType(): string {
+    return "scripted-fake";
+  }
+
+  _combineLLMOutput(): never[] {
+    return [];
+  }
+
+  bindTools(tools: unknown[]): ThrowingModel {
+    const next = new ThrowingModel(this.error, this.calls);
+    next.bound = [...this.bound, ...tools];
+    return next;
+  }
+
+  async _generate(): Promise<ChatResult> {
+    this.calls.count += 1;
+    throw this.error;
+  }
+}
+
 // -- the tools ---------------------------------------------------------------
 
 /** How often each tool body actually ran, and how many ran at once. */
@@ -153,11 +198,53 @@ const ran = {
   track: 0,
   deliver: 0,
   payout: 0,
+  notify: 0,
   concurrent: 0,
   peakConcurrent: 0,
 };
-/** Set to make the next `stamp_ledger` body throw, standing in for a crash. */
+/**
+ * Set to make the next `stamp_ledger` body throw. Once this was a stand-in for
+ * a crash mid-write (nothing survived to report the failure); now that a
+ * thrown tool body is itself recorded as the call's failure, this is a tool
+ * that fails on a bad input instead, and the recorded failure is what a later
+ * invoke of the same call meets.
+ */
 let stampCrashes = false;
+/**
+ * Set to make the next `lookup_order` body throw. `lookup_order` is declared
+ * `effect = "read"`, so a throw here proves the other half of the effect
+ * split: nothing is recorded, the intent is left open, and the next invoke
+ * performs the call again rather than meeting a failure the log settled.
+ */
+let lookupCrashes = false;
+/**
+ * Set to make the next `notify_shipper` body throw. `notify_shipper` is
+ * declared `effect = "idempotent"`, which sits with `read` on this question:
+ * an unfinished call is attempted again, under the key its recorded intent
+ * already fixed.
+ */
+let notifyCrashes = false;
+/** The derived key each `notify_shipper` body ran under, in order. */
+const notifyKeys: (string | undefined)[] = [];
+/**
+ * Set to make the next `wire_payout` body throw. `wire_payout` is declared
+ * `trust_completion = false`, so a throw here proves the untrusted path: no
+ * failure may be posted for it either, the same as no result may.
+ */
+let payoutThrows = false;
+/**
+ * Set to make `lookup_order` report a `status` its own declared output schema
+ * refuses (the enum is `paid`, `pending`, `refunded`): a server refusal at the
+ * completion, `400 bad_request`, that this middleware must not swallow.
+ */
+let lookupBadStatus = false;
+/**
+ * Set to make `stamp_ledger` report a different `order_id` than the intent
+ * recorded. The declaration pins `order_id` with `require_equal`, so this is
+ * a server refusal at the completion too, `403 client_completion_refused`,
+ * from a different check than `lookupBadStatus` exercises.
+ */
+let stampBadOrderId: string | undefined;
 /** What `currentToolCall()` reported the last time `lookup_order`'s body ran. */
 let capturedCall: ReturnType<typeof currentToolCall> | undefined;
 /**
@@ -181,10 +268,12 @@ const lookupOrder = tool(
       capturedCall = currentToolCall();
       await new Promise((r) => setTimeout(r, 15));
       ran.lookup += 1;
+      if (lookupCrashes) throw new Error("connect ECONNREFUSED reaching the order service");
       const interrupt = midToolCall;
       midToolCall = undefined;
       if (interrupt) await interrupt();
-      return { order_id, status: "paid", total_cents: 4200 };
+      const status = lookupBadStatus ? "lost_in_space" : "paid";
+      return { order_id, status, total_cents: 4200 };
     } finally {
       ran.concurrent -= 1;
     }
@@ -202,7 +291,8 @@ const stampLedger = tool(
     try {
       ran.stamp += 1;
       if (stampCrashes) throw new Error("the ledger writer died mid-call");
-      return { order_id, entry_id: `entry-${note.length}` };
+      const reportedOrderId = stampBadOrderId ?? order_id;
+      return { order_id: reportedOrderId, entry_id: `entry-${note.length}` };
     } finally {
       ran.concurrent -= 1;
     }
@@ -227,6 +317,7 @@ const sendEmail = tool(async () => ({ sent: true }), {
 const wirePayout = tool(
   async ({ payee, amount_cents }: { payee: string; amount_cents: number }) => {
     ran.payout += 1;
+    if (payoutThrows) throw new Error("the payout rail rejected the transfer");
     return { provider_transfer_id: `ptx-${payee}`, status: "succeeded", amount_cents };
   },
   {
@@ -272,6 +363,25 @@ const recordDelivery = tool(
     name: "record_delivery",
     description: "Record that a parcel was delivered.",
     schema: z.object({ tracking_number: z.string(), signed_by: z.string() }),
+  },
+);
+
+/**
+ * The suite's one `idempotent` tool: a call with an effect outside the
+ * process that the provider collapses on the key, so an unfinished one is
+ * attempted again rather than left for a person.
+ */
+const notifyShipper = tool(
+  async ({ order_id }: { order_id: string }) => {
+    ran.notify += 1;
+    notifyKeys.push(currentToolCall()?.key);
+    if (notifyCrashes) throw new Error("the shipper's endpoint timed out");
+    return { order_id, notice_id: `notice-${order_id}` };
+  },
+  {
+    name: "notify_shipper",
+    description: "Tell the shipper an order is ready to collect.",
+    schema: z.object({ order_id: z.string() }),
   },
 );
 
@@ -381,9 +491,16 @@ function reset(): void {
   ran.track = 0;
   ran.deliver = 0;
   ran.payout = 0;
+  ran.notify = 0;
   ran.concurrent = 0;
   ran.peakConcurrent = 0;
+  notifyKeys.length = 0;
   stampCrashes = false;
+  lookupCrashes = false;
+  notifyCrashes = false;
+  payoutThrows = false;
+  lookupBadStatus = false;
+  stampBadOrderId = undefined;
   capturedCall = undefined;
   midToolCall = undefined;
 }
@@ -628,12 +745,13 @@ test("a tool whose result keys are not alphabetical replays through a following 
   );
 });
 
-// -- (c) a crash between a tool's intent and its completion ------------------
+// -- (c) a thrown tool body is recorded as the call's failure ----------------
 
-test("a crash between a write's intent and its completion leaves a dangling intent the next invoke picks up", async (t) => {
+test("a tool that throws on a bad input has the failure recorded, releases the lease, and the next invoke rejects with tool_failed instead of running the body again", async (t) => {
   if (!base) return t.skip("salvor serve not available");
   reset();
-  const threadId = "thread-crash-mid-write";
+  const threadId = "thread-tool-throws";
+  const runId = await runIdForThread(threadId);
   const script: Turn[] = [
     {
       content: "stamping the ledger",
@@ -648,8 +766,10 @@ test("a crash between a write's intent and its completion leaves a dangling inte
     { content: "Stamped ORD-9001." },
   ];
 
-  // The tool dies after salvor recorded the intent and before anything could
-  // report a result, which is the shape of every real mid-write crash.
+  // The tool body throws on this input, the ordinary shape of a client tool
+  // that fails: this middleware mirrors what salvor itself does when a
+  // native tool exhausts its retries, and records the failure rather than
+  // leaving the intent to dangle forever.
   stampCrashes = true;
   const crashed = agentFor(script);
   await rejects(
@@ -663,40 +783,284 @@ test("a crash between a write's intent and its completion leaves a dangling inte
   strictEqual(ran.stamp, 1, "the tool body ran once and threw");
   deepStrictEqual(
     await kindsOf(threadId),
-    ["RunStarted", "ModelCallRequested", "ModelCallCompleted", "ToolCallRequested"],
-    "the log ends at the intent: a write asked for and never reported",
+    [
+      "RunStarted",
+      "ModelCallRequested",
+      "ModelCallCompleted",
+      "ToolCallRequested",
+      "ToolCallCompleted",
+    ],
+    "the log holds the intent AND a completion: the failure, not a dangling write",
   );
 
-  // The next invoke replays the model call for free, meets the dangling intent,
-  // performs the call once more under the same derived key, and closes it.
+  // The invoke ended badly, but it is still an ending: the lease was released
+  // like any other, so a stranger takes the run at once instead of waiting
+  // out the TTL.
+  const stranger = new SalvorClient(base!);
+  const taken = await stranger.openClientRun({ runId });
+  await taken.release();
+
+  // The next invoke never runs the body again: it meets the recorded failure
+  // on the tool's own intent and rejects with `tool_failed`, carrying the
+  // exact message the first invoke's throw recorded and the seq it sits at.
+  // A permanently failing input fails the same way on every invoke.
   reset();
   stampCrashes = false;
-  const recovered = agentFor(script);
-  const answer = await recovered.agent.invoke(
-    { messages: [{ role: "user", content: "stamp ORD-9001" }] },
+  const retried = agentFor(script);
+  let refusal: unknown;
+  try {
+    await retried.agent.invoke(
+      { messages: [{ role: "user", content: "stamp ORD-9001" }] },
+      { configurable: { thread_id: threadId } },
+    );
+    throw new Error("expected the invoke to reject");
+  } catch (error) {
+    refusal = causeOf(error);
+  }
+  ok(refusal instanceof SalvorMiddlewareError, "throws a SalvorMiddlewareError");
+  const stop = refusal as SalvorMiddlewareError;
+  strictEqual(stop.code, "tool_failed", "carries its code");
+  strictEqual(stop.seq, 3, "carries the seq the failure was recorded at");
+  match(stop.message, /ledger writer died mid-call/, "carries the recorded message verbatim");
+  match(stop.message, /every replay/, "says a recorded failure settles the call every time");
+  strictEqual(retried.model.calls.count, 0, "the model turn that asked for it replayed for free");
+  strictEqual(ran.stamp, 0, "the tool body did not run again");
+
+  deepStrictEqual(
+    await kindsOf(threadId),
+    [
+      "RunStarted",
+      "ModelCallRequested",
+      "ModelCallCompleted",
+      "ToolCallRequested",
+      "ToolCallCompleted",
+    ],
+    "still exactly one intent and one completion: nothing new was appended",
+  );
+});
+
+// -- (c1) a thrown read, and a thrown idempotent call, record nothing --------
+
+test("a read tool that throws records no completion, releases the lease, and the next invoke performs the call again at the same position", async (t) => {
+  if (!base) return t.skip("salvor serve not available");
+  reset();
+  const threadId = "thread-read-throws";
+  const runId = await runIdForThread(threadId);
+  const script: Turn[] = [
+    {
+      content: "looking that up",
+      toolCalls: [{ name: "lookup_order", args: { order_id: "ORD-7781" }, id: "call-1" }],
+    },
+    { content: "Order ORD-7781 is paid, 4200 cents." },
+  ];
+
+  // `lookup_order` is declared `effect = "read"`. Its body throws the way a
+  // dependency that is briefly down makes a body throw: nothing outside the
+  // process changed, and nothing about the input is wrong.
+  lookupCrashes = true;
+  const failed = agentFor(script);
+  await rejects(
+    () =>
+      failed.agent.invoke(
+        { messages: [{ role: "user", content: "how is ORD-7781?" }] },
+        { configurable: { thread_id: threadId } },
+      ),
+    (error: unknown) => /ECONNREFUSED/.test(String(error)),
+  );
+  strictEqual(ran.lookup, 1, "the tool body ran once and threw");
+  const firstKey = capturedCall?.key;
+  ok(firstKey, "the body was told the key it ran under");
+  deepStrictEqual(
+    await kindsOf(threadId),
+    ["RunStarted", "ModelCallRequested", "ModelCallCompleted", "ToolCallRequested"],
+    "the log ends at the open intent: a read's throw records no completion at all",
+  );
+
+  // The invoke ended badly, but it is still an ending: the lease came back,
+  // so a stranger takes the run at once instead of waiting out the TTL.
+  const stranger = new SalvorClient(base!);
+  const taken = await stranger.openClientRun({ runId });
+  await taken.release();
+
+  // The next invoke meets that same open intent at the same position, runs
+  // the body again under the key the recorded intent already fixed, and this
+  // time records the completion and finishes the thread normally.
+  reset();
+  const retried = agentFor(script);
+  const answer = await retried.agent.invoke(
+    { messages: [{ role: "user", content: "how is ORD-7781?" }] },
     { configurable: { thread_id: threadId } },
   );
-  strictEqual(recovered.model.calls.count, 1, "only the answer turn was live");
-  strictEqual(ran.stamp, 1, "the unfinished write ran once more");
-  strictEqual(textOf(answer.messages.at(-1)!), "Stamped ORD-9001.");
+  strictEqual(ran.lookup, 1, "the body ran again, once");
+  strictEqual(capturedCall?.key, firstKey, "under the identical derived key");
+  strictEqual(capturedCall?.seq, 3, "at the identical position");
+  strictEqual(retried.model.calls.count, 1, "only the answering turn was paid for");
+  strictEqual(
+    textOf(answer.messages.at(-1)!),
+    "Order ORD-7781 is paid, 4200 cents.",
+    "the thread finishes as though the failed attempt had never happened",
+  );
+  deepStrictEqual(
+    await kindsOf(threadId),
+    [
+      "RunStarted",
+      "ModelCallRequested",
+      "ModelCallCompleted",
+      "ToolCallRequested",
+      "ToolCallCompleted",
+      "ModelCallRequested",
+      "ModelCallCompleted",
+    ],
+    "one intent, now completed: the retry finished the call the first invoke opened",
+  );
+});
+
+test("an idempotent tool that throws behaves like the read: nothing recorded, and the next invoke retries it under the same key", async (t) => {
+  if (!base) return t.skip("salvor serve not available");
+  reset();
+  const threadId = "thread-idempotent-throws";
+  const runId = await runIdForThread(threadId);
+  const script: Turn[] = [
+    {
+      content: "telling the shipper",
+      toolCalls: [
+        { name: "notify_shipper", args: { order_id: "ORD-9002" }, id: "call-notify" },
+      ],
+    },
+    { content: "The shipper knows about ORD-9002." },
+  ];
+
+  // `notify_shipper` is declared `effect = "idempotent"`: it does reach out of
+  // the process, but the provider collapses two attempts under one key. That
+  // is the whole reason a throw here is retried rather than settled.
+  notifyCrashes = true;
+  const failed = agentFor(script, [notifyShipper]);
+  await rejects(
+    () =>
+      failed.agent.invoke(
+        { messages: [{ role: "user", content: "tell the shipper about ORD-9002" }] },
+        { configurable: { thread_id: threadId } },
+      ),
+    (error: unknown) => /the shipper's endpoint timed out/.test(String(error)),
+  );
+  strictEqual(ran.notify, 1, "the body ran once and threw");
+  const firstKey = notifyKeys[0];
+  ok(firstKey, "the body was told the key it ran under");
+  deepStrictEqual(
+    await kindsOf(threadId),
+    ["RunStarted", "ModelCallRequested", "ModelCallCompleted", "ToolCallRequested"],
+    "nothing was posted for it: the intent is open, exactly as a read's would be",
+  );
+
+  const stranger = new SalvorClient(base!);
+  const taken = await stranger.openClientRun({ runId });
+  await taken.release();
+
+  reset();
+  const retried = agentFor(script, [notifyShipper]);
+  const answer = await retried.agent.invoke(
+    { messages: [{ role: "user", content: "tell the shipper about ORD-9002" }] },
+    { configurable: { thread_id: threadId } },
+  );
+  strictEqual(ran.notify, 1, "the body ran again, once");
+  strictEqual(
+    notifyKeys[0],
+    firstKey,
+    "under the identical key: an idempotent retry is one the provider can collapse",
+  );
+  strictEqual(
+    textOf(answer.messages.at(-1)!),
+    "The shipper knows about ORD-9002.",
+    "and the thread finishes normally",
+  );
+  deepStrictEqual(
+    await kindsOf(threadId),
+    [
+      "RunStarted",
+      "ModelCallRequested",
+      "ModelCallCompleted",
+      "ToolCallRequested",
+      "ToolCallCompleted",
+      "ModelCallRequested",
+      "ModelCallCompleted",
+    ],
+    "the retry completed the call the first invoke opened",
+  );
+});
+
+// -- (c2) a provider error mid model call ------------------------------------
+
+test("a provider error mid model call leaves the intent open, is not salvor's, and the next invoke performs the call again", async (t) => {
+  if (!base) return t.skip("salvor serve not available");
+  reset();
+  const threadId = "thread-provider-error";
+  const runId = await runIdForThread(threadId);
+  const boom = new Error("the provider connection reset");
+
+  // The provider fails on the very first live call: the intent is already
+  // recorded by the time this throws (`wrapModelCall` opens it before
+  // `handler` is ever called), and nothing this middleware does records a
+  // completion for a handler that threw instead of answering.
+  const throwingModel = new ThrowingModel(boom);
+  const first = createAgent({
+    model: throwingModel as never,
+    tools: [lookupOrder, stampLedger] as never,
+    middleware: [salvorMiddleware({ client: client! })],
+  });
+
+  let rejected: unknown;
+  try {
+    await first.invoke(
+      { messages: [{ role: "user", content: "how is ORD-7781?" }] },
+      { configurable: { thread_id: threadId } },
+    );
+    throw new Error("expected the invoke to reject");
+  } catch (error) {
+    rejected = error;
+  }
+  strictEqual(throwingModel.calls.count, 1, "the provider was called once, and it threw");
+  match(String((rejected as Error).message ?? rejected), /provider connection reset/);
+  ok(
+    !(rejected instanceof SalvorMiddlewareError),
+    "the provider's own error, not translated into one of this middleware's",
+  );
+  ok(!salvorError(rejected), "not salvor's: salvorError finds nothing to unwrap");
+
+  deepStrictEqual(
+    await kindsOf(threadId),
+    ["RunStarted", "ModelCallRequested"],
+    "the intent is open: nothing records a completion for a handler that threw",
+  );
+
+  // The lease was released all the same: a rival, genuinely independent
+  // client can open the run at once rather than waiting out the TTL for a
+  // driver that already left.
+  const rival = new SalvorClient(base!);
+  const rivalDriver = await rival.openClientRun({ runId });
+  await rivalDriver.release();
+
+  // The next invoke replays nothing (there is nothing settled yet to
+  // replay), meets the same open intent, and performs that one call again
+  // under the same recorded position: one intent, one completion, no fork.
+  reset();
+  const second = agentFor([{ content: "Order ORD-7781 is paid, 4200 cents." }]);
+  const answer = await second.agent.invoke(
+    { messages: [{ role: "user", content: "how is ORD-7781?" }] },
+    { configurable: { thread_id: threadId } },
+  );
+  strictEqual(second.model.calls.count, 1, "the model performed that one call again");
+  strictEqual(textOf(answer.messages.at(-1)!), "Order ORD-7781 is paid, 4200 cents.");
+  ok(!markerOf(answer.messages.at(-1)!)?.forked, "not a fork: the same request, retried");
 
   const kinds = await kindsOf(threadId);
-  deepStrictEqual(kinds, [
-    "RunStarted",
-    "ModelCallRequested",
-    "ModelCallCompleted",
-    "ToolCallRequested",
-    "ToolCallCompleted",
-    "ModelCallRequested",
-    "ModelCallCompleted",
-  ]);
+  deepStrictEqual(kinds, ["RunStarted", "ModelCallRequested", "ModelCallCompleted"]);
   strictEqual(
-    kinds.filter((kind) => kind === "ToolCallRequested").length,
+    kinds.filter((kind) => kind === "ModelCallRequested").length,
     1,
     "exactly one intent",
   );
   strictEqual(
-    kinds.filter((kind) => kind === "ToolCallCompleted").length,
+    kinds.filter((kind) => kind === "ModelCallCompleted").length,
     1,
     "exactly one completion",
   );
@@ -927,6 +1291,82 @@ test("a tool with no client-tool declaration is refused by name", async (t) => {
       return true;
     },
   );
+});
+
+// -- (g) a server refusal reaches salvorError with the server's own code -----
+
+test("an output that fails its declared schema surfaces as bad_request through salvorError", async (t) => {
+  if (!base) return t.skip("salvor serve not available");
+  reset();
+  const threadId = "thread-bad-output-schema";
+  lookupBadStatus = true;
+  const script: Turn[] = [
+    {
+      content: "looking that up",
+      toolCalls: [{ name: "lookup_order", args: { order_id: "ORD-7781" }, id: "call-1" }],
+    },
+    { content: "Looked it up." },
+  ];
+  const { agent } = agentFor(script);
+
+  await rejects(
+    () =>
+      agent.invoke(
+        { messages: [{ role: "user", content: "how is ORD-7781?" }] },
+        { configurable: { thread_id: threadId } },
+      ),
+    (error: unknown) => {
+      const refusal = salvorError(error);
+      ok(refusal, "reachable through salvorError, not a bare SalvorApiError");
+      strictEqual(refusal!.code, "bad_request", "the server's own code, unwrapped");
+      ok(
+        refusal!.cause instanceof SalvorApiError,
+        "carrying the SalvorApiError underneath",
+      );
+      strictEqual((refusal!.cause as SalvorApiError).code, "bad_request");
+      match(refusal!.message, new RegExp(threadId), "names the thread");
+      return true;
+    },
+  );
+  strictEqual(ran.lookup, 1, "the tool body ran once before the report was refused");
+});
+
+test("a require_equal mismatch surfaces as client_completion_refused through salvorError", async (t) => {
+  if (!base) return t.skip("salvor serve not available");
+  reset();
+  const threadId = "thread-require-equal-mismatch";
+  stampBadOrderId = "ORD-9999";
+  const script: Turn[] = [
+    {
+      content: "stamping the ledger",
+      toolCalls: [
+        { name: "stamp_ledger", args: { order_id: "ORD-7781", note: "seen" }, id: "call-1" },
+      ],
+    },
+    { content: "Stamped." },
+  ];
+  const { agent } = agentFor(script);
+
+  await rejects(
+    () =>
+      agent.invoke(
+        { messages: [{ role: "user", content: "stamp ORD-7781" }] },
+        { configurable: { thread_id: threadId } },
+      ),
+    (error: unknown) => {
+      const refusal = salvorError(error);
+      ok(refusal, "reachable through salvorError, not a bare SalvorApiError");
+      strictEqual(refusal!.code, "client_completion_refused", "the server's own code");
+      ok(
+        refusal!.cause instanceof SalvorApiError,
+        "carrying the SalvorApiError underneath",
+      );
+      strictEqual((refusal!.cause as SalvorApiError).code, "client_completion_refused");
+      match(refusal!.message, new RegExp(threadId), "names the thread");
+      return true;
+    },
+  );
+  strictEqual(ran.stamp, 1, "the tool body ran once before the report was refused");
 });
 
 // -- leaving the recorded path ------------------------------------------------
@@ -1164,25 +1604,29 @@ test("finishThread on a thread whose log ends at an open intent is refused, nami
   if (!base) return t.skip("salvor serve not available");
   reset();
   const threadId = "thread-finish-open-intent";
+  // `wire_payout` is declared `trust_completion = false`: the body runs and
+  // succeeds, but the middleware may not report its own result, so the
+  // intent it opened is left genuinely open, an intent asked for with
+  // nothing this tape may treat as its completion. A thrown tool body no
+  // longer leaves an intent open this way (its failure is recorded), so this
+  // is the one path left that reaches `finishThread` with a dangling call.
   const script: Turn[] = [
     {
-      content: "stamping the ledger",
+      content: "sending the payout",
       toolCalls: [
-        { name: "stamp_ledger", args: { order_id: "ORD-4242", note: "seen" }, id: "call-stamp" },
+        { name: "wire_payout", args: { payee: "acct-4242", amount_cents: 1000 }, id: "call-payout" },
       ],
     },
-    { content: "Stamped ORD-4242." },
+    { content: "Payout sent." },
   ];
 
-  stampCrashes = true;
-  const crashed = agentFor(script);
+  const crashed = agentFor(script, [wirePayout]);
   await rejects(() =>
     crashed.agent.invoke(
-      { messages: [{ role: "user", content: "stamp ORD-4242" }] },
+      { messages: [{ role: "user", content: "wire the payout" }] },
       { configurable: { thread_id: threadId } },
     ),
   );
-  stampCrashes = false;
 
   const runId = await runIdForThread(threadId);
   await rejects(
@@ -1336,6 +1780,125 @@ test("a tool declared trust_completion = false runs once, then stops the invoke 
     "ModelCallRequested",
     "ModelCallCompleted",
   ]);
+});
+
+test("a tool declared trust_completion = false that throws stops with open_intent and posts nothing", async (t) => {
+  if (!base) return t.skip("salvor serve not available");
+  reset();
+  const threadId = "thread-untrusted-throw";
+  const runId = await runIdForThread(threadId);
+
+  // The tool has no output to hand a person the way ToolNeedsResolution does:
+  // it threw. Its declaration still forbids self-reporting either a result or
+  // a failure, so this stops the same way an open, unreported intent always
+  // does, naming the same fix, with nothing posted at all.
+  payoutThrows = true;
+  const first = agentFor(PAYOUT_SCRIPT, [wirePayout]);
+  const stopped = causeOf(await invokeRejection(first.agent, threadId));
+  ok(stopped instanceof SalvorMiddlewareError, "throws a SalvorMiddlewareError");
+  const stop = stopped as SalvorMiddlewareError;
+  strictEqual(stop.code, "open_intent", "carries its code");
+  match(stop.message, /trust_completion = false/);
+  match(stop.message, new RegExp(`salvor resolve ${runId}`), "names the resolve command");
+  match(
+    stop.message,
+    new RegExp(`POST /v1/runs/${runId}/resolve`),
+    "and the HTTP resolve endpoint, for a caller with no store path",
+  );
+  strictEqual(ran.payout, 1, "the tool body ran exactly once");
+
+  deepStrictEqual(
+    await kindsOf(threadId),
+    ["RunStarted", "ModelCallRequested", "ModelCallCompleted", "ToolCallRequested"],
+    "the log ends at the bare intent: no completion, success or failure, was ever posted",
+  );
+
+  // The lease was still handed back: this is an ending like any other.
+  const stranger = new SalvorClient(base!);
+  const taken = await stranger.openClientRun({ runId });
+  deepStrictEqual(
+    taken.logEnvelopes.map((event) => event.kind).slice(-1),
+    ["ToolCallRequested"],
+  );
+  await taken.release();
+
+  // Re-invoking before anyone resolves it does not run the tool again: it
+  // meets the same open intent and is refused by the tape's own "never
+  // completed" check, exactly as it would after a trusted tool's own crash
+  // used to leave things before this feature existed.
+  reset();
+  payoutThrows = true;
+  const impatient = agentFor(PAYOUT_SCRIPT, [wirePayout]);
+  const refusal = await invokeRejection(impatient.agent, threadId);
+  strictEqual(salvorError(refusal)?.code, "open_intent", "the open-intent refusal, by code");
+  strictEqual(ran.payout, 0, "refused before the tool ran again");
+});
+
+test("an abandoned thread refuses its next invoke by name, and finishThread says the same", async (t) => {
+  if (!base) return t.skip("salvor serve not available");
+  reset();
+  const threadId = "thread-abandoned";
+  const runId = await runIdForThread(threadId);
+
+  // The shape an operator actually abandons: an untrusted tool threw, so the
+  // log ends at an intent nobody may complete, and the provider turns out to
+  // show no such call. There is no output to resolve with, so the run is
+  // retired instead. The refusal itself says so.
+  payoutThrows = true;
+  const first = agentFor(PAYOUT_SCRIPT, [wirePayout]);
+  const stopped = causeOf(await invokeRejection(first.agent, threadId)) as SalvorMiddlewareError;
+  strictEqual(stopped.code, "open_intent");
+  match(
+    stopped.message,
+    new RegExp(`POST /v1/runs/${runId}/abandon`),
+    "the refusal names abandoning the run, for a call that never happened",
+  );
+  match(stopped.message, new RegExp(`salvor abandon ${runId}`), "and the command form");
+  strictEqual(ran.payout, 1, "the body ran and threw, once");
+
+  // The operator abandons it over HTTP, exactly as the sentence said to.
+  const abandoned = await client!.abandon(runId, "the provider never saw the payout");
+  strictEqual(abandoned.status.state, "abandoned");
+  deepStrictEqual((await kindsOf(threadId)).slice(-1), ["RunAbandoned"], "the run is terminal");
+
+  // The thread is dead, and the next invoke is told so before anything runs:
+  // not the open-intent refusal, which would send a person to a resolve the
+  // server answers `wrong_state` to.
+  reset();
+  payoutThrows = true;
+  const second = agentFor(PAYOUT_SCRIPT, [wirePayout]);
+  const refused = causeOf(await invokeRejection(second.agent, threadId));
+  ok(refused instanceof SalvorMiddlewareError, "a middleware refusal, not a raw HTTP error");
+  const refusal = refused as SalvorMiddlewareError;
+  strictEqual(refusal.code, "thread_abandoned", "by code");
+  match(refusal.message, new RegExp(threadId), "the message names the thread");
+  match(refusal.message, new RegExp(runId), "and the run");
+  match(refusal.message, /was abandoned/, "and says what happened to it");
+  match(refusal.message, /new thread id/, "and what to do next");
+  strictEqual(ran.payout, 0, "no tool body ran");
+  strictEqual(second.model.calls.count, 0, "and the model was never asked");
+  deepStrictEqual(
+    (await kindsOf(threadId)).slice(-1),
+    ["RunAbandoned"],
+    "and nothing was appended to the abandoned run",
+  );
+
+  // Closing it by hand meets the same fact and says the same thing: an
+  // abandoned run is not a thread with a dangling write to settle.
+  await rejects(
+    () => finishThread(client!, threadId),
+    (error: unknown) => {
+      const closing = salvorError(error);
+      strictEqual(closing?.code, "thread_abandoned", "finishThread refuses by the same code");
+      match(closing!.message, new RegExp(threadId), "naming the thread");
+      return true;
+    },
+  );
+  deepStrictEqual(
+    (await kindsOf(threadId)).slice(-1),
+    ["RunAbandoned"],
+    "finishThread appended nothing either",
+  );
 });
 
 // -- the lease ---------------------------------------------------------------
@@ -1711,15 +2274,16 @@ test("a tool body that throws still hands the lease back", async (t) => {
   );
   stampCrashes = false;
 
-  // The invoke died between the intent and the completion, which is the case
-  // that matters most: the run is stuck at a dangling write, and the process
-  // that comes to unstick it must not be locked out for a minute first.
+  // The invoke ended with the tool's own error, its failure already recorded
+  // as the call's completion (see the `tool_failed` case above): the process
+  // that comes next must not be locked out for a minute over an ending that
+  // was, from the lease's point of view, perfectly ordinary.
   const stranger = new SalvorClient(base!);
   const taken = await stranger.openClientRun({ runId });
   deepStrictEqual(
     taken.logEnvelopes.map((event) => event.kind).slice(-1),
-    ["ToolCallRequested"],
-    "the log still ends at the open intent: releasing the lease writes nothing",
+    ["ToolCallCompleted"],
+    "the log ends at the recorded failure, not a dangling intent",
   );
   await taken.release();
 });

@@ -290,6 +290,16 @@ class AsyncClientRunDriver:
             rules.client_tool_completion(self.run_id, self.drive_token, seq, output)
         )
 
+    async def client_tool_failure(
+        self, seq: int, message: str, kind: str = "handler"
+    ) -> None:
+        """Await :meth:`salvor.ClientRunDriver.client_tool_failure`."""
+        await self._send(
+            rules.client_tool_failure(
+                self.run_id, self.drive_token, seq, message, kind
+            )
+        )
+
     # -- client-performed model calls -------------------------------------------
 
     async def client_model_intent(

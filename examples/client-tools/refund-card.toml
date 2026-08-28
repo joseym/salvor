@@ -29,6 +29,23 @@ trust_completion = true
 # written. Each named field must be required on both sides, checked at load.
 require_equal = ["amount_cents"]
 
+# What this server derives the call's idempotency key from. Left unset here, so
+# the key stays positional: a hash of the run, the position in the log, and the
+# tool name. That is an attempt identifier. It promises one thing, which is the
+# thing a retry needs: the same position, retried after a dropped response,
+# presents the same key, and the provider collapses the pair.
+#
+# Naming fields would make it a content identity instead:
+#
+#     idempotency_key = ["order_id", "amount_cents"]
+#
+# Then the position drops out of the hash, and a refund of that amount against
+# that order is ONE refund wherever in the run it is asked for: a loop that asks
+# for it twice gets the first refund's result back on the second intent, and the
+# client performs nothing. Each named field must be required by the input schema,
+# checked at load, so there is always a value to derive from. This file leaves it
+# unset on purpose, so the desk behaves exactly as it did.
+
 [input_schema]
 type = "object"
 required = ["order_id", "amount_cents", "currency"]

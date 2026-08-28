@@ -24,7 +24,7 @@ from typing import Any, Awaitable, Callable, List, Tuple, Union
 from ..async_client import AsyncClient
 from ..client import Client
 from ..models import Event
-from .errors import SalvorMiddlewareError
+from .errors import SalvorMiddlewareError, thread_abandoned_error
 from .hash import run_id_for_thread
 from .messages import stored_ai_message
 
@@ -74,6 +74,11 @@ def finish_thread(
     * the thread has never been invoked (its run holds no events at all);
     * the run is already finished (its log already ends at ``RunCompleted`` or
       ``RunFailed``);
+    * the run was abandoned (its log ends at ``RunAbandoned``), which is
+      ``thread_abandoned`` rather than ``thread_finished``, and rather than the
+      open-intent refusal below: an abandoned run was retired by hand, and the
+      dangling write it was retired on top of is not one anybody is going to
+      resolve;
     * the log ends at an open intent: a model or tool call salvor recorded as
       requested but never recorded as completed. That call has to be settled
       first (``salvor run resolve <run> <output>``, or the resolve endpoint),
@@ -163,6 +168,11 @@ def _completion(
         )
 
     tail = log[-1]
+    # An abandoned run is over too, and says so in its own words: an operator
+    # retired it, often on top of the very open intent the rule below would
+    # otherwise tell this caller to settle. Checked first for that reason.
+    if tail.kind == "RunAbandoned":
+        raise thread_abandoned_error(thread_id, run_id)
     if tail.kind in ("RunCompleted", "RunFailed"):
         raise SalvorMiddlewareError(
             "thread `{thread}` (run {run}) is already finished.".format(

@@ -79,6 +79,7 @@ const runs   = await client.listRuns();                    // -> RunSummary[]
 const stream = client.streamEvents(runId, { fromSeq });    // -> EventStream
 const result = await client.resume(runId, input);          // -> ResumeResult
 const after  = await client.resolve(runId, output);        // record a dangling write
+const status = await client.abandon(runId, reason);        // retire a run by hand; the dangling write stays named
 const proj   = await client.replay(runId);                 // -> ReplayState (dry run)
 ```
 
@@ -262,6 +263,9 @@ The LangChain extra is in the next release of `@salvor-run/client`; it is not
 on npm yet, so until that release ships, install the SDK from a checkout of
 this repository instead (`npm install <path-to-checkout>/sdks/typescript
 langchain @langchain/core zod`), and come back to the line above once it is.
+That checkout install works the same way from any directory, so an app of
+your own outside this repository installs against it exactly as
+`examples/langchain` does.
 
 Then add one middleware to the agent you already have:
 
@@ -342,21 +346,44 @@ shape. `createAgent` wraps an error thrown inside a graph node in its own
 instance only on `.cause`: that is how `ToolNeedsResolution` and the tool-side
 refusals (`tool_undeclared`, `open_intent`, `lease_lost`) reach you. An error
 thrown from `beforeAgent`, before any node runs, arrives **bare**: that is
-`lease_held`, `thread_finished`, `thread_id_missing`, `thread_id_invalid` and
-`run_exists`. A `catch` that checks only `e.cause` misses the second group and
-a `catch` that checks only `instanceof` misses the first; `salvorError` walks
-the `cause` chain and covers both. Note that a middleware error now carries a
-`cause` of its own (the `SalvorApiError` underneath), so reaching one level in
-by hand can land on the server's error rather than the middleware's.
+`lease_held`, `thread_finished`, `thread_abandoned`, `thread_id_missing`,
+`thread_id_invalid` and `run_exists`. A `catch` that checks only `e.cause`
+misses the second group and a `catch` that checks only `instanceof` misses the
+first; `salvorError` walks the `cause` chain and covers both. Note that a
+middleware error now carries a `cause` of its own (the `SalvorApiError`
+underneath), so reaching one level in by hand can land on the server's error
+rather than the middleware's.
 
-The codes are: `lease_held`, `lease_lost`, `reopen_refused`, `thread_finished`,
-`thread_id_missing`, `thread_id_invalid`, `tool_undeclared`,
-`tool_needs_resolution`, `open_intent`, and then `run_exists`,
-`thread_never_invoked`, `tool_returned_command`, `call_unranked` and
-`unreadable_record` for conditions there is nothing to do about but read the
-message. A fork is not among them: leaving the recorded path is not an error
-(see `onFork` below). `ToolNeedsResolution` is still its own class, so
+The codes:
+
+| `code` | What happened |
+| --- | --- |
+| `lease_held` | Another driver holds this thread's run right now. `lapsesInSeconds` says how long their hold has left. |
+| `lease_lost` | This invoke stopped being the driver: its token is no longer the current lease, or the lease went twice in one invoke. |
+| `reopen_refused` | The lease was lost and the server would not hand the run back at all. The log is intact; this server is not the one to drive it from. |
+| `run_exists` | The thread maps to a run id salvor's other, server-driven mode already started. Give the thread an id of its own. |
+| `thread_finished` | `finishThread` closed this thread's run, and a completed run takes no more events. |
+| `thread_abandoned` | Somebody recorded a terminal `RunAbandoned` on this thread's run (`POST /v1/runs/{id}/abandon`, or `salvor abandon`). Nothing was replayed and nothing ran; give the next task a new thread id. |
+| `thread_never_invoked` | `finishThread` was asked to close a thread that has no run yet. |
+| `thread_id_missing` | The invoke passed no `thread_id`. |
+| `thread_id_invalid` | It passed one that is not a non-empty string. The message says what arrived. |
+| `tool_undeclared` | The tool has no client-tool declaration on this server. |
+| `tool_needs_resolution` | The tool ran and its operator settles such a call by hand. This one is the typed `ToolNeedsResolution`, with the result on `.output`. |
+| `tool_returned_command` | A tool answered with a LangGraph `Command`, which is control flow, not a result to record. |
+| `call_unranked` | The call's id is not among the ones the model's last recorded turn listed, so its position in the run cannot be pinned: either that turn was never recorded, or a middleware ahead of this one changed the call's id. |
+| `tool_failed` | The log already holds a recorded failure at this position: an earlier invoke's `effect = "write"` tool body threw, this middleware reported it, and salvor settled the call on it. Carries `seq`, the position it was recorded at. Fails the same way on every replay and on every fork of this thread, because a fork opens the same write under the same key: give the task a new thread id. |
+| `open_intent` | The log holds a call recorded as requested and never completed. Settle it and invoke again. |
+| `unreadable_record` | A model answer is missing or does not read back as one. |
+| `bad_request` | The server's own refusal, unwrapped: an intent's input failed the declared `input_schema` before the tool ran, or a reported tool output failed the declared `output_schema`. |
+| `client_completion_refused` | The server's own refusal: a `require_equal` field's reported value differed from the intent's, or a client tried to close a call salvor itself already performed, or the declaration says `trust_completion = false` (for a reported result or a reported failure alike), or the declaration has no `output_schema` to check a reported result against. |
+
+A fork is not among them: leaving the recorded path is not an error (see
+`onFork` below). `ToolNeedsResolution` is still its own class, so
 `salvorError(e) instanceof ToolNeedsResolution` works as well as its code does.
+The last two rows are the control plane's own refusal, unwrapped rather than
+translated: `cause` on that error is the `SalvorApiError` underneath, and the
+server can answer with codes beyond those two (`divergence`, `unknown_tool`,
+and so on) that arrive exactly the same way.
 
 ### Try it without a key
 
@@ -578,7 +605,11 @@ A run that died between a tool's intent and its completion is the case the whole
 design is for. The log ends at the intent, which is exactly what an unfinished
 write looks like, and the next invoke replays everything before it for free,
 performs that one call again under the same derived key, and records the
-completion. One intent, one completion, no second charge.
+completion. One intent, one completion, no second charge. A model call the
+provider itself failed on works the same way: the intent is already recorded
+by the time the provider throws, nothing records a completion for the failed
+attempt, and the next invoke meets that same open intent and performs the call
+again.
 
 Parallel tool calls in one model turn are serialised rather than refused. A
 turnstile inside the middleware admits one open intent per run at a time,
@@ -636,6 +667,19 @@ required = ["order_id", "status", "total_cents"]
 salvor serve --client-tool lookup-order.toml
 ```
 
+Both schemas are checked against a subset of JSON Schema, not the whole of it:
+`crates/salvor-server/API.md` lists exactly which keywords the server honours,
+and everything else, `pattern` and `format` included, is ignored without
+refusal and still published to the model through `GET /v1/client-tools`.
+
+`effect` is one of three classes. `read` has no side effect, so a dangling
+intent is simply performed again on the next invoke. `write` changes the
+world in a way that is not safe to repeat blindly, so a dangling intent waits
+for a person unless `trust_completion` says the tool may close its own call.
+`idempotent` changes the world too, but under an identity safe to retry, so a
+dangling intent is performed again under the same derived key and left for
+the provider to collapse, with no person needed.
+
 The middleware sends the tool's name and the arguments the model produced, and
 nothing else. A tool with no declaration is refused, and the error names the
 tool and the declaration it needs rather than quietly recording the call as a
@@ -644,6 +688,19 @@ the middleware record what the tool returned; a declaration without them leaves
 every call for that tool to be settled by hand with `resolve`, once someone has
 verified it externally. `examples/client-tools/refund-card.toml` is the fully
 commented version of the same file.
+
+A call's idempotency key is positional by default (one identity per position
+in the run) unless the declaration names `idempotency_key` fields, in which
+case the key is derived from those fields' values instead. With fields
+declared, two calls in the same run whose named fields carry the same values
+share one key, and the second one settles from the first's recorded result
+rather than performing the call again. So a model that emits the same write
+twice in one turn runs it once when the declared fields match between the two
+calls, and twice when the declaration names no fields at all, unless the
+provider underneath happens to dedupe such a retry on its own. Naming fields
+is naming what makes two calls the same call, so check the list against what
+actually varies between calls you mean to keep distinct: a field left out of
+it is a field two such calls may differ on and still collapse into one.
 
 The recorded output is the tool's own result, which is what the output schema
 describes. LangChain builds a tool message by stringifying whatever the tool
@@ -682,8 +739,8 @@ server's URL, which is why the HTTP endpoint is named first. The two differ in
 one way worth knowing: the HTTP resolve clears the run's lease along with the
 resolution, so the thread re-opens at once, while `salvor resolve` writes the
 store directly and cannot reach a live server's memory, so a lease held there
-survives it and lapses on its own (at most the TTL, 60 seconds by default). The
-Inspector and `driver.resolve(output)` go through the server too.
+survives it and lapses on its own (at most the TTL, 60 seconds by default).
+`driver.resolve(output)` goes through the server too.
 
 `--store` has to name the SERVER's store file; this middleware only ever
 speaks HTTP to that server, so it has no way to know that path itself, which
@@ -713,9 +770,13 @@ saying which of the three things happened to it: `{ replayed: true, seq }`
 when the answer came from the log, `{ live: true, seq }` when it was a real
 call on a path the log still agrees with, and `{ forked: { at, thread, run } }`
 on every message from the point the invoke actually forked onward. A fork also
-calls `onFork` once per invoke, naming the thread, the run and the seq it
-forked at. That seq is the first recorded position that no longer matches, so when several things changed between invokes it points at the earliest of them, not necessarily the one you meant. The default is `console.warn`, and it is the hook to point at your
-own logging instead.
+calls `onFork` once per invoke with a `SalvorForkNotice`, naming the log
+position it forked at (`at`), the thread (`thread`), the run (`run`), and the
+sentence the default handler warns with (`message`). That `at` is the first
+recorded position that no longer matches, so when several things changed
+between invokes it points at the earliest of them, not necessarily the one you
+meant. The default is `console.warn`, and it is the hook to point at your own
+logging instead.
 
 The one case it refuses is a log whose last event is a call that never
 completed: settle that first, then invoke again.
@@ -773,10 +834,13 @@ the one the recorded answer was an answer to.
 
 A tool body can read its own recorded idempotency key with `currentToolCall()`,
 returning `{ key, seq, runId, tool }` for the call `wrapToolCall` is recording
-right now. `key` is the value salvor already derived for `(run, seq, tool)`,
-the same one sitting on the intent; hand it straight to the tool's own
-provider as that provider's idempotency token, so a retried write and the
-first attempt present the same one. It works only from inside a tool body a
+right now. `key` is the value salvor already derived for this call: positional,
+a hash of `(run, seq, tool)`, unless the declaration names `idempotency_key`
+fields, in which case it is derived from the run, the tool and those fields
+instead, with no `seq` in it. Either way it is the same one sitting on the
+intent; hand it straight to the tool's own provider as that provider's
+idempotency token, so a retried write and the first attempt present the same
+one. It works only from inside a tool body a
 live `wrapToolCall` is running, and only in Node; called from anywhere else it
 returns `undefined`, and the middleware keeps recording and replaying exactly
 as it does without it.
@@ -792,6 +856,25 @@ charges the card a second time is the provider's decision, made on that key.
 So the key has to reach the provider as its idempotency token, not sit in a log
 line: pass it, and the duplicate collapses into the first write; leave it out,
 and the write can happen twice, with salvor's log recording it once either way.
+
+That dangling-intent case is what a process dying mid-write leaves behind. A
+tool body that instead throws is recorded as the call's failure only when the
+tool is declared `effect = "write"`: the middleware posts the thrown message
+as that failure, the same way salvor itself records a native tool's exhausted
+retries, and the invoke rejects with the tool's own error. Re-invoking the
+thread does not run that body again; it meets the recorded failure and rejects
+with `tool_failed` on the spot, carrying the message that was recorded. A
+permanently failing input fails the same way on every replay from here on, and
+on every fork of this thread too, because a fork opens the same write under
+the same key: only a new thread id escapes it. A `read` or `idempotent` tool
+that throws posts nothing at all: its intent stays open exactly as if the call
+had never returned, and the next invoke simply performs it again, which is why
+a transient error on a lookup does not wedge the thread the way a failed
+write's record would. A tool declared `trust_completion = false` is the one
+exception on the write side, because it may not report even a failure on its
+own say-so any more than it may report a result: it stops with the same open-intent
+refusal `ToolNeedsResolution` gives a successful untrusted call, and a person
+settles it by hand.
 
 ## Graphs
 

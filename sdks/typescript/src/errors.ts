@@ -35,7 +35,7 @@ export class SalvorApiError extends SalvorError {
     status: number,
     details?: Record<string, unknown>,
   ) {
-    super(`${code}: ${message}`);
+    super(message);
     this.code = code;
     this.status = status;
     this.details = details ?? {};

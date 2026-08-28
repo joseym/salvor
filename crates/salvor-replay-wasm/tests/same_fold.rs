@@ -147,6 +147,7 @@ fn reference_logs() -> Vec<(&'static str, Vec<EventEnvelope>)> {
                 seq: SequenceNumber::new(1),
                 output: json!({"id": "TICKET-1"}),
                 deduplicated_from: None,
+                settled_by: None,
             },
         ]),
     ));
