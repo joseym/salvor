@@ -1121,6 +1121,13 @@ impl ReplayCursor {
                 // before the field existed); recording on stores the same
                 // value that was hashed.
                 request_body,
+                // The cursor is the runtime's own path: a call salvor is about
+                // to make itself, so the performer stays unrecorded, exactly as
+                // it is on the tool intent this cursor emits. A call the client
+                // performed never reaches here; it is recorded by the server's
+                // client-model-intent endpoint, and replays through the
+                // hash-matching branch above, which reads no performer at all.
+                performed_by: None,
             },
         };
         Ok(Outcome::Live(ModelCallPermit {
@@ -1713,6 +1720,7 @@ impl BeginPermit<'_> {
             agent_def_hash: self.agent_def_hash,
             input,
             labels: self.labels,
+            driven_by: None,
         };
         self.cursor.emit(event)
     }
@@ -2116,6 +2124,7 @@ mod tests {
                 agent_def_hash: "sha256:agent".into(),
                 input: serde_json::json!({}),
                 labels: None,
+                driven_by: None,
             },
         )];
         let err = ReplayCursor::new(log).expect_err("a truncated head must be rejected");

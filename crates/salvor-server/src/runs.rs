@@ -346,12 +346,28 @@ pub async fn replay(
     Ok(Json(json::run_state(&derive_state(&log), state.now())))
 }
 
+/// The refusal a client-driven run gets from [`resume`], however this server
+/// learned the run is client-driven. One function so the two checks below can
+/// never drift into saying different things about the same rule.
+fn client_driven_refusal(run_id: RunId) -> ApiError {
+    ApiError::ClientDrivenRun(format!(
+        "run {} is client-driven; its client resumes it by re-opening \
+         POST /v1/client-runs, not this endpoint, so this server never becomes a second \
+         writer against the client's lease",
+        run_id.as_uuid()
+    ))
+}
+
 /// `POST /v1/runs/{id}/resume`: continue a run, dispatching on its state.
 ///
-/// Refused with `409 client_driven_run` for a run opened through
+/// Refused with `409 client_driven_run` for a run driven through
 /// `/v1/client-runs`, before its state is even read: that run's client is its
 /// only legal driver, and this endpoint starting a background driver for it
-/// would race the client's own drive token for the same log positions.
+/// would race the client's own drive token for the same log positions. Both
+/// kinds of evidence refuse it, this process's lease registry and the
+/// `driven_by` its `RunStarted` records, so a server restart does not turn the
+/// endpoint back into a second writer for a run whose client is still driving
+/// it.
 pub async fn resume(
     State(state): State<AppState>,
     Path(run_id_text): Path<String>,
@@ -367,17 +383,24 @@ pub async fn resume(
     // even when the agent the run recorded happens to be registered here too.
     // Mirrors the wake sweeper's own check in `wake::sweep`.
     if state.is_client_run(run_id) {
-        return Err(ApiError::ClientDrivenRun(format!(
-            "run {} is client-driven; its client resumes it by re-opening \
-             POST /v1/client-runs, not this endpoint, so this server never becomes a second \
-             writer against the client's lease",
-            run_id.as_uuid()
-        )));
+        return Err(client_driven_refusal(run_id));
     }
 
     let request: ResumeRequest = parse_body_or_default(&body)?;
 
     let log = state.store().read_log(run_id).await.map_err(store_error)?;
+
+    // The same refusal again, on the log's own evidence this time. The lease
+    // registry above answers only for runs this process opened, so after a
+    // restart it says nothing about a run a client is still driving, and
+    // without this check a restart would quietly turn this endpoint back into
+    // a second writer against that client's lease. The run's `RunStarted`
+    // records who drives it and outlives the process, so it is what decides
+    // here. Before the log's state is read, exactly as above.
+    if crate::client_runs::log_is_client_driven(&log) {
+        return Err(client_driven_refusal(run_id));
+    }
+
     if log.is_empty() {
         return Err(unknown_run(run_id));
     }
@@ -538,6 +561,25 @@ pub(crate) async fn redrive(
 /// /v1/client-runs/{id}/resolve` is the client's own path when it still holds
 /// its lease; this is the same override [`abandon`] already is for any run,
 /// whatever drove it.
+///
+/// # It clears a client-driven run's lease
+///
+/// A dangling write is a driver that never came back to record what its write
+/// did, and the caller here presents no drive token, so it is not that driver.
+/// Recording the completion over its head therefore says the driver is gone,
+/// and the lease it left behind is holding the run for nobody: the run would
+/// stay `409 lease_held` against its own client's next open for the rest of the
+/// TTL, right after an operator unstuck it. So a recorded resolution drops the
+/// lease, and the client re-opens straight away and carries on from the log.
+///
+/// Only the lease goes; the run's recorded `driven_by: client` stays, so it is
+/// still a client-driven run to every surface that reads the log (this endpoint
+/// included, [`resume`] still refusing it, the wake sweeper still skipping it).
+///
+/// `salvor resolve` cannot go through here: the CLI writes the store directly
+/// and has no way to reach a running server's memory, so a lease left on a live
+/// server survives a CLI resolve and lapses on its own. The client's next open
+/// then waits at most the TTL.
 pub async fn resolve(
     State(state): State<AppState>,
     Path(run_id_text): Path<String>,
@@ -555,6 +597,12 @@ pub async fn resolve(
     // inline rather than in a task.
     match state.runtime().resolve(run_id, request.output).await {
         Ok(_) => {
+            // The driver whose write dangled is gone (see above), so the lease
+            // it left is holding the run for nobody. Asked of a server-driven
+            // run this is simply a no-op: there is no lease on one.
+            if state.is_client_run(run_id) || crate::client_runs::log_is_client_driven(&log) {
+                state.clear_client_lease(run_id, None);
+            }
             let log = state.store().read_log(run_id).await.map_err(store_error)?;
             let derived = derive_state(&log);
             Ok(Json(json!({

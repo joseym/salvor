@@ -1,0 +1,39 @@
+# A tool the CLIENT performs, declared for the Python LangChain middleware's suite.
+#
+# Loaded with `salvor serve --client-tool tests/client-tools/lookup-order.toml`.
+# The middleware sends the tool's name and the model's arguments and nothing
+# else; the effect class, both schemas and the idempotency key are decided here,
+# by the operator, which is the whole point of the client-tool surface.
+
+name = "lookup_order"
+
+# A read: nothing outside the process changes, so an intent left without a
+# completion is a call to retry rather than a run to stop for a person.
+effect = "read"
+
+# The middleware records what the tool returned, so self-completion is on and
+# there is an output schema for the report to be checked against.
+trust_completion = true
+
+[input_schema]
+type = "object"
+required = ["order_id"]
+description = "Look up an order that has already been placed."
+
+[input_schema.properties.order_id]
+type = "string"
+description = "The order to look up, for example ORD-7781."
+
+[output_schema]
+type = "object"
+required = ["order_id", "status", "total_cents"]
+
+[output_schema.properties.order_id]
+type = "string"
+
+[output_schema.properties.status]
+type = "string"
+enum = ["paid", "pending", "refunded"]
+
+[output_schema.properties.total_cents]
+type = "integer"

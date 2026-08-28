@@ -480,6 +480,7 @@ mod tests {
             agent_def_hash: "sha256:agent".into(),
             input: json!({}),
             labels: None,
+            driven_by: None,
         }
     }
 

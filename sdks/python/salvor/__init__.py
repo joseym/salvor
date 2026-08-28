@@ -13,10 +13,17 @@ the write-ahead reconciliation rule.
     for event in (stream := client.stream_events(run_id)):
         print(event.seq, event.kind)
     print(stream.end.status.output)
+
+Every surface here comes in two transports over one set of rules. `AsyncClient`
+and `AsyncClientRunDriver` carry the same method names as `Client` and
+`ClientRunDriver`, awaited, and streaming reads `async for`. The rules they both
+apply, the wire shapes, the event tail's cursor, the durable timer's arithmetic,
+live in one sans-IO core, so the two transports cannot drift apart.
 """
 
 from .errors import (
     DivergenceError,
+    LeaseHeldError,
     NeedsReconciliationError,
     SalvorAPIError,
     SalvorError,
@@ -77,13 +84,19 @@ __all__ = [
     "ClientRunDriver",
     "ModelStepResult",
     "ModelStepStream",
+    "AsyncClient",
+    "AsyncEventStream",
+    "AsyncClientRunDriver",
+    "AsyncModelStepStream",
     "ClientToolDecl",
     "ClientToolIntentResult",
+    "ClientModelIntentResult",
     "Waking",
     "SalvorError",
     "SalvorAPIError",
     "NeedsReconciliationError",
     "DivergenceError",
+    "LeaseHeldError",
     "SalvorStreamError",
     "Event",
     "EndFrame",
@@ -147,8 +160,8 @@ except _PackageNotFoundError:  # pragma: no cover - a source checkout, not an in
 def __getattr__(name: str):
     """Lazily resolve the HTTP client on first access.
 
-    ``Client`` and ``EventStream`` live in :mod:`salvor.client`, which imports
-    httpx. Importing them here would make httpx a package-import-time
+    ``Client`` and ``EventStream`` live in :mod:`salvor.client`, and their async
+    twins in :mod:`salvor.async_client`, all of which import httpx. Importing them here would make httpx a package-import-time
     requirement, so authoring a graph document (``from salvor import
     GraphBuilder``) would fail without httpx installed. Resolving them through
     a module-level ``__getattr__`` (PEP 562) means httpx is imported only when
@@ -162,14 +175,28 @@ def __getattr__(name: str):
         globals()["Client"] = Client
         globals()["EventStream"] = EventStream
         return globals()[name]
+    if name in ("AsyncClient", "AsyncEventStream"):
+        from .async_client import AsyncClient, AsyncEventStream
+
+        globals()["AsyncClient"] = AsyncClient
+        globals()["AsyncEventStream"] = AsyncEventStream
+        return globals()[name]
+    if name in ("AsyncClientRunDriver", "AsyncModelStepStream"):
+        from .async_client_runs import AsyncClientRunDriver, AsyncModelStepStream
+
+        globals()["AsyncClientRunDriver"] = AsyncClientRunDriver
+        globals()["AsyncModelStepStream"] = AsyncModelStepStream
+        return globals()[name]
     if name in (
         "ClientRunDriver",
         "ModelStepResult",
         "ModelStepStream",
         "ClientToolIntentResult",
+        "ClientModelIntentResult",
         "Waking",
     ):
         from .client_runs import (
+            ClientModelIntentResult,
             ClientRunDriver,
             ClientToolIntentResult,
             ModelStepResult,
@@ -181,6 +208,7 @@ def __getattr__(name: str):
         globals()["ModelStepResult"] = ModelStepResult
         globals()["ModelStepStream"] = ModelStepStream
         globals()["ClientToolIntentResult"] = ClientToolIntentResult
+        globals()["ClientModelIntentResult"] = ClientModelIntentResult
         globals()["Waking"] = Waking
         return globals()[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

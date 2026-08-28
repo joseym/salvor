@@ -33,7 +33,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use salvor_core::{Event, EventEnvelope, PendingCall, RunId, RunStatus, derive_state};
+use salvor_core::{
+    Event, EventEnvelope, PendingCall, RunId, RunStatus, derive_state, log_is_client_driven,
+};
 use salvor_engine::{
     EngineError, ForkError, GraphOutcome, ToolResolver, WriteHazard, graph_hash, plan_fork,
     run_graph,
@@ -429,8 +431,8 @@ pub async fn wake(store_path: &Path, args: WakeArgs) -> Result<u8> {
         // that fails here is this run's own failure, not the whole sweep's: it
         // is reported on this run's line and the sweep still moves on to the
         // next due run, exactly as a drive failure does below.
-        let events_before = match store.read_log(run.run_id).await {
-            Ok(log) => log.len(),
+        let log_before = match store.read_log(run.run_id).await {
+            Ok(log) => log,
             Err(error) => {
                 failures += 1;
                 println!(
@@ -440,6 +442,16 @@ pub async fn wake(store_path: &Path, args: WakeArgs) -> Result<u8> {
                 continue;
             }
         };
+        // A client-driven run's own client wakes it on its own drive lease;
+        // re-driving it here would make this sweep a second writer racing
+        // that lease for the same positions. The server's wake sweeper
+        // already leaves these alone (see `salvor_server::wake`); this sweep
+        // must too, so it is neither driven nor counted as a failure below.
+        if log_is_client_driven(&log_before) {
+            println!("  {uuid} is client-driven; its client wakes it, this sweep left it alone");
+            continue;
+        }
+        let events_before = log_before.len();
         let outcome = resume(
             store_path,
             ResumeArgs {
@@ -759,6 +771,12 @@ enum WakeReadiness {
         /// The refusal, already formatted with its context chain.
         refusal: String,
     },
+    /// The run is client-driven (`driven_by: client` on its `RunStarted`), so
+    /// no file given here would ever drive it: a real wake leaves it alone
+    /// regardless, the same as [`wake`]'s non-dry-run sweep. Not a
+    /// [`Self::Blocked`] refusal, since nothing about the files given
+    /// is at fault, and not counted against the dry run's exit code.
+    ClientDriven,
 }
 
 impl WakeReadiness {
@@ -845,10 +863,23 @@ async fn preview_due_runs(
     for run in due {
         let uuid = run.run_id.as_uuid().to_string();
         let log = store.read_log(run.run_id).await?;
-        let (identity, readiness) = if is_graph_run(&log) {
+        let is_graph = is_graph_run(&log);
+        let identity = if is_graph {
             let recorded = recorded_graph_hash(&log)
                 .unwrap_or_else(|| "no document (its log has no GraphRunStarted event)".to_owned());
-            let readiness = match resolve_graph_document(args.graph.as_deref(), &log, &uuid) {
+            format!("graph run, recorded document {recorded}")
+        } else {
+            let recorded = recorded_agent_def_hash(&log)
+                .unwrap_or_else(|| "no definition (its log has no RunStarted event)".to_owned());
+            format!("agent run, recorded definition {recorded}")
+        };
+        // A client-driven run is left alone by a real wake regardless of what
+        // files were given, so a dry run says exactly that instead of
+        // resolving files against a run no drive will ever touch.
+        let readiness = if log_is_client_driven(&log) {
+            WakeReadiness::ClientDriven
+        } else if is_graph {
+            match resolve_graph_document(args.graph.as_deref(), &log, &uuid) {
                 Ok((path, document)) => {
                     match tool_node_without_any_agent(&document, &args.agents) {
                         Some(tool) => WakeReadiness::Blocked {
@@ -866,16 +897,9 @@ async fn preview_due_runs(
                 Err(error) => WakeReadiness::Blocked {
                     refusal: format!("{error:#}"),
                 },
-            };
-            (
-                format!("graph run, recorded document {recorded}"),
-                readiness,
-            )
+            }
         } else {
-            let recorded = recorded_agent_def_hash(&log)
-                .unwrap_or_else(|| "no definition (its log has no RunStarted event)".to_owned());
-            let readiness = match single_agent(&args.agents)
-                .and_then(|path| AgentConfig::load(path).map(|_| path))
+            match single_agent(&args.agents).and_then(|path| AgentConfig::load(path).map(|_| path))
             {
                 Ok(path) => WakeReadiness::Ready {
                     with: path.display().to_string(),
@@ -883,11 +907,7 @@ async fn preview_due_runs(
                 Err(error) => WakeReadiness::Blocked {
                     refusal: format!("{error:#}"),
                 },
-            };
-            (
-                format!("agent run, recorded definition {recorded}"),
-                readiness,
-            )
+            }
         };
         previews.push(WakePreview {
             uuid,
@@ -939,6 +959,11 @@ fn render_wake_preview(
                 out.push_str(&format!(
                     "    cannot be woken with these files: {refusal}\n"
                 ));
+            }
+            WakeReadiness::ClientDriven => {
+                out.push_str(
+                    "    is client-driven; its client wakes it, this sweep left it alone\n",
+                );
             }
         }
     }
@@ -1121,6 +1146,7 @@ pub async fn resolve(store_path: &Path, args: ResolveArgs) -> Result<u8> {
     // passed: an operator can resolve a graph run without supplying it, and
     // the printed command still needs to hint at `--graph <FILE>` then.
     let graph_run = is_graph_run(&log);
+    let client_driven = log_is_client_driven(&log);
 
     let runtime = Runtime::new(store);
     match runtime.resolve(run_id, output).await {
@@ -1132,6 +1158,7 @@ pub async fn resolve(store_path: &Path, args: ResolveArgs) -> Result<u8> {
                     &args.agents,
                     args.graph.as_deref(),
                     graph_run,
+                    client_driven,
                     Some(store_path),
                     render::DEFAULT_REPORT_WIDTH
                 )

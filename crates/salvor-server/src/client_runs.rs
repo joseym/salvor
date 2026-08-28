@@ -19,9 +19,13 @@
 //! client's cursor emits itself and that hold no secret and no side effect:
 //! `RunStarted`, `NowObserved`, `RandomObserved`, `Suspended`, `Resumed`,
 //! `SleepStarted`, `SleepCompleted`, `BudgetExceeded`, `RunCompleted`,
-//! `RunFailed`. The side-effecting steps (the model call and the tool call,
-//! which the server must perform because it holds the key or the binary) are
+//! `RunFailed`. The side-effecting steps (the model call and the tool call) are
 //! not supported here, so a model or tool event is refused with a clear error.
+//! Each has its own endpoint pair instead: [`model_step`] and [`tool_step`] for
+//! a call this server performs because it holds the key or the binary, and
+//! [`client_tool_intent`]/[`client_tool_completion`] and
+//! [`client_model_intent`]/[`client_model_completion`] for a call the CLIENT
+//! performs in its own process and reports back.
 //!
 //! # A client-driven run may sleep, and its client wakes it
 //!
@@ -50,8 +54,42 @@
 //! Opening a run mints a per-run `drive_token`, required on every append. It is
 //! the per-run gate that layers on top of the process-wide bearer: one
 //! authenticated caller still cannot drive another caller's run, and a second
-//! live driver without the current lease is refused. Re-opening a run mints a
-//! fresh lease, so a resuming tab always holds the current one.
+//! live driver without the current lease is refused.
+//!
+//! A lease is held until it lapses. Re-opening a run whose lease is still
+//! current is refused with `409 lease_held` rather than handed a fresh token,
+//! because the caller re-opening is usually not the driver that already has the
+//! run: two app instances on one thread, a duplicated tab, a retrying
+//! middleware. Handing the newest caller the lease would put both of them to
+//! work on the same log, and the one that loses the race to a position dies on
+//! a divergence after having already run the step. The driver that holds the
+//! run keeps it until it goes quiet for the lease TTL or the run finishes; the
+//! refusal says how long that is, so the second caller waits instead of
+//! polling.
+//!
+//! Lapsing is the safety net, not the way a drive is meant to end. A driver
+//! that is finished says so with [`release`], and the run is another driver's
+//! on the very next request rather than a TTL later; a driver that will be busy
+//! for longer than the TTL, inside one tool body or one streamed model call,
+//! says THAT with [`heartbeat`], and keeps the run it never actually left.
+//! Without the first, a short-lived process locks the process that follows it
+//! out for a minute for nothing; without the second, a slow step loses a run
+//! its driver is still working on. Recording a dangling write by hand drops the
+//! lease as well, because a write nobody came back to record is a driver that
+//! is gone (see [`resolve`] and [`crate::runs::resolve`]).
+//!
+//! # The lease is process-lived; the run is not
+//!
+//! The lease registry is in memory and dies with the process, which is right
+//! for a lease: a token nobody is holding any more means nothing. What must
+//! not die with it is the fact that the run is client-driven at all, because
+//! every surface that must not become a second writer (this one when a run is
+//! re-opened, [`crate::runs::resume`], the wake sweeper) turns on that fact.
+//! So the run records it: [`append`] stamps `driven_by: client` on the
+//! `RunStarted` it accepts, and [`log_is_client_driven`] reads it back. A
+//! restarted server therefore re-opens a run its client is still driving,
+//! keeps refusing to resume it, and still leaves its timer alone, none of
+//! which it could do from memory it no longer has.
 //!
 //! # Labels on a client-driven run
 //!
@@ -82,6 +120,7 @@
 //! everywhere an envelope is written.
 
 use std::convert::Infallible;
+use std::time::Duration;
 
 use axum::Json;
 use axum::body::Bytes;
@@ -91,7 +130,8 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use salvor_core::{
-    Effect, Event, EventEnvelope, LogValidator, Performer, RunId, SequenceNumber, TokenUsage,
+    Effect, Event, EventEnvelope, LogValidator, Performer, RunId, RunStatus, SequenceNumber,
+    TokenUsage, derive_state,
 };
 use salvor_llm::{ContentDelta, MessageAccumulator, StreamEvent};
 use salvor_runtime::{
@@ -107,7 +147,7 @@ use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::executor::{ModelExecutor, ModelStream};
-use crate::state::{AppState, ClientRunLease};
+use crate::state::{AppState, ClientRunLease, LeaseRelease};
 use std::sync::Arc;
 
 /// The header carrying the per-run drive token on a guarded append.
@@ -224,6 +264,43 @@ struct ClientToolCompletionRequest {
     output: Value,
 }
 
+/// The body of `POST /v1/client-runs/{id}/client-model-intent`.
+///
+/// Notice what is NOT here, next to [`ModelStepRequest`]: no `request`. The
+/// server never sees the request, because it is not the one sending it; the
+/// client hashes its own request and reports the hash. Everything this struct
+/// carries is therefore the client's claim, which is exactly the trust posture
+/// a client-performed tool call already lives under.
+#[derive(Debug, Deserialize)]
+struct ClientModelIntentRequest {
+    /// The log position the client's cursor reserved for the model intent.
+    seq: u64,
+    /// The client's canonical hash of the request it is about to send. This is
+    /// the replay-correlation key, and salvor cannot recompute it: it never
+    /// holds the request. A client that hashes inconsistently diverges against
+    /// its own log and nobody else's.
+    request_hash: String,
+    /// The full request, recorded on the intent only when the run was opened
+    /// with `record_prompts: true`, exactly as on the server-performed step.
+    /// Informational: replay correlates on `request_hash` alone.
+    #[serde(default)]
+    request_body: Option<Value>,
+}
+
+/// The body of `POST /v1/client-runs/{id}/client-model-completion`.
+#[derive(Debug, Deserialize)]
+struct ClientModelCompletionRequest {
+    /// The intent's position, which must be the pending intent at the log's end.
+    seq: u64,
+    /// What the client reports the provider returned, recorded verbatim.
+    response: Value,
+    /// The token usage the client reports for the call, in the shape
+    /// [`Event::ModelCallCompleted`] records. Required, because it is what a
+    /// token budget counts, and a completion that quietly reported none would
+    /// under-count every budget the run is held to.
+    usage: TokenUsage,
+}
+
 /// The body of `POST /v1/client-runs/{id}/resolve`.
 #[derive(Debug, Deserialize)]
 struct ResolveRequest {
@@ -233,16 +310,56 @@ struct ResolveRequest {
 }
 
 /// `POST /v1/client-runs`: open a fresh client-driven run, or re-open (resume)
-/// one this process already holds.
+/// one whose log says it is client-driven.
 ///
 /// A fresh run comes back with an empty log and a new drive token; the client
 /// appends its own `RunStarted` as the first event through the append endpoint.
 /// Re-opening a known client run returns its full recorded log and a fresh
-/// lease, for a refreshed tab to rebuild its cursor. A chosen id that already
-/// has history but is not a client-driven run this process opened is refused,
-/// so the client-driven and server-driven modes cannot collide.
+/// lease, for a refreshed tab to rebuild its cursor.
+///
+/// # A held lease is not taken away
+///
+/// A re-open only mints a fresh lease when nobody is driving the run: this
+/// process holds no lease for it (it never opened it, or it restarted), the
+/// lease it holds has lapsed because the driver went quiet for the TTL, or the
+/// run has finished and there is nothing left to drive. While a driver's lease
+/// is current, a re-open from anyone else is `409 lease_held`, carrying
+/// `details.lapses_in_seconds` so the caller knows when the hold expires.
+///
+/// The alternative, handing the run to whoever asked most recently, reads
+/// well for the one case it was written for (a tab the user refreshed, whose
+/// old driver is gone) and badly for every other: two app instances on one
+/// thread, a duplicated tab, a middleware that re-opens on a failed call. Each
+/// of those leaves two live drivers appending the same steps to one log, and
+/// the one that loses a position race takes a divergence after it has already
+/// done the work. A refreshed tab still resumes as before, because its old
+/// driver stopped presenting a token and its lease lapses.
+///
+/// A driver re-opening its OWN run, presenting its current token in the
+/// `X-Drive-Token` header, is allowed and keeps the lease it already has: it
+/// gets the recorded log back under the same token, which is what a client
+/// rebuilding its cursor after losing local state needs, and no second writer
+/// appears because the only writer is the one asking. No new token is minted,
+/// so a request already in flight under that token is not invalidated by the
+/// re-open. `record_prompts` on such a re-open is ignored; the lease keeps the
+/// setting it was opened with.
+///
+/// Two things say a run id is client-driven, and either is enough. The first is
+/// this process's own lease registry, which answers for every run opened since
+/// the server started. The second is the run's log: the `RunStarted` at its
+/// head carries `driven_by: client`, stamped by [`append`] when this server
+/// accepted it. The registry dies with the process and the log does not, so
+/// without the second an id opened before a restart would be refused as
+/// foreign, and a client-driven run would be stranded by any restart, which is
+/// the opposite of what a durable log is for. Adopting a run from its log mints
+/// a fresh lease exactly as re-opening one this process already held does; the
+/// client resumes by rebuilding its cursor from the returned log.
+///
+/// A chosen id whose history says nothing of the sort is a server-driven run,
+/// and it is still refused, so the two modes cannot collide over one store.
 pub async fn open(
     State(state): State<AppState>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
     let request: OpenRequest = parse_body(&body)?;
@@ -255,21 +372,44 @@ pub async fn open(
         None => RunId::new(),
     };
 
-    // A re-open of a run this process opened: return its log and a fresh lease.
-    if state.is_client_run(run_id) {
-        let log = state.store().read_log(run_id).await.map_err(store_error)?;
+    let log = state.store().read_log(run_id).await.map_err(store_error)?;
+
+    // A re-open: either this process opened the run (the lease registry knows
+    // it, which is also the only evidence a run opened but not yet started has)
+    // or its recorded log says it is client-driven (which survives the restart
+    // the registry does not). Return the recorded log, and a fresh lease unless
+    // a driver still holds one.
+    if state.is_client_run(run_id) || log_is_client_driven(&log) {
+        if let Some((held, remaining)) = state.current_client_lease(run_id)
+            && !run_is_finished(&log)
+        {
+            let presented = headers
+                .get(DRIVE_TOKEN_HEADER)
+                .and_then(|value| value.to_str().ok());
+            if presented != Some(held.drive_token.as_str()) {
+                return Err(lease_held(run_id, remaining));
+            }
+            // The holder re-opening its own run. It is the only writer either
+            // way, so nothing needs taking away: hand back the recorded log
+            // under the token it already has, and count the request as the
+            // proof of life it is.
+            state.touch_client_run(run_id);
+            return Ok((
+                StatusCode::OK,
+                Json(open_body(run_id, &held.drive_token, &log)),
+            ));
+        }
         let drive_token = state.lease_client_run(run_id, request.record_prompts);
         return Ok((StatusCode::OK, Json(open_body(run_id, &drive_token, &log))));
     }
 
-    // A run id with existing history that this process did not open as a
-    // client-driven run is foreign (a server-driven run, or one from before a
-    // restart): refuse it rather than adopt it.
-    let log = state.store().read_log(run_id).await.map_err(store_error)?;
+    // A run id with existing history and no client-driven marker is foreign: a
+    // server-driven run, whose driver is this process's own. Refuse it rather
+    // than adopt it and become a second writer on its log.
     if !log.is_empty() {
         return Err(ApiError::RunExists(format!(
-            "run {} already has recorded history and is not a client-driven run on this server; \
-             it cannot be opened for client-driven runs",
+            "run {} already has recorded history and its log does not record it as client-driven; \
+             it is a server-driven run, so it cannot be opened for client-driven runs",
             run_id.as_uuid()
         )));
     }
@@ -281,22 +421,109 @@ pub async fn open(
     ))
 }
 
+/// `POST /v1/client-runs/{id}/release`: hand the lease back, so the next open
+/// takes the run at once instead of waiting out the TTL.
+///
+/// A driver that is finished for now says so with this rather than by going
+/// quiet. The lapse is the safety net for a driver that cannot say anything
+/// any more (it crashed, the tab closed); it is a poor way to end a drive that
+/// ended in an orderly fashion, because the run stays unopenable for the rest
+/// of the TTL. That is exactly what a short-lived process hits: an SDK invoke
+/// returns, the process exits, and the very next process is refused
+/// `409 lease_held` for up to a minute for no reason at all.
+///
+/// Only the lease goes. The log is untouched, and the run keeps its recorded
+/// `driven_by: client`, so it is still a client-driven run: a later open adopts
+/// it exactly as it adopts one after a restart, `POST /v1/runs/{id}/resume`
+/// still refuses it, and the wake sweeper still leaves its timer to its client,
+/// all three of which read that marker rather than this registry.
+///
+/// Idempotent: a run with no lease here (already released, lapsed, or never
+/// opened by this process) answers `200` with `released: false`. Nothing to
+/// give back is not an error, because the caller's goal, a run nobody is
+/// holding, is already true. Presenting a token that is not the current lease,
+/// or none at all, IS refused (`403 invalid_drive_token`), because that caller
+/// is asking to end somebody else's hold.
+pub async fn release(
+    State(state): State<AppState>,
+    Path(run_id_text): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let run_id = parse_run_id(&run_id_text)?;
+    let presented = headers
+        .get(DRIVE_TOKEN_HEADER)
+        .and_then(|value| value.to_str().ok());
+    match state.release_client_run(run_id, presented) {
+        LeaseRelease::Released => Ok(Json(json!({ "released": true }))),
+        LeaseRelease::NoLease => Ok(Json(json!({ "released": false }))),
+        // A missing token lands here alongside a wrong one, unlike the driving
+        // endpoints, which answer `401 missing_drive_token` for it. Here the
+        // question is not "did you bring credentials" but "is this hold
+        // yours to end", and the answer to that is no either way.
+        LeaseRelease::NotTheHolder => Err(ApiError::InvalidDriveToken(format!(
+            "the presented drive token is not the current lease for run {}, so it cannot release it",
+            run_id.as_uuid()
+        ))),
+    }
+}
+
+/// `POST /v1/client-runs/{id}/heartbeat`: refresh the lease without driving.
+/// Requires the `X-Drive-Token` header.
+///
+/// Presenting the drive token has always been the heartbeat, and every driving
+/// call carries it. What that misses is the driver that is busy for longer than
+/// the TTL between two calls: a tool that takes minutes, a model body streaming
+/// to the client's own screen. Nothing refreshes the lease while that runs, so
+/// it lapses mid-work and another opener can take the run out from under a
+/// driver that never went anywhere. So a driver with a long stretch of work
+/// ahead of it beats every so often instead.
+///
+/// The answer carries `lapses_in_seconds`, the whole TTL as of this beat, which
+/// is what a client needs to pick its interval without being told the server's
+/// configuration some other way.
+///
+/// A driver could get the same effect by re-opening the run under its own token
+/// (that keeps the lease and counts as proof of life), and that is what the
+/// SDKs did before this existed. It re-reads the whole recorded log every beat
+/// to do it, which is the wrong price for saying "still here".
+pub async fn heartbeat(
+    State(state): State<AppState>,
+    Path(run_id_text): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let run_id = parse_run_id(&run_id_text)?;
+    // The lease gate IS the beat: it checks the token is this run's current
+    // lease and refreshes `last_seen` on the way through, exactly as it does
+    // for an append.
+    authorize_drive(&state, run_id, &headers)?;
+    Ok(Json(
+        json!({ "lapses_in_seconds": whole_seconds(state.client_lease_ttl()) }),
+    ))
+}
+
 /// `GET /v1/client-runs/{id}/log`: the recorded envelopes, for cursor rebuild.
 ///
 /// `?from_seq=<n>` returns only envelopes at or after `n`, so a resuming client
 /// that already holds a prefix fetches just the tail. The read needs no drive
-/// token (a second viewer may read), but it serves only client-driven runs this
-/// process opened, keeping the two modes' surfaces apart.
+/// token (a second viewer may read), and it needs no lease either: a run whose
+/// driver released it (see [`release`]), whose lease lapsed, or that this
+/// process only knows from a log written before a restart is still a
+/// client-driven run's log, and this is a read, not a step in driving it. So
+/// the gate asks the same two questions [`open`] does for the same reason (see
+/// [`log_is_client_driven`]): this process's lease registry, or, failing that,
+/// the log's own `driven_by: client` marker on its `RunStarted`. A run neither
+/// says is client-driven, because it is server-driven or unknown outright,
+/// still answers `404 unknown_run`.
 pub async fn get_log(
     State(state): State<AppState>,
     Path(run_id_text): Path<String>,
     Query(query): Query<LogQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let run_id = parse_run_id(&run_id_text)?;
-    if !state.is_client_run(run_id) {
+    let mut log = state.store().read_log(run_id).await.map_err(store_error)?;
+    if !state.is_client_run(run_id) && !log_is_client_driven(&log) {
         return Err(unknown_client_run(run_id));
     }
-    let mut log = state.store().read_log(run_id).await.map_err(store_error)?;
     if let Some(from) = query.from_seq {
         log.retain(|env| env.seq.get() >= from);
     }
@@ -365,12 +592,25 @@ pub async fn append(
         // byte-identical retry at an already-recorded position (handled just
         // below) was validated the first time it landed, so re-checking here
         // is cheap and harmless, never a behavior change.
+        //
+        // It is also where the run records who drives it. Reaching this line
+        // means the caller holds this run's lease, so the run IS client-driven,
+        // and the head of its log is the one place that fact can be written
+        // down durably. The server stamps it rather than trusting a submitted
+        // value, exactly as it does with `recorded_at` just below: what the
+        // client sent in the field is discarded, so a caller cannot mark a run
+        // client-driven anywhere but here, under a lease this server minted.
+        // Stamping before the retry comparison is what keeps a retry
+        // byte-identical: the resubmitted event is canonicalized the same way
+        // the recorded one was.
         if let Event::RunStarted {
-            labels: Some(labels),
-            ..
-        } = &candidate.event
+            labels, driven_by, ..
+        } = &mut candidate.event
         {
-            validate_labels(labels).map_err(ApiError::BadRequest)?;
+            if let Some(labels) = labels {
+                validate_labels(labels).map_err(ApiError::BadRequest)?;
+            }
+            *driven_by = Some(Performer::Client);
         }
 
         let next_seq = validator.next_seq();
@@ -504,6 +744,11 @@ pub async fn model_step(
                         seq: SequenceNumber::new(seq),
                         request_hash: request_hash.clone(),
                         request_body,
+                        // This server is about to make the call itself, so the
+                        // performer stays unrecorded: absent means salvor
+                        // witnessed it, which is what every model intent
+                        // written before the field existed meant.
+                        performed_by: None,
                     },
                 );
                 let mut validator = LogValidator::new(log);
@@ -564,6 +809,7 @@ fn plan_model_step(
     let recorded = &log[seq as usize];
     let Event::ModelCallRequested {
         request_hash: recorded_hash,
+        performed_by,
         ..
     } = &recorded.event
     else {
@@ -571,6 +817,19 @@ fn plan_model_step(
             "seq {seq} already holds a non-model event; it is not a model-step position"
         )));
     };
+    // A call the CLIENT performed is not this endpoint's to re-issue or to
+    // answer. Re-issuing it would let this server witness and record a response
+    // for an intent the log attributes to the client, smearing the one
+    // distinction `performed_by` exists to keep; and a cursor that asks this
+    // server to perform a step its own log says the client performed has
+    // genuinely diverged from that log. Close it with client-model-completion.
+    if *performed_by == Some(Performer::Client) {
+        return Err(ApiError::Divergence(format!(
+            "the model intent at seq {seq} was performed by the client, so this server may not \
+             perform or answer it; record its result with POST \
+             /v1/client-runs/{{id}}/client-model-completion"
+        )));
+    }
     if recorded_hash != request_hash {
         return Err(ApiError::Divergence(format!(
             "model-step at seq {seq} carries a request hash that differs from the recorded intent"
@@ -1129,6 +1388,23 @@ fn tool_output_body(output: &Value) -> Json<Value> {
 /// share one reconciliation contract. After it records the completion the run
 /// is drivable again, so the client re-fetches the log and its cursor sails
 /// past the once-dangling intent.
+///
+/// # The lease a resolve clears, and the one it does not
+///
+/// A dangling write means the driver that opened it never came back to record
+/// what happened, so a resolve is normally the sign that that driver is gone
+/// and the lease it left behind is holding the run for nobody. Both resolve
+/// endpoints say so the same way (see
+/// [`AppState::clear_client_lease`](crate::state::AppState::clear_client_lease)):
+/// the run's lease is dropped once the resolution is recorded, and the next
+/// open takes the run at once instead of waiting out the TTL. The operator's
+/// path, `POST /v1/runs/{id}/resolve`, is where that matters, because the
+/// caller there presents no token and is by definition not the driver.
+///
+/// This endpoint is the exception, and passes its own token to be kept. Getting
+/// in here at all means presenting the run's current lease, which is the driver
+/// saying it is right here; revoking it would strand the very caller that just
+/// proved it is alive, mid-run, over a write it is about to carry on past.
 pub async fn resolve(
     State(state): State<AppState>,
     Path(run_id_text): Path<String>,
@@ -1136,14 +1412,23 @@ pub async fn resolve(
     body: Bytes,
 ) -> Result<Json<Value>, ApiError> {
     let run_id = parse_run_id(&run_id_text)?;
-    authorize_drive(&state, run_id, &headers)?;
+    let lease = authorize_drive(&state, run_id, &headers)?;
     let request: ResolveRequest = parse_body(&body)?;
 
     match state.runtime().resolve(run_id, request.output).await {
-        Ok(_) => Ok(Json(json!({
-            "run": run_id.as_uuid().to_string(),
-            "resolved": true,
-        }))),
+        Ok(_) => {
+            // The resolve rule, with this caller's own lease held back from
+            // it. In the one case where the stored lease is no longer the one
+            // authorized above (it lapsed while the completion was being
+            // written and another driver took the run), this does clear that
+            // driver's lease, which is the same outcome it would meet on its
+            // next call anyway.
+            state.clear_client_lease(run_id, Some(&lease.drive_token));
+            Ok(Json(json!({
+                "run": run_id.as_uuid().to_string(),
+                "resolved": true,
+            })))
+        }
         Err(RuntimeError::NotReconcilable { status, .. }) => Err(ApiError::WrongState(format!(
             "run {} does not need reconciliation (status: {status}); there is no dangling write \
              to resolve",
@@ -1502,10 +1787,272 @@ pub async fn client_tool_completion(
     })))
 }
 
+/// `POST /v1/client-runs/{id}/client-model-intent`: open a model call the
+/// CLIENT performs.
+///
+/// The counterpart of [`model_step`] for a call this server does not make. The
+/// client is about to call the provider in its OWN process, with its own key
+/// and its own model configuration; this endpoint records that it is about to,
+/// so the intent is in the log before the call happens, exactly as the
+/// write-ahead rule demands of a call salvor performs itself. Requires the
+/// `X-Drive-Token` header, like every other driving endpoint.
+///
+/// # What salvor is trusting, and what it buys
+///
+/// [`model_step`] recomputes `request_hash` from the request body it was handed,
+/// so the client cannot record a hash that does not match what was sent. Here
+/// it cannot: the request never reaches this server, because this server is not
+/// the one sending it. The hash is the client's claim over its own request, and
+/// the recorded response is the client's claim about what came back, in exactly
+/// the sense a client-performed tool result is (see [`Performer`]). Salvor did
+/// not witness the call; it is trusting the report.
+///
+/// What the trust buys is the whole point of the feature: a resume replays the
+/// recorded answer instead of paying the provider for it a second time. The
+/// claim is also self-punishing rather than dangerous to anyone else, which is
+/// why it is safe to take: the hash is a key into this run's own log, so a
+/// client that hashes inconsistently diverges against its own history and
+/// nobody else's.
+///
+/// # Replay, mirroring [`client_tool_intent`] exactly
+///
+/// A recorded intent at this position whose `request_hash` matches is a replay:
+/// nothing is written, and the answer carries the recorded completion when one
+/// exists, so a middleware can short-circuit without a separate log read. A
+/// different hash there, a non-model event, or an intent the SERVER performed is
+/// `409 divergence` and nothing is written. A fresh position goes through the
+/// same [`LogValidator`] guard every other append on this surface uses.
+pub async fn client_model_intent(
+    State(state): State<AppState>,
+    Path(run_id_text): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<Value>, ApiError> {
+    let run_id = parse_run_id(&run_id_text)?;
+    let lease = authorize_drive(&state, run_id, &headers)?;
+
+    if body.len() > MAX_EVENTS_BODY {
+        return Err(ApiError::PayloadTooLarge(format!(
+            "client-model-intent body is {} bytes, over the {MAX_EVENTS_BODY}-byte cap",
+            body.len()
+        )));
+    }
+    let request: ClientModelIntentRequest = parse_body(&body)?;
+
+    let log = state.store().read_log(run_id).await.map_err(store_error)?;
+    if (request.seq as usize) < log.len() {
+        // An already-recorded position. Correlation is on the hash alone, the
+        // identical rule [`plan_model_step`] and `ReplayCursor::model_call`
+        // use: the body is informational and a log captured with bodies must
+        // replay the same as one captured without, so a re-post that omits the
+        // body it once sent is still the same call.
+        let recorded = &log[request.seq as usize];
+        let Event::ModelCallRequested {
+            request_hash: recorded_hash,
+            performed_by,
+            ..
+        } = &recorded.event
+        else {
+            return Err(ApiError::Divergence(format!(
+                "seq {} already holds a non-model event; it is not this client-model intent's \
+                 position",
+                request.seq
+            )));
+        };
+        if *performed_by != Some(Performer::Client) {
+            return Err(ApiError::Divergence(format!(
+                "the model intent at seq {} was performed by this server, not by the client",
+                request.seq
+            )));
+        }
+        if recorded_hash != &request.request_hash {
+            return Err(ApiError::Divergence(format!(
+                "the model intent at seq {} carries a request hash that differs from the recorded \
+                 one",
+                request.seq
+            )));
+        }
+        return Ok(Json(client_model_intent_body(
+            request.seq,
+            recorded_completion(&log, request.seq),
+        )));
+    }
+
+    // Recorded only when the run was opened with `record_prompts: true`, the
+    // same rule and the same `Option::then` shape the server-performed step
+    // reads off the lease. A body sent with recording off is dropped here and
+    // never written.
+    let request_body = lease
+        .record_prompts
+        .then_some(request.request_body)
+        .flatten();
+    let intent = EventEnvelope::new(
+        run_id,
+        SequenceNumber::new(request.seq),
+        state.now(),
+        Event::ModelCallRequested {
+            seq: SequenceNumber::new(request.seq),
+            request_hash: request.request_hash.clone(),
+            request_body,
+            // The whole point of the endpoint: the log says who performed this,
+            // so a later reader can tell a call salvor witnessed from a call it
+            // was told about.
+            performed_by: Some(Performer::Client),
+        },
+    );
+
+    let mut validator = LogValidator::new(log);
+    validator
+        .push(intent.clone())
+        .map_err(|error| ApiError::Divergence(error.to_string()))?;
+    state.store().append(&intent).await.map_err(append_error)?;
+    // A freshly-recorded intent can never already be settled: the append above
+    // just placed it at the log's new end, with nothing after it yet.
+    Ok(Json(client_model_intent_body(request.seq, None)))
+}
+
+/// The recorded `(response, usage)` for the model intent at `seq`, when its
+/// completion is already in `log`.
+///
+/// The append-guard only ever admits a completion for the same `seq`
+/// immediately after its intent, so it is enough to check the very next slot,
+/// the same way [`intent_is_settled`] checks a tool intent's.
+fn recorded_completion(log: &[EventEnvelope], seq: u64) -> Option<(&Value, TokenUsage)> {
+    match &log.get(seq as usize + 1)?.event {
+        Event::ModelCallCompleted {
+            seq: completed_seq,
+            response,
+            usage,
+        } if completed_seq.get() == seq => Some((response, *usage)),
+        _ => None,
+    }
+}
+
+/// The `200` client-model-intent body: the position, whether this position's
+/// completion is ALREADY recorded, and, when it is, that completion.
+///
+/// `settled` is the same flag [`intent_body`] carries for a tool intent, and it
+/// is here for a sharper version of the same reason. A middleware re-posting an
+/// intent it believes it already opened cannot otherwise tell "safe to call the
+/// provider" from "already called, do not pay for it again", and paying twice
+/// is precisely what recording the call was for. So the recorded completion
+/// rides along on a settled answer: the middleware short-circuits on the
+/// response it already has, with no second request.
+fn client_model_intent_body(seq: u64, completion: Option<(&Value, TokenUsage)>) -> Value {
+    match completion {
+        Some((response, usage)) => json!({
+            "seq": seq,
+            "settled": true,
+            "response": response,
+            "usage": usage,
+        }),
+        None => json!({ "seq": seq, "settled": false }),
+    }
+}
+
+/// `POST /v1/client-runs/{id}/client-model-completion`: record that a
+/// client-performed model call finished.
+///
+/// The client called the provider in its own process and is now reporting the
+/// response and what it cost. Requires the `X-Drive-Token` header.
+///
+/// It refuses, recording nothing, when:
+///
+/// - the log does not end at a model intent, or ends at one whose `seq` is not
+///   the one this request names (`409 divergence`);
+/// - the pending intent was performed by the SERVER (`403`): a client must not
+///   close a call salvor made, since salvor holds the real response.
+///
+/// That is the whole list, and it is shorter than [`client_tool_completion`]'s
+/// on purpose. The tool completion's remaining refusals all come from the
+/// operator's declaration (`trust_completion`, `output_schema`,
+/// `require_equal`), and a model call has no such declaration to check against:
+/// its response shape is the provider's, not an operator's. The response is
+/// recorded verbatim, as the server-performed step records its own.
+///
+/// Once recorded, the completion is byte-identical to a server-performed one
+/// (it goes through the same [`append_completion`] helper), so the fold treats
+/// the call exactly the same: pending while open, closed by this event, and its
+/// tokens counted toward every budget the run is held to.
+pub async fn client_model_completion(
+    State(state): State<AppState>,
+    Path(run_id_text): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<Value>, ApiError> {
+    let run_id = parse_run_id(&run_id_text)?;
+    authorize_drive(&state, run_id, &headers)?;
+
+    if body.len() > MAX_EVENTS_BODY {
+        return Err(ApiError::PayloadTooLarge(format!(
+            "client-model-completion body is {} bytes, over the {MAX_EVENTS_BODY}-byte cap",
+            body.len()
+        )));
+    }
+    let request: ClientModelCompletionRequest = parse_body(&body)?;
+
+    // A completion settles the log's LAST event, which must be the intent this
+    // request names. Anything else and the client and the log disagree about
+    // what is outstanding.
+    let log = state.store().read_log(run_id).await.map_err(store_error)?;
+    let pending = log.last().ok_or_else(|| {
+        ApiError::Divergence(format!(
+            "run {} has recorded nothing, so it has no client-performed model call to complete",
+            run_id.as_uuid()
+        ))
+    })?;
+    let Event::ModelCallRequested {
+        seq: intent_seq,
+        performed_by,
+        ..
+    } = &pending.event
+    else {
+        return Err(ApiError::Divergence(format!(
+            "run {} does not end at a model intent, so there is no model call to complete",
+            run_id.as_uuid()
+        )));
+    };
+    if intent_seq.get() != request.seq {
+        return Err(ApiError::Divergence(format!(
+            "the pending model intent is at seq {}, not the seq {} this completion names",
+            intent_seq.get(),
+            request.seq
+        )));
+    }
+    // A client may close only a call a client made. The server-performed
+    // model-step records its own completion from the response it saw, so a
+    // client completion there would be overwriting a witnessed fact with a
+    // claim.
+    if *performed_by != Some(Performer::Client) {
+        return Err(ApiError::ClientCompletionRefused(format!(
+            "the pending model call at seq {} was performed by this server, not by the client, so \
+             a client may not record its completion",
+            request.seq
+        )));
+    }
+
+    // The same guard and the same helper the server-performed model step
+    // records its own completion with, so the two surfaces write byte-identical
+    // `ModelCallCompleted` events.
+    append_completion(
+        &state,
+        run_id,
+        request.seq,
+        &request.response,
+        request.usage,
+    )
+    .await?;
+    Ok(Json(json!({
+        "seq": request.seq,
+        "completed": true,
+    })))
+}
+
 /// Refuses a model or tool event on the generic append: those are recorded
 /// through the server-performed model-step and tool-step endpoints, or, for a
 /// call the CLIENT performs in its own process, through the client-tool-intent
-/// and client-tool-completion endpoints. All four kinds stay refused here.
+/// and client-tool-completion endpoints, or the client-model-intent and
+/// client-model-completion pair. All four kinds stay refused here.
 ///
 /// A client-performed tool call is possible, in other words; it is just not
 /// possible by hand-appending an event. That is the same rule the server-
@@ -1513,6 +2060,14 @@ pub async fn client_tool_completion(
 /// input check, and the idempotency key are the server's to decide from an
 /// operator's declaration, and an event submitted whole would carry the caller's
 /// answers to all three.
+///
+/// A client-performed MODEL call is possible on the same terms, and stays
+/// refused here for a narrower reason: the endpoints are where `performed_by`
+/// is stamped, where prompt recording is read off the run's lease rather than
+/// taken from the request, and where a completion is checked against the intent
+/// it claims to close. An event submitted whole would carry the caller's
+/// answers to all three, including the ability to write `performed_by: null` on
+/// a call salvor never made and pass a claim off as a witnessed fact.
 fn reject_side_effecting_kind(candidate: &EventEnvelope) -> Result<(), ApiError> {
     use salvor_core::Event;
     let kind = match &candidate.event {
@@ -1524,7 +2079,8 @@ fn reject_side_effecting_kind(candidate: &EventEnvelope) -> Result<(), ApiError>
     };
     Err(ApiError::UnsupportedEventKind(format!(
         "the generic append accepts control and context events only; `{kind}` is recorded through \
-         the model-step or tool-step endpoint"
+         the model-step or tool-step endpoint, or, for a call the client performs itself, through \
+         the client-model or client-tool endpoint pair"
     )))
 }
 
@@ -1547,6 +2103,28 @@ fn is_sleeping(log: &[EventEnvelope]) -> bool {
             _ => None,
         })
         .unwrap_or(false)
+}
+
+/// Whether `log` is a client-driven run's own log, on the log's own evidence:
+/// the `RunStarted` at its head carries `driven_by: client`.
+///
+/// This is the durable half of the answer to "who drives this run". The other
+/// half is [`AppState::is_client_run`], the in-memory lease registry, which is
+/// authoritative only for runs this process opened and knows nothing after a
+/// restart. Every surface that must not become a second writer against a
+/// client's drive token asks both: [`open`] (to adopt rather than refuse a run
+/// from an earlier process), [`crate::runs::resume`] (to keep refusing it), and
+/// the wake sweeper (to keep leaving its timer to its client). Asking only the
+/// registry would make a restart quietly re-arm this server as a driver of runs
+/// it does not own.
+///
+/// The check itself lives in [`salvor_replay::log_is_client_driven`], the
+/// pure crate both this server and `salvor-cli`'s `wake` sweep depend on, so
+/// the two processes that must each leave a client-driven run alone read the
+/// same marker the same way. This wrapper only narrows visibility to the
+/// crate, matching the narrower one this module used before the check moved.
+pub(crate) fn log_is_client_driven(log: &[EventEnvelope]) -> bool {
+    salvor_replay::log_is_client_driven(log)
 }
 
 /// The per-run lease gate shared by every driving endpoint: the run must be a
@@ -1595,6 +2173,51 @@ fn parse_run_id(text: &str) -> Result<RunId, ApiError> {
     Uuid::parse_str(text).map(RunId::from_uuid).map_err(|_| {
         ApiError::BadRequest(format!("`{text}` is not a valid run id (expected a UUID)"))
     })
+}
+
+/// Whether a run's log says it is over, so no driver could still be working on
+/// it and a re-open may take it regardless of any lease left behind.
+///
+/// This asks the recorded log, not the lease, because a driver that completed a
+/// run and then vanished leaves a lease that is still current for the rest of
+/// the TTL. Refusing a re-open on that would make the last minute of every
+/// finished run needlessly unopenable, and there is nothing to protect: a
+/// finished run takes no more appends from anyone.
+fn run_is_finished(log: &[EventEnvelope]) -> bool {
+    matches!(
+        derive_state(log).status,
+        RunStatus::Completed { .. } | RunStatus::Failed { .. } | RunStatus::Abandoned { .. }
+    )
+}
+
+/// The refusal for a re-open of a run whose driver still holds a current lease,
+/// naming how long the hold has left, rounded up to whole seconds by
+/// [`whole_seconds`] so the number is always a time at which retrying works.
+fn lease_held(run_id: RunId, remaining: Duration) -> ApiError {
+    let lapses_in_seconds = whole_seconds(remaining);
+    ApiError::LeaseHeld {
+        message: format!(
+            "another driver holds run {}; its lease lapses in {lapses_in_seconds}s if that \
+             driver goes quiet, and re-opening works then (or as soon as the run finishes)",
+            run_id.as_uuid()
+        ),
+        lapses_in_seconds,
+    }
+}
+
+/// A lease duration as the whole seconds the wire carries, for the `lease_held`
+/// refusal and the heartbeat answer alike.
+///
+/// Rounded UP, and never below 1. Rounding down would let a hold with a
+/// fraction of a second left report `0`, and a caller reading that as "try
+/// again now" would come straight back into the same refusal; rounding up means
+/// the number is always a time at which retrying can actually work. The same
+/// reasoning covers a heartbeat interval: a driver told `0` would beat in a
+/// tight loop.
+fn whole_seconds(duration: Duration) -> i64 {
+    i64::try_from(duration.as_nanos().div_ceil(1_000_000_000))
+        .unwrap_or(i64::MAX)
+        .max(1)
 }
 
 /// The not-found error for a run that is not a client-driven run here.

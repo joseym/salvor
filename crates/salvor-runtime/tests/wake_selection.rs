@@ -42,6 +42,7 @@ fn started() -> Event {
         agent_def_hash: "sha256:wake-selection".to_owned(),
         input: json!("go"),
         labels: None,
+        driven_by: None,
     }
 }
 

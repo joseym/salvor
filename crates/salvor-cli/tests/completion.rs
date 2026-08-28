@@ -67,6 +67,7 @@ async fn seed_agent_run(path: &Path) -> RunId {
             agent_def_hash: AGENT.into(),
             input: json!("salvage the waratah"),
             labels: None,
+            driven_by: None,
         },
     );
     store.append(&envelope).await.expect("seed append");

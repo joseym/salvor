@@ -14,6 +14,15 @@ authors = [{ name = "Salvor" }]
 # read the event tail needs; nothing else is required.
 dependencies = ["httpx>=0.24"]
 
+# The LangChain middleware is an extra, so `import salvor` pulls none of it in
+# and the plain client keeps its one runtime dependency. The floor is LangChain
+# 1.0, the release whose `AgentMiddleware` carries `wrap_model_call` and
+# `wrap_tool_call` (and their awaited twins, which is what
+# `salvor.langchain` actually sits in); the ceiling is the next major, because
+# those hook names are the whole surface this adapter is written against.
+[project.optional-dependencies]
+langchain = ["langchain>=1.0,<2", "langchain-core>=1.0,<2"]
+
 [project.urls]
 Repository = "https://github.com/joseym/salvor"
 

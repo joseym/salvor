@@ -1,0 +1,35 @@
+# The write half of the suite's tool pair: a call that changes something outside
+# the process, so a recorded intent with no completion after it is a run that
+# stops for a human rather than one that quietly retries itself.
+
+name = "stamp_ledger"
+
+effect = "write"
+
+trust_completion = true
+
+# The reported `order_id` must equal the one the intent recorded. The output
+# schema is a shape check and cannot know which order was authorized; this is
+# the field-level equality the shape check cannot do.
+require_equal = ["order_id"]
+
+[input_schema]
+type = "object"
+required = ["order_id", "note"]
+description = "Write one line into the order's ledger."
+
+[input_schema.properties.order_id]
+type = "string"
+
+[input_schema.properties.note]
+type = "string"
+
+[output_schema]
+type = "object"
+required = ["order_id", "entry_id"]
+
+[output_schema.properties.order_id]
+type = "string"
+
+[output_schema.properties.entry_id]
+type = "string"

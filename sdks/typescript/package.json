@@ -10,7 +10,12 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    }
+    },
+    "./langchain": {
+      "types": "./dist/langchain/index.d.ts",
+      "default": "./dist/langchain/index.js"
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
@@ -27,7 +32,21 @@
   "engines": {
     "node": ">=18"
   },
+  "peerDependencies": {
+    "@langchain/core": ">=1.0.0 <2",
+    "langchain": ">=1.0.0 <2"
+  },
+  "peerDependenciesMeta": {
+    "@langchain/core": {
+      "optional": true
+    },
+    "langchain": {
+      "optional": true
+    }
+  },
   "devDependencies": {
+    "@langchain/core": "^1.2.9",
+    "langchain": "^1.5.10",
     "typescript": "^5.4.0"
   }
 }

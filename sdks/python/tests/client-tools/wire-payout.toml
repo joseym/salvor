@@ -1,0 +1,41 @@
+# A write whose operator will not let the client close the call.
+#
+# The suite's copy of `examples/client-tools/wire-payout.toml`, cut down to the
+# arguments this file's scripted model produces. `trust_completion = false` is
+# the whole point of it: the middleware performs the call, then stops and says a
+# person has to confirm what it did, because salvor refuses a completion
+# reported by the party that performed the write.
+
+name = "wire_payout"
+
+effect = "write"
+
+trust_completion = false
+
+[input_schema]
+type = "object"
+required = ["order_id", "amount_cents"]
+description = "Wire a payout for an order whose card refund is not available."
+
+[input_schema.properties.order_id]
+type = "string"
+
+[input_schema.properties.amount_cents]
+type = "integer"
+
+# Declared and still checked, even though no client completion will ever reach
+# it: dropping it would refuse a completion for a second reason and hide which
+# rule is doing the work here.
+[output_schema]
+type = "object"
+required = ["provider_transfer_id", "status", "amount_cents"]
+
+[output_schema.properties.provider_transfer_id]
+type = "string"
+
+[output_schema.properties.status]
+type = "string"
+enum = ["succeeded", "pending"]
+
+[output_schema.properties.amount_cents]
+type = "integer"

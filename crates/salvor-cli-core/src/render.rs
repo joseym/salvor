@@ -392,6 +392,7 @@ pub fn resolved_report(
     agents: &[PathBuf],
     graph: Option<&Path>,
     graph_run: bool,
+    client_driven: bool,
     store: Option<&Path>,
     width: usize,
 ) -> String {
@@ -404,25 +405,36 @@ pub fn resolved_report(
         "",
         "",
     );
-    let mut command = format!("salvor resume {run_uuid}{}", store_flag(store));
-    match graph {
-        Some(graph) => command.push_str(&format!(" --graph {}", graph.display())),
-        None if graph_run => command.push_str(" --graph <FILE>"),
-        None => {}
-    }
-    if agents.is_empty() {
-        command.push_str(" --agent <FILE>");
+    if client_driven {
+        out.push_str(&wrap(
+            "this run is client-driven; its client picks up the resolution on its next drive \
+             (for a LangChain thread, invoke the thread again)",
+            width,
+            "\n  ",
+            "  ",
+        ));
+        out.push_str(".\n");
     } else {
-        for agent in agents {
-            command.push_str(&format!(" --agent {}", agent.display()));
+        let mut command = format!("salvor resume {run_uuid}{}", store_flag(store));
+        match graph {
+            Some(graph) => command.push_str(&format!(" --graph {}", graph.display())),
+            None if graph_run => command.push_str(" --graph <FILE>"),
+            None => {}
         }
+        if agents.is_empty() {
+            command.push_str(" --agent <FILE>");
+        } else {
+            for agent in agents {
+                command.push_str(&format!(" --agent {}", agent.display()));
+            }
+        }
+        // No `--input`: a resolved run is a crashed run whose missing completion
+        // was just recorded by hand, so `resume` recovers it rather than resuming a
+        // parked one, and `recover` ignores `--input` (it warns and drops it). The
+        // command printed here is meant to be copied as it stands, so it carries
+        // only flags that do something.
+        out.push_str(&format!("\n  {command}\n"));
     }
-    // No `--input`: a resolved run is a crashed run whose missing completion
-    // was just recorded by hand, so `resume` recovers it rather than resuming a
-    // parked one, and `recover` ignores `--input` (it warns and drops it). The
-    // command printed here is meant to be copied as it stands, so it carries
-    // only flags that do something.
-    out.push_str(&format!("\n  {command}\n"));
     out
 }
 
@@ -1171,6 +1183,7 @@ mod tests {
                 &[PathBuf::from("agent.toml")],
                 None,
                 false,
+                false,
                 Some(sample_store()),
                 40
             )),
@@ -1178,6 +1191,7 @@ mod tests {
                 UUID,
                 &[PathBuf::from("agent.toml")],
                 None,
+                false,
                 false,
                 Some(sample_store()),
                 100
@@ -1205,6 +1219,7 @@ mod tests {
             &[PathBuf::from("agents/writer.toml")],
             None,
             false,
+            false,
             Some(sample_store()),
             40,
         );
@@ -1217,7 +1232,7 @@ mod tests {
         // A `resolve` that was given no `--agent`/`--graph` still prints a
         // parseable command, with a bracketed placeholder standing in for the
         // one thing it does not know.
-        let unfilled = resolved_report(UUID, &[], None, false, Some(sample_store()), 40);
+        let unfilled = resolved_report(UUID, &[], None, false, false, Some(sample_store()), 40);
         assert!(
             unfilled
                 .lines()
@@ -1231,7 +1246,8 @@ mod tests {
         // caller still knows from the run's own log that this is a graph run,
         // so the printed command hints at both placeholders rather than
         // silently dropping `--graph`.
-        let unfilled_graph = resolved_report(UUID, &[], None, true, Some(sample_store()), 40);
+        let unfilled_graph =
+            resolved_report(UUID, &[], None, true, false, Some(sample_store()), 40);
         assert!(
             unfilled_graph.lines().any(|line| line
                 == format!(
@@ -1280,6 +1296,7 @@ mod tests {
             &[PathBuf::from("agents/writer.toml")],
             Some(Path::new("flow.json")),
             true,
+            false,
             Some(sample_store()),
             80,
         );
@@ -1347,6 +1364,7 @@ mod tests {
                 UUID,
                 &[PathBuf::from("agent.toml")],
                 None,
+                false,
                 false,
                 Some(sample_store()),
                 WIDTH,
@@ -1442,6 +1460,7 @@ mod tests {
             UUID,
             &[PathBuf::from("agent.toml")],
             None,
+            false,
             false,
             None,
             DEFAULT_REPORT_WIDTH,

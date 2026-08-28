@@ -27,6 +27,7 @@ export type {
   ModelStepStream,
   ModelStepDelta,
   ClientToolIntentResult,
+  ClientModelIntentResult,
   Waking,
 } from "./client_runs.js";
 export {
@@ -34,6 +35,7 @@ export {
   SalvorApiError,
   NeedsReconciliationError,
   DivergenceError,
+  LeaseHeldError,
   SalvorStreamError,
 } from "./errors.js";
 export {

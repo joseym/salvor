@@ -33,9 +33,11 @@ SDK's own dependency ``httpx``. Run it with
 from __future__ import annotations
 
 import json
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -56,7 +58,12 @@ except ImportError:
     ) from None
 
 from salvor import ClientRunDriver
-from salvor.errors import DivergenceError, NeedsReconciliationError, SalvorAPIError
+from salvor.errors import (
+    DivergenceError,
+    LeaseHeldError,
+    NeedsReconciliationError,
+    SalvorAPIError,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SALVOR = REPO_ROOT / "target" / "debug" / "salvor"
@@ -91,6 +98,17 @@ def terminate(*procs: "subprocess.Popen | None") -> None:
                 proc.kill()
 
 
+def discard(workspace: "str | None") -> None:
+    """Remove a class's own temp directory, however the class ended.
+
+    Every file a case here writes (the store, the model's log) goes inside one
+    of these, so a run that failed halfway leaves nothing in the system temp
+    directory for the next one to trip over.
+    """
+    if workspace is not None:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
 class ClientRunLoopRealServer(unittest.TestCase):
     """The full loop, model step included, against the real control-plane binary."""
 
@@ -98,6 +116,7 @@ class ClientRunLoopRealServer(unittest.TestCase):
     model: subprocess.Popen
     base: str
     model_log: Path
+    workspace: str
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -108,12 +127,11 @@ class ClientRunLoopRealServer(unittest.TestCase):
         model_port = free_port()
         serve_port = free_port()
         cls.base = f"http://127.0.0.1:{serve_port}"
-        store = f"/tmp/salvor-driver-test-{serve_port}.db"
-        Path(store).unlink(missing_ok=True)
+        cls.workspace = tempfile.mkdtemp(prefix="salvor-py-")
+        store = str(Path(cls.workspace) / "driver.db")
         # The demo model logs one line per request to stderr; capturing it is
         # what lets the retry test count provider hits (the no-re-pay proof).
-        cls.model_log = Path(f"/tmp/salvor-driver-test-model-{model_port}.log")
-        cls.model_log.unlink(missing_ok=True)
+        cls.model_log = Path(cls.workspace) / "model.log"
         with cls.model_log.open("wb") as log:
             cls.model = subprocess.Popen(
                 [str(DEMO_MODEL), "--port", str(model_port), "--delay-ms", "0"],
@@ -141,6 +159,7 @@ class ClientRunLoopRealServer(unittest.TestCase):
     @classmethod
     def tearDownClass(cls) -> None:
         terminate(getattr(cls, "proc", None), getattr(cls, "model", None))
+        discard(getattr(cls, "workspace", None))
 
     def provider_hits(self) -> int:
         """How many model requests the scripted demo model has served."""
@@ -183,23 +202,30 @@ class ClientRunLoopRealServer(unittest.TestCase):
         tail = run.log(from_seq=2)
         self.assertEqual([e.seq for e in tail], [2, 3])
 
-    def test_reopen_supersedes_lease_and_returns_log(self) -> None:
+    def test_reopen_with_the_held_token_keeps_the_lease(self) -> None:
         run = ClientRunDriver.open(self.base)
         self.addCleanup(run.close)
         run.append([self.started(run, 0)])
         old_token = run.drive_token
 
-        # Re-opening the same run returns its recorded log and a fresh lease.
-        reopened = ClientRunDriver.open(self.base, run_id=run.run_id)
+        # A bare re-open, with no token, is refused while the lease is current:
+        # the rule is not "newest caller wins".
+        with self.assertRaises(LeaseHeldError) as caught:
+            ClientRunDriver.open(self.base, run_id=run.run_id)
+        self.assertEqual(caught.exception.code, "lease_held")
+        self.assertGreater(caught.exception.lapses_in_seconds, 0)
+
+        # Presenting the held lease's own token re-opens under the SAME token,
+        # so the driver that already holds the run is never made to give it up.
+        reopened = ClientRunDriver.open(
+            self.base, run_id=run.run_id, drive_token=old_token
+        )
         self.addCleanup(reopened.close)
         self.assertEqual([e.kind for e in reopened.log_envelopes], ["RunStarted"])
-        self.assertNotEqual(reopened.drive_token, old_token)
+        self.assertEqual(reopened.drive_token, old_token)
 
-        # The superseded lease no longer drives the run.
-        run.drive_token = old_token
-        with self.assertRaises(SalvorAPIError) as caught:
-            run.append([run.envelope(1, "NowObserved", now="2026-07-11T12:00:00Z")])
-        self.assertEqual(caught.exception.code, "invalid_drive_token")
+        # And that token still drives the run afterwards.
+        reopened.append([reopened.envelope(1, "NowObserved", now="2026-07-11T12:00:00Z")])
 
     def test_idempotent_reappend_is_a_no_op(self) -> None:
         run = ClientRunDriver.open(self.base)
@@ -292,6 +318,41 @@ class ClientRunLoopRealServer(unittest.TestCase):
         self.assertEqual(stream.completion.response, result.response)
         self.assertEqual(self.provider_hits(), before + 1, "streaming replay paid nothing")
 
+    def test_client_model_intent_and_completion_settle_a_client_performed_call(
+        self,
+    ) -> None:
+        run = ClientRunDriver.open(self.base)
+        self.addCleanup(run.close)
+        run.append([self.started(run, 0)])
+
+        intent = run.client_model_intent(1, "sha256:the-request")
+        self.assertEqual(intent.seq, 1)
+        self.assertFalse(intent.settled, "nothing has reported on it yet")
+        self.assertIsNone(intent.response)
+
+        run.client_model_completion(
+            1,
+            {"content": [{"type": "text", "text": "the plan"}]},
+            {"input_tokens": 10, "output_tokens": 5},
+        )
+        self.assertEqual(
+            [e.kind for e in run.log()],
+            ["RunStarted", "ModelCallRequested", "ModelCallCompleted"],
+        )
+
+        # A re-post of the same hash now reports itself settled, carrying the
+        # recorded response and usage back without a second log read.
+        settled = run.client_model_intent(1, "sha256:the-request")
+        self.assertTrue(settled.settled)
+        self.assertEqual(settled.response["content"][0]["text"], "the plan")
+        self.assertEqual(settled.usage.input_tokens, 10)
+        self.assertEqual(settled.usage.output_tokens, 5)
+
+        # A different hash at the same recorded position is a divergence: the
+        # client's cursor and the log disagree about what request was sent.
+        with self.assertRaises(DivergenceError):
+            run.client_model_intent(1, "sha256:a-different-request")
+
     def test_sleep_parks_the_run_and_only_the_deadline_wakes_it(self) -> None:
         """Three drives over one run: park, come back too soon, come back late.
 
@@ -325,8 +386,13 @@ class ClientRunLoopRealServer(unittest.TestCase):
         run_id = first.run_id
 
         # Drive two, ten minutes later: the replayed instants are the recorded
-        # ones, so the deadline has not moved and the run stays asleep.
-        early = ClientRunDriver.open(self.base, run_id=run_id)
+        # ones, so the deadline has not moved and the run stays asleep. `first`
+        # never went quiet, so its lease is still current, and this drive
+        # presents its token to re-open under it rather than being refused
+        # `lease_held`.
+        early = ClientRunDriver.open(
+            self.base, run_id=run_id, drive_token=first.drive_token
+        )
         self.addCleanup(early.close)
         early.clock = lambda: started_at + timedelta(minutes=10)
         replayed = early.sleep_for(1, timedelta(hours=1))
@@ -336,8 +402,12 @@ class ClientRunLoopRealServer(unittest.TestCase):
         self.assertEqual(len(early.log()), 3, "and appends nothing at all")
 
         # Drive three, two hours later: the deadline has passed, so this drive
-        # closes the pair itself and the run carries on to its result.
-        late = ClientRunDriver.open(self.base, run_id=run_id)
+        # closes the pair itself and the run carries on to its result. Same
+        # story: the lease is still current (this is the same held token
+        # `early` re-opened under), so this drive presents it too.
+        late = ClientRunDriver.open(
+            self.base, run_id=run_id, drive_token=early.drive_token
+        )
         self.addCleanup(late.close)
         late.clock = lambda: started_at + timedelta(hours=2)
         self.assertEqual(late.sleep_for(1, timedelta(hours=1)), wake_at)
@@ -472,6 +542,7 @@ class StreamingModelStepRealServer(unittest.TestCase):
     proc: subprocess.Popen
     endpoint: ThreadingHTTPServer
     base: str
+    workspace: str
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -483,8 +554,8 @@ class StreamingModelStepRealServer(unittest.TestCase):
         model_port = cls.endpoint.server_address[1]
         serve_port = free_port()
         cls.base = f"http://127.0.0.1:{serve_port}"
-        store = f"/tmp/salvor-driver-sse-{serve_port}.db"
-        Path(store).unlink(missing_ok=True)
+        cls.workspace = tempfile.mkdtemp(prefix="salvor-py-")
+        store = str(Path(cls.workspace) / "driver-sse.db")
         cls.proc = subprocess.Popen(
             [str(SALVOR), "--store", store, "serve", "--bind", f"127.0.0.1:{serve_port}"],
             stdout=subprocess.DEVNULL,
@@ -501,6 +572,7 @@ class StreamingModelStepRealServer(unittest.TestCase):
     @classmethod
     def tearDownClass(cls) -> None:
         terminate(getattr(cls, "proc", None))
+        discard(getattr(cls, "workspace", None))
         endpoint = getattr(cls, "endpoint", None)
         if endpoint is not None:
             endpoint.shutdown()

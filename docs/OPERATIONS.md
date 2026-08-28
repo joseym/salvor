@@ -292,8 +292,8 @@ about a second drive cron started on the same run. Running both against the
 same due run still records it once: exactly-once holds, one write completes
 the run, and the loser's drive fails on the store lock and reports the run
 as taken by another driver; nothing is recorded twice. A client-driven run
-that records a sleep is the client's to wake; the server's sweeper leaves
-client-driven runs alone.
+that records a sleep is the client's to wake; both the server's sweeper and
+`salvor wake` leave client-driven runs alone.
 
 `wake` takes the same `--agent` (repeatable) and `--graph` a `resume` would
 need, and for the same reason: the log records an agent run by its agent's

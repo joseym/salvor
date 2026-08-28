@@ -1,0 +1,66 @@
+# The desk's ordinary refund: money moves, and the desk's own report closes the
+# call.
+#
+# Loaded by the operator:
+#     salvor serve --client-tool examples/langchain/tools/refund-order.toml
+#
+# This is the tool the crash proof in `run.sh` interrupts. The app is killed
+# between the refund landing in the ledger and the completion reaching salvor,
+# which leaves the log ending at this call's intent. The next invoke runs the
+# body again at the same position, under the same derived key, and the ledger
+# collapses the duplicate because the key is already on file.
+
+name = "refund_order"
+
+# A write. An intent with no completion after it parks the run at
+# `needs_reconciliation` rather than being retried behind anyone's back.
+effect = "write"
+
+# The desk may close its own call for this tool. That is an operator's decision
+# about ordinary card refunds, and `refund-large.toml` is where it goes the
+# other way.
+trust_completion = true
+
+# The report has to be about the call that was authorized. Salvor compares each
+# named field to what the intent recorded and refuses a completion that alters
+# one, so a report cannot quietly move the refund to another order or change the
+# amount. Each name here must be required on both schemas below, or the server
+# refuses the declaration when it loads it.
+require_equal = ["order_id", "amount_cents"]
+
+[input_schema]
+type = "object"
+required = ["order_id", "amount_cents"]
+description = "Refund an order in full, up to the desk's own limit."
+
+[input_schema.properties.order_id]
+type = "string"
+description = "The order to refund, for example ORD-7781."
+
+[input_schema.properties.amount_cents]
+type = "integer"
+minimum = 1
+# The desk's limit, in the one place that can enforce it. A refund above this
+# belongs to `refund_large`, whose report a person has to confirm, and an
+# operator who moves the line moves it here rather than in the application.
+maximum = 99999
+description = "The amount to refund, in cents. Refunds above 99999 go to refund_large."
+
+[output_schema]
+type = "object"
+required = ["order_id", "amount_cents", "refund_id", "status"]
+
+[output_schema.properties.order_id]
+type = "string"
+
+[output_schema.properties.amount_cents]
+type = "integer"
+
+# The evidence. A desk can invent a status; it cannot invent the identifier its
+# payment provider handed back, which is why the schema insists on this one.
+[output_schema.properties.refund_id]
+type = "string"
+
+[output_schema.properties.status]
+type = "string"
+enum = ["succeeded"]

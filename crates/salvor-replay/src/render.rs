@@ -75,8 +75,16 @@ pub fn event_detail(event: &Event) -> String {
             short_hash(agent_def_hash),
             truncate_json(input)
         ),
-        Event::ModelCallRequested { request_hash, .. } => {
-            format!("request {}", short_hash(request_hash))
+        Event::ModelCallRequested {
+            request_hash,
+            performed_by,
+            ..
+        } => {
+            format!(
+                "request {}{}",
+                short_hash(request_hash),
+                performer_marker(*performed_by)
+            )
         }
         Event::ModelCallCompleted { usage, .. } => format!(
             "usage in {} out {}",
@@ -93,15 +101,7 @@ pub fn event_detail(event: &Event) -> String {
             let key = idempotency_key
                 .as_deref()
                 .map_or_else(String::new, |k| format!(" key {k}"));
-            // Absent (the field's default, and every entry recorded before it
-            // existed) means salvor performed the call itself: the
-            // overwhelmingly common case, so it renders nothing. Only a
-            // recorded `Performer::Client` gets a marker, in the same
-            // bracketed register as the effect class beside it.
-            let performer = match performed_by {
-                Some(Performer::Client) => " [Client]",
-                None | Some(Performer::Server) => "",
-            };
+            let performer = performer_marker(*performed_by);
             format!(
                 "{tool} [{effect:?}]{performer}{key} input {}",
                 truncate_json(input)
@@ -293,6 +293,22 @@ fn sentinel_body<'v>(output: &'v Value, key: &str) -> Option<&'v Value> {
     map.get(key)
 }
 
+/// The marker a call intent carries when the CLIENT performed it, and the
+/// empty string otherwise.
+///
+/// Absent (the field's default, and every intent recorded before the field
+/// existed) means salvor performed the call itself: the overwhelmingly common
+/// case, so it renders nothing. Only a recorded [`Performer::Client`] gets a
+/// marker, in the same bracketed register the effect class uses. Model and
+/// tool intents share this function so the same fact reads the same way on
+/// both lines.
+fn performer_marker(performed_by: Option<Performer>) -> &'static str {
+    match performed_by {
+        Some(Performer::Client) => " [Client]",
+        None | Some(Performer::Server) => "",
+    }
+}
+
 /// Shortens a `sha256:...` hash to its prefix and the first seven hex digits,
 /// so a line names a request without a 64-character wall of hex.
 fn short_hash(hash: &str) -> String {
@@ -408,6 +424,7 @@ mod tests {
             agent_def_hash: "sha256:abcdef0123456789".into(),
             input: json!({ "prompt": big }),
             labels: None,
+            driven_by: None,
         });
         assert!(detail.contains('\u{2026}'), "detail should be truncated");
         assert!(
@@ -489,6 +506,38 @@ mod tests {
         assert_eq!(
             event_detail(&event),
             r#"refund_card [Write] [Client] key sha256:d2bb005d input {"amount_cents":15900}"#
+        );
+    }
+
+    /// A model call salvor performed itself renders exactly as it always did:
+    /// the request hash and nothing else. This is the compatibility pin for
+    /// the model line, the twin of
+    /// [`detail_omits_performer_marker_when_absent`].
+    #[test]
+    fn model_detail_omits_performer_marker_when_absent() {
+        let event = Event::ModelCallRequested {
+            seq: crate::id::SequenceNumber::new(3),
+            request_hash: "sha256:abcdef0123456789".into(),
+            request_body: None,
+            performed_by: None,
+        };
+        assert_eq!(event_detail(&event), "request sha256:abcdef0\u{2026}");
+    }
+
+    /// A model call the CLIENT performed is marked the same way a
+    /// client-performed tool call is, so a person reading a history reads one
+    /// fact one way whichever kind of call carries it.
+    #[test]
+    fn model_detail_marks_a_client_performed_call() {
+        let event = Event::ModelCallRequested {
+            seq: crate::id::SequenceNumber::new(3),
+            request_hash: "sha256:abcdef0123456789".into(),
+            request_body: None,
+            performed_by: Some(Performer::Client),
+        };
+        assert_eq!(
+            event_detail(&event),
+            "request sha256:abcdef0\u{2026} [Client]"
         );
     }
 }

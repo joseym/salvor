@@ -148,6 +148,7 @@ async fn started_run(client: &reqwest::Client, base: &str) -> (String, String) {
             agent_def_hash: "sha256:agent".into(),
             input: json!({ "invoice": "INV-1" }),
             labels: None,
+            driven_by: None,
         },
     );
     let (status, body) = post(

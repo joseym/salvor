@@ -168,19 +168,31 @@ struct Inner {
     handles: Mutex<HashMap<RunId, JoinHandle<()>>>,
     // The client-driven runs this process has opened, each with its current
     // drive-token lease. This registry is what keeps the client-driven and
-    // server-driven modes from colliding over one store: the client-driven
-    // endpoints operate only on runs recorded here, so a server-driven run is
-    // never reachable through them, and a foreign run id with existing history
-    // is refused rather than adopted. It is in-memory because the drive token
-    // is a single-writer lease with a process lifetime:
-    // re-opening a run mints a fresh lease.
+    // server-driven modes from colliding over one store: the driving
+    // client-run endpoints operate only on runs recorded here, so a
+    // server-driven run is never reachable through them. It is in-memory
+    // because the drive token is a single-writer lease with a process
+    // lifetime: a token nobody is holding any more means nothing.
+    //
+    // Which is why membership here is not the whole answer to "is this run
+    // client-driven". This map knows only what this process opened; a run
+    // opened before a restart is absent from it while its client is still
+    // driving it. The durable half of the answer is the run's own
+    // `RunStarted`, which records `driven_by: client` (see
+    // `client_runs::log_is_client_driven`). The open endpoint adopts such a
+    // run back into this registry, and the surfaces that must not become a
+    // second writer (resume, the wake sweeper) consult the log directly.
     client_runs: Mutex<HashMap<RunId, ClientRunLease>>,
     // How long a client-driven run's lease stays "current" without the driver
     // presenting its token again. Past this, the run reports no attached driver
     // on GET /v1/runs (the client-driven half of the liveness evidence): the tab
-    // closed, the SDK exited, the driver crashed. Generous by default so a single
-    // long model call between drive operations never reads as a false stall; a
-    // test shortens it (see `with_client_lease_ttl`) to prove the lapse.
+    // closed, the SDK exited, the driver crashed. It is also how long the run is
+    // another driver's to take: a re-open while the lease is current is refused
+    // (`409 lease_held`), and a lapsed one is not. Generous by default so a
+    // single long model call between drive operations never reads as a false
+    // stall, which would also be a window for a second driver to take a run its
+    // first driver is still working on; a test shortens it (see
+    // `with_client_lease_ttl`) to prove the lapse.
     client_lease_ttl: Duration,
     // Runs the wake sweeper has already warned about being unwakeable here (its
     // agent or graph is not registered in this process). Only the first sighting
@@ -214,6 +226,26 @@ pub struct ClientRunLease {
     pub last_seen: OffsetDateTime,
 }
 
+/// What asking to drop a client-driven run's lease came to (see
+/// [`release_client_run`](AppState::release_client_run)).
+///
+/// The three outcomes are kept apart because the release endpoint answers each
+/// one differently: a release that dropped a lease and a release that found
+/// none are both a job done (the run is unheld either way, which is all a
+/// caller wanted), while a caller presenting somebody else's token is refused
+/// rather than quietly obeyed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaseRelease {
+    /// The caller held the lease, and it is gone.
+    Released,
+    /// There was no lease on the run to drop: it lapsed, it was released
+    /// already, or this process never opened the run at all.
+    NoLease,
+    /// A lease stands on the run and the caller did not present its token.
+    /// Nothing was dropped.
+    NotTheHolder,
+}
+
 impl AppState {
     /// Builds server state over `store`, using `factory` to turn submitted
     /// definitions into live agents. Auth is off and the clock and random
@@ -244,7 +276,8 @@ impl AppState {
 
     /// Sets how long a client-driven run's lease stays current without the
     /// driver presenting its token again (default 60s). Past this, the run
-    /// reports no attached driver. Additive and off-default; a test or a seed
+    /// reports no attached driver and a re-open may take it from the driver
+    /// that has gone quiet. Additive and off-default; a test or a seed
     /// shortens it to make a driverless client run observable quickly, exactly
     /// as [`with_poll_interval`](Self::with_poll_interval) shortens the stream
     /// poll. `salvor serve` reads it from `SALVOR_CLIENT_LEASE_TTL_SECS`.
@@ -575,9 +608,13 @@ impl AppState {
     }
 
     /// Records (or re-leases) a client-driven run, returning a fresh drive
-    /// token. Called by the open endpoint both for a new run and for a
-    /// re-open, so a resuming tab always receives a current lease and any
-    /// earlier lease is superseded (the single-writer rule from Q5).
+    /// token. Called by the open endpoint for a new run, and for a re-open the
+    /// open endpoint has already decided is allowed: no lease stands, or the
+    /// one that does has lapsed, or the run is finished. Minting here is
+    /// unconditional, so it must never be reached while another driver's lease
+    /// is current; that is the whole point of the check in
+    /// [`client_runs::open`](crate::client_runs::open), which reads
+    /// [`current_client_lease`](Self::current_client_lease) first.
     pub fn lease_client_run(&self, run_id: RunId, record_prompts: bool) -> String {
         let drive_token = format!("dt_{}", uuid::Uuid::new_v4().simple());
         self.inner
@@ -612,22 +649,48 @@ impl AppState {
         }
     }
 
+    /// A client-driven run's lease and how long is left before it lapses, when
+    /// this process holds one whose driver has proved it is alive within the
+    /// lease TTL. `None` covers both "no lease here" (a fresh process, a run
+    /// this server never opened) and "the lease lapsed" (the tab closed, the
+    /// SDK exited, the driver crashed), because to everything downstream those
+    /// are the same fact: nobody is driving this run.
+    ///
+    /// This is the one place the TTL comparison happens, so the liveness field
+    /// on `GET /v1/runs` and the re-open refusal in
+    /// [`client_runs::open`](crate::client_runs::open) can never disagree about
+    /// whether a driver is still attached. The remaining time comes back with
+    /// the lease because the refusal has to tell the second caller when to try
+    /// again, and computing it twice would invite the two answers to drift.
+    #[must_use]
+    pub fn current_client_lease(&self, run_id: RunId) -> Option<(ClientRunLease, Duration)> {
+        let now = self.now();
+        let leases = self.inner.client_runs.lock().expect("client runs lock");
+        let lease = leases.get(&run_id)?;
+        let quiet_for = (now - lease.last_seen).unsigned_abs();
+        // `checked_sub` is the lapse test: nothing left means the TTL has run
+        // out. A remaining of exactly zero is a lapse too, which keeps this
+        // strictly-less-than, the comparison this rule has always used.
+        let remaining = self.inner.client_lease_ttl.checked_sub(quiet_for)?;
+        (!remaining.is_zero()).then(|| (lease.clone(), remaining))
+    }
+
     /// Whether a live driver is currently attached to a client-driven run: this
     /// process holds a lease for it AND the driver presented its token within the
     /// lease TTL. A lapsed lease (the tab closed, the SDK exited) reports `false`:
     /// the client-driven half of the liveness evidence `GET /v1/runs` carries.
     #[must_use]
     pub fn client_run_driver_live(&self, run_id: RunId) -> bool {
-        let now = self.now();
-        let leases = self.inner.client_runs.lock().expect("client runs lock");
-        match leases.get(&run_id) {
-            Some(lease) => (now - lease.last_seen).unsigned_abs() < self.inner.client_lease_ttl,
-            None => false,
-        }
+        self.current_client_lease(run_id).is_some()
     }
 
     /// The lease for a client-driven run, if this process opened one under
-    /// `run_id`.
+    /// `run_id`, whether or not its driver has been heard from lately. The
+    /// drive-token gate wants exactly this: a driver that went quiet for longer
+    /// than the TTL and then presents its token again is still the run's writer,
+    /// as long as nobody took the run away from it in the meantime. Ask
+    /// [`current_client_lease`](Self::current_client_lease) instead when the
+    /// question is whether someone is driving right now.
     #[must_use]
     pub fn client_run(&self, run_id: RunId) -> Option<ClientRunLease> {
         self.inner
@@ -636,6 +699,61 @@ impl AppState {
             .expect("client runs lock")
             .get(&run_id)
             .cloned()
+    }
+
+    /// How long a client-driven run's lease stays current without the driver
+    /// presenting its token again, the TTL every freshness judgment here is
+    /// made against. Read by the heartbeat endpoint, which answers with it so a
+    /// driver about to be busy for a while knows how often it has to beat.
+    #[must_use]
+    pub fn client_lease_ttl(&self) -> Duration {
+        self.inner.client_lease_ttl
+    }
+
+    /// Hands a client-driven run's lease back when `presented` is the token
+    /// holding it, so the next open takes the run immediately instead of
+    /// waiting out the TTL.
+    ///
+    /// The token check and the removal happen under one lock, so a release can
+    /// only ever drop the lease the caller was actually holding, never one
+    /// minted in between by a driver that took the run over.
+    ///
+    /// Only the lease goes. Nothing about the run itself changes, its recorded
+    /// `driven_by: client` included, so a later open adopts it back exactly as
+    /// it would after a restart.
+    pub fn release_client_run(&self, run_id: RunId, presented: Option<&str>) -> LeaseRelease {
+        let mut leases = self.inner.client_runs.lock().expect("client runs lock");
+        let Some(lease) = leases.get(&run_id) else {
+            return LeaseRelease::NoLease;
+        };
+        if presented != Some(lease.drive_token.as_str()) {
+            return LeaseRelease::NotTheHolder;
+        }
+        leases.remove(&run_id);
+        LeaseRelease::Released
+    }
+
+    /// Drops a client-driven run's lease unless `keep` is the token that holds
+    /// it, reporting whether a lease went. What a resolve calls: recording a
+    /// dangling write by hand says the driver that opened that write never came
+    /// back, so the lease it left behind is holding the run for nobody and the
+    /// next open should not have to wait out the TTL for it.
+    ///
+    /// `keep` is how the client-driven resolve keeps its own lease. That caller
+    /// presented its current token to get in, which is the driver saying it is
+    /// right here, so the lease is not a dead one and taking it away would
+    /// strand a driver mid-run. Every other resolve passes `None`, because no
+    /// token was presented and nothing says a driver is still attached.
+    pub fn clear_client_lease(&self, run_id: RunId, keep: Option<&str>) -> bool {
+        let mut leases = self.inner.client_runs.lock().expect("client runs lock");
+        let Some(lease) = leases.get(&run_id) else {
+            return false;
+        };
+        if keep == Some(lease.drive_token.as_str()) {
+            return false;
+        }
+        leases.remove(&run_id);
+        true
     }
 
     /// Whether `run_id` names a client-driven run this process opened.

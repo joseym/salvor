@@ -1,0 +1,22 @@
+{
+  "name": "salvor-example-langchain",
+  "version": "0.0.0",
+  "private": true,
+  "description": "A support desk built with LangChain's createAgent, made durable by the salvor middleware.",
+  "type": "module",
+  "license": "(MIT OR Apache-2.0)",
+  "comments": {
+    "@salvor-run/client": "This checkout's SDK, by relative path, because the LangChain entry point is not on npm yet. Once it ships, this becomes an ordinary version range and nothing else here changes.",
+    "install": "run.sh installs with `npm install --install-links --omit=optional`: --install-links copies the SDK in rather than symlinking it, so its `langchain` import resolves to the one copy installed here, and --omit=optional keeps the key-free path from pulling a provider it will not use.",
+    "@langchain/anthropic": "Optional, and only for the ANTHROPIC_API_KEY path. `npm install --install-links` (without --omit=optional) fetches it."
+  },
+  "dependencies": {
+    "@salvor-run/client": "file:../../sdks/typescript",
+    "@langchain/core": "^1.2.9",
+    "langchain": "^1.5.10",
+    "zod": "^4.4.3"
+  },
+  "optionalDependencies": {
+    "@langchain/anthropic": "^1.0.0"
+  }
+}

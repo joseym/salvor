@@ -39,7 +39,7 @@ use common::run_salvor;
 use salvor_cli::commands::{
     FailedWake, ReadTiming, classify_failed_wake, describe_taken, describe_unreadable,
 };
-use salvor_core::{Event, EventEnvelope, RunId, RunStatus, SequenceNumber};
+use salvor_core::{Event, EventEnvelope, Performer, RunId, RunStatus, SequenceNumber};
 use salvor_engine::EngineError;
 use salvor_graph::Graph;
 use salvor_runtime::RuntimeError;
@@ -124,6 +124,20 @@ fn agent_head() -> Event {
         agent_def_hash: "sha256:not-registered-anywhere".to_owned(),
         input: json!("go"),
         labels: None,
+        driven_by: None,
+    }
+}
+
+/// A client-driven agent run's head: the same shape as [`agent_head`], except
+/// its `driven_by` carries the marker `wake` (and the server's own sweeper)
+/// must both read and leave alone, since re-driving it here would make this
+/// sweep a second writer racing the client's own drive lease.
+fn client_driven_head() -> Event {
+    Event::RunStarted {
+        agent_def_hash: "sha256:not-registered-anywhere".to_owned(),
+        input: json!("go"),
+        labels: None,
+        driven_by: Some(Performer::Client),
     }
 }
 
@@ -1001,6 +1015,69 @@ async fn a_due_graph_run_needs_its_document() {
     );
     assert!(!woke.status.success());
     assert_eq!(log_len(&store, &uuid).await, 2);
+}
+
+/// A due run whose log is client-driven is left alone: its own client wakes
+/// it on its own drive lease, so this sweep neither drives it nor counts it
+/// as a failure. Named on its own line, the sweep still exits 0, and its log
+/// does not grow.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_due_client_driven_run_is_left_alone() {
+    let dir = tempdir().expect("tempdir");
+    let store = dir.path().join("salvor.db");
+    let now = OffsetDateTime::now_utc();
+    let uuid = seed_sleeping(&store, client_driven_head(), now - Duration::hours(1)).await;
+
+    let woke = run_salvor(&store, &["wake"]).await;
+    let out = String::from_utf8_lossy(&woke.stdout);
+    assert!(
+        out.contains(&format!(
+            "{uuid} is client-driven; its client wakes it, this sweep left it alone"
+        )),
+        "the run is named and the reason is stated: {out}"
+    );
+    assert!(
+        woke.status.success(),
+        "leaving a client-driven run to its client is not a failure: {out}"
+    );
+    assert_eq!(
+        log_len(&store, &uuid).await,
+        2,
+        "the sweep did not drive it, so its log did not grow"
+    );
+}
+
+/// `--dry-run` gives the same answer for a client-driven run, without ever
+/// resolving `--agent`/`--graph` files against it: no file could wake a run
+/// that is not this sweep's to drive, so the preview says so instead of the
+/// usual "would wake with" line, and still exits 0.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dry_run_leaves_a_client_driven_run_alone() {
+    let dir = tempdir().expect("tempdir");
+    let store = dir.path().join("salvor.db");
+    let now = OffsetDateTime::now_utc();
+    let uuid = seed_sleeping(&store, client_driven_head(), now - Duration::hours(1)).await;
+
+    let woke = run_salvor(&store, &["wake", "--dry-run"]).await;
+    let out = String::from_utf8_lossy(&woke.stdout);
+    assert!(out.contains(&uuid), "the run is named: {out}");
+    assert!(
+        out.contains("is client-driven; its client wakes it, this sweep left it alone"),
+        "the same note appears in place of a wake-with line: {out}"
+    );
+    assert!(
+        !out.contains("would wake with"),
+        "no file is proposed for a run no file could ever wake: {out}"
+    );
+    assert!(
+        woke.status.success(),
+        "leaving a client-driven run alone does not fail a dry run: {out}"
+    );
+    assert_eq!(
+        log_len(&store, &uuid).await,
+        2,
+        "a dry run appends nothing regardless"
+    );
 }
 
 /// One run failing to drive does not end the sweep: every due run gets its

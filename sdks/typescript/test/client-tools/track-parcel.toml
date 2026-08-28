@@ -1,0 +1,38 @@
+# A read whose result's keys are not in alphabetical order, on purpose.
+#
+# Loaded with `salvor serve --client-tool test/client-tools/track-parcel.toml`.
+# A tool that returns `{ tracking_number, status, eta }` reaches the model as
+# JSON text in that order when the call is live, and comes back from the log
+# with its keys sorted when the call is replayed, because salvor stores a
+# recorded output as a map. The pair of tools declared here and in
+# `record-delivery.toml` is what proves the middleware sends the model the same
+# bytes either way; a tool that happened to return alphabetical keys would
+# prove nothing, which is how the fork went unnoticed.
+
+name = "track_parcel"
+
+effect = "read"
+
+trust_completion = true
+
+[input_schema]
+type = "object"
+required = ["parcel_id"]
+description = "Track a parcel that has already shipped."
+
+[input_schema.properties.parcel_id]
+type = "string"
+description = "The parcel to track, for example PCL-31."
+
+[output_schema]
+type = "object"
+required = ["tracking_number", "status", "eta"]
+
+[output_schema.properties.tracking_number]
+type = "string"
+
+[output_schema.properties.status]
+type = "string"
+
+[output_schema.properties.eta]
+type = "string"

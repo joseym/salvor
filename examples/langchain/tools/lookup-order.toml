@@ -1,0 +1,41 @@
+# The desk's read: what an order is and what it cost.
+#
+# Loaded by the operator, never by the app:
+#     salvor serve --client-tool examples/langchain/tools/lookup-order.toml
+#
+# The LangChain middleware sends the tool's name and the arguments the model
+# produced, and nothing else. Everything below is the operator's: the effect
+# class, both schemas, and whether a report from the client can close the call.
+
+name = "lookup_order"
+
+# A read. Nothing outside the process changes, so an intent left without a
+# completion is a call to retry, not a run to stop a person for.
+effect = "read"
+
+# The middleware records what the tool returned, so self-completion is on and
+# there is an output schema for that report to be checked against.
+trust_completion = true
+
+[input_schema]
+type = "object"
+required = ["order_id"]
+description = "Look up an order that has already been placed."
+
+[input_schema.properties.order_id]
+type = "string"
+description = "The order to look up, for example ORD-7781."
+
+[output_schema]
+type = "object"
+required = ["order_id", "status", "total_cents"]
+
+[output_schema.properties.order_id]
+type = "string"
+
+[output_schema.properties.status]
+type = "string"
+enum = ["paid", "pending", "refunded"]
+
+[output_schema.properties.total_cents]
+type = "integer"

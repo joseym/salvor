@@ -26,10 +26,11 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import { createServer as netServer } from "node:net";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
-import { existsSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 
 // Imports the built output: the driver's source uses `.js` NodeNext specifiers
 // for its sibling modules, which Node's type stripping does not resolve to
@@ -38,6 +39,7 @@ import { existsSync } from "node:fs";
 import {
   ClientRunDriver,
   DivergenceError,
+  LeaseHeldError,
   NeedsReconciliationError,
   SalvorApiError,
   openClientRun,
@@ -354,6 +356,13 @@ test("append surfaces divergence as DivergenceError", async () => {
 let model: ChildProcess | undefined;
 let serve: ChildProcess | undefined;
 let base: string | undefined;
+/**
+ * This layer's own directory under the system temp dir, holding its store.
+ * Made with `mkdtemp` and removed whole in `after`, pass or fail: a store named
+ * after a port is world-readable, outlives the run, and leaves one more triple
+ * of files behind every time the suite is run.
+ */
+let storeDir: string | undefined;
 // The demo model logs one line per request to stderr; accumulating it is what
 // lets the retry test count provider hits (the no-re-pay proof).
 let modelLog = "";
@@ -361,6 +370,7 @@ const providerHits = () => (modelLog.match(/request #/g) ?? []).length;
 
 before(async () => {
   if (!existsSync(SALVOR) || !existsSync(DEMO_MODEL)) return;
+  storeDir = mkdtempSync(join(tmpdir(), "salvor-ts-"));
   const modelPort = await freePort();
   const servePort = await freePort();
   base = `http://127.0.0.1:${servePort}`;
@@ -370,7 +380,7 @@ before(async () => {
   model.stderr?.on("data", (chunk: Buffer) => {
     modelLog += chunk.toString("utf8");
   });
-  serve = spawn(SALVOR, ["--store", `/tmp/salvor-ts-driver-${servePort}.db`, "serve", "--bind", `127.0.0.1:${servePort}`], {
+  serve = spawn(SALVOR, ["--store", join(storeDir, "driver.db"), "serve", "--bind", `127.0.0.1:${servePort}`], {
     stdio: "ignore",
     env: {
       PATH: "/usr/bin:/bin",
@@ -397,9 +407,10 @@ before(async () => {
 after(() => {
   serve?.kill();
   model?.kill();
+  if (storeDir) rmSync(storeDir, { recursive: true, force: true });
 });
 
-test("full control loop, re-open, idempotency and divergence against salvor serve", async (t) => {
+test("full control loop, re-open with the held lease, idempotency and divergence against salvor serve", async (t) => {
   if (!base) return t.skip("salvor serve not available (build with cargo build)");
 
   const run = await openClientRun(base);
@@ -409,18 +420,25 @@ test("full control loop, re-open, idempotency and divergence against salvor serv
   const appended = await run.append([
     run.envelope(0, "RunStarted", { agent_def_hash: "sha256:agent", input: { topic: "otters" } }),
     run.envelope(1, "NowObserved", { now: "2026-07-11T12:00:00Z" }),
-    run.envelope(2, "RunCompleted", { output: { done: true } }),
   ]);
-  deepStrictEqual(appended, [0, 1, 2]);
+  deepStrictEqual(appended, [0, 1]);
 
   const log = await run.log();
-  deepStrictEqual(log.map((e) => e.kind), ["RunStarted", "NowObserved", "RunCompleted"]);
+  deepStrictEqual(log.map((e) => e.kind), ["RunStarted", "NowObserved"]);
 
-  // Re-open mints a fresh lease and returns the recorded log.
+  // The lease is current, so a bare re-open (no token) is refused: the
+  // driver that already has the run keeps it, and nothing is minted.
   const oldToken = run.driveToken;
-  const reopened = await openClientRun(base, { runId: run.runId });
-  deepStrictEqual(reopened.logEnvelopes.map((e) => e.kind), ["RunStarted", "NowObserved", "RunCompleted"]);
-  ok(reopened.driveToken !== oldToken);
+  await rejects(
+    () => openClientRun(base, { runId: run.runId }),
+    (error: unknown) => error instanceof LeaseHeldError && error.lapsesInSeconds > 0,
+  );
+
+  // Presenting that lease's own token re-opens under the SAME token: the
+  // run's own driver rebuilding its cursor, not a second writer.
+  const reopened = await openClientRun(base, { runId: run.runId, driveToken: oldToken });
+  deepStrictEqual(reopened.logEnvelopes.map((e) => e.kind), ["RunStarted", "NowObserved"]);
+  strictEqual(reopened.driveToken, oldToken, "the same token comes back, not a fresh one");
 
   // Idempotent re-append of byte-identical events is a no-op reporting the seqs.
   const again = await reopened.append([
@@ -432,6 +450,15 @@ test("full control loop, re-open, idempotency and divergence against salvor serv
   await rejects(
     () => reopened.append([reopened.envelope(0, "RunStarted", { agent_def_hash: "sha256:OTHER", input: {} })]),
     (error: unknown) => error instanceof DivergenceError,
+  );
+
+  // A finished run is never held: once RunCompleted lands, anyone re-opens
+  // it straight away, no token needed.
+  await reopened.append([reopened.envelope(2, "RunCompleted", { output: { done: true } })]);
+  const finished = await openClientRun(base, { runId: run.runId });
+  deepStrictEqual(
+    finished.logEnvelopes.map((e) => e.kind),
+    ["RunStarted", "NowObserved", "RunCompleted"],
   );
 });
 
@@ -490,6 +517,58 @@ test("live model step records, returns, and never re-pays against salvor serve",
 });
 
 
+test("a client-performed model call records, replays, and diverges on a different hash", async (t) => {
+  if (!base) return t.skip("salvor serve not available");
+  // Nothing here calls a provider. That is the point: the middleware holds the
+  // key and the model configuration, calls the provider itself, and hands
+  // salvor the hash and the answer so a later drive replays the answer.
+  const run = await openClientRun(base);
+  await run.append([run.envelope(0, "RunStarted", { agent_def_hash: "sha256:agent", input: {} })]);
+
+  const before = providerHits();
+  const hash = "sha256:client-request-1";
+  const opened = await run.clientModelIntent(1, hash);
+  strictEqual(opened.settled, false, "a fresh intent has to be performed");
+  strictEqual(opened.response, undefined);
+
+  // The client calls the provider here, in its own process.
+  const answer = { content: [{ type: "text", text: "the plan" }] };
+  await run.clientModelCompletion(1, answer, { inputTokens: 10, outputTokens: 5 });
+
+  const log = await run.log();
+  deepStrictEqual(
+    log.map((e) => e.kind),
+    ["RunStarted", "ModelCallRequested", "ModelCallCompleted"],
+  );
+  strictEqual(
+    (log[1].payload as any).performed_by,
+    "client",
+    "the log says the client performed it",
+  );
+
+  // The replay: the same position and hash on a later drive answers with the
+  // recorded completion, so the middleware short-circuits and pays nothing.
+  const replayed = await run.clientModelIntent(1, hash);
+  strictEqual(replayed.settled, true);
+  deepStrictEqual(replayed.response, answer, "the recorded answer, verbatim");
+  strictEqual(replayed.usage?.inputTokens, 10);
+  strictEqual(replayed.usage?.outputTokens, 5);
+  strictEqual((await run.log()).length, 3, "the replay wrote nothing");
+  strictEqual(providerHits(), before, "no provider was called at any point");
+
+  // A different hash at that position is the client disagreeing with its own log.
+  await rejects(
+    () => run.clientModelIntent(1, "sha256:a-different-request"),
+    (error: unknown) => error instanceof DivergenceError,
+  );
+
+  // And a completion with nothing outstanding is refused.
+  await rejects(
+    () => run.clientModelCompletion(2, answer, { inputTokens: 1, outputTokens: 1 }),
+    (error: unknown) => error instanceof DivergenceError,
+  );
+});
+
 test("a sleep parks the run, refuses to wake early, and continues after the deadline", async (t) => {
   if (!base) return t.skip("salvor serve not available");
   // Three drives over one run: park, come back too soon, come back late. Each
@@ -517,8 +596,12 @@ test("a sleep parks the run, refuses to wake early, and continues after the dead
   strictEqual((await first.log()).length, 3, "asking appended nothing");
 
   // Ten minutes later: the replayed instants are the recorded ones, so the
-  // deadline has not moved and the run stays asleep.
-  const early = await openClientRun(base, { runId: first.runId });
+  // deadline has not moved and the run stays asleep. The lease `first` opened
+  // is still current at this point (nothing here waits a real minute, let
+  // alone ten), so this drive is the SAME driver taking its own run up again,
+  // presenting the token it already holds rather than a bare re-open, which
+  // a run still held would refuse.
+  const early = await openClientRun(base, { runId: first.runId, driveToken: first.driveToken });
   early.clock = () => new Date(startedAt.getTime() + 10 * 60 * 1000);
   const replayed = await early.sleepFor(1, hour);
   strictEqual(replayed.getTime(), wakeAt.getTime(), "the wake instant reproduces on replay");
@@ -526,8 +609,11 @@ test("a sleep parks the run, refuses to wake early, and continues after the dead
   strictEqual((await early.log()).length, 3, "and appends nothing at all");
 
   // Two hours later: the deadline has passed, so this drive closes the pair
-  // itself and the run carries on to its result.
-  const late = await openClientRun(base, { runId: first.runId });
+  // itself and the run carries on to its result. Same reasoning as `early`:
+  // presenting the still-current lease's own token (which re-opening under a
+  // held token always hands back unchanged, so it is still `first`'s) is what
+  // lets this drive take the run up rather than being refused.
+  const late = await openClientRun(base, { runId: first.runId, driveToken: early.driveToken });
   late.clock = () => new Date(startedAt.getTime() + 2 * hour);
   strictEqual((await late.sleepFor(1, hour)).getTime(), wakeAt.getTime());
   const woken = await late.awaitWake(3);

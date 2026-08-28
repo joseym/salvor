@@ -367,6 +367,7 @@ mod tests {
                 agent_def_hash: "sha256:a".into(),
                 input: json!(null),
                 labels: None,
+                driven_by: None,
             },
         )];
         assert!(matches!(

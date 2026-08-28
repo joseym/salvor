@@ -10,7 +10,7 @@ use common::{
 };
 use reqwest::StatusCode;
 use salvor_core::{Effect, Event, EventEnvelope, ReplayCursor, RunId, SequenceNumber};
-use salvor_server::AppState;
+use salvor_server::{AppState, ClientToolDecl, ClientToolRegistry};
 use serde_json::{Value, json};
 use std::time::Duration;
 use time::macros::datetime;
@@ -48,6 +48,7 @@ fn run_started() -> Event {
         agent_def_hash: "sha256:agent".into(),
         input: json!({ "topic": "otters" }),
         labels: None,
+        driven_by: None,
     }
 }
 
@@ -234,6 +235,7 @@ async fn divergent_bytes_at_existing_seq_is_409() {
             agent_def_hash: "sha256:DIFFERENT".into(),
             input: json!({ "topic": "badgers" }),
             labels: None,
+            driven_by: None,
         },
     );
     let (status, body) = append(&client, &server.base, &run, Some(&token), vec![divergent]).await;
@@ -340,6 +342,7 @@ async fn model_and_tool_kinds_are_rejected() {
             seq: SequenceNumber::new(1),
             request_hash: "sha256:req".into(),
             request_body: None,
+            performed_by: None,
         },
     );
     let (status, body) = append(
@@ -358,8 +361,34 @@ async fn model_and_tool_kinds_are_rejected() {
     assert_eq!(body["error"]["code"], "unsupported_event_kind");
 }
 
+/// A re-open of `run`, optionally presenting a drive token, which is how the
+/// run's own driver asks for its recorded state back without giving up the
+/// lease it already holds.
+async fn reopen(
+    client: &reqwest::Client,
+    base: &str,
+    run: &str,
+    token: Option<&str>,
+) -> (StatusCode, Value) {
+    let mut request = client
+        .post(format!("{base}/v1/client-runs"))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(json!({ "run_id": run }).to_string());
+    if let Some(token) = token {
+        request = request.header("x-drive-token", token);
+    }
+    let response = request.send().await.expect("re-open sends");
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    (status, serde_json::from_str(&text).unwrap_or(Value::Null))
+}
+
+/// The driver of a run may re-open it to get its recorded log back, and doing
+/// so costs it nothing: it presents the token it holds and keeps that same
+/// token. Minting a fresh one here would invalidate any call the driver already
+/// has in flight, for no gain, since the only writer is the one asking.
 #[tokio::test]
-async fn reopening_returns_the_log_and_a_fresh_lease() {
+async fn reopening_with_the_held_token_returns_the_log_and_keeps_the_lease() {
     let server = client_server().await;
     let client = reqwest::Client::new();
     let (run, token) = open_run(&client, &server.base).await;
@@ -373,20 +402,309 @@ async fn reopening_returns_the_log_and_a_fresh_lease() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    // Re-opening the same run returns its recorded log and a fresh token.
-    let (status, body) = post_json(
-        &client,
-        &format!("{}/v1/client-runs", server.base),
-        json!({ "run_id": run }),
-        None,
-    )
-    .await;
+    let (status, body) = reopen(&client, &server.base, &run, Some(&token)).await;
     assert_eq!(status, StatusCode::OK, "re-open: {body}");
     assert_eq!(body["log"].as_array().unwrap().len(), 1, "log comes back");
-    let fresh = body["drive_token"].as_str().unwrap();
-    assert_ne!(fresh, token, "re-opening mints a fresh lease");
+    assert_eq!(
+        body["drive_token"].as_str().unwrap(),
+        token,
+        "the holder keeps the lease it came in with"
+    );
 
-    // The superseded token no longer drives the run.
+    // And it is still the run's writer afterwards.
+    let (status, body) = append(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        vec![env_value(&run, 1, Event::NowObserved { now: ts() })],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the lease still drives: {body}");
+}
+
+/// Two drivers on one run is the failure this refusal exists to prevent: a
+/// second app instance opens the run it was handed, takes the lease, and both
+/// processes append the same steps until one loses a position race and dies on
+/// a divergence, after having already done the work. So a re-open by anyone but
+/// the holder, while the holder's lease is current, is refused, and the refusal
+/// says when the hold lapses so the caller can wait rather than poll.
+#[tokio::test]
+async fn a_second_open_is_refused_while_the_holder_lease_is_current() {
+    let server = client_server().await;
+    let client = reqwest::Client::new();
+    let (run, token) = open_run(&client, &server.base).await;
+    let (status, _) = append(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        vec![env_value(&run, 0, run_started())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // A second driver, with no token of its own, asks for the same run.
+    let (status, body) = reopen(&client, &server.base, &run, None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "the run is held: {body}");
+    assert_eq!(body["error"]["code"], "lease_held");
+    let lapses_in = body["error"]["details"]["lapses_in_seconds"]
+        .as_i64()
+        .expect("the refusal says when the hold lapses");
+    assert!(
+        lapses_in > 0,
+        "a current hold always has whole seconds left to report, got {lapses_in}"
+    );
+    assert_eq!(
+        lapses_in, 60,
+        "the whole default TTL is left: the fixed clock has not moved since the lease was minted"
+    );
+    let message = body["error"]["message"].as_str().expect("a message");
+    assert!(
+        message.starts_with(&format!("another driver holds run {run}")),
+        "the message names the run and who has it: {message}"
+    );
+    assert!(
+        message.contains("60s"),
+        "and says when the hold lapses, so a caller can wait: {message}"
+    );
+    assert!(
+        body["drive_token"].is_null(),
+        "and no lease was handed out: {body}"
+    );
+
+    // A wrong token is refused the same way: this is about who holds the run,
+    // not about whether the caller brought a token at all.
+    let (status, body) = reopen(&client, &server.base, &run, Some("dt_not_the_lease")).await;
+    assert_eq!(status, StatusCode::CONFLICT, "still held: {body}");
+    assert_eq!(body["error"]["code"], "lease_held");
+
+    // The driver that holds the run never notices any of it.
+    let (status, body) = append(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        vec![env_value(&run, 1, Event::NowObserved { now: ts() })],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the holder keeps driving through a refused open: {body}"
+    );
+}
+
+/// The hold is a hold, not a lock nobody can break: once the driver stops
+/// presenting its token for the lease TTL, the run is free and the next open
+/// takes it, superseding the lease the quiet driver was holding.
+///
+/// A real clock and a short TTL, for the reason
+/// [`client_run_driver_is_attached_while_leased_and_none_once_it_lapses`] uses
+/// them: freshness is a wall-clock property, so this lets real time pass.
+#[tokio::test]
+async fn an_open_takes_the_run_once_the_holding_driver_goes_quiet() {
+    let model = ScriptedModel::mount(vec![]).await;
+    let factory = agent_factory(
+        model.uri(),
+        "record",
+        Effect::Read,
+        CountBehavior::Record,
+        counter(),
+    );
+    Box::leak(Box::new(model));
+    let state = AppState::new(memory_store(), factory)
+        .with_poll_interval(Duration::from_millis(10))
+        .with_client_lease_ttl(Duration::from_millis(150));
+    let server = TestServer::spawn(state).await;
+    let client = reqwest::Client::new();
+
+    let (run, first_token) = open_run(&client, &server.base).await;
+    let (status, _) = append(
+        &client,
+        &server.base,
+        &run,
+        Some(&first_token),
+        vec![env_value(&run, 0, run_started())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Straight away the run is held.
+    let (status, body) = reopen(&client, &server.base, &run, None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "held: {body}");
+    assert_eq!(body["error"]["code"], "lease_held");
+
+    // The driver goes quiet: nothing refreshes the lease past the TTL.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let (status, body) = reopen(&client, &server.base, &run, None).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a lapsed hold is no hold at all: {body}"
+    );
+    let second_token = body["drive_token"].as_str().expect("a fresh lease");
+    assert_ne!(
+        second_token, first_token,
+        "taking a lapsed run mints a fresh lease"
+    );
+    assert_eq!(
+        body["log"].as_array().unwrap().len(),
+        1,
+        "with the recorded log to rebuild a cursor from"
+    );
+
+    // Now the quiet driver's token really is superseded, and it learns so on
+    // its next call rather than by racing the new one.
+    let (status, _) = append(
+        &client,
+        &server.base,
+        &run,
+        Some(&first_token),
+        vec![env_value(&run, 1, Event::NowObserved { now: ts() })],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "the superseded lease no longer drives"
+    );
+}
+
+/// A finished run is nobody's to drive, so the hold does not outlive it. The
+/// driver that completed the run may vanish without going quiet for a whole
+/// TTL first, and the run would otherwise be unopenable for the rest of it for
+/// no reason: there are no more appends to protect it from.
+#[tokio::test]
+async fn a_finished_run_re_opens_even_though_its_lease_is_current() {
+    let server = client_server().await;
+    let client = reqwest::Client::new();
+    let (run, token) = open_run(&client, &server.base).await;
+    let (status, body) = append(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        vec![
+            env_value(&run, 0, run_started()),
+            env_value(
+                &run,
+                1,
+                Event::RunCompleted {
+                    output: json!({ "done": true }),
+                },
+            ),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the run finishes: {body}");
+
+    // The lease is still current (a fixed clock: no time has passed at all),
+    // and the run still re-opens, because the log says it is over.
+    let (status, body) = reopen(&client, &server.base, &run, None).await;
+    assert_eq!(status, StatusCode::OK, "a finished run re-opens: {body}");
+    assert_ne!(
+        body["drive_token"].as_str().expect("a fresh lease"),
+        token,
+        "with a fresh lease, as any re-open of an unheld run does"
+    );
+}
+
+/// A `POST` to one of a run's lease endpoints (`release`, `heartbeat`),
+/// optionally presenting a drive token. Neither reads a body, so the empty
+/// object stands in for one.
+async fn post_lease(
+    client: &reqwest::Client,
+    base: &str,
+    run: &str,
+    verb: &str,
+    token: Option<&str>,
+) -> (StatusCode, Value) {
+    let mut request = client
+        .post(format!("{base}/v1/client-runs/{run}/{verb}"))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body("{}".to_string());
+    if let Some(token) = token {
+        request = request.header("x-drive-token", token);
+    }
+    let response = request.send().await.expect("lease call sends");
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    (status, serde_json::from_str(&text).unwrap_or(Value::Null))
+}
+
+/// Lapsing is for a driver that cannot say anything any more. One that finished
+/// on purpose hands the lease back, and the next open takes the run on the very
+/// next request instead of waiting out a minute of TTL: the cost a short-lived
+/// process pays otherwise is that the process after it cannot drive at all.
+///
+/// The run itself is untouched by a release. Its log still says client-driven,
+/// so the next open adopts it exactly as it would after a restart, and the
+/// surfaces that must not become a second writer still refuse it.
+#[tokio::test]
+async fn releasing_the_lease_lets_the_next_open_take_the_run_at_once() {
+    let server = client_server().await;
+    let client = reqwest::Client::new();
+    let (run, token) = open_run(&client, &server.base).await;
+    let (status, body) = append(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        vec![env_value(&run, 0, run_started())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the run starts: {body}");
+
+    // A beat while the driver still has work says nothing but "still here",
+    // and reports the TTL the driver has to beat inside of.
+    let (status, body) = post_lease(&client, &server.base, &run, "heartbeat", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "the beat is accepted: {body}");
+    assert_eq!(
+        body["lapses_in_seconds"], 60,
+        "the whole default TTL, as of this beat: {body}"
+    );
+
+    // Until it is released, the run is held, as it always was.
+    let (status, body) = reopen(&client, &server.base, &run, None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "held: {body}");
+
+    let (status, body) = post_lease(&client, &server.base, &run, "release", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "release: {body}");
+    assert_eq!(
+        body["released"], true,
+        "the lease was this caller's to give"
+    );
+
+    // Idempotent: giving back a lease that is already gone is the caller's goal
+    // already met, not an error.
+    let (status, body) = post_lease(&client, &server.base, &run, "release", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "second release: {body}");
+    assert_eq!(
+        body["released"], false,
+        "there was nothing left to give back"
+    );
+
+    // No wait at all: the next process picks the run straight up.
+    let (status, body) = reopen(&client, &server.base, &run, None).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a released run is free on the next request: {body}"
+    );
+    let second_token = body["drive_token"]
+        .as_str()
+        .expect("a fresh lease")
+        .to_owned();
+    assert_ne!(second_token, token, "the next opener gets its own lease");
+    assert_eq!(
+        body["log"].as_array().unwrap().len(),
+        1,
+        "and the recorded log, which a release never touched: {body}"
+    );
+
+    // The released token is not the lease any more; the fresh one drives.
     let (status, _) = append(
         &client,
         &server.base,
@@ -395,7 +713,226 @@ async fn reopening_returns_the_log_and_a_fresh_lease() {
         vec![env_value(&run, 1, Event::NowObserved { now: ts() })],
     )
     .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "the old lease is refused");
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "the driver that let go does not still write"
+    );
+    let (status, body) = append(
+        &client,
+        &server.base,
+        &run,
+        Some(&second_token),
+        vec![env_value(&run, 1, Event::NowObserved { now: ts() })],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the new lease drives: {body}");
+
+    // The run is still a client's to drive: the marker in its log outlived the
+    // lease, so this server still refuses to become a second writer on it.
+    let (status, body) = post_json(
+        &client,
+        &format!("{}/v1/runs/{run}/resume", server.base),
+        json!({}),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "resume still refuses a released client-driven run: {body}"
+    );
+    assert_eq!(body["error"]["code"], "client_driven_run");
+}
+
+/// A release ends a hold, so it is only for the caller whose hold it is.
+/// Anything else is the failure the lease exists to stop, arriving by a
+/// politer route: a second app instance that could release the run it was
+/// refused would simply take it on the next request.
+#[tokio::test]
+async fn releasing_without_the_lease_is_refused_and_the_hold_stands() {
+    let server = client_server().await;
+    let client = reqwest::Client::new();
+    let (run, token) = open_run(&client, &server.base).await;
+    let (status, _) = append(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        vec![env_value(&run, 0, run_started())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = post_lease(
+        &client,
+        &server.base,
+        &run,
+        "release",
+        Some("dt_not_the_lease"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "not yours to end: {body}");
+    assert_eq!(body["error"]["code"], "invalid_drive_token");
+
+    // No token at all is the same refusal: the question here is whose hold it
+    // is, not whether the caller brought credentials.
+    let (status, body) = post_lease(&client, &server.base, &run, "release", None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "still not yours: {body}");
+    assert_eq!(body["error"]["code"], "invalid_drive_token");
+
+    // The hold stands, refusing an open ...
+    let (status, body) = reopen(&client, &server.base, &run, None).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "the run is still held: {body}"
+    );
+    assert_eq!(body["error"]["code"], "lease_held");
+
+    // ... and the driver that holds it never noticed any of it.
+    let (status, body) = append(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        vec![env_value(&run, 1, Event::NowObserved { now: ts() })],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the holder keeps driving: {body}");
+}
+
+/// The log read needs no lease, so a release does not strand it. Releasing
+/// drops the in-memory lease entirely (unlike a re-open under the held token,
+/// which keeps it), so a gate that asked only the lease registry would answer
+/// `404` for a run whose recorded log plainly says it is client-driven. The
+/// read asks the log too, so it keeps answering.
+#[tokio::test]
+async fn get_log_answers_after_the_lease_is_released() {
+    let server = client_server().await;
+    let client = reqwest::Client::new();
+    let (run, token) = open_run(&client, &server.base).await;
+    let (status, body) = append(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        vec![
+            env_value(&run, 0, run_started()),
+            env_value(&run, 1, Event::NowObserved { now: ts() }),
+            env_value(&run, 2, Event::RandomObserved { value: 7 }),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the events land: {body}");
+
+    let (status, body) = post_lease(&client, &server.base, &run, "release", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "release: {body}");
+    assert_eq!(body["released"], true);
+
+    let (status, log) = get_json(
+        &client,
+        &format!("{}/v1/client-runs/{run}/log", server.base),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a released run is still a client-driven run's log: {log}"
+    );
+    assert_eq!(
+        log["log"].as_array().expect("log array").len(),
+        3,
+        "every event recorded before the release comes back: {log}"
+    );
+}
+
+/// A driver inside one long body (a tool that takes minutes, a model stream the
+/// client is rendering) makes no drive call at all while it works, so before
+/// the beat existed its lease lapsed mid-body and another opener could take a
+/// run whose driver had never gone anywhere. Beating holds it, and stopping
+/// still lapses, because the beat is proof of life and nothing more.
+///
+/// A real clock and a short TTL, for the reason
+/// [`an_open_takes_the_run_once_the_holding_driver_goes_quiet`] uses them:
+/// freshness is a wall-clock property, so this lets real time pass.
+#[tokio::test]
+async fn a_heartbeat_holds_the_lease_through_a_body_longer_than_the_ttl() {
+    let model = ScriptedModel::mount(vec![]).await;
+    let factory = agent_factory(
+        model.uri(),
+        "record",
+        Effect::Read,
+        CountBehavior::Record,
+        counter(),
+    );
+    Box::leak(Box::new(model));
+    let state = AppState::new(memory_store(), factory)
+        .with_poll_interval(Duration::from_millis(10))
+        .with_client_lease_ttl(Duration::from_millis(150));
+    let server = TestServer::spawn(state).await;
+    let client = reqwest::Client::new();
+
+    let (run, token) = open_run(&client, &server.base).await;
+    let (status, _) = append(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        vec![env_value(&run, 0, run_started())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Six quiet stretches, each longer than half the TTL and the six together
+    // three times it: nothing here drives the run, only beats.
+    for beat in 0..6 {
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let (status, body) =
+            post_lease(&client, &server.base, &run, "heartbeat", Some(&token)).await;
+        assert_eq!(status, StatusCode::OK, "beat {beat}: {body}");
+        assert_eq!(
+            body["lapses_in_seconds"], 1,
+            "a sub-second TTL still reports a whole second to beat inside of: {body}"
+        );
+
+        let (status, body) = reopen(&client, &server.base, &run, None).await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "a beating driver keeps its run at beat {beat}: {body}"
+        );
+        assert_eq!(body["error"]["code"], "lease_held");
+    }
+
+    // A beat is a driving call, so it needs the run's token like any other.
+    let (status, body) = post_lease(&client, &server.base, &run, "heartbeat", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "no token: {body}");
+    assert_eq!(body["error"]["code"], "missing_drive_token");
+
+    // The driver stops beating, and the hold lapses exactly as it does for one
+    // that stopped driving.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (status, body) = reopen(&client, &server.base, &run, None).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a driver that stops beating loses the run: {body}"
+    );
+    assert_ne!(
+        body["drive_token"].as_str().expect("a fresh lease"),
+        token,
+        "the run went to the opener that asked for it"
+    );
+
+    let (status, body) = post_lease(&client, &server.base, &run, "heartbeat", Some(&token)).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "and the superseded driver learns so on its next beat: {body}"
+    );
+    assert_eq!(body["error"]["code"], "invalid_drive_token");
 }
 
 #[tokio::test]
@@ -487,6 +1024,7 @@ async fn appended_run_started_with_too_many_labels_is_rejected() {
         agent_def_hash: "sha256:agent".into(),
         input: json!({ "topic": "otters" }),
         labels: Some(labels),
+        driven_by: None,
     };
     let (status, body) = append(
         &client,
@@ -529,6 +1067,7 @@ async fn appended_run_started_with_labels_round_trips() {
             "build".to_owned(),
             "42".to_owned(),
         )])),
+        driven_by: None,
     };
     let (status, body) = append(
         &client,
@@ -974,6 +1513,7 @@ async fn resuming_a_client_driven_run_through_the_server_endpoint_is_refused() {
                     agent_def_hash: agent,
                     input: json!({ "topic": "otters" }),
                     labels: None,
+                    driven_by: None,
                 },
             ),
             env_value(&run, 1, Event::NowObserved { now: ts() }),
@@ -1019,4 +1559,468 @@ async fn resuming_a_client_driven_run_through_the_server_endpoint_is_refused() {
         !server.state.is_run_active(run_id),
         "the refusal never reaches the code that spawns a drive"
     );
+}
+
+/// A client-driven server over `store`, holding one declared client-performed
+/// tool so a run can be left mid-call.
+///
+/// It takes the store instead of minting one, which is what lets a test drop
+/// the whole server and stand a second one over the same store. That is all a
+/// `salvor serve` restart is from a run's point of view: the process's lease
+/// registry goes, the recorded log stays.
+async fn client_server_over(store: std::sync::Arc<dyn salvor_store::EventStore>) -> TestServer {
+    let model = ScriptedModel::mount(vec![]).await;
+    let factory = agent_factory(
+        model.uri(),
+        "record",
+        Effect::Read,
+        CountBehavior::Record,
+        counter(),
+    );
+    Box::leak(Box::new(model));
+    let mut client_tools = ClientToolRegistry::new();
+    client_tools.declare(ClientToolDecl {
+        name: "charge_card".into(),
+        effect: Effect::Write,
+        input_schema: json!({
+            "type": "object",
+            "required": ["amount_cents"],
+            "properties": { "amount_cents": { "type": "integer" } }
+        }),
+        output_schema: Some(json!({
+            "type": "object",
+            "required": ["charge_id"],
+            "properties": { "charge_id": { "type": "string" } }
+        })),
+        trust_completion: true,
+        require_equal: Vec::new(),
+    });
+    let state = app_state(store, factory).with_client_tools(std::sync::Arc::new(client_tools));
+    TestServer::spawn(state).await
+}
+
+/// Stops `server` and gives up everything it held in memory. The store it was
+/// serving is the caller's and survives, so what comes next reads a log with
+/// no process behind it, exactly as a restarted server does.
+fn restart(server: TestServer) {
+    server.state.abort_all();
+    server.handle.abort();
+    drop(server);
+}
+
+/// A `POST` carrying a run's drive token.
+async fn post_driven(
+    client: &reqwest::Client,
+    url: &str,
+    body: Value,
+    token: &str,
+) -> (StatusCode, Value) {
+    let response = client
+        .post(url)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .header("x-drive-token", token)
+        .body(body.to_string())
+        .send()
+        .await
+        .expect("request sends");
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    (status, serde_json::from_str(&text).unwrap_or(Value::Null))
+}
+
+/// A restart does not strand a run its client is still driving. The lease
+/// registry that used to be the only thing saying "this run is client-driven"
+/// died with the first process; the `driven_by` the server stamped on the
+/// run's `RunStarted` did not, so the second process re-opens the run from its
+/// log, hands out a fresh lease, and the client carries on from where it was:
+/// here, with an unanswered tool intent still open.
+///
+/// The lease going down with the process is also why the hold that refuses a
+/// second driver cannot outlive a restart: the first driver here never went
+/// quiet, and the fresh process still hands the run over on the first ask,
+/// because a hold nobody is in a position to keep is not a hold.
+#[tokio::test]
+async fn a_restart_re_opens_a_client_driven_run_from_its_log() {
+    let store = memory_store();
+    let first = client_server_over(store.clone()).await;
+    let client = reqwest::Client::new();
+    let (run, first_token) = open_run(&client, &first.base).await;
+    let run_id = RunId::from_uuid(Uuid::parse_str(&run).expect("run id"));
+
+    let (status, body) = append(
+        &client,
+        &first.base,
+        &run,
+        Some(&first_token),
+        vec![
+            env_value(&run, 0, run_started()),
+            env_value(&run, 1, Event::NowObserved { now: ts() }),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the head and a clock reading: {body}"
+    );
+
+    // A call the client had asked for but not yet reported back on when the
+    // server went down: the state a resuming client most needs returned to it.
+    let (status, body) = post_driven(
+        &client,
+        &format!("{}/v1/client-runs/{run}/client-tool-intent", first.base),
+        json!({ "seq": 2, "tool": "charge_card", "input": { "amount_cents": 250 } }),
+        &first_token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the intent is recorded: {body}");
+
+    restart(first);
+    let second = client_server_over(store.clone()).await;
+    assert!(
+        !second.state.is_client_run(run_id),
+        "the fresh process remembers no lease for the run; only its log speaks"
+    );
+
+    // Re-opening is an adoption: an existing run, so `200`, not `201`.
+    let (status, body) = post_json(
+        &client,
+        &format!("{}/v1/client-runs", second.base),
+        json!({ "run_id": run }),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the run is re-opened: {body}");
+    let kinds: Vec<&str> = body["log"]
+        .as_array()
+        .expect("the recorded log comes back")
+        .iter()
+        .map(|envelope| envelope["event"]["kind"].as_str().expect("a kind"))
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["RunStarted", "NowObserved", "ToolCallRequested"],
+        "the recorded state, intent included: {body}"
+    );
+
+    let token = body["drive_token"].as_str().expect("a lease").to_owned();
+    assert_ne!(
+        token, first_token,
+        "adoption mints a fresh lease: the hold that would have refused this \
+         re-open died with the process that was keeping it warm"
+    );
+    assert!(
+        second.state.is_client_run(run_id),
+        "and the run is a client-driven run of this process from here on"
+    );
+
+    // The dead process's token is not the current lease.
+    let (status, _) = append(
+        &client,
+        &second.base,
+        &run,
+        Some(&first_token),
+        vec![env_value(&run, 3, Event::RandomObserved { value: 4 })],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "the lease the first process minted is superseded"
+    );
+
+    // The client finishes the call it had open, and then the run.
+    let (status, body) = post_driven(
+        &client,
+        &format!(
+            "{}/v1/client-runs/{run}/client-tool-completion",
+            second.base
+        ),
+        json!({ "seq": 2, "output": { "charge_id": "ch_1" } }),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the open call is answered: {body}");
+
+    let (status, body) = append(
+        &client,
+        &second.base,
+        &run,
+        Some(&token),
+        vec![env_value(
+            &run,
+            4,
+            Event::RunCompleted {
+                output: json!({ "charged": true }),
+            },
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the run finishes: {body}");
+
+    let (status, body) = get_json(&client, &format!("{}/v1/runs/{run}", second.base), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["status"]["state"], "completed",
+        "the run a restart interrupted ran to completion: {body}"
+    );
+}
+
+/// A restart does not strand the log read either, and it need not go through
+/// `open` first to prove it: a fresh process that never opened this run at
+/// all, and so has no lease for it, still answers the read from the log's own
+/// `driven_by: client` marker, exactly as [`open`](salvor_server) adopts the
+/// run for driving.
+#[tokio::test]
+async fn get_log_answers_after_a_restart_from_the_log_alone() {
+    let store = memory_store();
+    let first = client_server_over(store.clone()).await;
+    let client = reqwest::Client::new();
+    let (run, token) = open_run(&client, &first.base).await;
+    let run_id = RunId::from_uuid(Uuid::parse_str(&run).expect("run id"));
+
+    let (status, body) = append(
+        &client,
+        &first.base,
+        &run,
+        Some(&token),
+        vec![
+            env_value(&run, 0, run_started()),
+            env_value(&run, 1, Event::NowObserved { now: ts() }),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the head and a clock reading: {body}"
+    );
+
+    restart(first);
+    let second = client_server_over(store.clone()).await;
+    assert!(
+        !second.state.is_client_run(run_id),
+        "the fresh process holds no lease for the run; only its log speaks"
+    );
+
+    // No open, no adoption, no lease: the read still answers from the log.
+    let (status, log) = get_json(
+        &client,
+        &format!("{}/v1/client-runs/{run}/log", second.base),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the recorded log survives the restart even though no lease does: {log}"
+    );
+    let kinds: Vec<&str> = log["log"]
+        .as_array()
+        .expect("the recorded log comes back")
+        .iter()
+        .map(|envelope| envelope["event"]["kind"].as_str().expect("a kind"))
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["RunStarted", "NowObserved"],
+        "both events: {log}"
+    );
+}
+
+/// Adoption reads the marker, not merely "this id has history". A run this
+/// server drove itself carries no `driven_by`, so a restart leaves it exactly
+/// as refused as it was before: the two modes still cannot collide over one
+/// store.
+#[tokio::test]
+async fn a_restart_still_refuses_a_server_driven_run_id() {
+    let store = memory_store();
+    let first = client_server_over(store.clone()).await;
+    let client = reqwest::Client::new();
+
+    // A server-driven run's head: the same event, without the marker this
+    // server stamps only under a client's lease.
+    let foreign = RunId::new();
+    store
+        .append(&EventEnvelope::new(
+            foreign,
+            SequenceNumber::new(0),
+            ts(),
+            run_started(),
+        ))
+        .await
+        .expect("seed a server-driven run");
+
+    restart(first);
+    let second = client_server_over(store.clone()).await;
+
+    let (status, body) = post_json(
+        &client,
+        &format!("{}/v1/client-runs", second.base),
+        json!({ "run_id": foreign.as_uuid().to_string() }),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "still refused: {body}");
+    assert_eq!(body["error"]["code"], "run_exists");
+}
+
+/// The other two surfaces that must never become a second writer read the same
+/// evidence, and they read it before any re-open: a client-driven run that a
+/// restart has left with no lease anywhere is still refused by `resume` and
+/// still left asleep by the wake sweeper. Were either to consult only the
+/// in-memory registry, the first restart would put this server back to racing
+/// the client for the run's log positions.
+#[tokio::test]
+async fn after_a_restart_resume_refuses_and_the_sweeper_skips_a_client_driven_run() {
+    let store = memory_store();
+    let first = client_server_over(store.clone()).await;
+    let client = reqwest::Client::new();
+    let (run, token) = open_run(&client, &first.base).await;
+    let run_id = RunId::from_uuid(Uuid::parse_str(&run).expect("run id"));
+
+    // The client parks its own run on a timer that is already overdue against
+    // the server's clock, so the sweeper genuinely selects it.
+    let (status, body) = append(
+        &client,
+        &first.base,
+        &run,
+        Some(&token),
+        vec![
+            env_value(&run, 0, run_started()),
+            env_value(&run, 1, Event::NowObserved { now: ts() }),
+            env_value(
+                &run,
+                2,
+                Event::SleepStarted {
+                    wake_at: datetime!(2026-07-10 11:00:00 UTC),
+                },
+            ),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the run parks on its timer: {body}");
+
+    restart(first);
+    let second = client_server_over(store.clone()).await;
+    assert!(
+        !second.state.is_client_run(run_id),
+        "no lease survived; the log is the only evidence either surface has"
+    );
+
+    let (status, body) = post_json(
+        &client,
+        &format!("{}/v1/runs/{run}/resume", second.base),
+        json!({}),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "resume still refuses a run whose client drives it: {body}"
+    );
+    assert_eq!(body["error"]["code"], "client_driven_run");
+
+    assert!(
+        salvor_server::sweep(&second.state).await.is_empty(),
+        "and the sweeper still leaves the due timer to the client"
+    );
+    assert_eq!(
+        store.read_log(run_id).await.expect("log reads").len(),
+        3,
+        "neither surface wrote anything to the run"
+    );
+    assert!(
+        !second.state.is_run_active(run_id),
+        "and no driver task was spawned for it"
+    );
+}
+
+/// An operator resolving a client-driven run's stuck write over HTTP is saying
+/// the driver that opened that write is gone: it never came back to record what
+/// the write did, and the caller unsticking it presents no drive token, so it
+/// is somebody else. The lease that dead driver left would otherwise hold the
+/// run for nobody, and the client sent to re-open the run it was just told is
+/// unstuck would be refused for the rest of the TTL. So a recorded resolution
+/// drops the lease, and the next open takes the run at once.
+#[tokio::test]
+async fn an_http_resolve_of_a_client_driven_run_clears_the_dead_driver_lease() {
+    let store = memory_store();
+    let server = client_server_over(store.clone()).await;
+    let client = reqwest::Client::new();
+    let (run, token) = open_run(&client, &server.base).await;
+
+    let (status, body) = append(
+        &client,
+        &server.base,
+        &run,
+        Some(&token),
+        vec![env_value(&run, 0, run_started())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the run starts: {body}");
+
+    // The client asks for a write and is never heard from again: the crash
+    // that leaves a dangling intent.
+    let (status, body) = post_driven(
+        &client,
+        &format!("{}/v1/client-runs/{run}/client-tool-intent", server.base),
+        json!({ "seq": 1, "tool": "charge_card", "input": { "amount_cents": 250 } }),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the intent is recorded: {body}");
+
+    // The dead driver's lease is still current, so nobody else can pick the
+    // run up.
+    let (status, body) = reopen(&client, &server.base, &run, None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "the run is held: {body}");
+    assert_eq!(body["error"]["code"], "lease_held");
+
+    // An operator records what the charge actually did.
+    let (status, body) = post_json(
+        &client,
+        &format!("{}/v1/runs/{run}/resolve", server.base),
+        json!({ "output": { "charge_id": "ch_1" } }),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "resolve: {body}");
+    assert_eq!(body["resolved"], true);
+
+    // The lease went with the resolution: no wait for the TTL.
+    let (status, body) = reopen(&client, &server.base, &run, None).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the resolved run is free on the next request: {body}"
+    );
+    let fresh = body["drive_token"]
+        .as_str()
+        .expect("a fresh lease")
+        .to_owned();
+    assert_ne!(fresh, token, "and it is the new opener's lease");
+    let kinds: Vec<&str> = body["log"]
+        .as_array()
+        .expect("the recorded log comes back")
+        .iter()
+        .map(|envelope| envelope["event"]["kind"].as_str().expect("a kind"))
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["RunStarted", "ToolCallRequested", "ToolCallCompleted"],
+        "the once-dangling intent has its recorded completion: {body}"
+    );
+
+    // And the run drives on from there under the fresh lease.
+    let (status, body) = append(
+        &client,
+        &server.base,
+        &run,
+        Some(&fresh),
+        vec![env_value(&run, 3, Event::NowObserved { now: ts() })],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the run is unstuck: {body}");
 }

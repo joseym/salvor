@@ -128,6 +128,7 @@ async fn resume_refuses_a_reconciliation_run() {
                 agent_def_hash: "sha256:test".to_owned(),
                 input: json!("charge the card"),
                 labels: None,
+                driven_by: None,
             },
         );
         let write_intent = EventEnvelope::new(

@@ -404,6 +404,7 @@ mod tests {
             agent_def_hash: "sha256:agent".into(),
             input: serde_json::json!({"topic": "otters"}),
             labels: None,
+            driven_by: None,
         }
     }
 
@@ -412,6 +413,7 @@ mod tests {
             seq: SequenceNumber::new(seq),
             request_hash: "sha256:req".into(),
             request_body: None,
+            performed_by: None,
         }
     }
 

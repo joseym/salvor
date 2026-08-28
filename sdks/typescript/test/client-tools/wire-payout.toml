@@ -1,0 +1,43 @@
+# The one tool in this suite whose result the client may not self-report.
+#
+# A bank transfer leaves the rails entirely, so this desk's operator will not
+# let a client close the call by reporting on it: `trust_completion = false`
+# means salvor refuses a client completion for this tool outright, whatever it
+# says. The intent still records and the tool still runs; only the completion
+# is left for a person, through `salvor resolve` (or the driver's own
+# `resolve`), which is what `test/langchain.test.ts` proves.
+
+name = "wire_payout"
+
+effect = "write"
+
+trust_completion = false
+
+[input_schema]
+type = "object"
+required = ["payee", "amount_cents"]
+description = "Send a bank transfer to a payee whose card refund is not available."
+
+[input_schema.properties.payee]
+type = "string"
+
+[input_schema.properties.amount_cents]
+type = "integer"
+
+# Declared even though no client completion will ever reach it: dropping it
+# would be a second refusal for a different reason (no output schema at all
+# also refuses a completion), and that would hide which rule is doing the
+# work here.
+[output_schema]
+type = "object"
+required = ["provider_transfer_id", "status", "amount_cents"]
+
+[output_schema.properties.provider_transfer_id]
+type = "string"
+
+[output_schema.properties.status]
+type = "string"
+enum = ["succeeded", "pending"]
+
+[output_schema.properties.amount_cents]
+type = "integer"

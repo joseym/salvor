@@ -31,6 +31,7 @@ fn started() -> Event {
         agent_def_hash: "sha256:agent".into(),
         input: json!({"topic": "otters"}),
         labels: None,
+        driven_by: None,
     }
 }
 

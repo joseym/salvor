@@ -61,6 +61,7 @@ fn started() -> Event {
         agent_def_hash: "sha256:agent-def".into(),
         input: json!({"topic": "otters", "nested": {"z": 1, "a": 2}}),
         labels: None,
+        driven_by: None,
     }
 }
 
@@ -80,6 +81,7 @@ fn reference_logs() -> Vec<(&'static str, Vec<EventEnvelope>)> {
                 seq: SequenceNumber::new(1),
                 request_hash: "sha256:req-1".into(),
                 request_body: None,
+                performed_by: None,
             },
         ]),
     ));
@@ -194,6 +196,7 @@ fn reference_logs() -> Vec<(&'static str, Vec<EventEnvelope>)> {
                 seq: SequenceNumber::new(2),
                 request_hash: "sha256:req-1".into(),
                 request_body: None,
+                performed_by: None,
             },
             Event::ModelCallCompleted {
                 seq: SequenceNumber::new(2),
@@ -220,6 +223,7 @@ fn reference_logs() -> Vec<(&'static str, Vec<EventEnvelope>)> {
                 seq: SequenceNumber::new(7),
                 request_hash: "sha256:req-2".into(),
                 request_body: None,
+                performed_by: None,
             },
             Event::ModelCallCompleted {
                 seq: SequenceNumber::new(7),
@@ -247,6 +251,7 @@ fn reference_logs() -> Vec<(&'static str, Vec<EventEnvelope>)> {
                 seq: SequenceNumber::new(3),
                 request_hash: "sha256:req-a".into(),
                 request_body: Some(json!({"model": "test", "messages": []})),
+                performed_by: None,
             },
             Event::ModelCallCompleted {
                 seq: SequenceNumber::new(3),
@@ -260,6 +265,7 @@ fn reference_logs() -> Vec<(&'static str, Vec<EventEnvelope>)> {
                 seq: SequenceNumber::new(5),
                 request_hash: "sha256:req-b".into(),
                 request_body: None,
+                performed_by: None,
             },
             Event::ModelCallCompleted {
                 seq: SequenceNumber::new(5),
@@ -290,6 +296,7 @@ fn reference_logs() -> Vec<(&'static str, Vec<EventEnvelope>)> {
                 seq: SequenceNumber::new(1),
                 request_hash: "sha256:req".into(),
                 request_body: None,
+                performed_by: None,
             },
             Event::RunFailed {
                 error: "provider timeout".into(),
@@ -307,6 +314,7 @@ fn reference_logs() -> Vec<(&'static str, Vec<EventEnvelope>)> {
             seq: SequenceNumber::new(seq),
             request_hash: format!("sha256:req-{seq}"),
             request_body: None,
+            performed_by: None,
         });
         let req_seq = seq;
         seq += 1;

@@ -44,6 +44,7 @@ fn run_started_env(run_id: &str) -> Value {
             agent_def_hash: "sha256:agent".into(),
             input: json!({ "topic": "otters" }),
             labels: None,
+            driven_by: None,
         },
     )
 }
@@ -289,6 +290,7 @@ async fn dangling_intent_reissues_and_completes() {
             seq: SequenceNumber::new(1),
             request_hash: hash_value(&request),
             request_body: None,
+            performed_by: None,
         },
     );
     server

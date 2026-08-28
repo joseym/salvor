@@ -40,95 +40,40 @@ ride in that call's keyword arguments, e.g.
 ``run.envelope(0, "RunStarted", agent_def_hash=agent, input=task,
 labels={"build": "42"})``. The server enforces the same bounds on append (see
 ``API.md``) as it does for a server-driven start.
+
+Every rule this driver applies, the wire shapes and the durable-timer
+arithmetic alike, lives in :mod:`salvor._core.driver`, which knows nothing about
+sockets. :class:`salvor.AsyncClientRunDriver` is this same surface awaited, over
+the same core. What differs between them is the sending; nothing else.
 """
 
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any, Callable, Iterator, Optional
 
 import httpx
 
-from .errors import SalvorStreamError, decode_error
-from .models import Event, Usage
+from ._core import api, driver as rules, wire
+from ._core.driver import (
+    ClientModelIntentResult,
+    ClientToolIntentResult,
+    ModelStepResult,
+    Waking,
+    utc_now as _utc_now,
+)
+from ._core.sse import frames as _sse_frames, model_step_frame
+from ._core.wire import Call
+from .models import Event
 
-
-@dataclass
-class ModelStepResult:
-    """The completion of a server-performed model step.
-
-    ``response`` is the provider's ``MessageResponse`` as decoded JSON; ``usage``
-    is the token counts folded from it. The full decoded body stays on ``raw``.
-    The client feeds ``response`` and the recomputed request hash back to its
-    cursor, which advances over the two now-recorded events.
-    """
-
-    response: Any
-    usage: Optional[Usage] = None
-    raw: dict[str, Any] = field(default_factory=dict)
-
-    @classmethod
-    def from_json(cls, obj: dict[str, Any]) -> "ModelStepResult":
-        return cls(
-            response=obj.get("response"),
-            usage=Usage.from_json(obj.get("usage")),
-            raw=obj,
-        )
-
-
-@dataclass
-class ClientToolIntentResult:
-    """The receipt from opening a client-performed tool call: the position,
-    the DERIVED idempotency key the client must perform under, the
-    operator-declared effect the intent was recorded with, and whether this
-    position's completion is already recorded.
-
-    ``settled`` is ``True`` when the intent at ``seq`` already has its
-    completion recorded, ``False`` otherwise. A payments caller retrying
-    ``client_tool_intent`` after a dropped response gets back the same key
-    either way; ``settled`` is what lets it tell "safe to perform the call"
-    from "already done, do not perform it again" without separately reading
-    the log.
-    """
-
-    seq: int
-    idempotency_key: str
-    effect: str
-    settled: bool
-    raw: dict[str, Any] = field(default_factory=dict)
-
-    @classmethod
-    def from_json(cls, obj: dict[str, Any]) -> "ClientToolIntentResult":
-        return cls(
-            seq=int(obj.get("seq", 0)),
-            idempotency_key=obj.get("idempotency_key", ""),
-            effect=obj.get("effect", ""),
-            settled=bool(obj.get("settled", False)),
-            raw=obj,
-        )
-
-
-@dataclass
-class Waking:
-    """What a check on a durable timer found.
-
-    ``woken`` is ``True`` when the sleep is over: either the log already held
-    the ``SleepCompleted`` (a replay) or the deadline had passed and this call
-    recorded it. ``False`` means the run is still asleep and nothing was
-    appended; stop driving and come back later.
-
-    ``wake_at`` is the deadline this drive measured against, which is the
-    instant :meth:`~ClientRunDriver.sleep_until` or
-    :meth:`~ClientRunDriver.sleep_for` recorded earlier in the same drive. It is
-    ``None`` when this drive set no deadline at all, which is also why such a
-    drive always reports still asleep: a wake nobody asked for has not arrived,
-    and no clock reading will make it so.
-    """
-
-    woken: bool
-    wake_at: Optional[datetime] = None
+__all__ = [
+    "ClientRunDriver",
+    "ClientModelIntentResult",
+    "ClientToolIntentResult",
+    "ModelStepResult",
+    "ModelStepStream",
+    "Waking",
+]
 
 
 class ModelStepStream:
@@ -174,10 +119,15 @@ class ClientRunDriver:
         log: list[Event],
         owns_http: bool,
         stream_timeout: httpx.Timeout,
+        on_release: Optional[Callable[[str], None]] = None,
     ) -> None:
         self._http = http
         self._owns_http = owns_http
         self._stream_timeout = stream_timeout
+        # Told the run id when this driver hands the lease back, so the client
+        # that opened it stops remembering a token that no longer opens
+        # anything. See :meth:`release` and :attr:`salvor.Client._client_run_tokens`.
+        self._on_release = on_release
         self.run_id = run_id
         self.drive_token = drive_token
         #: The envelopes returned when this run was opened. Empty for a fresh
@@ -204,38 +154,44 @@ class ClientRunDriver:
         input: Any = None,
         run_id: Optional[str] = None,
         record_prompts: bool = False,
+        drive_token: Optional[str] = None,
         token: Optional[str] = None,
         timeout: float = 30.0,
     ) -> "ClientRunDriver":
         """Open a fresh client-driven run, or re-open (resume) an existing one.
 
-        Passing a ``run_id`` this server already holds re-opens it: the recorded
-        log comes back on :attr:`log_envelopes` and a fresh lease is minted, so a
-        resuming client always holds the current one and the superseded lease
-        stops working. Omitting ``run_id`` opens a fresh run the server mints an
-        id for.
+        Passing a ``run_id`` this server already holds re-opens it. A run whose
+        lease is unheld (never opened, lapsed, or terminal) or one this server
+        only knows from its log (after a restart) comes back with a fresh
+        lease. A run whose lease is still current is refused with
+        :class:`~salvor.errors.LeaseHeldError` UNLESS ``drive_token`` is that
+        lease's own token, in which case the re-open returns the recorded log
+        under the SAME token rather than minting a fresh one, so a client
+        rebuilding its cursor is not made to give up the lease it holds and a
+        call already in flight under that token stays valid. Omitting
+        ``run_id`` opens a fresh run the server mints an id for.
 
         ``agent`` and ``input`` are accepted for forward compatibility; this
         surface records them nowhere, because the client appends its own
         ``RunStarted`` (carrying the agent hash and input) as the run's first
         event. ``record_prompts`` is stored against the run and controls whether
-        a later :meth:`model_step` records the request body on its intent.
+        a later :meth:`model_step` records the request body on its intent; it
+        is ignored on a re-open under the held lease's own token, which keeps
+        what the lease was opened with.
 
         The driver owns its own HTTP connection; close it with :meth:`close`.
         """
-        headers = {}
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-        http = httpx.Client(base_url=base_url.rstrip("/"), headers=headers, timeout=timeout)
-        stream_timeout = httpx.Timeout(timeout, read=None)
+        base, headers = api.connection(base_url, token)
+        http = httpx.Client(base_url=base, headers=headers, timeout=timeout)
         return cls._open_over(
             http,
             owns_http=True,
-            stream_timeout=stream_timeout,
+            stream_timeout=httpx.Timeout(timeout, read=None),
             agent=agent,
             input=input,
             run_id=run_id,
             record_prompts=record_prompts,
+            drive_token=drive_token,
         )
 
     @classmethod
@@ -249,24 +205,20 @@ class ClientRunDriver:
         input: Any,
         run_id: Optional[str],
         record_prompts: bool,
+        drive_token: Optional[str] = None,
+        on_release: Optional[Callable[[str], None]] = None,
     ) -> "ClientRunDriver":
-        body: dict[str, Any] = {"record_prompts": record_prompts}
-        if agent is not None:
-            body["agent"] = agent
-        if input is not None:
-            body["input"] = input
-        if run_id is not None:
-            body["run_id"] = run_id
-        resp = http.post("/v1/client-runs", json=body)
-        obj = cls._json(resp)
-        log = [Event.from_envelope(e) for e in obj.get("log", [])]
+        call = rules.open_run(agent, input, run_id, record_prompts, drive_token)
+        resp = http.request(call.method, call.path, **wire.request_kwargs(call))
+        opened = call.parse(wire.decode_json(resp.status_code, resp.content))
         return cls(
             http,
-            run_id=obj["run"],
-            drive_token=obj["drive_token"],
-            log=log,
+            run_id=opened.run_id,
+            drive_token=opened.drive_token,
+            log=opened.log,
             owns_http=owns_http,
             stream_timeout=stream_timeout,
+            on_release=on_release,
         )
 
     def close(self) -> None:
@@ -279,6 +231,56 @@ class ClientRunDriver:
 
     def __exit__(self, *exc: Any) -> None:
         self.close()
+
+    # -- the lease ------------------------------------------------------------
+
+    def release(self) -> bool:
+        """Hand the lease back, so the next open takes the run at once.
+
+        Returns ``True`` when a lease was given back, ``False`` when there was
+        none to give (released already, lapsed, or a run this server never
+        opened): the call is idempotent, and finding nothing to hand back is
+        not an error, because the caller's goal is already true. A lease that
+        stands and is not this driver's raises ``SalvorAPIError`` with code
+        ``invalid_drive_token``, and nothing is dropped.
+
+        Lapsing is the safety net, not how a drive ends. Without this, a
+        short-lived process locks the process after it out for up to the lease
+        TTL for nothing: an invoke returns, the process exits, and the next one
+        is refused ``lease_held`` for a minute. Call it when a drive is over,
+        in the success path and the error path alike.
+
+        The client that opened this run forgets the token here too, so its next
+        ``open_client_run`` for this run presents nothing rather than a token
+        the server has already dropped.
+
+        Only the lease goes. The log is untouched and the run stays
+        client-driven, so the next open adopts it exactly as it would after a
+        restart, and :meth:`log` still reads it back: that endpoint serves any
+        client-driven run, held or not.
+        """
+        try:
+            return self._send(rules.release(self.run_id, self.drive_token))
+        finally:
+            if self._on_release is not None:
+                self._on_release(self.run_id)
+
+    def heartbeat(self) -> int:
+        """Say "still here" without driving the run, and hear how long the
+        lease has left.
+
+        Returns the whole seconds until the hold lapses if this driver goes
+        quiet from now (never below ``1``), which is what a driver picks its
+        beat interval from. Every driving call already refreshes the lease;
+        this is for the driver that makes none for longer than the TTL because
+        it is inside one long body (a tool that takes minutes, a model call it
+        is streaming itself).
+
+        Raises ``SalvorAPIError`` with code ``invalid_drive_token`` when this
+        token is no longer the run's lease, and ``unknown_run`` when this
+        server holds no such client-driven run.
+        """
+        return self._send(rules.heartbeat(self.run_id, self.drive_token))
 
     # -- building envelopes ---------------------------------------------------
 
@@ -295,13 +297,7 @@ class ClientRunDriver:
             run.envelope(1, "NowObserved", now="2026-07-11T12:00:00Z")
             run.envelope(3, "RunCompleted", output={"done": True})
         """
-        return {
-            "run_id": self.run_id,
-            "seq": seq,
-            "schema_version": 1,
-            "recorded_at": "1970-01-01T00:00:00Z",
-            "event": {"kind": kind, "payload": payload},
-        }
+        return rules.envelope(self.run_id, seq, kind, **payload)
 
     # -- log ------------------------------------------------------------------
 
@@ -312,11 +308,7 @@ class ClientRunDriver:
         :class:`~salvor.models.Event` list. A client that already holds a prefix
         passes ``from_seq`` to fetch just the tail. The read needs no drive token.
         """
-        resp = self._http.get(
-            f"/v1/client-runs/{self.run_id}/log", params={"from_seq": from_seq}
-        )
-        obj = self._json(resp)
-        return [Event.from_envelope(e) for e in obj.get("log", [])]
+        return self._send(rules.read_log(self.run_id, from_seq))
 
     # -- generic append -------------------------------------------------------
 
@@ -335,12 +327,7 @@ class ClientRunDriver:
         ``SalvorAPIError`` with code ``unsupported_event_kind`` (those go through
         :meth:`model_step` and :meth:`tool_step`).
         """
-        resp = self._http.post(
-            f"/v1/client-runs/{self.run_id}/events",
-            json={"events": events},
-            headers=self._lease(),
-        )
-        return list(self._json(resp).get("appended", []))
+        return self._send(rules.append(self.run_id, self.drive_token, events))
 
     # -- model step -----------------------------------------------------------
 
@@ -356,12 +343,9 @@ class ClientRunDriver:
         a different request there raises
         :class:`~salvor.errors.DivergenceError`.
         """
-        resp = self._http.post(
-            f"/v1/client-runs/{self.run_id}/model-step",
-            json={"seq": seq, "request": request},
-            headers=self._lease(),
+        return self._send(
+            rules.model_step(self.run_id, self.drive_token, seq, request)
         )
-        return ModelStepResult.from_json(self._json(resp))
 
     def model_step_stream(self, seq: int, request: Any) -> ModelStepStream:
         """Perform a model step with a live ticker, over a server-sent stream.
@@ -380,26 +364,23 @@ class ClientRunDriver:
     def _stream_model(
         self, seq: int, request: Any, stream: ModelStepStream
     ) -> Iterator[dict[str, Any]]:
-        headers = self._lease()
-        headers["Accept"] = "text/event-stream"
+        call = rules.model_step_stream(self.run_id, self.drive_token, seq, request)
         with self._http.stream(
-            "POST",
-            f"/v1/client-runs/{self.run_id}/model-step",
-            json={"seq": seq, "request": request},
-            headers=headers,
+            call.method,
+            call.path,
+            json=call.json_body,
+            headers=call.headers,
             timeout=self._stream_timeout,
         ) as resp:
             if resp.status_code != 200:
-                raise decode_error(resp.status_code, resp.read())
-            for name, data in _sse_frames(resp.iter_lines()):
-                if name == "delta":
-                    yield json.loads(data)
-                elif name == "complete":
-                    stream.completion = ModelStepResult.from_json(json.loads(data))
+                raise wire.error(resp.status_code, resp.read())
+            for frame in _sse_frames(resp.iter_lines()):
+                what, value = model_step_frame(self.run_id, frame)
+                if what == "delta":
+                    yield value
+                elif what == "complete":
+                    stream.completion = value
                     return
-                elif name == "error":
-                    message = json.loads(data).get("message", "model step failed")
-                    raise SalvorStreamError(f"model step for run {self.run_id}: {message}")
 
     # -- tool step ------------------------------------------------------------
 
@@ -424,15 +405,11 @@ class ClientRunDriver:
         :class:`~salvor.errors.NeedsReconciliationError` carrying the recorded
         intent, and only :meth:`resolve` may record its completion.
         """
-        body: dict[str, Any] = {"seq": seq, "tool": tool, "input": input}
-        if idempotency_key is not None:
-            body["idempotency_key"] = idempotency_key
-        resp = self._http.post(
-            f"/v1/client-runs/{self.run_id}/tool-step",
-            json=body,
-            headers=self._lease(),
+        return self._send(
+            rules.tool_step(
+                self.run_id, self.drive_token, seq, tool, input, idempotency_key
+            )
         )
-        return self._json(resp).get("output")
 
     # -- client-performed tool calls -------------------------------------------
 
@@ -471,12 +448,9 @@ class ClientRunDriver:
         ready for, or a different event already recorded there, raises
         :class:`~salvor.errors.DivergenceError`.
         """
-        resp = self._http.post(
-            f"/v1/client-runs/{self.run_id}/client-tool-intent",
-            json={"seq": seq, "tool": tool, "input": input},
-            headers=self._lease(),
+        return self._send(
+            rules.client_tool_intent(self.run_id, self.drive_token, seq, tool, input)
         )
-        return ClientToolIntentResult.from_json(self._json(resp))
 
     def client_tool_completion(self, seq: int, output: Any) -> None:
         """Report what a client-performed tool call returned.
@@ -493,12 +467,69 @@ class ClientRunDriver:
         externally. A reported ``output`` that fails the declared schema is
         ``bad_request``; there the fix is the output, not the call.
         """
-        resp = self._http.post(
-            f"/v1/client-runs/{self.run_id}/client-tool-completion",
-            json={"seq": seq, "output": output},
-            headers=self._lease(),
+        self._send(
+            rules.client_tool_completion(self.run_id, self.drive_token, seq, output)
         )
-        self._json(resp)
+
+    # -- client-performed model calls -------------------------------------------
+
+    def client_model_intent(
+        self, seq: int, request_hash: str, request_body: Any = None
+    ) -> ClientModelIntentResult:
+        """Open a model call the CLIENT performs, in its own process, with its
+        own key and its own model configuration.
+
+        ``seq`` is the log position the client's cursor reserved for the
+        intent; ``request_hash`` is the client's own hash of the request it is
+        about to send. This server never sees the request and cannot recompute
+        the hash the way :meth:`model_step` does, so the hash is the client's
+        claim over its own request, and self-punishing rather than dangerous to
+        anyone else: a client that hashes inconsistently diverges against its
+        own history and nobody else's. ``request_body`` is recorded on the
+        intent only when the run was opened with ``record_prompts=True``; sent
+        to a run that does not record prompts, it is dropped and never written.
+
+        The returned ``settled`` is ``True`` when the intent at ``seq`` already
+        has its completion recorded, ``False`` otherwise, and when it is
+        ``True`` the recorded ``response`` and ``usage`` ride along, so a
+        caller retrying this call after a dropped response returns them
+        without a second request and without a separate log read.
+
+        Raises :class:`~salvor.errors.DivergenceError` for a different
+        ``request_hash`` at an already-recorded position, a non-model event
+        there, an intent there this SERVER performed, or a ``seq`` the log is
+        not ready for.
+        """
+        return self._send(
+            rules.client_model_intent(
+                self.run_id, self.drive_token, seq, request_hash, request_body
+            )
+        )
+
+    def client_model_completion(
+        self, seq: int, response: Any, usage: dict[str, int]
+    ) -> None:
+        """Report what a client-performed model call returned.
+
+        ``seq`` must name the pending intent at the end of the log; ``usage``
+        is required, not optional, because it is what a token budget counts,
+        and a completion that quietly reported none would under-count every
+        budget the run is held to. The response is recorded verbatim, with no
+        schema to check it against: its shape is the provider's, not an
+        operator's.
+
+        Raises :class:`~salvor.errors.DivergenceError` when the log does not
+        end at a model intent, or ends at one whose ``seq`` is not the one
+        named. Raises :class:`~salvor.errors.SalvorAPIError` with code
+        ``client_completion_refused`` when the pending intent was performed by
+        the SERVER: a client must not close a call salvor made, since salvor
+        holds the real response.
+        """
+        self._send(
+            rules.client_model_completion(
+                self.run_id, self.drive_token, seq, response, usage
+            )
+        )
 
     # -- durable timers --------------------------------------------------------
 
@@ -512,12 +543,11 @@ class ClientRunDriver:
         outside the log means nothing to a replay, which has no clock of its
         own to interpret it against.
         """
-        recorded = self._event_at(seq)
-        if recorded is not None and recorded.kind == "NowObserved":
-            return _parse_rfc3339(recorded.payload["now"])
-        reading = self.clock()
-        self.append([self.envelope(seq, "NowObserved", now=_rfc3339(reading))])
-        return reading
+        return self._timed(
+            rules.now_step(
+                self.run_id, seq, self._event_at(seq), self.clock, self._sleeping_until
+            )
+        )
 
     def sleep_until(self, seq: int, wake_at: datetime) -> datetime:
         """Park the run on a durable timer at ``seq``, returning ``wake_at``.
@@ -534,15 +564,9 @@ class ClientRunDriver:
         intent and its completion: the run holds that call's claim for the whole
         sleep, which for a durable timer is hours or weeks.
         """
-        recorded = self._event_at(seq)
-        if recorded is not None and recorded.kind == "SleepStarted":
-            already = _parse_rfc3339(recorded.payload["wake_at"])
-            if already == wake_at:
-                self._sleeping_until = already
-                return already
-        self.append([self.envelope(seq, "SleepStarted", wake_at=_rfc3339(wake_at))])
-        self._sleeping_until = wake_at
-        return wake_at
+        return self._timed(
+            rules.sleep_step(self.run_id, seq, wake_at, self._event_at(seq))
+        )
 
     def sleep_for(self, seq: int, duration: timedelta) -> datetime:
         """Sleep for ``duration`` from a recorded reading of the clock, and
@@ -572,19 +596,20 @@ class ClientRunDriver:
         comes back too soon simply finds it still asleep, exactly as the server
         wakes nothing before its instant.
         """
-        recorded = self._event_at(seq)
-        if recorded is not None and recorded.kind == "SleepCompleted":
-            wake_at = self._sleeping_until
-            self._sleeping_until = None
-            return Waking(True, wake_at)
-        # A drive that set no deadline has none that could have arrived, so it
-        # stays asleep, mirroring the runtime's stand-in for the same case.
-        if self._sleeping_until is None or self.clock() < self._sleeping_until:
-            return Waking(False, self._sleeping_until)
-        self.append([self.envelope(seq, "SleepCompleted")])
-        wake_at = self._sleeping_until
-        self._sleeping_until = None
-        return Waking(True, wake_at)
+        return self._timed(
+            rules.wake_step(
+                self.run_id, seq, self._event_at(seq), self.clock, self._sleeping_until
+            )
+        )
+
+    def _timed(self, step: rules.TimerStep) -> Any:
+        """Carry out one durable-timer verdict: append what it asks for, then
+        adopt the deadline it leaves behind. The deadline moves only once the
+        append has landed, so a refused park leaves this drive as it was."""
+        if step.events:
+            self.append(step.events)
+        self._sleeping_until = step.sleeping_until
+        return step.result
 
     def _event_at(self, seq: int) -> Optional[Event]:
         """The recorded event at ``seq``, or ``None`` when the log has not
@@ -594,10 +619,7 @@ class ClientRunDriver:
         per drive apiece, and a driver that has been away for a week cannot
         trust anything it cached before it left.
         """
-        tail = self.log(from_seq=seq)
-        if tail and tail[0].seq == seq:
-            return tail[0]
-        return None
+        return rules.event_at(self.log(from_seq=seq), seq)
 
     # -- resolve --------------------------------------------------------------
 
@@ -610,96 +632,18 @@ class ClientRunDriver:
         the cursor sails past the once-dangling intent. Raises a ``SalvorAPIError``
         with code ``wrong_state`` when there is no dangling write.
         """
-        resp = self._http.post(
-            f"/v1/client-runs/{self.run_id}/resolve",
-            json={"output": output},
-            headers=self._lease(),
-        )
-        self._json(resp)
+        self._send(rules.resolve(self.run_id, self.drive_token, output))
 
     # -- helpers --------------------------------------------------------------
 
     def _lease(self) -> dict[str, str]:
-        return {"X-Drive-Token": self.drive_token}
+        return rules.lease(self.drive_token)
+
+    def _send(self, call: Call) -> Any:
+        """Perform one described call: send it, decode the answer, parse it."""
+        resp = self._http.request(call.method, call.path, **wire.request_kwargs(call))
+        return call.parse(wire.decode_json(resp.status_code, resp.content))
 
     @staticmethod
     def _json(resp: httpx.Response) -> dict[str, Any]:
-        if resp.status_code // 100 != 2:
-            raise decode_error(resp.status_code, resp.content)
-        if not resp.content:
-            return {}
-        return resp.json()
-
-
-def _utc_now() -> datetime:
-    """The default clock the durable-timer methods read: the current instant,
-    timezone-aware and in UTC, which is the only form the log records."""
-    return datetime.now(timezone.utc)
-
-
-def _rfc3339(instant: datetime) -> str:
-    """Format an instant the way every recorded timestamp on the wire is
-    formatted: UTC, RFC 3339, with the ``Z`` suffix.
-
-    A naive datetime is refused rather than assumed to be UTC. Guessing an
-    offset here would put an instant in the log that is wrong by hours, and a
-    recorded instant is the one thing a later drive cannot re-derive.
-    """
-    if instant.tzinfo is None:
-        raise ValueError(
-            "a recorded instant must be timezone-aware; pass a UTC datetime "
-            "(datetime.now(timezone.utc)) rather than a naive one"
-        )
-    return instant.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def _parse_rfc3339(text: str) -> datetime:
-    """Decode a recorded RFC 3339 instant.
-
-    Tolerates the two things the server writes that Python's own parser has not
-    always taken: the ``Z`` suffix, and more fractional digits than microsecond
-    precision holds. Extra digits are truncated rather than rejected, because a
-    reading this driver recorded at microsecond precision comes back at the
-    precision the store kept it.
-    """
-    value = text.strip()
-    if value.endswith(("Z", "z")):
-        value = value[:-1] + "+00:00"
-    head, dot, tail = value.partition(".")
-    if dot:
-        digits = ""
-        for char in tail:
-            if not char.isdigit():
-                break
-            digits += char
-        value = f"{head}.{digits[:6].ljust(6, '0')}{tail[len(digits):]}"
-    return datetime.fromisoformat(value)
-
-
-def _sse_frames(lines: Iterator[str]) -> Iterator[tuple[str, str]]:
-    """Parse a server-sent-events line stream into ``(event, data)`` frames.
-
-    The same line protocol :class:`salvor.Client` reads for the event tail:
-    ``event:`` and ``data:`` fields accumulate until a blank line dispatches the
-    frame. A frame with no ``event:`` field defaults to ``"message"``.
-    """
-    event_name: Optional[str] = None
-    data_lines: list[str] = []
-    for line in lines:
-        if line == "":
-            if data_lines:
-                yield (event_name or "message", "\n".join(data_lines))
-            event_name = None
-            data_lines = []
-            continue
-        if line.startswith(":"):
-            continue
-        field_name, _, value = line.partition(":")
-        if value.startswith(" "):
-            value = value[1:]
-        if field_name == "event":
-            event_name = value
-        elif field_name == "data":
-            data_lines.append(value)
-    if data_lines:
-        yield (event_name or "message", "\n".join(data_lines))
+        return wire.decode_json(resp.status_code, resp.content)

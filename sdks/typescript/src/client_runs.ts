@@ -15,7 +15,12 @@
  * `SleepStarted`, `SleepCompleted`, `BudgetExceeded`, `RunCompleted`,
  * `RunFailed`). The side-effecting steps, which the server must perform because
  * it holds the key or the binary, have their own methods:
- * {@link ClientRunDriver.modelStep} and {@link ClientRunDriver.toolStep}.
+ * {@link ClientRunDriver.modelStep} and {@link ClientRunDriver.toolStep}. A
+ * call the CLIENT performs in its own process, with its own secrets, has its
+ * own pair as well: {@link ClientRunDriver.clientToolIntent} with
+ * {@link ClientRunDriver.clientToolCompletion}, and
+ * {@link ClientRunDriver.clientModelIntent} with
+ * {@link ClientRunDriver.clientModelCompletion}.
  *
  * A client-driven run may park on a durable timer, and the client is what wakes
  * it. Nothing on the server waits for the deadline: the wake sweeper leaves
@@ -56,6 +61,19 @@ export interface OpenClientRunOptions {
   input?: unknown;
   /** A client-chosen run id. Passing an existing one re-opens (resumes) it. */
   runId?: string;
+  /**
+   * The held lease's own token, presented on a re-open so it comes back
+   * under the SAME token instead of being refused.
+   *
+   * Re-opening a run whose driver still holds a current lease is refused
+   * (`409 lease_held`, see {@link LeaseHeldError}) unless the request
+   * presents that lease's own token in `X-Drive-Token`: the run's own driver
+   * rebuilding its cursor after losing local state, not a second writer.
+   * Omit it for a fresh run, or when the run is not currently held (a lapsed
+   * lease or a finished run re-opens under a fresh lease regardless of what,
+   * if anything, is presented here).
+   */
+  driveToken?: string;
   /** Record each model step's request body on its intent. Default false. */
   recordPrompts?: boolean;
   /** An optional shared-secret bearer token, sent as `Authorization: Bearer`. */
@@ -133,6 +151,40 @@ function parseClientToolIntentResult(
 }
 
 /**
+ * The receipt from opening a client-performed model call: the position, and
+ * whether this position's completion is already recorded.
+ *
+ * `settled` is `false` on a fresh intent and on a re-post of one still
+ * awaiting its answer: the call has to be made. `settled` is `true` when the
+ * completion is already in the log, and then `response` and `usage` carry it,
+ * which is the whole reason to record the call at all. A middleware calls the
+ * provider only on the `false` branch and returns the recorded answer on the
+ * `true` one, so a resumed run never pays twice for the same request.
+ */
+export interface ClientModelIntentResult {
+  seq: number;
+  settled: boolean;
+  /** The recorded response, present only when `settled`. */
+  response?: unknown;
+  /** The recorded token usage, present only when `settled`. */
+  usage?: Usage;
+  raw: Record<string, unknown>;
+}
+
+function parseClientModelIntentResult(
+  obj: Record<string, unknown>,
+): ClientModelIntentResult {
+  const settled = obj.settled as boolean;
+  return {
+    seq: obj.seq as number,
+    settled,
+    response: settled ? obj.response : undefined,
+    usage: settled ? parseUsage(obj.usage) : undefined,
+    raw: obj,
+  };
+}
+
+/**
  * What a check on a durable timer found.
  *
  * `woken` is true when the sleep is over: either the log already held the
@@ -154,10 +206,16 @@ export interface Waking {
 /**
  * Open a fresh client-driven run, or re-open (resume) an existing one.
  *
- * Passing a `runId` this server already holds re-opens it: the recorded log
- * comes back on {@link ClientRunDriver.logEnvelopes} and a fresh lease is
- * minted, so a resuming client always holds the current one and the superseded
- * lease stops working. Omitting it opens a fresh run the server mints an id for.
+ * Passing a `runId` this server has no current lease on (never opened, a
+ * lapsed lease, or a finished run) re-opens it: the recorded log comes back
+ * on {@link ClientRunDriver.logEnvelopes} and a fresh lease is minted, so a
+ * resuming client always holds the current one and any superseded lease
+ * stops working. Passing a `runId` whose driver still holds a current lease
+ * is refused as {@link LeaseHeldError} UNLESS `options.driveToken` is that
+ * lease's own token, in which case the recorded log comes back under the
+ * SAME token rather than a fresh one: the run's own driver rebuilding its
+ * cursor, not a second writer taking the run over. Omitting `runId` entirely
+ * opens a fresh run the server mints an id for.
  */
 export async function openClientRun(
   baseUrl: string,
@@ -175,7 +233,18 @@ export async function openClientRun(
   if (options.input !== undefined) body.input = options.input;
   if (options.runId !== undefined) body.run_id = options.runId;
 
-  const obj = await requestJson(base, headers, timeoutMs, "POST", "/v1/client-runs", body);
+  const extraHeaders: Record<string, string> = {};
+  if (options.driveToken !== undefined) extraHeaders["X-Drive-Token"] = options.driveToken;
+
+  const obj = await requestJson(
+    base,
+    headers,
+    timeoutMs,
+    "POST",
+    "/v1/client-runs",
+    body,
+    extraHeaders,
+  );
   const log = ((obj.log as Record<string, unknown>[]) ?? []).map(parseEvent);
   return new ClientRunDriver(base, headers, timeoutMs, {
     runId: obj.run as string,
@@ -202,6 +271,14 @@ export class ClientRunDriver {
    * for it.
    */
   clock: () => Date = () => new Date();
+
+  /**
+   * Called after {@link release} has handed the lease back, so whoever handed
+   * this driver out can forget the token it remembered for the run. A
+   * {@link SalvorClient} sets it (see `openClientRun` there); a driver opened
+   * through the free function has nobody to tell and leaves it unset.
+   */
+  onRelease?: () => void;
 
   private readonly base: string;
   private readonly headers: Record<string, string>;
@@ -444,6 +521,88 @@ export class ClientRunDriver {
   }
 
   /**
+   * Open a model call the CLIENT performs, in its own process, with its own
+   * key and its own model configuration. `seq` is the log position the
+   * client's cursor reserved for the intent; `requestHash` is the client's own
+   * canonical hash of the request it is about to send; `requestBody` is the
+   * full request, recorded on the intent only when the run was opened with
+   * `recordPrompts: true` and dropped otherwise.
+   *
+   * This is the counterpart of {@link modelStep} for a call salvor does not
+   * make. There the server holds the key, performs the call, and recomputes
+   * the hash from the request it was handed, so the hash cannot be lied about.
+   * Here it can: the request never reaches the server, so the hash is the
+   * client's claim over its own request, the way a client-performed tool
+   * result is the client's claim about its own call. What the trust buys is
+   * the point of the method: a resume replays the recorded answer instead of
+   * paying the provider for it again. The claim is also self-punishing rather
+   * than dangerous to anyone else, because the hash is a key into this run's
+   * own log: a client that hashes inconsistently diverges against its own
+   * history and nobody else's.
+   *
+   * The returned `settled` is `true` when the intent at `seq` already has its
+   * completion recorded, and the recorded `response` and `usage` come back
+   * with it. That is what a middleware short-circuits on: call the provider
+   * only when `settled` is `false`, and otherwise return the recorded answer
+   * without a second request.
+   *
+   * A re-post at a recorded position with the same hash is a replay that
+   * writes nothing. A different hash there, a non-model event, or an intent
+   * the SERVER performed throws {@link DivergenceError}, as does a `seq` the
+   * log is not ready for.
+   */
+  async clientModelIntent(
+    seq: number,
+    requestHash: string,
+    requestBody?: unknown,
+  ): Promise<ClientModelIntentResult> {
+    const body: Record<string, unknown> = { seq, request_hash: requestHash };
+    if (requestBody !== undefined) body.request_body = requestBody;
+    const obj = await this.send(
+      "POST",
+      `/v1/client-runs/${this.runId}/client-model-intent`,
+      body,
+    );
+    return parseClientModelIntentResult(obj);
+  }
+
+  /**
+   * Report what a client-performed model call returned. `seq` must name the
+   * pending intent at the end of the log; `response` is recorded verbatim and
+   * `usage` is the token count the run's budgets are held to, so it is
+   * required rather than optional: a completion that quietly reported none
+   * would under-count every budget the run runs under.
+   *
+   * Refused, recording nothing, as a {@link DivergenceError} when the log does
+   * not end at a model intent or ends at one for a different `seq`, and as a
+   * `SalvorApiError` with code `client_completion_refused` when the pending
+   * intent was performed by the SERVER: salvor holds the real response for
+   * that call, so a client may not overwrite it with a claim.
+   *
+   * Once recorded, the completion is byte-identical to a server-performed
+   * one, so the run folds the same either way: pending while the intent is
+   * open, closed by this call, tokens counted.
+   */
+  async clientModelCompletion(
+    seq: number,
+    response: unknown,
+    usage: Usage,
+  ): Promise<void> {
+    await this.send(
+      "POST",
+      `/v1/client-runs/${this.runId}/client-model-completion`,
+      {
+        seq,
+        response,
+        usage: {
+          input_tokens: usage.inputTokens,
+          output_tokens: usage.outputTokens,
+        },
+      },
+    );
+  }
+
+  /**
    * Observe the clock at `seq`, recording the reading the first time.
    *
    * Returns the recorded reading when `seq` already holds a `NowObserved`, so a
@@ -553,6 +712,55 @@ export class ClientRunDriver {
    */
   async resolve(output: unknown): Promise<void> {
     await this.send("POST", `/v1/client-runs/${this.runId}/resolve`, { output });
+  }
+
+  /**
+   * Hand the lease back, so the next open takes the run at once instead of
+   * waiting out the TTL.
+   *
+   * Lapsing is the safety net for a driver that can no longer say anything (it
+   * crashed, the tab closed); it is a poor way to end a drive that ended in an
+   * orderly fashion, because the run stays unopenable for the rest of the TTL.
+   * A short-lived process is exactly where that bites: an invoke returns, the
+   * process exits, and the next one is refused `409 lease_held` for up to a
+   * minute for nothing. So a driver that is finished calls this.
+   *
+   * Returns whether there was a lease here to give back. `false` is not an
+   * error: it means the run has no lease on this server (already released,
+   * lapsed, or never opened here), which is the state the caller was asking
+   * for anyway, so the call is idempotent. Throws a `SalvorApiError` with code
+   * `invalid_drive_token` when a lease DOES stand and this token is not it: a
+   * hold that is not this driver's is not this driver's to end.
+   *
+   * Only the lease goes. The log is untouched and the run stays client-driven,
+   * so a later open adopts it exactly as it would after a server restart.
+   */
+  async release(): Promise<boolean> {
+    const obj = await this.send("POST", `/v1/client-runs/${this.runId}/release`, {});
+    const released = (obj.released as boolean) ?? false;
+    this.onRelease?.();
+    return released;
+  }
+
+  /**
+   * Say "still here" without driving the run, and learn the lease TTL.
+   *
+   * Presenting the drive token has always been the heartbeat, and every
+   * driving call carries it. What that misses is the driver that makes no
+   * drive call for longer than the TTL because it is inside one long body: a
+   * tool that takes minutes, a model call it is streaming to its own screen.
+   * Its lease would lapse mid-body and another opener could take a run whose
+   * driver never went anywhere.
+   *
+   * Returns `lapses_in_seconds`, the whole lease TTL as of this beat, so a
+   * caller picks its interval from the answer rather than from a copy of the
+   * server's configuration. Throws a `SalvorApiError` with code
+   * `invalid_drive_token` when this token is no longer the run's lease, or
+   * `unknown_run` when this server holds no lease for the run at all.
+   */
+  async heartbeat(): Promise<number> {
+    const obj = await this.send("POST", `/v1/client-runs/${this.runId}/heartbeat`, {});
+    return (obj.lapses_in_seconds as number | undefined) ?? 0;
   }
 
   // -- helpers --------------------------------------------------------------

@@ -33,5 +33,6 @@ pub use salvor_replay::{
     Pricing, RandomPermit, ReplayCursor, ReplayError, RequestedStep, RunId, RunState, RunStatus,
     RunSummary, SCHEMA_VERSION, SequenceNumber, SuspensionKind, TokenTotals, TokenUsage,
     ToolCallPermit, UnresolvedWrite, ValidationError, budget_extensions, budget_observations,
-    derive_state, event_detail, event_kind, validate_extension_input, validate_next,
+    derive_state, event_detail, event_kind, log_is_client_driven, validate_extension_input,
+    validate_next,
 };

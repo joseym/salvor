@@ -28,7 +28,7 @@ use common::{
     CountBehavior, ScriptedModel, SseReader, TestServer, agent_factory, app_state, counter,
     memory_store, open_store, register_agent, sample_toml,
 };
-use salvor_core::{Effect, Event, EventEnvelope, RunId, SequenceNumber};
+use salvor_core::{Effect, Event, EventEnvelope, Performer, RunId, SequenceNumber};
 use salvor_runtime::due_runs;
 use salvor_server::{AgentFactory, AppState};
 use salvor_store::EventStore;
@@ -54,6 +54,33 @@ async fn seed_sleeping(
             agent_def_hash: agent_hash.to_owned(),
             input: json!("go"),
             labels: None,
+            driven_by: None,
+        },
+        Event::SleepStarted { wake_at },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let envelope = EventEnvelope::new(run_id, SequenceNumber::new(seq as u64), NOW, event);
+        store.append(&envelope).await.expect("append");
+    }
+    run_id
+}
+
+/// The same seeded sleeping run, written the way the client-run surface writes
+/// one: its head carries `driven_by: client`, which is the durable fact a
+/// restarted server has to go on once the lease that used to prove it is gone.
+async fn seed_sleeping_client_driven(
+    store: &Arc<dyn EventStore>,
+    wake_at: OffsetDateTime,
+) -> RunId {
+    let run_id = RunId::new();
+    for (seq, event) in [
+        Event::RunStarted {
+            agent_def_hash: "sha256:any".to_owned(),
+            input: json!("go"),
+            labels: None,
+            driven_by: Some(Performer::Client),
         },
         Event::SleepStarted { wake_at },
     ]
@@ -219,6 +246,45 @@ async fn a_client_driven_runs_due_timer_is_left_alone() {
     assert!(
         salvor_server::sweep(&state).await.is_empty(),
         "a client-driven run's due timer is not driven from here"
+    );
+    assert_eq!(
+        builds.load(Ordering::SeqCst),
+        before,
+        "and nothing was rebuilt to try"
+    );
+    assert_eq!(
+        store.read_log(run_id).await.expect("log reads").len(),
+        2,
+        "the log is untouched"
+    );
+    assert_eq!(
+        due_runs(store.as_ref(), NOW).await.expect("reads").len(),
+        1,
+        "still due, waiting on the client"
+    );
+}
+
+/// The same skip, for a client-driven run this process never opened. Its lease
+/// died with the server that minted it, so the in-memory registry has nothing
+/// to say about it; what says it is the client's to wake is the `driven_by`
+/// the run's own `RunStarted` carries. Without this, a restart would put the
+/// sweeper back to racing a client for its run's log positions, which is the
+/// one thing the lease check exists to prevent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_client_driven_run_known_only_from_its_log_is_left_alone() {
+    let store = memory_store();
+    let (state, builds, _model) = state_with_counter(store.clone()).await;
+
+    let run_id = seed_sleeping_client_driven(&store, NOW - time::Duration::hours(1)).await;
+    assert!(
+        !state.is_client_run(run_id),
+        "no lease here: the log is the only evidence the sweeper has"
+    );
+
+    let before = builds.load(Ordering::SeqCst);
+    assert!(
+        salvor_server::sweep(&state).await.is_empty(),
+        "a client-driven run's due timer is not driven from here, lease or no lease"
     );
     assert_eq!(
         builds.load(Ordering::SeqCst),

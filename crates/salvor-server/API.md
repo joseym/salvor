@@ -60,7 +60,8 @@ codes:
 | 409 | `needs_reconciliation` | Resuming a run whose log ends at a write intent with no completion; `details.intent` carries the recorded write |
 | 409 | `still_sleeping` | Resuming a run parked on a durable timer before its instant; `details.wake_at` and `details.remaining_seconds` say when it can be driven. Nothing is recorded |
 | 401 | `missing_drive_token` | A client-driven append with no drive token (see [Client-driven runs](#client-driven-runs)) |
-| 403 | `invalid_drive_token` | A client-driven append whose drive token is not the run's current lease |
+| 403 | `invalid_drive_token` | A client-driven append whose drive token is not the run's current lease, or a release asking to end a hold the caller does not hold |
+| 409 | `lease_held` | Re-opening a client-driven run whose driver still holds a current lease; `details.lapses_in_seconds` says how long until the hold lapses. Nothing is recorded and no lease is minted |
 | 409 | `divergence` | A client-driven append that is not the legal next event, or different bytes at an already-recorded position |
 | 422 | `unsupported_event_kind` | A client-driven append carrying a model or tool event, which this surface does not accept |
 | 413 | `payload_too_large` | A client-driven append over the body-size or per-batch cap |
@@ -97,12 +98,16 @@ codes:
 | POST | `/v1/graph-runs` | Start a run of a stored graph |
 | GET | `/v1/client-tools` | List the client-performed tool declarations this server holds |
 | POST | `/v1/client-runs` | Open or resume a client-driven run |
+| POST | `/v1/client-runs/{id}/release` | Hand the drive-token lease back, so the next open takes the run at once |
+| POST | `/v1/client-runs/{id}/heartbeat` | Refresh the lease without driving, for a driver inside a long body |
 | GET | `/v1/client-runs/{id}/log` | Read a client-driven run's recorded log |
 | POST | `/v1/client-runs/{id}/events` | Append control and context events (the guarded append) |
 | POST | `/v1/client-runs/{id}/model-step` | Perform and record a model call (server-performed) |
 | POST | `/v1/client-runs/{id}/tool-step` | Perform and record a tool call (server-performed) |
 | POST | `/v1/client-runs/{id}/client-tool-intent` | Open a tool call the CLIENT performs, and derive its idempotency key |
 | POST | `/v1/client-runs/{id}/client-tool-completion` | Record what a client-performed tool call returned |
+| POST | `/v1/client-runs/{id}/client-model-intent` | Open a model call the CLIENT performs, or replay a recorded one |
+| POST | `/v1/client-runs/{id}/client-model-completion` | Record what a client-performed model call returned |
 | POST | `/v1/client-runs/{id}/resolve` | Record a dangling write's completion by hand (client-driven) |
 
 ### POST /v1/agents
@@ -261,7 +266,10 @@ already holds:
 - A **client-driven** run is `"attached"` exactly when this process holds a
   current lease for it: the driver presented its drive token within the lease
   TTL (default 60s; `salvor serve` reads `SALVOR_CLIENT_LEASE_TTL_SECS`). A
-  lapsed lease (the tab closed, the SDK exited) is `"none"`.
+  lapsed lease (the tab closed, the SDK exited) is `"none"`. It is the same
+  lease, read the same way, that decides whether re-opening the run is refused
+  with `409 lease_held` (see [The drive token](#the-drive-token)), so a run that
+  reports `"attached"` here is exactly a run another driver cannot take.
 
 `driver` follows the same zero-vs-absent rule as the folded fields, one way: it
 is **omitted entirely for a terminal run** (`completed` or `failed`), because
@@ -558,6 +566,23 @@ drives nothing.
 - `409 wrong_state` when the run does not need reconciliation (there is no
   dangling write to resolve).
 - `404 unknown_run` when the id has no history.
+
+**It clears a client-driven run's lease.** A dangling write is a driver that
+never came back to record what its write did, and this caller presents no drive
+token, so it is not that driver. Recording the completion over its head
+therefore says the driver is gone, and a recorded resolution drops the lease it
+left behind: the run's own client re-opens it on the next request rather than
+being refused `409 lease_held` for the rest of the TTL right after an operator
+unstuck it. Only the lease goes; the run keeps its recorded `driven_by:
+"client"`, so it is still a client-driven run to every surface that reads the
+log. On a server-driven run there is no lease and nothing changes.
+
+`salvor resolve` on the command line cannot do this. It writes the store
+directly and has no way to reach a running server's memory, so a lease held by a
+live server survives a CLI resolve and lapses on its own; the middleware's next
+open then waits at most the lease TTL
+(`SALVOR_CLIENT_LEASE_TTL_SECS`, 60s by default). Resolve over HTTP against a
+live server to free the run at once.
 
 ### POST /v1/runs/{id}/abandon
 
@@ -954,6 +979,9 @@ has arrived is the client's. `GET /v1/runs/{id}` reports such a run as
 For the same reason, `POST /v1/runs/{id}/resume` (the server-driven surface)
 refuses a client-driven run outright, `409 client_driven_run`, whatever its
 state: only its own client may drive it, by re-opening `POST /v1/client-runs`.
+Both that refusal and the sweep's skip read the run's recorded `driven_by`, not
+only the server's in-memory leases, so they hold after a restart and before the
+client has re-opened anything.
 
 The generic append carries only the control and deterministic-context events the
 client's cursor emits itself, which hold no secret and no side effect:
@@ -962,7 +990,10 @@ client's cursor emits itself, which hold no secret and no side effect:
 `RunFailed`. The side-effecting steps, which the server must perform because it
 holds the key or the binary, have their own endpoints: the model call is the model-step endpoint and the tool call is the
 tool-step endpoint below, and a model or tool event is still refused on the
-generic append.
+generic append. A step the CLIENT performs in its own process, with its own
+secrets, has its own endpoint pair for the same reason: `client-tool-intent`
+with `client-tool-completion` for a tool, and `client-model-intent` with
+`client-model-completion` for a model call the client made with its own key.
 
 ### The drive token
 
@@ -970,8 +1001,68 @@ Opening a client-driven run mints a per-run `drive_token`: the single-writer
 lease. Every append must present it in the `X-Drive-Token` header. It is the
 per-run gate that layers on top of the process-wide bearer, so one authenticated
 caller cannot drive another caller's run, and a second live driver without the
-current lease is refused. Re-opening a run mints a fresh lease, so a resuming tab
-always holds the current one; the superseded lease stops working.
+current lease is refused.
+
+**A lease is held until it lapses.** Re-opening a run whose driver still holds a
+current lease is `409 lease_held`, not a fresh token: the refusal carries
+`details.lapses_in_seconds`, the whole seconds until the hold expires if that
+driver stays quiet. A driver proves it is alive by presenting its token: every
+driving call (append, model step, tool step, an intent, a completion, resolve)
+refreshes the lease. Go quiet for the lease TTL (`SALVOR_CLIENT_LEASE_TTL_SECS`,
+60s by default) and the hold lapses; the next open takes the run and mints a
+fresh lease, and the quiet driver's token is then `403 invalid_drive_token` on
+its next call. A `completed`, `failed`, or `abandoned` run is never held: it
+takes no more appends from anyone, so it re-opens straight away.
+
+The run's own driver may re-open it, presenting its current token in the
+`X-Drive-Token` header. That returns the recorded log under the **same** token,
+so a client rebuilding its cursor is not made to give up the lease it holds and
+a call already in flight under that token stays valid. `record_prompts` is
+ignored on such a re-open; the lease keeps what it was opened with.
+
+**Lapsing is the safety net, not how a drive ends.** A driver that is finished
+hands the lease back with `POST /v1/client-runs/{id}/release`, and the run is
+free on the very next request instead of a TTL later. Without it a short-lived
+process locks out the process that follows it: an SDK invoke returns, the
+process exits, and the next one is refused `409 lease_held` for up to a minute
+for nothing. A driver that will be busy for longer than the TTL inside one body
+(a tool that takes minutes, a model stream it is rendering itself) makes no
+drive call while it works, so it says "still here" with `POST
+/v1/client-runs/{id}/heartbeat` and keeps the run it never left.
+
+**A resolve clears the lease.** Recording a dangling write by hand through `POST
+/v1/runs/{id}/resolve` says the driver that opened that write is gone: it never
+came back to record what the write did, and the caller unsticking it presents no
+drive token, so it is somebody else. The lease that dead driver left behind is
+dropped along with the resolution, and the client re-opens the run straight away rather than being
+refused for the rest of the TTL right after being told the run is unstuck. The
+client's own `POST /v1/client-runs/{id}/resolve` is the exception: it presented
+the run's current token to get in, which is the driver saying it is right here,
+so it keeps the lease and carries on.
+
+`salvor resolve` on the command line is a third case. The CLI writes the store
+directly and has no way to reach a running server's memory, so a lease held by a
+live server survives a CLI resolve and lapses on its own; a client re-opening
+after one waits at most the TTL. Use the HTTP resolve against a live server to
+free the run at once.
+
+The rule is not "newest caller wins", and deliberately so. The caller re-opening
+a live run is usually not the driver that has it, but a second app instance, a
+duplicated tab, or a middleware retrying after a failed call. Handing it the
+lease puts two drivers on one log: both run the same step, and the one that
+loses the race to a position takes a `409 divergence` after doing the work. A
+refreshed tab still resumes, because the tab that went away stopped presenting
+its token and its lease lapses.
+
+Leases live in the server process and do not survive its restart, but the run
+does. A client-driven run's `RunStarted` records `driven_by: "client"`, stamped
+by the server when it accepted that event, and that is what a restarted server
+reads to know the run is a client's to drive. So a restart does not strand a
+run: re-opening it returns its recorded log with a fresh lease (see below), and
+until then the surfaces that would otherwise become a second writer still
+refuse it (`POST /v1/runs/{id}/resume` answers `409 client_driven_run`, and the
+wake sweep leaves its due timer alone). Every lease minted before the restart is
+gone, so a client that was mid-drive re-opens the run to get a current one.
 
 ### POST /v1/client-runs
 
@@ -999,11 +1090,99 @@ endpoint records them nowhere, because the client appends its own
 The empty `log` is what the client builds its cursor from. The client then
 appends its own `RunStarted` at seq 0 through the events endpoint.
 
-- Response `200` for a re-open of a run this server already holds: the same
-  shape, with `log` carrying every recorded envelope and a fresh `drive_token`.
-- `409 run_exists` when the chosen `run_id` already has history and is not a
-  client-driven run this server opened (a server-driven run, so the two modes
-  cannot collide).
+- Response `200` for a re-open, with `log` carrying every recorded envelope and
+  a `drive_token`: a fresh one when the run was unheld, or the caller's own one
+  back when it presented it (see [The drive token](#the-drive-token)). Two
+  things make a `run_id` re-openable, and either is enough: this server opened
+  it since it started (it holds the lease), or the run's own log says it is
+  client-driven, its `RunStarted` carrying `driven_by: "client"`. The second is
+  what makes a restart survivable: the lease registry dies with the process, the
+  log does not, so a server that has just come back re-opens a run its client is
+  still driving instead of refusing it as foreign. Adopting a run this way mints
+  a fresh lease, and the returned `log` is the recorded state the client rebuilds
+  its cursor from, dangling intent and all.
+- `409 lease_held` when another driver's lease on the run is still current and
+  the request did not present that lease's token. Nothing is recorded and no
+  lease is minted, so the driver that has the run keeps it.
+
+```json
+{
+  "error": {
+    "code": "lease_held",
+    "message": "another driver holds run 6f...; its lease lapses in 60s if that driver goes quiet, and re-opening works then (or as soon as the run finishes)",
+    "details": { "lapses_in_seconds": 60 }
+  }
+}
+```
+
+  A caller that means to take over waits `lapses_in_seconds` and asks again. A
+  caller that IS the driver presents its token instead and is not refused. The
+  hold never survives the server process: a restart leaves no lease to hold,
+  so the first open after one always succeeds.
+- `409 run_exists` when the chosen `run_id` already has history and its log does
+  not record it as client-driven, which means it is a server-driven run. That
+  refusal is unchanged by a restart, so the two modes still cannot collide over
+  one store.
+
+### POST /v1/client-runs/{id}/release
+
+Hand the drive-token lease back. Requires the `X-Drive-Token` header. No request
+body is read.
+
+- Response `200`:
+
+```json
+{ "released": true }
+```
+
+- Response `200` with `"released": false` when the run has no lease here: it was
+  released already, it lapsed, or this server never opened the run. The call is
+  idempotent, and finding nothing to give back is not an error, because the
+  caller's goal (a run nobody is holding) is already true.
+- `403 invalid_drive_token` when a lease stands on the run and the request did
+  not present its token, a missing token included. Unlike the driving endpoints,
+  a missing token here is not `401 missing_drive_token`: the question a release
+  asks is not "did you bring credentials" but "is this hold yours to end", and
+  the answer is no either way. Nothing is dropped.
+
+Only the lease goes. The run's log is untouched and it stays a client-driven run
+(its `RunStarted` still carries `driven_by: "client"`), so the next open adopts
+it exactly as it would after a restart, `POST /v1/runs/{id}/resume` still answers
+`409 client_driven_run`, and the wake sweeper still leaves a due timer to its
+client. All three read the log marker, not the lease.
+
+An SDK calls this when an invoke ends, in the success path and the error path
+alike. It is the difference between the next process picking the run up
+immediately and being refused for the rest of the TTL.
+
+### POST /v1/client-runs/{id}/heartbeat
+
+Refresh the lease without driving the run. Requires the `X-Drive-Token` header.
+No request body is read.
+
+- Response `200`:
+
+```json
+{ "lapses_in_seconds": 60 }
+```
+
+`lapses_in_seconds` is the whole lease TTL as of this beat (rounded up to whole
+seconds, never below `1`), so a driver picks its interval from the answer rather
+than being told the server's configuration some other way. Beat comfortably
+inside it.
+
+- `401 missing_drive_token` / `403 invalid_drive_token` on a missing or
+  superseded lease; `404 unknown_run` when the id is not a client-driven run
+  this server opened.
+
+Presenting the drive token has always been the heartbeat, and every driving call
+carries it. What that misses is the driver that makes no drive call for longer
+than the TTL because it is inside one long body: a tool that takes minutes, a
+model call it is streaming to its own screen. Its lease would lapse mid-body and
+another opener could take a run whose driver never went anywhere. Re-opening
+under the held token has the same effect (it keeps the lease and counts as proof
+of life), but it re-reads the whole recorded log every beat to say four words;
+this is the call the SDKs use.
 
 ### GET /v1/client-runs/{id}/log
 
@@ -1016,8 +1195,11 @@ The recorded envelopes, for a refreshed tab to rebuild its cursor.
 Each envelope is exactly the pinned event-envelope wire JSON the event stream
 and `salvor history --json` use. `?from_seq=<n>` returns only envelopes at or
 after `n`, so a client that already holds a prefix fetches just the tail. The
-read needs no drive token, but it serves only client-driven runs this server
-opened. `404 unknown_run` otherwise.
+read needs no drive token, and it needs no lease either: it serves any run
+that is client-driven, whether that is known from this server's lease
+registry or from the recorded log's own `driven_by: client` marker, so it
+still answers after the driver released the lease, the lease lapsed, or the
+process restarted. A server-driven (or unknown) run is `404 unknown_run`.
 
 ### POST /v1/client-runs/{id}/events
 
@@ -1044,6 +1226,14 @@ bounds `POST /v1/runs` enforces apply here, at the one point this server ever
 sees them for a client-driven run: at most 16 labels, each key at most 64
 bytes, each value at most 256 bytes. A `RunStarted` carrying labels over the
 bounds is `400 bad_request`, and nothing in the batch is written.
+
+A `RunStarted` event in the batch is also **stamped** with
+`driven_by: "client"` before it is folded or written, whatever the submitted
+event carried in that field. Reaching this endpoint means holding the run's
+lease, so the run is client-driven, and its head is where that fact is recorded
+durably; a caller cannot set the marker anywhere else. The stamp happens before
+the retry comparison below, so re-appending the same `RunStarted` bytes is
+still the byte-identical no-op it was.
 
 Every envelope's `recorded_at` is **server-stamped**: the server overwrites it
 with its own clock reading before folding or writing the event, regardless of
@@ -1338,6 +1528,122 @@ The recorded `ToolCallRequested` carries `performed_by: "client"`, which is how
 a later reader tells a call salvor witnessed from a call it was told about. A
 server-performed intent omits the field entirely.
 
+### POST /v1/client-runs/{id}/client-model-intent
+
+Open a model call the CLIENT performs, in its own process, with its own key and
+its own model configuration. This server does not make the call and never sees
+the request; it records that the call was asked for, before it happens, exactly
+as the write-ahead rule demands of a call it performs itself. Requires the
+`X-Drive-Token` header.
+
+- Request:
+
+```json
+{ "seq": 3, "request_hash": "sha256:...", "request_body": <the request, optional> }
+```
+
+- Response `200`, an intent that still has to be performed:
+
+```json
+{ "seq": 3, "settled": false }
+```
+
+- Response `200`, an intent whose completion is already recorded:
+
+```json
+{ "seq": 3, "settled": true,
+  "response": <the recorded response>,
+  "usage": { "input_tokens": 10, "output_tokens": 5 } }
+```
+
+Notice what the request does NOT carry, compared with `model-step` above: no
+`request`. `model-step` recomputes `request_hash` from the request body it is
+handed, so a client cannot record a hash that does not match what was sent.
+Here it can. The request never reaches this server, because this server is not
+the one sending it, so the hash is the client's claim over its own request, and
+the response reported later is the client's claim about what came back. Salvor
+did not witness the call; it is trusting the report, exactly as it trusts a
+client-performed tool result.
+
+What the trust buys is the point of the endpoint: a resume replays the recorded
+answer instead of paying the provider for it a second time. The claim is also
+self-punishing rather than dangerous to anyone else, because the hash is a key
+into this run's own log: a client that hashes inconsistently diverges against
+its own history and nobody else's.
+
+`settled` is what a middleware short-circuits on. `false` means the call still
+has to be made; `true` means it is already recorded, and the recorded
+`response` and `usage` ride along so the caller can return them without a
+second request and without a separate log read.
+
+`request_body` is recorded on the intent only when the run was opened with
+`record_prompts: true`, the same rule the server-performed step reads off the
+run's lease. Sent to a run that does not record prompts, it is dropped and
+never written. It is informational either way: correlation is on `request_hash`
+alone.
+
+Refusals, each of which writes nothing:
+
+- a different `request_hash` at an already-recorded position: `409 divergence`;
+- a non-model event at that position: `409 divergence`;
+- an intent at that position that this SERVER performed: `409 divergence`. The
+  client's cursor and the log disagree about who owns that step;
+- a `seq` the log is not ready for: `409 divergence`.
+
+A re-post at a recorded position with the same hash is a `200` that writes
+nothing: the safe retry a dropped response leaves behind, and the replay a
+later drive is built on.
+
+The recorded `ModelCallRequested` carries `performed_by: "client"`, which is how
+a later reader tells a call salvor witnessed from a call it was told about. A
+server-performed intent omits the field entirely. The fold reads no performer at
+all, so a client-performed call moves a run exactly as a server-performed one
+does: `awaiting_model` while the intent is open, and its tokens counted toward
+every budget once the completion lands.
+
+For the same reason in the other direction, `model-step` refuses a position
+holding a client-performed intent with `409 divergence`, and calls no provider:
+performing it there would let this server witness a response for a call the log
+attributes to the client.
+
+### POST /v1/client-runs/{id}/client-model-completion
+
+Record what a client-performed model call returned. Requires the
+`X-Drive-Token` header.
+
+- Request:
+
+```json
+{ "seq": 3, "response": <what the client says the provider returned>,
+  "usage": { "input_tokens": 10, "output_tokens": 5 } }
+```
+
+- Response `200`:
+
+```json
+{ "seq": 3, "completed": true }
+```
+
+`usage` is required, not optional: it is what a token budget counts, and a
+completion that quietly reported none would under-count every budget the run is
+held to.
+
+Refusals, each of which records nothing:
+
+- the log does not end at a model intent, or ends at one whose `seq` is not the
+  one named: `409 divergence`;
+- the pending intent was performed by the SERVER: `403
+  client_completion_refused`. A client must not close a call salvor made, since
+  salvor holds the real response.
+
+That is the whole list, and it is shorter than `client-tool-completion`'s on
+purpose. The tool completion's remaining refusals all come from the operator's
+declaration (`trust_completion`, `output_schema`, `require_equal`), and a model
+call has no such declaration to check against: its response shape is the
+provider's, not an operator's. The response is recorded verbatim, and the
+recorded `ModelCallCompleted` is byte-identical to the one the server-performed
+step writes for the same response.
+
 ### POST /v1/client-runs/{id}/resolve
 
 Record the completion of a dangling write by hand for a client-driven run, the
@@ -1361,6 +1667,12 @@ run's log ends at a dangling `Write` intent, it correlates the caller-supplied
 output to that intent, and it dispatches nothing. After it records the completion
 the run is drivable again, so the client re-fetches the log and its cursor sails
 past the once-dangling intent.
+
+**This one keeps the caller's lease**, unlike `POST /v1/runs/{id}/resolve`, which
+drops it. Getting in here at all means presenting the run's current drive token,
+which is the driver saying it is right here, so there is no dead lease to clear
+and revoking a live one would strand the very caller that just proved it is
+alive.
 
 - `409 wrong_state` when the run does not need reconciliation (there is no
   dangling write to resolve).

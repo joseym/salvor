@@ -34,6 +34,7 @@ async fn seed_running(path: &Path) -> RunId {
             agent_def_hash: "sha256:agent".into(),
             input: json!("research otters"),
             labels: None,
+            driven_by: None,
         },
     );
     store.append(&envelope).await.expect("seed append");
@@ -49,6 +50,7 @@ async fn seed_dangling_write(path: &Path) -> RunId {
             agent_def_hash: "sha256:agent".into(),
             input: json!("publish otters"),
             labels: None,
+            driven_by: None,
         },
         Event::ToolCallRequested {
             seq: SequenceNumber::new(1),
