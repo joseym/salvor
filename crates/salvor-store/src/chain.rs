@@ -87,12 +87,18 @@
 //! splicing a row into the middle of it, or dropping rows out of it are all
 //! refused on the next read.
 //!
-//! Closing the remaining two cases needs an anchor outside the store: a
-//! signature over the head hash under a key the store does not have, or the
-//! head hash published somewhere append-only, so that "the head moved" becomes
-//! a claim someone outside can check. [`ChainHead`] is the seam that would
-//! attach to: it is the single value per run that commits to the entire log,
-//! so an external anchor signs 32 bytes per run rather than the log.
+//! Closing the remaining two cases needs an anchor outside the store, so that
+//! "the head moved" becomes a claim someone outside can check. [`ChainHead`]
+//! is the seam it attaches to: it is the single value per run that commits to
+//! the entire log, so an anchor holds 32 bytes per run rather than the log.
+//! [`SqliteStore::chain_heads`](crate::SqliteStore::chain_heads) hands those
+//! heads out and `salvor anchor` writes them to a file kept elsewhere;
+//! [`SqliteStore::chain_hash_at`](crate::SqliteStore::chain_hash_at) is what a
+//! later check compares against, since a run may honestly have grown since the
+//! anchor and what has to still hold is that its chain passed through the
+//! anchored hash at the anchored length. That anchor is unsigned, and so
+//! closes the rewrite case only as far as the file is out of the rewriter's
+//! reach; see SECURITY.md.
 //!
 //! # For backend implementors
 //!
@@ -163,6 +169,36 @@ pub struct ChainHead<'a> {
     pub len: u64,
     /// The `row_hash` of the run's last recorded row.
     pub hash: &'a str,
+}
+
+/// A run's recorded chain head, owned rather than borrowed: the same two
+/// values as [`ChainHead`], in the form a caller can keep after the read that
+/// produced them has finished.
+///
+/// [`ChainHead`] borrows because verification hands a backend's freshly read
+/// strings straight back to it without copying. Listing heads is the other
+/// shape: a backend hands out one value per run, the rows they were read from
+/// are gone, and what the caller does next (write them to an anchor file,
+/// compare them against one) outlives the read. Convert with [`Self::as_ref`]
+/// wherever a borrowed head is what the function takes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedChainHead {
+    /// The number of rows recorded for the run.
+    pub len: u64,
+    /// The `row_hash` of the run's last recorded row, 64 lowercase hex
+    /// characters.
+    pub hash: String,
+}
+
+impl OwnedChainHead {
+    /// Borrows this head as a [`ChainHead`], the form [`verify`] takes.
+    #[must_use]
+    pub fn as_ref(&self) -> ChainHead<'_> {
+        ChainHead {
+            len: self.len,
+            hash: &self.hash,
+        }
+    }
 }
 
 /// Computes one row's hash, per the definition in the module docs.

@@ -11,6 +11,7 @@
 //! object-safe and async-usable, since the kit only ever names the public
 //! `EventStore` surface, never `rusqlite`.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,7 +20,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use rusqlite::Connection;
 use salvor_core::{Event, EventEnvelope, RunId, RunSummary, SequenceNumber};
-use salvor_store::{EventStore, SqliteStore, StoreError};
+use salvor_store::{EventStore, SqliteStore, StoreError, chain};
 use salvor_store_conformance::TamperHarness;
 use time::OffsetDateTime;
 
@@ -532,6 +533,96 @@ async fn a_store_written_before_the_chain_opens_reads_and_verifies() {
         }
         other => panic!("expected TamperEvident on a migrated row, got {other:?}"),
     }
+}
+
+/// `chain_heads` hands back one recorded head per run, ordered by run id, and
+/// `chain_hash_at` hands back the head the chain carried at any earlier
+/// length.
+///
+/// Both are checked against a chain recomputed here from the appended
+/// envelopes with the crate's own `row_hash`, rather than against whatever the
+/// store happens to hold, so a query that read the wrong column or the wrong
+/// row would fail this. These are the two reads `salvor anchor` and
+/// `salvor verify` are built on: one takes the heads, the other asks whether
+/// the chain still passes through an anchored hash at an anchored length.
+#[tokio::test]
+async fn chain_heads_and_earlier_positions_read_back() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("salvor.db");
+    let store = SqliteStore::open(&path).expect("store opens");
+
+    assert!(
+        store.chain_heads().expect("heads read").is_empty(),
+        "a store with no runs anchors nothing"
+    );
+
+    // Two runs of different lengths, with the chain each one should end up
+    // with computed alongside from the exact bytes appended.
+    let mut expected: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let runs = [(RunId::new(), 3u64), (RunId::new(), 2u64)];
+    for (run, count) in runs {
+        let mut prev = chain::GENESIS_PREV_HASH.to_owned();
+        let mut hashes = Vec::new();
+        for seq in 0..count {
+            let envelope = envelope(run, seq, fail(&format!("event {seq}")));
+            store.append(&envelope).await.expect("append");
+            let wire = serde_json::to_string(&envelope).expect("envelope serializes");
+            prev = chain::row_hash(&prev, run, SequenceNumber::new(seq), &wire);
+            hashes.push(prev.clone());
+        }
+        expected.insert(run.as_uuid().to_string(), hashes);
+    }
+
+    let heads = store.chain_heads().expect("heads read");
+    let listed: Vec<String> = heads
+        .iter()
+        .map(|(run, _)| run.as_uuid().to_string())
+        .collect();
+    let mut ordered = listed.clone();
+    ordered.sort();
+    assert_eq!(listed, ordered, "heads come back ordered by run id");
+    assert_eq!(listed, expected.keys().cloned().collect::<Vec<_>>());
+
+    for (run, head) in &heads {
+        let chain = &expected[&run.as_uuid().to_string()];
+        assert_eq!(head.len, chain.len() as u64, "the recorded length");
+        assert_eq!(
+            head.hash,
+            *chain.last().expect("a run with rows has a last hash"),
+            "the recorded head hash"
+        );
+        // Every prefix length reads back the hash the chain carried there.
+        for (index, hash) in chain.iter().enumerate() {
+            assert_eq!(
+                store
+                    .chain_hash_at(*run, index as u64 + 1)
+                    .expect("row hash reads"),
+                Some(hash.clone()),
+                "the hash at length {}",
+                index + 1
+            );
+        }
+        assert_eq!(
+            store.chain_hash_at(*run, 0).expect("row hash reads"),
+            None,
+            "no row sits before the first one"
+        );
+        assert_eq!(
+            store
+                .chain_hash_at(*run, head.len + 1)
+                .expect("row hash reads"),
+            None,
+            "a length the run never reached has no hash"
+        );
+    }
+
+    assert_eq!(
+        store
+            .chain_hash_at(RunId::new(), 1)
+            .expect("row hash reads"),
+        None,
+        "a run this store never held has no hash at any length"
+    );
 }
 
 /// Wraps a payload in an envelope for `run` at `seq`, timestamped `seq` seconds
