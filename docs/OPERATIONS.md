@@ -245,6 +245,116 @@ them are worth a retry: treat it as an integrity incident and go back
 to a backup that reads clean. Restoring a store whose chain does not
 verify puts a log into service that `read_log` will keep refusing.
 
+Reading proves the store still agrees with itself. What it cannot prove
+is that the store still holds what it held before the loss, since a
+writer who rewrites a run recomputes its hashes too. That is what an
+anchor is for, next.
+
+### Anchoring the chain
+
+Reading is the check, and it has one blind spot. The chain is unkeyed:
+every value the verification uses sits in the database beside the rows,
+so somebody who can write the file can rewrite a run from its first
+event and recompute every hash and the recorded head. The store then
+reads clean and says nothing, because there is nothing left inside it
+to disagree with.
+
+An anchor is a copy of what the heads were, kept where that writer
+cannot reach it:
+
+```sh
+salvor anchor --store /var/lib/salvor/salvor.db --out /mnt/anchors/salvor-2026-08-28.json
+```
+
+```
+anchored 2 run(s) (written to /mnt/anchors/salvor-2026-08-28.json). Keep it somewhere this store cannot reach: an anchor kept beside the database it describes is rewritten by whoever rewrites the database.
+```
+
+The file is JSON, one entry per run, ordered by run id: how many events
+the run held and the hash that commits to exactly those events.
+
+```json
+{
+  "anchor": "salvor.anchor.v1",
+  "chain": "salvor.chain.v1",
+  "store": "/var/lib/salvor/salvor.db",
+  "taken_at": "2026-08-28T16:40:11.482913Z",
+  "runs": [
+    {
+      "run": "1f9c1f6d-0d3a-4a1c-9a0f-7f4a2d2b6c11",
+      "len": 12,
+      "hash": "4c26d7252c8cafb2842eae97494c28865b945a190bfb2518a77778b38af49e4c"
+    }
+  ]
+}
+```
+
+With no `--out` the document goes to stdout and that one human line to
+stderr, so `salvor anchor > anchor.json` gets the file and nothing else.
+
+Take one after every backup, and on a schedule for a store that is
+being written to, the same way the backup itself is scheduled. Then
+move it off the box. An anchor sitting next to the database it
+describes is rewritten by whoever rewrites the database and answers
+nothing; the whole value is in the distance.
+
+After a restore, read the store (above), then check it against the
+anchor you took before the loss:
+
+```sh
+salvor verify --store /var/lib/salvor/salvor.db --against /mnt/anchors/salvor-2026-08-28.json
+```
+
+```
+run 1f9c1f6d-0d3a-4a1c-9a0f-7f4a2d2b6c11: intact at 12 event(s), 3 recorded since the anchor
+run 8a2b0c44-51e7-4f0a-b3d1-9c6e5f2a7d90: new since the anchor, 4 event(s). Not covered by this anchor; the next one covers it.
+1 run(s) anchored, 1 intact, 1 new since the anchor
+```
+
+Every run is named, including the ones that are fine, because an answer
+that lists only trouble cannot tell "nothing is wrong" from "nothing
+was checked". A run that has grown since the anchor is intact: the
+anchor commits to the prefix it saw, and ordinary appending is not a
+discrepancy. A run started after the anchor was taken is reported as
+new and fails nothing; the next anchor covers it.
+
+Four findings are failures, and each names the run and the position:
+
+* `missing`: the anchor recorded the run and this store does not hold it.
+* `shortened`: this store holds fewer events than the anchor recorded.
+* `rewritten`: this store holds at least as many, and the hash at the
+  anchored length is not the anchored one. The events the anchor
+  covered are not the events this store now holds.
+* `broken`: this store refuses the run's own log, at the sequence
+  number it names. That is the ordinary chain failure, found here
+  because verifying reads every log.
+
+```
+run 1f9c1f6d-0d3a-4a1c-9a0f-7f4a2d2b6c11: rewritten at event 12. The events this anchor covered are not the events this store now holds.
+  the anchor recorded 4c26d7252c8cafb2842eae97494c28865b945a190bfb2518a77778b38af49e4c
+  this store holds  1b27340ee0ce5419b995c63eedb0b937087b59a7033402802a6cca8c8a21a2d3
+1 run(s) anchored, 0 intact, 0 new since the anchor
+
+This store no longer holds what the anchor says it held. Do not re-anchor it: a fresh anchor
+over a rewritten store records the rewrite. Go back to a backup that reads clean and verifies
+against this anchor. See docs/OPERATIONS.md, Anchoring the chain.
+```
+
+`verify` exits `0` when every anchored run is intact and `1` when any
+one of them is missing, shortened, rewritten, or broken, so it drops
+into a restore script or a cron line without parsing its output. An
+anchor file written under a spec this binary does not know is refused
+before a single run is read, and exits non-zero having checked nothing.
+`--json` prints the same result as a document (`"ok"`, the counts, and
+one entry per run carrying its `finding`) with the same exit code.
+
+Two honest limits. An anchor says nothing about events recorded after
+it was taken, so a run extended with fabricated events chained onto its
+current head is invisible until the next anchor covers it; anchor often
+enough that the window is one you can live with. And the anchor is not
+signed: it proves what it says only as far as you can vouch for where
+the file has been. Salvor ships no signing. See SECURITY.md.
+
 ## Runs waiting on a person
 
 A run waiting on a person, whether at a dangling write, a gate, or a budget ceiling, stays where it is until someone acts. Nothing times out and nothing escalates on its own. `salvor list --store <path> --group waiting` lists such runs; that is what to alert on.
