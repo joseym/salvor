@@ -1,0 +1,61 @@
+#!/bin/sh
+#
+# pre-push: lint the commit messages being pushed, then require a review stamp.
+#
+# Git feeds this hook one "<local ref> <local sha> <remote ref> <remote sha>"
+# line per ref. For each ref with a real local sha it lints the commits that
+# the remote does not have yet, and refuses the push if the linter complains.
+# It then requires the file .git/commit-review/<local sha>, which the
+# /review-commits skill writes once the messages have been read by a human or
+# an agent. Nothing is pushed until both pass.
+
+set -u
+
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+GIT_DIR=$(git rev-parse --git-dir 2>/dev/null) || exit 0
+LINT="$ROOT/.githooks/commit-lint.sh"
+
+status=0
+
+is_zero() {
+  case "$1" in
+    *[!0]*) return 1 ;;
+    '') return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ -n "${local_sha:-}" ] || continue
+  if is_zero "$local_sha"; then
+    continue
+  fi
+
+  if [ -n "${remote_sha:-}" ] && ! is_zero "$remote_sha"; then
+    range="$remote_sha..$local_sha"
+  elif git rev-parse --verify -q origin/main >/dev/null 2>&1; then
+    range="origin/main..$local_sha"
+  elif git rev-parse --verify -q main >/dev/null 2>&1; then
+    range="main..$local_sha"
+  else
+    range="$local_sha^!"
+  fi
+
+  if [ -x "$LINT" ]; then
+    out=$("$LINT" "$range" 2>&1)
+    code=$?
+    if [ "$code" -ne 0 ]; then
+      echo "pre-push: commit-lint failed for $local_ref ($range)" >&2
+      [ -n "$out" ] && printf '%s\n' "$out" >&2
+      status=1
+      continue
+    fi
+  fi
+
+  if [ ! -f "$GIT_DIR/commit-review/$local_sha" ]; then
+    echo "pre-push: these commits have not been reviewed; run /review-commits (it writes .git/commit-review/<sha>) or push with --no-verify to skip." >&2
+    status=1
+  fi
+done
+
+exit "$status"
