@@ -39,6 +39,7 @@
 //! [`EXIT_NOT_CHECKED`] are three codes, not two: page on the second,
 //! investigate the third, and never read the third as an all-clear.
 
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -197,11 +198,19 @@ impl Anchor {
     /// [`salvor_store::chain`]), and an anchored run holds at least one event,
     /// since a run with no events has no head to record.
     ///
+    /// A run named twice is refused as well, because the counts are what the
+    /// summary reports and a duplicate inflates them: an anchor listing one
+    /// run twice reports "2 anchored, 2 intact" over a store holding one run,
+    /// which is a pass that counted the same evidence twice. The store writes
+    /// one entry per run, so a second entry for the same run came from
+    /// somewhere else.
+    ///
     /// # Errors
     ///
     /// Returns the message to print, naming the entry by its position in the
     /// file and by the run it claims.
     pub fn check_entries(&self) -> Result<(), String> {
+        let mut first_seen: HashMap<&str, usize> = HashMap::new();
         for (index, entry) in self.runs.iter().enumerate() {
             let position = index + 1;
             if uuid::Uuid::parse_str(&entry.run).is_err() {
@@ -225,6 +234,15 @@ impl Anchor {
                      hash is 64 lowercase hex characters. Nothing was checked: this file is not \
                      an anchor this salvor can read.",
                     entry.run, entry.hash
+                ));
+            }
+            if let Some(first) = first_seen.insert(entry.run.as_str(), position) {
+                return Err(format!(
+                    "entries {first} and {position} both name run {}, and an anchor records one \
+                     entry per run. Nothing was checked: a run named twice is checked twice and \
+                     counted twice, so a pass against this file would report more runs standing \
+                     than this store holds.",
+                    entry.run
                 ));
             }
         }
@@ -305,6 +323,11 @@ pub enum Finding {
     Rewritten {
         /// The length the anchor recorded.
         anchored_len: u64,
+        /// How many events the run holds now. Recorded alongside the anchored
+        /// length because "rewritten" says nothing about the current size on
+        /// its own, and a run rewritten and extended reads differently from
+        /// one rewritten in place.
+        len: u64,
         /// The hash the anchor recorded at that length.
         anchored_hash: String,
         /// The hash the store carries there now, or `None` if it holds no
@@ -399,6 +422,7 @@ pub fn finding_for(anchored: &AnchoredRun, observed: &Observed) -> Finding {
             } else {
                 Finding::Rewritten {
                     anchored_len: anchored.len,
+                    len: *len,
                     anchored_hash: anchored.hash.clone(),
                     found_hash: hash_at_anchored_len.clone(),
                 }
@@ -433,18 +457,37 @@ pub struct Verification {
     pub anchored: usize,
     /// How many of those still carry their anchored events.
     pub intact: usize,
-    /// How many of those did not: missing, shortened, rewritten, or broken.
-    /// The number an operator is being asked to act on.
+    /// How many anchored runs did not: missing, shortened, rewritten, or
+    /// broken. Anchored runs only, so `intact + failed` is never more than
+    /// `anchored`; a broken run the anchor never named is counted in
+    /// [`Verification::broken_unanchored`] instead.
     pub failed: usize,
-    /// How many runs the store holds that the anchor does not.
+    /// How many runs the anchor never named whose log this store now refuses.
+    ///
+    /// Its own number rather than part of `failed`, because the anchor says
+    /// nothing about these runs: the finding is the store refusing itself, not
+    /// a comparison against the anchor. It still exits non-zero, because a log
+    /// the store will not read is a log nobody can read.
+    pub broken_unanchored: usize,
+    /// How many runs the store holds that the anchor does not, and whose logs
+    /// read. A run the anchor never named whose log the store refuses is in
+    /// `broken_unanchored`, not here.
     pub new: usize,
+    /// Whether this reads like the wrong anchor rather than a loss: every run
+    /// the anchor names is missing here while the store holds runs the anchor
+    /// never named. A suspicion, not a verdict; see
+    /// [`Verification::looks_like_the_wrong_anchor`]. In the document because
+    /// a caller reading `--json` has to be able to reach the same conclusion
+    /// the human report prints.
+    pub maybe_wrong_anchor: bool,
     /// Always true on this document: the check ran. A pre-flight refusal
     /// prints [`PreflightFailure`] instead, which carries `false`, so a
     /// consumer reads one field to tell "checked and clean" from "never
     /// checked".
     pub checked: bool,
-    /// Whether every run passed. False if any run is missing, shortened,
-    /// rewritten, or broken; a new run never makes this false.
+    /// Whether every run passed. False if any anchored run is missing,
+    /// shortened, rewritten, or broken, and false if any run outside the
+    /// anchor is broken; a new run that reads never makes this false.
     pub ok: bool,
 }
 
@@ -483,6 +526,11 @@ impl PreflightFailure {
 impl Verification {
     /// Assembles the result from the findings, counting what the summary line
     /// reports and deciding the exit code.
+    ///
+    /// The counts are split by whether the anchor named the run, so they
+    /// close: `intact + failed` never exceeds `anchored`, and a broken run the
+    /// anchor never named lands in `broken_unanchored` rather than inflating a
+    /// number the summary presents as a fraction of the anchored ones.
     #[must_use]
     pub fn new(
         anchor: &Anchor,
@@ -492,6 +540,7 @@ impl Verification {
         mut runs: Vec<RunFinding>,
     ) -> Self {
         runs.sort_by(|a, b| a.run.cmp(&b.run));
+        let anchored_runs: HashSet<&str> = anchor.runs.iter().map(|r| r.run.as_str()).collect();
         let intact = runs
             .iter()
             .filter(|r| matches!(r.finding, Finding::Intact { .. }))
@@ -500,7 +549,22 @@ impl Verification {
             .iter()
             .filter(|r| matches!(r.finding, Finding::New { .. }))
             .count();
-        let failed = runs.iter().filter(|r| r.finding.is_failure()).count();
+        let failed = runs
+            .iter()
+            .filter(|r| r.finding.is_failure() && anchored_runs.contains(r.run.as_str()))
+            .count();
+        let broken_unanchored = runs
+            .iter()
+            .filter(|r| {
+                matches!(r.finding, Finding::Broken { .. })
+                    && !anchored_runs.contains(r.run.as_str())
+            })
+            .count();
+        let missing = runs
+            .iter()
+            .filter(|r| matches!(r.finding, Finding::Missing { .. }))
+            .count();
+        let anchored = anchor.runs.len();
         Verification {
             verify: VERIFY_SPEC.to_owned(),
             store: store.display().to_string(),
@@ -509,12 +573,14 @@ impl Verification {
             anchor_taken_at: anchor.taken_at.clone(),
             checked_at: format_time(checked_at),
             runs,
-            anchored: anchor.runs.len(),
+            anchored,
             intact,
             failed,
+            broken_unanchored,
             new,
+            maybe_wrong_anchor: anchored > 0 && new > 0 && missing == anchored,
             checked: true,
-            ok: failed == 0,
+            ok: failed == 0 && broken_unanchored == 0,
         }
     }
 
@@ -528,7 +594,7 @@ impl Verification {
     /// effort and hours apart in consequence.
     #[must_use]
     pub fn looks_like_the_wrong_anchor(&self) -> bool {
-        self.anchored > 0 && self.new > 0 && self.missing() == self.anchored
+        self.maybe_wrong_anchor
     }
 
     /// How many anchored runs this store does not hold at all.
@@ -607,26 +673,33 @@ mod tests {
     /// and whose anchored prefix is not what it was.
     #[test]
     fn a_recomputed_rewrite_is_named_rewritten() {
+        // Rewritten and extended, so the current length is a fact of its own:
+        // "rewritten" alone does not say whether the run is the size it was.
         let finding = finding_for(
             &anchored(3, "aa"),
             &Observed::Present {
-                len: 3,
+                len: 5,
                 hash_at_anchored_len: Some("bb".to_owned()),
             },
         );
         match &finding {
             Finding::Rewritten {
                 anchored_len,
+                len,
                 anchored_hash,
                 found_hash,
             } => {
                 assert_eq!(*anchored_len, 3);
+                assert_eq!(*len, 5, "the length the store holds now is recorded too");
                 assert_eq!(anchored_hash, "aa");
                 assert_eq!(found_hash.as_deref(), Some("bb"));
             }
             other => panic!("expected rewritten, got {other:?}"),
         }
         assert!(finding.is_failure());
+        let json = serde_json::to_value(&finding).expect("serializes");
+        assert_eq!(json["len"], serde_json::json!(5));
+        assert_eq!(json["anchored_len"], serde_json::json!(3));
     }
 
     #[test]
@@ -836,6 +909,164 @@ mod tests {
             }],
         );
         assert!(!only_missing.looks_like_the_wrong_anchor());
+    }
+
+    /// An anchor that names one run twice verifies it twice and counts it
+    /// twice, so a store holding one of two anchored runs comes back "2
+    /// anchored, 2 intact" against evidence for one. Refused as a file.
+    #[test]
+    fn a_run_named_twice_refuses_the_file_by_both_positions() {
+        let mut anchor = Anchor::take("s.db", OffsetDateTime::UNIX_EPOCH, Vec::new());
+        let entry = AnchoredRun {
+            run: "6d1b7a7e-0000-4000-8000-00000000abcd".to_owned(),
+            len: 4,
+            hash: "a".repeat(64),
+        };
+        let other = AnchoredRun {
+            run: "7d1b7a7e-0000-4000-8000-00000000abcd".to_owned(),
+            len: 2,
+            hash: "b".repeat(64),
+        };
+        anchor.runs = vec![entry.clone(), other, entry.clone()];
+        let refusal = anchor.check().expect_err("a run named twice is refused");
+        assert!(refusal.contains("entries 1 and 3"), "{refusal}");
+        assert!(refusal.contains(&entry.run), "{refusal}");
+
+        // The same lengths and hashes across two runs are not a duplicate:
+        // what is refused is one run named twice.
+        let mut distinct = anchor.clone();
+        distinct.runs = vec![
+            entry.clone(),
+            AnchoredRun {
+                run: "7d1b7a7e-0000-4000-8000-00000000abcd".to_owned(),
+                ..entry
+            },
+        ];
+        distinct
+            .check()
+            .expect("two runs, same head, is not a duplicate");
+    }
+
+    /// An entry's own fields are checked before it is compared with any other,
+    /// so a malformed run id is named as malformed rather than as a repeat of
+    /// the malformed one above it.
+    #[test]
+    fn a_malformed_entry_is_named_before_a_duplicate_is() {
+        let mut anchor = Anchor::take("s.db", OffsetDateTime::UNIX_EPOCH, Vec::new());
+        let bad = AnchoredRun {
+            run: "run-7".to_owned(),
+            len: 1,
+            hash: "a".repeat(64),
+        };
+        anchor.runs = vec![bad.clone(), bad];
+        let refusal = anchor.check().expect_err("a non-uuid run is refused");
+        assert!(refusal.contains("not a run id"), "{refusal}");
+    }
+
+    /// The counts have to close: `intact` plus `failed` is the anchored total,
+    /// and a broken run the anchor never named is its own number rather than a
+    /// failure counted against runs it does not describe.
+    #[test]
+    fn a_broken_run_outside_the_anchor_is_counted_on_its_own() {
+        let mut anchor = Anchor::take("s.db", OffsetDateTime::UNIX_EPOCH, Vec::new());
+        anchor.runs = vec![anchored(3, &"a".repeat(64))];
+
+        let result = Verification::new(
+            &anchor,
+            Path::new("s.db"),
+            Path::new("anchor.json"),
+            OffsetDateTime::UNIX_EPOCH,
+            vec![
+                RunFinding {
+                    run: anchored(3, "").run,
+                    finding: Finding::Shortened {
+                        anchored_len: 3,
+                        len: 1,
+                    },
+                },
+                RunFinding {
+                    run: "9d1b7a7e-0000-4000-8000-00000000abcd".to_owned(),
+                    finding: Finding::Broken {
+                        seq: 0,
+                        detail: "expected x, found y".to_owned(),
+                    },
+                },
+            ],
+        );
+        assert_eq!(result.anchored, 1);
+        assert_eq!(result.failed, 1, "the anchored run, and only it");
+        assert_eq!(result.broken_unanchored, 1);
+        assert_eq!(result.new, 0, "a broken run is not a new one");
+        assert!(
+            result.intact + result.failed <= result.anchored,
+            "the counts close: {result:?}"
+        );
+        assert_eq!(result.exit_code(), EXIT_TAMPER);
+
+        // A broken run outside the anchor on its own still fails the check:
+        // the store refuses a log, and nobody can read it whatever the anchor
+        // says.
+        let only_outside = Verification::new(
+            &anchor,
+            Path::new("s.db"),
+            Path::new("anchor.json"),
+            OffsetDateTime::UNIX_EPOCH,
+            vec![
+                RunFinding {
+                    run: anchored(3, "").run,
+                    finding: Finding::Intact {
+                        anchored_len: 3,
+                        len: 3,
+                        events_since: 0,
+                    },
+                },
+                RunFinding {
+                    run: "9d1b7a7e-0000-4000-8000-00000000abcd".to_owned(),
+                    finding: Finding::Broken {
+                        seq: 0,
+                        detail: "expected x, found y".to_owned(),
+                    },
+                },
+            ],
+        );
+        assert_eq!((only_outside.intact, only_outside.failed), (1, 0));
+        assert_eq!(only_outside.broken_unanchored, 1);
+        assert!(!only_outside.ok);
+        assert_eq!(only_outside.exit_code(), EXIT_TAMPER);
+    }
+
+    /// The suspicion the human report prints is a field on the document, so a
+    /// caller reading `--json` reaches the same conclusion without parsing
+    /// prose.
+    #[test]
+    fn the_wrong_anchor_suspicion_is_a_field_on_the_document() {
+        let mut anchor = Anchor::take("old.db", OffsetDateTime::UNIX_EPOCH, Vec::new());
+        anchor.runs = vec![anchored(3, &"a".repeat(64))];
+        let result = Verification::new(
+            &anchor,
+            Path::new("new.db"),
+            Path::new("anchor.json"),
+            OffsetDateTime::UNIX_EPOCH,
+            vec![
+                RunFinding {
+                    run: anchored(3, "").run,
+                    finding: Finding::Missing { anchored_len: 3 },
+                },
+                RunFinding {
+                    run: "9d1b7a7e-0000-4000-8000-00000000abcd".to_owned(),
+                    finding: Finding::New { len: 1 },
+                },
+            ],
+        );
+        assert!(result.maybe_wrong_anchor);
+        assert_eq!(
+            result.looks_like_the_wrong_anchor(),
+            result.maybe_wrong_anchor,
+            "the method and the field are one answer"
+        );
+        let json = serde_json::to_value(&result).expect("serializes");
+        assert_eq!(json["maybe_wrong_anchor"], serde_json::json!(true));
+        assert_eq!(json["broken_unanchored"], serde_json::json!(0));
     }
 
     /// The document's shape is the contract an operator's own tooling reads,

@@ -67,13 +67,27 @@ pub enum Command {
     Abandon(AbandonArgs),
     /// List runs in the store, newest activity last. Filters narrow what is
     /// printed; with none, every run is listed.
+    ///
+    /// Reading is the integrity check: every log listed is read back through
+    /// its whole hash chain, and a store holding a run it refuses to read
+    /// fails here rather than listing the rest. The store is read, never
+    /// created, so a `--store` path with no database at it is refused (exit 2)
+    /// instead of printing `no runs in <path>` and exiting 0.
     List(ListArgs),
     /// Print a shell completion script for `salvor` on stdout.
     Completions(CompletionsArgs),
     /// Print a run's event log.
+    ///
+    /// The store is read, never created: a `--store` path with no database at
+    /// it is refused (exit 2), rather than reading back as a store in which
+    /// this run does not exist.
     History(HistoryArgs),
     /// Re-derive a run's state from its log without executing anything. The
     /// only mode; nothing is ever executed.
+    ///
+    /// The store is read, never created: a `--store` path with no database at
+    /// it is refused (exit 2), rather than reading back as a store in which
+    /// this run does not exist.
     Replay(ReplayArgs),
     /// Take an anchor over this store: one line per run naming how many events
     /// it holds and the hash that commits to them. Keep the file somewhere the
@@ -86,8 +100,9 @@ pub enum Command {
     /// Exit codes. 0: the anchor was written. 1: the file at `--out` is an
     /// anchor this store no longer verifies against, so it was not
     /// overwritten. 2: no anchor was taken (no store at the path, a store
-    /// holding no runs without `--allow-empty`, or a file at `--out` that is
-    /// not an anchor).
+    /// holding no runs without `--allow-empty`, a file at `--out` that is not
+    /// an anchor, or a write that failed, such as a `--out` under a directory
+    /// that is not there). Exit 2 never means the store is suspect.
     Anchor(AnchorArgs),
     /// Check this store against an anchor taken earlier: every anchored run
     /// must still hold, unchanged, the events it was anchored at.
@@ -492,9 +507,10 @@ pub struct AnchorArgs {
     /// store no longer verifies against, the write is refused (exit 1) rather
     /// than recording the rewrite over the evidence of it; if it is not an
     /// anchor at all, the write is refused too (exit 2). `--force` overwrites
-    /// either. Write it somewhere the store cannot reach: an anchor kept
-    /// beside the database it describes is rewritten by whoever rewrites the
-    /// database, and answers nothing.
+    /// either. A write that fails, such as one under a directory that is not
+    /// there, is exit 2 as well: no anchor was taken. Write it somewhere the
+    /// store cannot reach: an anchor kept beside the database it describes is
+    /// rewritten by whoever rewrites the database, and answers nothing.
     #[arg(long, value_name = "FILE")]
     pub out: Option<PathBuf>,
     /// Take an anchor over a store that holds no runs.

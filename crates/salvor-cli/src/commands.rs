@@ -1253,7 +1253,11 @@ pub async fn abandon(store_path: &Path, args: AbandonArgs) -> Result<u8> {
 /// Three ways it declines to write, all before anything is serialized: no
 /// store at the path, a store holding no runs (an anchor over nothing commits
 /// to nothing), and a `--out` file it would be destroying evidence to replace.
-/// See [`anchor::EXIT_NOT_CHECKED`] and [`anchor::EXIT_TAMPER`].
+/// A fourth is decided by the filesystem: a write that fails leaves no anchor,
+/// and says so with [`anchor::EXIT_NOT_CHECKED`] rather than as a generic
+/// error, so a cron line reading exit 1 as "the store no longer verifies
+/// against the file already there" is not handed an unmounted directory under
+/// that name. See [`anchor::EXIT_NOT_CHECKED`] and [`anchor::EXIT_TAMPER`].
 pub async fn anchor(store_path: &Path, args: AnchorArgs) -> Result<u8> {
     let store = match open_existing_store(store_path) {
         Ok(store) => store,
@@ -1289,17 +1293,55 @@ pub async fn anchor(store_path: &Path, args: AnchorArgs) -> Result<u8> {
             // refused rather than reported afterwards.
             Ok(existing) => {
                 let result = verify_store_against(&store, store_path, out, &existing).await?;
-                if !result.ok {
+                // The recovery command carries `--store`, because the store it
+                // has to be run against is the one this command was given, and
+                // an operator who is being told to go and look must not have
+                // to reconstruct half the line.
+                let look = format!(
+                    "salvor verify --store {} --against {}",
+                    store_path.display(),
+                    out.display()
+                );
+                // Being handed the wrong file looks exactly like a store that
+                // lost everything, and the two lead to opposite actions. Say
+                // the cheap one when the shape fits, rather than the integrity
+                // wording that sends an operator to a backup.
+                if result.maybe_wrong_anchor {
+                    eprintln!(
+                        "salvor anchor: not overwriting {}: this may be the wrong file. Every run \
+                         it records is missing from {}, which holds {} run(s) it never names, and \
+                         it was taken over {}. Run `{look}` to see the comparison. Confirm the two \
+                         belong together before overwriting; pass --force to overwrite anyway.",
+                        out.display(),
+                        store_path.display(),
+                        result.new,
+                        result.anchor_store,
+                    );
+                    return Ok(anchor::EXIT_TAMPER);
+                }
+                if result.failed > 0 {
                     eprintln!(
                         "salvor anchor: this store no longer verifies against the anchor already \
-                         at {}; not overwriting. {} of {} anchored run(s) failed. Run `salvor \
-                         verify --against {}` to see which, and read docs/OPERATIONS.md, \
-                         Anchoring the chain, before re-anchoring. Pass --force to overwrite \
-                         anyway.",
+                         at {}; not overwriting. {} of {} anchored run(s) failed. Run `{look}` to \
+                         see which, and read docs/OPERATIONS.md, Anchoring the chain, before \
+                         re-anchoring. Pass --force to overwrite anyway.",
                         out.display(),
                         result.failed,
                         result.anchored,
+                    );
+                    return Ok(anchor::EXIT_TAMPER);
+                }
+                // Every anchored run stands, and a run outside the anchor has
+                // a log this store refuses. Anchoring over that records a head
+                // for a run nothing can read, so it waits for the operator.
+                if result.broken_unanchored > 0 {
+                    eprintln!(
+                        "salvor anchor: every run in the anchor at {} still stands, and {} run(s) \
+                         it does not cover have logs this store refuses to read; not overwriting. \
+                         Run `{look}` to see which. Go back to a backup that reads clean, or pass \
+                         --force to anchor this store as it is.",
                         out.display(),
+                        result.broken_unanchored,
                     );
                     return Ok(anchor::EXIT_TAMPER);
                 }
@@ -1325,9 +1367,31 @@ pub async fn anchor(store_path: &Path, args: AnchorArgs) -> Result<u8> {
     let mut json = serde_json::to_string_pretty(&document).context("serializing the anchor")?;
     json.push('\n');
     match &args.out {
-        Some(path) => std::fs::write(path, &json)
-            .with_context(|| format!("writing the anchor to {}", path.display()))?,
+        // A write that fails is a fourth way no anchor was taken, and it exits
+        // like the other three rather than as a generic error: the documented
+        // `case` in a cron line reads 1 as "the store no longer verifies
+        // against the file already there", and an unmounted directory is not
+        // that. Nothing was written, so nothing was checked.
+        Some(path) => {
+            if let Err(error) = std::fs::write(path, &json) {
+                eprintln!(
+                    "salvor anchor: writing the anchor to {}: {error}. No anchor was taken; the \
+                     store was not touched. Check the path and the directory it is in.",
+                    path.display()
+                );
+                return Ok(anchor::EXIT_NOT_CHECKED);
+            }
+        }
         None => print!("{json}"),
+    }
+    // Before the success line, not after: an operator reads "anchored 2
+    // run(s)" as the end of the matter and stops, and the one thing that makes
+    // this anchor worthless has to come first. Printed on every anchor,
+    // because the hazard is there on every anchor.
+    if let Some(out) = args.out.as_deref()
+        && shares_directory(out, store_path)
+    {
+        eprintln!("{}", render::anchor_beside_store_warning(out, store_path));
     }
     // On stderr: with no --out the anchor itself is on stdout, and a caller
     // redirecting that into a file must get the file and nothing else.
@@ -1335,11 +1399,6 @@ pub async fn anchor(store_path: &Path, args: AnchorArgs) -> Result<u8> {
         "{}",
         render::anchored_line(document.runs.len(), args.out.as_deref())
     );
-    if let Some(out) = args.out.as_deref()
-        && shares_directory(out, store_path)
-    {
-        eprintln!("{}", render::anchor_beside_store_warning(out, store_path));
-    }
     Ok(0)
 }
 
@@ -1368,10 +1427,16 @@ fn shares_directory(left: &Path, right: &Path) -> bool {
 /// Opens a store that already exists, refusing a path with no file at it.
 ///
 /// [`SqliteStore::open`] creates a database at a path that has none, which is
-/// right for a writer and wrong for both of these read-only verbs. A created
-/// store holds no runs, so `anchor` would write a file committing to nothing
-/// and `verify` would report every anchored run missing and send an operator
-/// to a restore, both over a typo in `--store`. Neither creates a file.
+/// right for a writer and wrong for every verb that only reads. A created
+/// store holds no runs, so `anchor` would write a file committing to nothing,
+/// `verify` would report every anchored run missing and send an operator to a
+/// restore, and `list` would print `no runs in <path>` and exit 0, which is
+/// the same words a genuinely empty store prints and the same exit code a
+/// clean integrity read prints. All of that over a typo in `--store`. None of
+/// them creates a file.
+///
+/// The verbs that do create are the ones a first run has to be able to use:
+/// `run`, `graph run`, and `serve`. Everything else here reads.
 ///
 /// # Errors
 ///
@@ -1601,9 +1666,40 @@ pub fn completions(args: CompletionsArgs) -> Result<u8> {
 /// Filtering happens after the fold because status is a replay-time projection, not a stored
 /// column: there is nothing to filter on until each log has been read. That also means a filter
 /// saves screen space, not work.
+///
+/// The store is read, never created. `no runs in <path>` and exit 0 is what a
+/// genuinely empty store prints, and it is also what a clean integrity read
+/// over every run prints, so a store this command invented at a mistyped path
+/// would print an all-clear about nothing. A missing path is refused with
+/// [`anchor::EXIT_NOT_CHECKED`] instead, the same code and the same words
+/// `verify` uses.
 pub async fn list(store_path: &Path, args: ListArgs) -> Result<u8> {
-    let store = open_store(store_path)?;
+    let store = match open_existing_store(store_path) {
+        Ok(store) => store,
+        Err(refusal) => {
+            eprintln!("salvor list: {refusal}");
+            return Ok(anchor::EXIT_NOT_CHECKED);
+        }
+    };
     let mut summaries = store.list_runs().await?;
+
+    // `list_runs` builds its summaries out of the recorded rows, so a run
+    // whose rows are gone while its recorded head remains is a run it cannot
+    // see at all, and a listing that never mentions it completes and exits 0.
+    // That is the one shape of tampering this command was silent about, and it
+    // is the shape a deletion takes. Every head with no summary under it is
+    // read, and `read_log` is what refuses it: a head with no rows is not a
+    // run that went away quietly, it is a run someone cleared the way for.
+    let listed: HashSet<String> = summaries
+        .iter()
+        .map(|summary| summary.run_id.as_uuid().to_string())
+        .collect();
+    for (run_id, _) in store.chain_heads()? {
+        if !listed.contains(&run_id.as_uuid().to_string()) {
+            store.read_log(run_id).await?;
+        }
+    }
+
     if summaries.is_empty() {
         println!("no runs in {}", store_path.display());
         return Ok(0);
@@ -1663,9 +1759,19 @@ pub async fn list(store_path: &Path, args: ListArgs) -> Result<u8> {
 }
 
 /// `salvor history`: the pretty event log, or raw JSON envelopes with `--json`.
+///
+/// The store is read, never created: against a store this command had just
+/// made, every run id in the world reads back as `no run <id> in this store`,
+/// which is a typo in `--store` wearing the words of a missing run.
 pub async fn history(store_path: &Path, args: HistoryArgs) -> Result<u8> {
     let run_id = parse_run_id(&args.run_id)?;
-    let store = open_store(store_path)?;
+    let store = match open_existing_store(store_path) {
+        Ok(store) => store,
+        Err(refusal) => {
+            eprintln!("salvor history: {refusal}");
+            return Ok(anchor::EXIT_NOT_CHECKED);
+        }
+    };
     let log = store.read_log(run_id).await?;
     if log.is_empty() {
         bail!("no run {} in this store", run_id.as_uuid());
@@ -1686,9 +1792,18 @@ pub async fn history(store_path: &Path, args: HistoryArgs) -> Result<u8> {
 /// anything, and never has run any other way. `--dry-run` is accepted and
 /// ignored, kept only so a script written against an earlier version that
 /// passed it does not break.
+///
+/// The store is read, never created, for the same reason as `history`: a
+/// mistyped `--store` must not come back as a missing run.
 pub async fn replay(store_path: &Path, args: ReplayArgs) -> Result<u8> {
     let run_id = parse_run_id(&args.run_id)?;
-    let store = open_store(store_path)?;
+    let store = match open_existing_store(store_path) {
+        Ok(store) => store,
+        Err(refusal) => {
+            eprintln!("salvor replay: {refusal}");
+            return Ok(anchor::EXIT_NOT_CHECKED);
+        }
+    };
     let log = store.read_log(run_id).await?;
     if log.is_empty() {
         bail!("no run {} in this store", run_id.as_uuid());

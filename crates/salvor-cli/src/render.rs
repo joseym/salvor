@@ -222,16 +222,24 @@ pub fn verify_report(result: &crate::anchor::Verification) -> String {
     for entry in &result.runs {
         let run = &entry.run;
         match &entry.finding {
+            // Two shapes on purpose. A run that has not grown has one length
+            // worth naming and names it. A run that has grown has two, and
+            // printing only the anchored one reads as the current size of a
+            // run that is in fact longer, which is the number an operator
+            // would go on to compare against a backup.
             Finding::Intact {
                 anchored_len,
+                len,
                 events_since,
-                ..
             } => {
-                out.push_str(&format!("run {run}: intact at {anchored_len} event(s)"));
                 if *events_since > 0 {
-                    out.push_str(&format!(", {events_since} recorded since the anchor"));
+                    out.push_str(&format!(
+                        "run {run}: intact: {len} event(s), anchored at {anchored_len}, \
+                         {events_since} recorded since\n"
+                    ));
+                } else {
+                    out.push_str(&format!("run {run}: intact at {anchored_len} event(s)\n"));
                 }
-                out.push('\n');
             }
             Finding::New { len } => {
                 out.push_str(&format!(
@@ -255,6 +263,7 @@ pub fn verify_report(result: &crate::anchor::Verification) -> String {
                 anchored_len,
                 anchored_hash,
                 found_hash,
+                ..
             } => {
                 // The position is a seq, the same number `salvor history`
                 // prints, so an operator can go straight there. The anchored
@@ -279,29 +288,52 @@ pub fn verify_report(result: &crate::anchor::Verification) -> String {
         }
     }
 
+    // `failed` counts anchored runs only, so the first three numbers close:
+    // intact plus failed is the anchored total. A broken run the anchor never
+    // named is a real finding and gets its own clause, printed only when there
+    // is one, so the ordinary summary keeps its four numbers.
     out.push_str(&format!(
-        "{} run(s) anchored, {} intact, {} failed, {} new since the anchor\n",
-        result.anchored, result.intact, result.failed, result.new
+        "{} run(s) anchored, {} intact, {} failed, ",
+        result.anchored, result.intact, result.failed
     ));
+    if result.broken_unanchored > 0 {
+        out.push_str(&format!(
+            "{} broken outside the anchor, ",
+            result.broken_unanchored
+        ));
+    }
+    out.push_str(&format!("{} new since the anchor\n", result.new));
 
-    if !result.ok {
-        // The cheap explanation before the expensive one. Being handed the
-        // wrong file looks exactly like total loss, and an operator who reads
-        // the restore advice first restores over a store that was fine.
-        if result.looks_like_the_wrong_anchor() {
-            out.push_str(&format!(
-                "\nThis may be the wrong anchor. Every run it records is missing here, and this \
-                 store holds\n{} run(s) it never names. The anchor was taken over {}; this check \
-                 read\n{}. Confirm the two belong together before treating this as a loss.\n",
-                result.new, result.anchor_store, result.store,
-            ));
-        }
+    // The cheap explanation before the expensive one. Being handed the wrong
+    // file looks exactly like total loss, and an operator who reads the
+    // restore advice first restores over a store that was fine.
+    if result.maybe_wrong_anchor {
+        out.push_str(&format!(
+            "\nThis may be the wrong anchor. Every run it records is missing here, and this \
+             store holds\n{} run(s) it never names. The anchor was taken over {}; this check \
+             read\n{}. Confirm the two belong together before treating this as a loss.\n",
+            result.new, result.anchor_store, result.store,
+        ));
+    }
+    if result.failed > 0 {
         out.push_str(
             "\nThis store no longer holds what the anchor says it held. Do not re-anchor it: a \
              fresh anchor\nover a rewritten store records the rewrite. Go back to a backup that \
              reads clean and verifies\nagainst this anchor. See docs/OPERATIONS.md, Anchoring \
              the chain.\n",
         );
+    }
+    // Said separately, because the anchor is not what found it: these runs are
+    // outside what it covers, and the store is refusing its own log. The
+    // advice is the same backup, for a different reason.
+    if result.broken_unanchored > 0 {
+        out.push_str(&format!(
+            "\n{} run(s) this anchor does not cover have logs this store refuses to read. The \
+             anchor\nsays nothing about them either way; the refusal is the store disagreeing \
+             with itself.\nGo back to a backup that reads clean. See docs/OPERATIONS.md, \
+             Anchoring the chain.\n",
+            result.broken_unanchored
+        ));
     }
     out
 }
