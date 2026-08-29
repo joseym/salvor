@@ -235,9 +235,18 @@ before returning a single event. A listing that completes is therefore
 an integrity pass over every run it walked, and only over every run it
 walked: `no runs in <path>` is a pass over zero chains, not evidence
 the restore worked. A verification worth trusting needs a store that
-holds at least one run.
+holds at least one run. A run whose rows are gone while the store still
+records a head for it is read too, and refused, so a deletion is not
+something a listing can walk past in silence.
 `salvor history <run-id> --store <path>` does the same for one run in
 detail.
+
+`list`, `history` and `replay` read the store and never create one. A
+`--store` path with no database at it is refused with exit 2 and the
+same words `verify` uses, so a typo cannot come back as a store holding
+no runs, which prints the same line and the same exit code as a store
+that is genuinely empty. The verbs that create a store are the ones a
+first run needs: `run`, `graph run`, and `serve`.
 
 A failure names the run and the position it broke at. That is a
 truncated copy, a torn copy of a live store, or an edit, and none of
@@ -292,21 +301,41 @@ the run held and the hash that commits to exactly those events.
 With no `--out` the document goes to stdout and that one human line to
 stderr, so `salvor anchor > anchor.json` gets the file and nothing else.
 
+A store carried over from a binary older than the chain has its hashes
+backfilled the first time a current binary opens it, and an anchor
+taken afterwards attests the store from that migration onward. It
+cannot say whether anything had already been changed before the
+backfill, and it cannot mark which runs that covers: the entries for a
+run recorded before the migration and a run recorded after it are the
+same three fields. Note the migration date beside the anchors, because
+the file will not carry it.
+
 `anchor` reads the store and never creates one. A `--store` path with
 no database at it is refused (exit 2) with nothing written, so a typo
 cannot produce an anchor over an empty store the command just made. A
 store that holds no runs is refused the same way, because an anchor
 over zero runs commits to nothing and every later verify against it
 passes having checked nothing; pass `--allow-empty` when the store is
-empty on purpose and a file still has to appear on schedule.
+empty on purpose and a file still has to appear on schedule. A write
+that fails, such as a `--out` under a directory that is not mounted, is
+exit 2 as well: no anchor was taken. Exit 1 is always about the file
+already at `--out`, which is the paragraph below.
 
 The file at `--out` is read before it is replaced. If it is an anchor
 this store no longer verifies against, the write is refused (exit 1):
 re-anchoring there would record the rewrite and destroy the only copy
 of what the heads used to be, which is the failure mode a nightly
-`--out /mnt/anchors/latest.json` walks straight into. A file that is
-not an anchor at all is refused too (exit 2). `--force` overwrites
-either, once you know what you are overwriting.
+`--out /mnt/anchors/latest.json` walks straight into. Two more shapes
+refuse the same way. If every run in that file is missing here while
+this store holds runs it never names, the refusal says it may be the
+wrong file and names both stores, because that reading and total loss
+look identical and lead to opposite actions. And if every anchored run
+stands while some run outside the anchor has a log this store refuses
+to read, the write waits too: anchoring then records a head for a run
+nobody can read. Each refusal prints the `salvor verify` line to run,
+with the `--store` it was given. A file that is not an anchor at all is
+refused as well (exit 2). `--force` overwrites any of them, once you
+know what you are overwriting.
 
 #### Custody
 
@@ -331,7 +360,10 @@ Give each anchor a dated name and keep the history:
 `salvor-2026-08-28.json`, not `latest.json`. One rolling file is one
 file to overwrite, and overwriting it is the whole attack. A directory
 of dated anchors is also what lets a restore be checked against the
-anchor from before the loss rather than one taken after it.
+anchor from before the loss rather than one taken after it. Keep an
+anchor for as long as you keep the backup it was taken beside, since a
+backup you can still restore and no longer have an anchor for is a
+store you can bring back and cannot check.
 
 #### Cadence
 
@@ -357,6 +389,24 @@ which anchor" have the same answer, and treat the gap between the last
 anchor and the incident as runs you will have to account for by other
 means.
 
+The order within one nightly job matters as much as the interval. Check
+the store against the newest anchor you already hold, and take today's
+anchor only if that check passed. A job that anchors first and verifies
+second has checked a store against a file it wrote a second earlier,
+which passes by construction and says nothing; a job that anchors first
+and stops has recorded whatever the store now holds as the truth. Never
+verify against an anchor the same job just took.
+
+```sh
+#!/bin/sh
+# Nightly: check yesterday's evidence, then record today's.
+set -e
+store=/var/lib/salvor/salvor.db
+latest=$(ls -1 /mnt/anchors/salvor-*.json | tail -1)
+salvor verify --store "$store" --against "$latest"
+salvor anchor --store "$store" --out /mnt/anchors/salvor-$(date -u +%Y-%m-%d).json
+```
+
 #### After a restore
 
 Read the store (above), then check it against the anchor you took
@@ -367,7 +417,7 @@ salvor verify --store /var/lib/salvor/salvor.db --against /mnt/anchors/salvor-20
 ```
 
 ```
-run 1f9c1f6d-0d3a-4a1c-9a0f-7f4a2d2b6c11: intact at 12 event(s), 3 recorded since the anchor
+run 1f9c1f6d-0d3a-4a1c-9a0f-7f4a2d2b6c11: intact: 15 event(s), anchored at 12, 3 recorded since
 run 8a2b0c44-51e7-4f0a-b3d1-9c6e5f2a7d90: new since the anchor, 4 event(s). Not covered by this anchor; the next one covers it.
 1 run(s) anchored, 1 intact, 0 failed, 1 new since the anchor
 ```
@@ -381,10 +431,21 @@ new and fails nothing; the next anchor covers it. The store's path is
 never matched against the one recorded in the anchor, because a restore
 to a new path is ordinary.
 
-Four findings are failures, and each names the run and the position:
+An intact run that has grown names both lengths. The anchored one is
+not the current one, and a line that prints only the anchored length
+reads as the size of a run that is in fact longer, which is the number
+you would go on to compare against a backup. A run that has not grown
+has one length worth naming and names it: `intact at 12 event(s)`.
 
-* `missing`: the anchor recorded the run and this store does not hold it.
+Four findings are failures. Each names the run; `rewritten` and
+`broken` name the position they failed at, and `missing` and
+`shortened` name lengths, because a run that is not there and a run
+that stops early have no position to point at.
+
+* `missing`: the anchor recorded the run and this store does not hold
+  it. Names the anchored length.
 * `shortened`: this store holds fewer events than the anchor recorded.
+  Names both lengths.
 * `rewritten`: this store holds at least as many, and the hash at the
   anchored length is not the anchored one. The events the anchor
   covered are not the events this store now holds.
@@ -408,12 +469,27 @@ so a finding names a line you can go and read. Lengths are counts, and
 the report says which is which: an anchored length of 12 is a rewrite
 at seq 11.
 
+`failed` counts anchored runs only, so the summary closes: intact plus
+failed is the number the anchor covers. A run the anchor never names
+whose log this store now refuses is a real finding and gets a clause of
+its own, printed only when there is one:
+
+```
+1 run(s) anchored, 0 intact, 1 failed, 1 broken outside the anchor, 0 new since the anchor
+```
+
+Both exit 1. The anchor says nothing about that second run either way;
+what found it is the store refusing its own log, which is the ordinary
+chain failure and leads to the same backup.
+
 If every anchored run comes back missing while the store holds runs the
 anchor never names, the report says the anchor may simply be the wrong
 one, and names the store it was taken over beside the store just
 checked, before any advice about restoring. Being handed the wrong file
 looks exactly like total loss, and the two are a minute apart in effort
-and hours apart in consequence.
+and hours apart in consequence. `salvor anchor` says the same thing
+when it declines to overwrite such a file, rather than the wording that
+sends you to a backup.
 
 #### The three exit codes
 
@@ -428,10 +504,16 @@ store the anchor describes, and the next step is a backup, not another
 anchor. Exit 2 says nothing was compared, so it is neither a pass nor a
 finding: there was no store at the path, or the anchor file was
 missing, unreadable, not JSON, written under a spec this binary does
-not read, carrying a malformed entry, or committing to no runs at all
-(`--allow-empty` accepts that last one deliberately). A check that
-quietly stops running looks identical to a check that keeps passing, so
-alert on 2 as well, in its own words.
+not read, carrying a malformed entry, naming one run twice, or
+committing to no runs at all (`--allow-empty` accepts that last one
+deliberately). A check that quietly stops running looks identical to a
+check that keeps passing, so alert on 2 as well, in its own words.
+
+`salvor anchor` uses the same three codes, and 2 covers one more thing:
+a write that failed. An anchor is not taken because `--out` names a
+directory that is not there, and the job that reads exit 1 as "this
+store no longer matches the file already at that path" must not read an
+unmounted volume under that name.
 
 ```sh
 #!/bin/sh
@@ -447,9 +529,11 @@ esac
 
 `--json` prints a document for all three. A check that ran carries
 `"checked": true`, `"ok"`, the counts (`anchored`, `intact`, `failed`,
-`new`), and one entry per run with its `finding`; a check that did not
-run carries `"checked": false` and an `error` saying why. One parser
-reads every outcome, and an empty stdout is never one of them.
+`broken_unanchored`, `new`), `"maybe_wrong_anchor"` for the reading the
+report prints in prose, and one entry per run with its `finding`; a
+check that did not run carries `"checked": false` and an `error` saying
+why. One parser reads every outcome, and an empty stdout is never one
+of them.
 
 #### Signing an anchor
 
