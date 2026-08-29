@@ -169,6 +169,11 @@ pub fn server_table(servers: &[RunningServer]) -> String {
 /// On stderr, not stdout, because with no `--out` the anchor itself is on
 /// stdout and a caller redirecting it into a file must get the file and
 /// nothing else.
+///
+/// The custody advice is one sentence. It is printed on every anchor, and a
+/// paragraph printed every time is a paragraph nobody reads; the reasoning
+/// behind it belongs in `docs/OPERATIONS.md`, which this does not try to
+/// repeat.
 #[must_use]
 pub fn anchored_line(runs: usize, out: Option<&Path>) -> String {
     let where_to = match out {
@@ -177,14 +182,28 @@ pub fn anchored_line(runs: usize, out: Option<&Path>) -> String {
     };
     if runs == 0 {
         return format!(
-            "anchored 0 runs ({where_to}). This store holds no runs, so the anchor commits to \
-             nothing; take one over a store that holds runs."
+            "anchored 0 run(s) ({where_to}). This store holds no runs, so this anchor commits to \
+             nothing and a verify against it checks nothing. Keep it somewhere this store cannot \
+             reach."
         );
     }
+    format!("anchored {runs} run(s) ({where_to}). Keep it somewhere this store cannot reach.")
+}
+
+/// The warning `salvor anchor` prints when `--out` lands in the store file's
+/// own directory.
+///
+/// The general advice is easy to nod along to and then ignore; this is the one
+/// case where the file being written right now is provably within reach of
+/// whoever can rewrite the store, so it is named rather than implied.
+#[must_use]
+pub fn anchor_beside_store_warning(out: &Path, store: &Path) -> String {
     format!(
-        "anchored {runs} run(s) ({where_to}). Keep it somewhere this store cannot reach: an \
-         anchor kept beside the database it describes is rewritten by whoever rewrites the \
-         database."
+        "warning: {} is in the same directory as {}. Whoever can rewrite the store can rewrite \
+         this file along with it, so an anchor kept here answers nothing. Copy it somewhere the \
+         store's writer cannot reach and keep it there.",
+        out.display(),
+        store.display()
     )
 }
 
@@ -237,9 +256,14 @@ pub fn verify_report(result: &crate::anchor::Verification) -> String {
                 anchored_hash,
                 found_hash,
             } => {
+                // The position is a seq, the same number `salvor history`
+                // prints, so an operator can go straight there. The anchored
+                // length is a count, and saying which is which is the
+                // difference between an off-by-one and a wrong line.
                 out.push_str(&format!(
-                    "run {run}: rewritten at event {anchored_len}. The events this anchor \
-                     covered are not the events this store now holds.\n"
+                    "run {run}: rewritten at seq {} (the anchored length is {anchored_len}). The \
+                     events this anchor covered are not the events this store now holds.\n",
+                    anchored_len.saturating_sub(1)
                 ));
                 out.push_str(&format!("  the anchor recorded {anchored_hash}\n"));
                 match found_hash {
@@ -256,11 +280,22 @@ pub fn verify_report(result: &crate::anchor::Verification) -> String {
     }
 
     out.push_str(&format!(
-        "{} run(s) anchored, {} intact, {} new since the anchor\n",
-        result.anchored, result.intact, result.new
+        "{} run(s) anchored, {} intact, {} failed, {} new since the anchor\n",
+        result.anchored, result.intact, result.failed, result.new
     ));
 
     if !result.ok {
+        // The cheap explanation before the expensive one. Being handed the
+        // wrong file looks exactly like total loss, and an operator who reads
+        // the restore advice first restores over a store that was fine.
+        if result.looks_like_the_wrong_anchor() {
+            out.push_str(&format!(
+                "\nThis may be the wrong anchor. Every run it records is missing here, and this \
+                 store holds\n{} run(s) it never names. The anchor was taken over {}; this check \
+                 read\n{}. Confirm the two belong together before treating this as a loss.\n",
+                result.new, result.anchor_store, result.store,
+            ));
+        }
         out.push_str(
             "\nThis store no longer holds what the anchor says it held. Do not re-anchor it: a \
              fresh anchor\nover a rewritten store records the rewrite. Go back to a backup that \

@@ -239,10 +239,13 @@ enum CommandDto {
     Anchor {
         #[serde(skip_serializing_if = "Option::is_none")]
         out: Option<String>,
+        allow_empty: bool,
+        force: bool,
     },
     Verify {
         against: String,
         json: bool,
+        allow_empty: bool,
     },
     Serve {
         bind: String,
@@ -423,12 +426,23 @@ impl From<&Command> for CommandDto {
                 client_tools: paths(client_tools),
                 wake_interval: *wake_interval,
             },
-            Command::Anchor(AnchorArgs { out }) => CommandDto::Anchor {
+            Command::Anchor(AnchorArgs {
+                out,
+                allow_empty,
+                force,
+            }) => CommandDto::Anchor {
                 out: out.as_deref().map(path),
+                allow_empty: *allow_empty,
+                force: *force,
             },
-            Command::Verify(VerifyArgs { against, json }) => CommandDto::Verify {
+            Command::Verify(VerifyArgs {
+                against,
+                json,
+                allow_empty,
+            }) => CommandDto::Verify {
                 against: path(against),
                 json: *json,
+                allow_empty: *allow_empty,
             },
             Command::Build(BuildArgs { install }) => CommandDto::Build { install: *install },
             Command::Agent { command } => CommandDto::Agent {

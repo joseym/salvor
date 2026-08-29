@@ -1244,19 +1244,84 @@ pub async fn abandon(store_path: &Path, args: AbandonArgs) -> Result<u8> {
 /// `EventStore` trait, because a chain head is bookkeeping that backend keeps
 /// beside the rows and is deliberately not part of the trait's promise.
 ///
-/// Nothing is verified here. Taking an anchor records what the store says its
-/// heads are; whether the store still agrees with itself is what
-/// `salvor verify` and every ordinary read answer.
-pub fn anchor(store_path: &Path, args: AnchorArgs) -> Result<u8> {
-    let store = SqliteStore::open(store_path)
-        .with_context(|| format!("opening store at {}", store_path.display()))?;
+/// Nothing about the store's own consistency is judged here. Taking an anchor
+/// records what the store says its heads are; whether the store still agrees
+/// with itself is what `salvor verify` and every ordinary read answer. The one
+/// verification this command does run is against the file it is about to
+/// overwrite, which is a question about that file, not about the store.
+///
+/// Three ways it declines to write, all before anything is serialized: no
+/// store at the path, a store holding no runs (an anchor over nothing commits
+/// to nothing), and a `--out` file it would be destroying evidence to replace.
+/// See [`anchor::EXIT_NOT_CHECKED`] and [`anchor::EXIT_TAMPER`].
+pub async fn anchor(store_path: &Path, args: AnchorArgs) -> Result<u8> {
+    let store = match open_existing_store(store_path) {
+        Ok(store) => store,
+        Err(refusal) => {
+            eprintln!("salvor anchor: {refusal}");
+            return Ok(anchor::EXIT_NOT_CHECKED);
+        }
+    };
+
     let heads = store.chain_heads()?;
+    // An anchor over zero runs is a file that says nothing and verifies
+    // against anything, which is worse than no file at all: it looks like
+    // evidence on the shelf. Refused unless the operator says the emptiness is
+    // the truth.
+    if heads.is_empty() && !args.allow_empty {
+        eprintln!(
+            "salvor anchor: nothing to anchor: {} holds no runs. Nothing was written; an anchor \
+             over zero runs commits to nothing and a later verify against it passes without \
+             checking anything. Pass --allow-empty if this store is empty on purpose.",
+            store_path.display()
+        );
+        return Ok(anchor::EXIT_NOT_CHECKED);
+    }
+
+    if let Some(out) = args.out.as_deref()
+        && !args.force
+        && out.exists()
+    {
+        match read_anchor_file(out) {
+            // The file already there is an anchor. Re-anchoring a store that
+            // no longer verifies against it records the rewrite and destroys
+            // the only copy of what the heads used to be, so the write is
+            // refused rather than reported afterwards.
+            Ok(existing) => {
+                let result = verify_store_against(&store, store_path, out, &existing).await?;
+                if !result.ok {
+                    eprintln!(
+                        "salvor anchor: this store no longer verifies against the anchor already \
+                         at {}; not overwriting. {} of {} anchored run(s) failed. Run `salvor \
+                         verify --against {}` to see which, and read docs/OPERATIONS.md, \
+                         Anchoring the chain, before re-anchoring. Pass --force to overwrite \
+                         anyway.",
+                        out.display(),
+                        result.failed,
+                        result.anchored,
+                        out.display(),
+                    );
+                    return Ok(anchor::EXIT_TAMPER);
+                }
+            }
+            // Not an anchor at all: whatever it is, this command did not write
+            // it, and replacing an unread file is how an operator loses one.
+            Err(why) => {
+                eprintln!(
+                    "salvor anchor: not overwriting {}: {why} Read it before replacing it, or \
+                     pass --force.",
+                    out.display(),
+                );
+                return Ok(anchor::EXIT_NOT_CHECKED);
+            }
+        }
+    }
+
     let document = anchor::Anchor::take(
         &store_path.display().to_string(),
         OffsetDateTime::now_utc(),
         heads,
     );
-
     let mut json = serde_json::to_string_pretty(&document).context("serializing the anchor")?;
     json.push('\n');
     match &args.out {
@@ -1270,7 +1335,151 @@ pub fn anchor(store_path: &Path, args: AnchorArgs) -> Result<u8> {
         "{}",
         render::anchored_line(document.runs.len(), args.out.as_deref())
     );
+    if let Some(out) = args.out.as_deref()
+        && shares_directory(out, store_path)
+    {
+        eprintln!("{}", render::anchor_beside_store_warning(out, store_path));
+    }
     Ok(0)
+}
+
+/// Whether two paths sit in the same directory, compared canonically so a
+/// relative path, a `..`, and a symlinked directory all answer honestly.
+///
+/// A path whose directory cannot be canonicalized answers `false`: this
+/// decides whether to print a warning, and a warning that cannot be justified
+/// is not printed.
+fn shares_directory(left: &Path, right: &Path) -> bool {
+    let directory = |path: &Path| {
+        let parent = path.parent().unwrap_or(Path::new(""));
+        let parent = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        };
+        parent.canonicalize().ok()
+    };
+    match (directory(left), directory(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+/// Opens a store that already exists, refusing a path with no file at it.
+///
+/// [`SqliteStore::open`] creates a database at a path that has none, which is
+/// right for a writer and wrong for both of these read-only verbs. A created
+/// store holds no runs, so `anchor` would write a file committing to nothing
+/// and `verify` would report every anchored run missing and send an operator
+/// to a restore, both over a typo in `--store`. Neither creates a file.
+///
+/// # Errors
+///
+/// Returns the message to print: either that there is no store at the path, or
+/// what went wrong opening the one that is there.
+fn open_existing_store(path: &Path) -> Result<SqliteStore, String> {
+    if !path.exists() {
+        return Err(format!(
+            "no store at {}. Nothing was read and nothing was created: check the path, or point \
+             --store at the database.",
+            path.display()
+        ));
+    }
+    SqliteStore::open(path)
+        .map_err(|error| format!("opening the store at {}: {error}", path.display()))
+}
+
+/// Reads and validates an anchor file: it exists, it is JSON, it carries the
+/// two specs this binary knows, and every entry is shaped like an anchored
+/// head.
+///
+/// # Errors
+///
+/// Returns one sentence saying what is wrong with the file, without naming the
+/// path: the two callers put the path in different places (`verify` leads with
+/// it, `anchor` says it is not overwriting it), and a reason that names the
+/// file itself reads as a stutter in both.
+fn read_anchor_file(path: &Path) -> Result<anchor::Anchor, String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|error| format!("cannot be read: {error}."))?;
+    let document: anchor::Anchor = serde_json::from_str(&text)
+        .map_err(|error| format!("not an anchor this salvor can read: {error}."))?;
+    document.check()?;
+    Ok(document)
+}
+
+/// Compares a store against an already-validated anchor, run by run.
+///
+/// Shared by `verify` and by `anchor`'s overwrite guard, so the question "does
+/// this store still verify against that file" has exactly one answer in this
+/// binary whichever verb asked it.
+async fn verify_store_against(
+    store: &SqliteStore,
+    store_path: &Path,
+    against: &Path,
+    document: &anchor::Anchor,
+) -> Result<anchor::Verification> {
+    let mut findings: Vec<anchor::RunFinding> = Vec::new();
+    let mut anchored: HashSet<String> = HashSet::new();
+    for run in &document.runs {
+        // Already validated as a UUID by `Anchor::check`, so this cannot fail
+        // on a document that reached here.
+        let run_id = parse_run_id(&run.run)
+            .with_context(|| format!("in the anchor file {}", against.display()))?;
+        anchored.insert(run.run.clone());
+        let observed = observe(store, run_id, run.len).await?;
+        findings.push(anchor::RunFinding {
+            run: run.run.clone(),
+            finding: anchor::finding_for(run, &observed),
+        });
+    }
+
+    for (run_id, head) in store.chain_heads()? {
+        let uuid = run_id.as_uuid().to_string();
+        if anchored.contains(&uuid) {
+            continue;
+        }
+        // A run this anchor never saw is still read, because reading is what
+        // recomputes a chain: there is nothing to compare it against, and a log
+        // this store refuses is still worth saying out loud.
+        let finding = match observe(store, run_id, head.len).await? {
+            anchor::Observed::Broken { seq, detail } => anchor::Finding::Broken { seq, detail },
+            anchor::Observed::Present { len, .. } => anchor::Finding::New { len },
+            // A recorded head with no rows under it is refused by `read_log`,
+            // so this arm is unreachable in practice; skipping is the honest
+            // answer if it ever is reached, since there is no run to report.
+            anchor::Observed::Missing => continue,
+        };
+        findings.push(anchor::RunFinding { run: uuid, finding });
+    }
+
+    Ok(anchor::Verification::new(
+        document,
+        store_path,
+        against,
+        OffsetDateTime::now_utc(),
+        findings,
+    ))
+}
+
+/// Reports a check that did not run, in the form the caller asked for, and
+/// returns [`anchor::EXIT_NOT_CHECKED`].
+///
+/// With `--json` this goes to stdout as a document rather than to stderr as
+/// prose, because a consumer that parses stdout has to be able to tell "no
+/// store at that path" from "every run intact", and an empty stdout with an
+/// exit code is exactly the shape a script mistakes for a pass.
+fn not_checked(json: bool, message: &str) -> Result<u8> {
+    if json {
+        let document = anchor::PreflightFailure::new(message);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&document).context("serializing the refusal")?
+        );
+    } else {
+        eprintln!("salvor verify: {message}");
+    }
+    Ok(anchor::EXIT_NOT_CHECKED)
 }
 
 /// `salvor verify --against <file>`: check this store against an anchor taken
@@ -1287,63 +1496,49 @@ pub fn anchor(store_path: &Path, args: AnchorArgs) -> Result<u8> {
 /// it reports every run and then exits non-zero, rather than stopping at the
 /// first bad one.
 ///
-/// Exit `0` when every run passed, `1` when any is missing, shortened,
-/// rewritten, or broken. A run the anchor never saw is reported and changes
-/// nothing.
+/// Three exit codes, because "the check found nothing wrong" and "the check
+/// never ran" have to be different answers to a cron line: [`anchor::
+/// EXIT_INTACT`] when every anchored run passed, [`anchor::EXIT_TAMPER`] when
+/// any is missing, shortened, rewritten, or broken, and
+/// [`anchor::EXIT_NOT_CHECKED`] when nothing was compared at all. A run the
+/// anchor never saw is reported and changes none of it.
+///
+/// With `--json` every one of those prints a document on stdout, so a consumer
+/// never has to tell an empty stdout apart from a result.
 pub async fn verify(store_path: &Path, args: VerifyArgs) -> Result<u8> {
-    let text = std::fs::read_to_string(&args.against)
-        .with_context(|| format!("reading the anchor file {}", args.against.display()))?;
-    let document: anchor::Anchor = serde_json::from_str(&text)
-        .with_context(|| format!("parsing the anchor file {}", args.against.display()))?;
-    // A document under another spec may name its fields the same way and mean
-    // something else, so it is refused before a single run is read rather than
-    // compared on a guess.
-    if let Err(refusal) = document.check_specs() {
-        bail!("{}: {refusal}", args.against.display());
-    }
+    let store = match open_existing_store(store_path) {
+        Ok(store) => store,
+        Err(refusal) => return not_checked(args.json, &refusal),
+    };
 
-    let store = SqliteStore::open(store_path)
-        .with_context(|| format!("opening store at {}", store_path.display()))?;
-
-    let mut findings: Vec<anchor::RunFinding> = Vec::new();
-    let mut anchored: HashSet<String> = HashSet::new();
-    for run in &document.runs {
-        let run_id = parse_run_id(&run.run)
-            .with_context(|| format!("in the anchor file {}", args.against.display()))?;
-        anchored.insert(run.run.clone());
-        let observed = observe(&store, run_id, run.len).await?;
-        findings.push(anchor::RunFinding {
-            run: run.run.clone(),
-            finding: anchor::finding_for(run, &observed),
-        });
-    }
-
-    for (run_id, head) in store.chain_heads()? {
-        let uuid = run_id.as_uuid().to_string();
-        if anchored.contains(&uuid) {
-            continue;
+    // Every way the anchor file can fail to be an anchor: gone, unreadable,
+    // not JSON, written under another spec, or carrying an entry that is not a
+    // head. Each one is refused here rather than compared on a guess, because
+    // a comparison against a file this binary does not understand reads as a
+    // finding about the store.
+    let document = match read_anchor_file(&args.against) {
+        Ok(document) => document,
+        Err(why) => {
+            return not_checked(args.json, &format!("{}: {why}", args.against.display()));
         }
-        // A run this anchor never saw is still read, because reading is what
-        // recomputes a chain: there is nothing to compare it against, and a log
-        // this store refuses is still worth saying out loud.
-        let finding = match observe(&store, run_id, head.len).await? {
-            anchor::Observed::Broken { seq, detail } => anchor::Finding::Broken { seq, detail },
-            anchor::Observed::Present { len, .. } => anchor::Finding::New { len },
-            // A recorded head with no rows under it is refused by `read_log`,
-            // so this arm is unreachable in practice; skipping is the honest
-            // answer if it ever is reached, since there is no run to report.
-            anchor::Observed::Missing => continue,
-        };
-        findings.push(anchor::RunFinding { run: uuid, finding });
+    };
+
+    // A pass over zero runs prints exactly like a pass over a store full of
+    // intact ones, which is the problem: the operator asked a question and got
+    // a yes that meant nothing.
+    if document.runs.is_empty() && !args.allow_empty {
+        return not_checked(
+            args.json,
+            &format!(
+                "this anchor commits to nothing: {} records no runs, so a pass against it would \
+                 mean nothing was checked. Take an anchor over a store that holds runs, or pass \
+                 --allow-empty to accept this one.",
+                args.against.display()
+            ),
+        );
     }
 
-    let result = anchor::Verification::new(
-        &document,
-        store_path,
-        &args.against,
-        OffsetDateTime::now_utc(),
-        findings,
-    );
+    let result = verify_store_against(&store, store_path, &args.against, &document).await?;
     if args.json {
         println!(
             "{}",

@@ -131,8 +131,10 @@ pub async fn dispatch(cli: Cli) -> Result<u8> {
         Command::Completions(args) => commands::completions(args),
         Command::History(args) => commands::history(store, args).await,
         Command::Replay(args) => commands::replay(store, args).await,
-        // `anchor` writes; it drives nothing and awaits nothing.
-        Command::Anchor(args) => commands::anchor(store, args),
+        // `anchor` writes, and reads the file it would overwrite: checking a
+        // store against that file is the same read `verify` does, so it awaits
+        // the same way.
+        Command::Anchor(args) => commands::anchor(store, args).await,
         Command::Verify(args) => commands::verify(store, args).await,
         Command::Serve(args) => commands::serve(store, args).await,
         // `build` produces the product from a checkout; it reads no store.

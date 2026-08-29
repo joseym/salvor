@@ -443,6 +443,26 @@
             "global": false,
             "help": "Write the anchor to this file instead of standard output",
             "possible_values": null
+          },
+          {
+            "long": "--allow-empty",
+            "short": null,
+            "value_name": null,
+            "required": false,
+            "repeatable": false,
+            "global": false,
+            "help": "Take an anchor over a store that holds no runs",
+            "possible_values": null
+          },
+          {
+            "long": "--force",
+            "short": null,
+            "value_name": null,
+            "required": false,
+            "repeatable": false,
+            "global": false,
+            "help": "Overwrite the file at `--out` whatever it holds, and skip verifying the store against it first",
+            "possible_values": null
           }
         ],
         "subcommands": []
@@ -469,7 +489,17 @@
             "required": false,
             "repeatable": false,
             "global": false,
-            "help": "Print the result as JSON instead of the human report. The exit code is the same either way",
+            "help": "Print the result as JSON instead of the human report",
+            "possible_values": null
+          },
+          {
+            "long": "--allow-empty",
+            "short": null,
+            "value_name": null,
+            "required": false,
+            "repeatable": false,
+            "global": false,
+            "help": "Accept an anchor that commits to no runs",
             "possible_values": null
           }
         ],

@@ -211,7 +211,7 @@ async fn an_anchor_is_written_and_an_untouched_store_verifies() {
                     second.as_uuid()
                 )))
                 .and(predicate::str::contains(
-                    "2 run(s) anchored, 2 intact, 0 new since the anchor",
+                    "2 run(s) anchored, 2 intact, 0 failed, 0 new since the anchor",
                 )),
         );
 }
@@ -253,7 +253,7 @@ async fn growth_since_the_anchor_is_intact_and_a_later_run_is_new() {
                 later.as_uuid()
             )))
             .and(predicate::str::contains(
-                "1 run(s) anchored, 1 intact, 1 new since the anchor",
+                "1 run(s) anchored, 1 intact, 0 failed, 1 new since the anchor",
             )),
         );
 }
@@ -299,12 +299,15 @@ async fn a_rewritten_and_rechained_run_is_reported_rewritten() {
         .assert()
         .code(1)
         .stdout(
-            predicate::str::contains(format!("run {}: rewritten at event 3", run_id.as_uuid()))
-                .and(predicate::str::contains(&anchored))
-                .and(predicate::str::contains(
-                    "1 run(s) anchored, 0 intact, 0 new since the anchor",
-                ))
-                .and(predicate::str::contains("backup that reads clean")),
+            predicate::str::contains(format!(
+                "run {}: rewritten at seq 2 (the anchored length is 3)",
+                run_id.as_uuid()
+            ))
+            .and(predicate::str::contains(&anchored))
+            .and(predicate::str::contains(
+                "1 run(s) anchored, 0 intact, 1 failed, 0 new since the anchor",
+            ))
+            .and(predicate::str::contains("backup that reads clean")),
         );
     let stdout = String::from_utf8_lossy(&refusal.get_output().stdout).into_owned();
     assert!(
@@ -345,7 +348,7 @@ async fn a_deleted_run_is_reported_missing() {
                 kept.as_uuid()
             )))
             .and(predicate::str::contains(
-                "2 run(s) anchored, 1 intact, 0 new since the anchor",
+                "2 run(s) anchored, 1 intact, 1 failed, 0 new since the anchor",
             )),
         );
 }
@@ -442,7 +445,7 @@ async fn an_anchor_under_a_foreign_spec_is_refused() {
         .args(["verify", "--against"])
         .arg(&anchor_path)
         .assert()
-        .failure()
+        .code(2)
         .stderr(
             predicate::str::contains("someone.else.anchor.v1")
                 .and(predicate::str::contains("salvor.anchor.v1")),
@@ -462,7 +465,7 @@ async fn an_anchor_under_a_foreign_spec_is_refused() {
         .args(["verify", "--against"])
         .arg(&anchor_path)
         .assert()
-        .failure()
+        .code(2)
         .stderr(
             predicate::str::contains("salvor.chain.v9")
                 .and(predicate::str::contains("salvor.chain.v1")),
@@ -489,7 +492,9 @@ async fn the_json_result_names_the_same_findings() {
     assert_eq!(result["store"], store_path.display().to_string());
     assert_eq!(result["anchored"], 1);
     assert_eq!(result["intact"], 1);
+    assert_eq!(result["failed"], 0);
     assert_eq!(result["new"], 0);
+    assert_eq!(result["checked"], true);
     assert_eq!(result["ok"], true);
     assert_eq!(result["runs"][0]["run"], run_id.as_uuid().to_string());
     assert_eq!(result["runs"][0]["finding"], "intact");
@@ -515,8 +520,526 @@ async fn the_json_result_names_the_same_findings() {
         serde_json::from_slice(&failing.get_output().stdout).expect("stdout is JSON");
     assert_eq!(result["runs"][0]["finding"], "rewritten");
     assert_eq!(result["ok"], false);
+    assert_eq!(result["failed"], 1);
+    assert_eq!(
+        result["checked"], true,
+        "the check ran; `checked` is what separates that from a refusal"
+    );
     assert_ne!(
         result["runs"][0]["anchored_hash"], result["runs"][0]["found_hash"],
         "the two hashes are what the finding is about"
+    );
+}
+
+/// A store file that exists and holds nothing. `SqliteStore::open` creates the
+/// database, which is exactly the state a typo in `--store` produces.
+fn empty_store(path: &Path) {
+    drop(SqliteStore::open(path).expect("store opens"));
+}
+
+/// Neither verb creates the store it was pointed at.
+///
+/// `SqliteStore::open` creates a database at a path that has none, and both
+/// verbs used to go through it: `verify` against a store it had just created
+/// reported every anchored run missing and sent the operator to a restore, and
+/// `anchor` wrote a file committing to no runs. A typo in `--store` must not
+/// be able to produce either.
+#[tokio::test]
+async fn a_missing_store_is_refused_by_both_verbs_and_never_created() {
+    let dir = tempdir().expect("tempdir");
+    let store_path = dir.path().join("salvor.db");
+    seed_run(&store_path, 2).await;
+    let anchor_path = take_anchor(&store_path, dir.path());
+
+    let missing = dir.path().join("no-such-store.db");
+
+    salvor(&missing)
+        .args(["verify", "--against"])
+        .arg(&anchor_path)
+        .assert()
+        .code(2)
+        .stderr(
+            predicate::str::contains(format!("no store at {}", missing.display()))
+                .and(predicate::str::contains("nothing was created")),
+        );
+    assert!(!missing.exists(), "verify must not create the store");
+
+    let out = dir.path().join("would-be-anchor.json");
+    salvor(&missing)
+        .args(["anchor", "--out"])
+        .arg(&out)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(format!(
+            "no store at {}",
+            missing.display()
+        )));
+    assert!(!missing.exists(), "anchor must not create the store");
+    assert!(!out.exists(), "and must not write an anchor over nothing");
+
+    // With no --out there is nothing on stdout either: a redirect gets an
+    // empty file rather than `"runs": []`.
+    salvor(&missing)
+        .arg("anchor")
+        .assert()
+        .code(2)
+        .stdout(predicate::str::is_empty());
+}
+
+/// An anchor over a store with no runs commits to nothing, and a later verify
+/// against it passes having checked nothing. Refused unless the operator says
+/// the emptiness is the truth.
+#[tokio::test]
+async fn an_anchor_over_no_runs_is_refused_unless_it_is_asked_for() {
+    let dir = tempdir().expect("tempdir");
+    let store_path = dir.path().join("salvor.db");
+    empty_store(&store_path);
+    let out = dir.path().join("anchor.json");
+
+    salvor(&store_path)
+        .args(["anchor", "--out"])
+        .arg(&out)
+        .assert()
+        .code(2)
+        .stderr(
+            predicate::str::contains(format!(
+                "nothing to anchor: {} holds no runs",
+                store_path.display()
+            ))
+            .and(predicate::str::contains("--allow-empty")),
+        );
+    assert!(!out.exists(), "nothing is written by a refused anchor");
+
+    salvor(&store_path)
+        .args(["anchor", "--allow-empty", "--out"])
+        .arg(&out)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("anchored 0 run(s)"));
+    assert_eq!(
+        read_anchor(&out)["runs"].as_array().expect("runs").len(),
+        0,
+        "--allow-empty writes the empty document rather than refusing"
+    );
+}
+
+/// The same argument from the other end: a pass over zero runs is not evidence
+/// about a store, and it is indistinguishable from a real all-clear.
+#[tokio::test]
+async fn an_anchor_that_commits_to_nothing_is_refused_by_verify() {
+    let dir = tempdir().expect("tempdir");
+    let store_path = dir.path().join("salvor.db");
+    empty_store(&store_path);
+    let out = dir.path().join("anchor.json");
+    salvor(&store_path)
+        .args(["anchor", "--allow-empty", "--out"])
+        .arg(&out)
+        .assert()
+        .success();
+
+    // A real run appears afterwards, so the store is no longer empty: the
+    // anchor still commits to nothing, which is the point.
+    seed_run(&store_path, 2).await;
+
+    salvor(&store_path)
+        .args(["verify", "--against"])
+        .arg(&out)
+        .assert()
+        .code(2)
+        .stderr(
+            predicate::str::contains("this anchor commits to nothing")
+                .and(predicate::str::contains("--allow-empty")),
+        );
+
+    salvor(&store_path)
+        .args(["verify", "--allow-empty", "--against"])
+        .arg(&out)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "0 run(s) anchored, 0 intact, 0 failed, 1 new since the anchor",
+        ));
+}
+
+/// An entry that is not shaped like an anchored head refuses the file, by the
+/// entry, instead of being compared and reported as tampering.
+///
+/// `"hash": "deadbeef"` used to come back as `rewritten` with restore advice,
+/// which is a typo reading as an incident.
+#[tokio::test]
+async fn a_malformed_entry_refuses_the_file_rather_than_blaming_the_store() {
+    let dir = tempdir().expect("tempdir");
+    let store_path = dir.path().join("salvor.db");
+    seed_run(&store_path, 3).await;
+    let anchor_path = take_anchor(&store_path, dir.path());
+
+    // Each case starts from the good document, so the entry the refusal names
+    // is the one this case broke.
+    let good = read_anchor(&anchor_path);
+    let write = |document: &Value| {
+        std::fs::write(
+            &anchor_path,
+            serde_json::to_string_pretty(document).expect("serialize"),
+        )
+        .expect("write");
+    };
+
+    let mut document = good.clone();
+    document["runs"][0]["hash"] = json!("deadbeef");
+    write(&document);
+    let refusal = salvor(&store_path)
+        .args(["verify", "--against"])
+        .arg(&anchor_path)
+        .assert()
+        .code(2)
+        .stderr(
+            predicate::str::contains("entry 1")
+                .and(predicate::str::contains("deadbeef"))
+                .and(predicate::str::contains("64 lowercase hex")),
+        );
+    let printed = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refusal.get_output().stderr),
+        String::from_utf8_lossy(&refusal.get_output().stdout)
+    );
+    assert!(
+        !printed.contains("rewritten") && !printed.contains("backup that reads clean"),
+        "a broken file is not a finding about the store: {printed}"
+    );
+
+    let mut document = good.clone();
+    document["runs"][0]["run"] = json!("run-7");
+    write(&document);
+    salvor(&store_path)
+        .args(["verify", "--against"])
+        .arg(&anchor_path)
+        .assert()
+        .code(2)
+        .stderr(
+            predicate::str::contains("entry 1")
+                .and(predicate::str::contains("run-7"))
+                .and(predicate::str::contains("UUID")),
+        );
+
+    let mut document = good.clone();
+    document["runs"][0]["len"] = json!(0);
+    write(&document);
+    salvor(&store_path)
+        .args(["verify", "--against"])
+        .arg(&anchor_path)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("length of 0"));
+}
+
+/// Every way the check can fail to run exits `2`, and with `--json` each one
+/// still prints a document on stdout: a consumer that parses stdout has to be
+/// able to tell "never checked" from "checked and clean", and an empty stdout
+/// beside an exit code is what a script reads as a pass.
+#[tokio::test]
+async fn a_check_that_did_not_run_exits_two_and_still_prints_json() {
+    let dir = tempdir().expect("tempdir");
+    let store_path = dir.path().join("salvor.db");
+    seed_run(&store_path, 2).await;
+    let anchor_path = take_anchor(&store_path, dir.path());
+
+    let document = |assert: assert_cmd::assert::Assert| -> Value {
+        serde_json::from_slice(&assert.get_output().stdout).expect("stdout is JSON")
+    };
+
+    // No store at the path.
+    let missing_store = dir.path().join("no-such-store.db");
+    let refused = document(
+        salvor(&missing_store)
+            .args(["verify", "--json", "--against"])
+            .arg(&anchor_path)
+            .assert()
+            .code(2),
+    );
+    assert_eq!(refused["verify"], "salvor.verify.v1");
+    assert_eq!(refused["ok"], false);
+    assert_eq!(refused["checked"], false);
+    assert!(
+        refused["error"]
+            .as_str()
+            .expect("error is a string")
+            .contains("no store at"),
+        "{refused}"
+    );
+
+    // No anchor file at the path.
+    let refused = document(
+        salvor(&store_path)
+            .args(["verify", "--json", "--against"])
+            .arg(dir.path().join("no-such-anchor.json"))
+            .assert()
+            .code(2),
+    );
+    assert_eq!(refused["checked"], false);
+    assert!(
+        refused["error"]
+            .as_str()
+            .expect("error is a string")
+            .contains("cannot be read"),
+        "{refused}"
+    );
+
+    // A file that is not JSON at all.
+    let not_json = dir.path().join("not-json.txt");
+    std::fs::write(&not_json, "this is not an anchor\n").expect("write");
+    let refused = document(
+        salvor(&store_path)
+            .args(["verify", "--json", "--against"])
+            .arg(&not_json)
+            .assert()
+            .code(2),
+    );
+    assert_eq!(refused["checked"], false);
+
+    // A malformed entry.
+    let mut broken = read_anchor(&anchor_path);
+    broken["runs"][0]["hash"] = json!("deadbeef");
+    let broken_path = dir.path().join("broken.json");
+    std::fs::write(
+        &broken_path,
+        serde_json::to_string_pretty(&broken).expect("serialize"),
+    )
+    .expect("write");
+    let refused = document(
+        salvor(&store_path)
+            .args(["verify", "--json", "--against"])
+            .arg(&broken_path)
+            .assert()
+            .code(2),
+    );
+    assert!(
+        refused["error"]
+            .as_str()
+            .expect("error is a string")
+            .contains("entry 1"),
+        "{refused}"
+    );
+
+    // And the check that did run says so in the same field.
+    let checked = document(
+        salvor(&store_path)
+            .args(["verify", "--json", "--against"])
+            .arg(&anchor_path)
+            .assert()
+            .success(),
+    );
+    assert_eq!(checked["checked"], true);
+    assert_eq!(checked["ok"], true);
+    assert_eq!(checked["failed"], 0);
+}
+
+/// An anchor held against the wrong store looks exactly like total loss. The
+/// cheap explanation is offered before the expensive one, because an operator
+/// who reads the restore advice first restores over a store that was fine.
+#[tokio::test]
+async fn every_run_missing_beside_unknown_runs_says_it_may_be_the_wrong_anchor() {
+    let dir = tempdir().expect("tempdir");
+    let anchored_store = dir.path().join("anchored.db");
+    seed_run(&anchored_store, 3).await;
+    let anchor_path = take_anchor(&anchored_store, dir.path());
+
+    let other_store = dir.path().join("other.db");
+    seed_run(&other_store, 2).await;
+
+    let report = salvor(&other_store)
+        .args(["verify", "--against"])
+        .arg(&anchor_path)
+        .assert()
+        .code(1)
+        .stdout(
+            predicate::str::contains("This may be the wrong anchor")
+                .and(predicate::str::contains(
+                    anchored_store.display().to_string(),
+                ))
+                .and(predicate::str::contains(other_store.display().to_string()))
+                .and(predicate::str::contains(
+                    "1 run(s) anchored, 0 intact, 1 failed, 1 new since the anchor",
+                )),
+        );
+    let stdout = String::from_utf8_lossy(&report.get_output().stdout).into_owned();
+    let suspicion = stdout
+        .find("This may be the wrong anchor")
+        .expect("the suspicion is printed");
+    let restore = stdout
+        .find("Go back to a backup")
+        .expect("the restore advice is printed");
+    assert!(
+        suspicion < restore,
+        "the cheap explanation comes first: {stdout}"
+    );
+
+    // A path mismatch on its own is never a refusal: a restore to a new path
+    // is ordinary, so the same store under a copied name still verifies.
+    let restored = dir.path().join("restored.db");
+    std::fs::copy(&anchored_store, &restored).expect("copy the store");
+    salvor(&restored)
+        .args(["verify", "--against"])
+        .arg(&anchor_path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "1 run(s) anchored, 1 intact, 0 failed, 0 new since the anchor",
+        ));
+
+    // The count is in the JSON too, under the same word.
+    let json = salvor(&other_store)
+        .args(["verify", "--json", "--against"])
+        .arg(&anchor_path)
+        .assert()
+        .code(1);
+    let result: Value = serde_json::from_slice(&json.get_output().stdout).expect("stdout is JSON");
+    assert_eq!(result["failed"], 1);
+    assert_eq!(result["anchor_store"], anchored_store.display().to_string());
+}
+
+/// Re-anchoring over an existing anchor is how the evidence of a rewrite gets
+/// destroyed on a schedule, so the store is checked against the file first and
+/// the write is refused when it no longer verifies.
+#[tokio::test]
+async fn an_existing_anchor_is_verified_before_it_is_overwritten() {
+    let dir = tempdir().expect("tempdir");
+    let store_path = dir.path().join("salvor.db");
+    let run_id = seed_run(&store_path, 3).await;
+    let anchor_path = take_anchor(&store_path, dir.path());
+
+    // An untouched store re-anchors over its own file without ceremony: a
+    // scheduled anchor can keep one name.
+    salvor(&store_path)
+        .args(["anchor", "--out"])
+        .arg(&anchor_path)
+        .assert()
+        .success();
+
+    let before = std::fs::read_to_string(&anchor_path).expect("anchor reads");
+    tamper(&store_path, |conn| {
+        let forged = serde_json::to_string(&envelope(run_id, 1, "forged")).expect("serialize");
+        conn.execute(
+            "UPDATE events SET envelope = ?1 WHERE run_id = ?2 AND seq = 1",
+            params![forged, run_id.as_uuid().to_string()],
+        )
+        .expect("rewrite the envelope");
+        recompute_chain(conn, run_id);
+    });
+
+    salvor(&store_path)
+        .args(["anchor", "--out"])
+        .arg(&anchor_path)
+        .assert()
+        .code(1)
+        .stderr(
+            predicate::str::contains(format!(
+                "this store no longer verifies against the anchor already at {}",
+                anchor_path.display()
+            ))
+            .and(predicate::str::contains("not overwriting"))
+            .and(predicate::str::contains("1 of 1 anchored run(s) failed")),
+        );
+    assert_eq!(
+        std::fs::read_to_string(&anchor_path).expect("anchor reads"),
+        before,
+        "the refused write left the file exactly as it was"
+    );
+
+    salvor(&store_path)
+        .args(["anchor", "--force", "--out"])
+        .arg(&anchor_path)
+        .assert()
+        .success();
+    assert_ne!(
+        std::fs::read_to_string(&anchor_path).expect("anchor reads"),
+        before,
+        "--force records the store as it now is"
+    );
+}
+
+/// A file at `--out` that is not an anchor at all was written by something
+/// else, and replacing an unread file is how an operator loses one.
+#[tokio::test]
+async fn a_file_that_is_not_an_anchor_is_not_overwritten_either() {
+    let dir = tempdir().expect("tempdir");
+    let store_path = dir.path().join("salvor.db");
+    seed_run(&store_path, 2).await;
+    let out = dir.path().join("something-else.json");
+
+    for content in ["not JSON at all\n", "{\"hello\": \"world\"}\n"] {
+        std::fs::write(&out, content).expect("write");
+        salvor(&store_path)
+            .args(["anchor", "--out"])
+            .arg(&out)
+            .assert()
+            .code(2)
+            .stderr(
+                predicate::str::contains("not overwriting")
+                    .and(predicate::str::contains(
+                        "not an anchor this salvor can read",
+                    ))
+                    .and(predicate::str::contains("--force")),
+            );
+        assert_eq!(
+            std::fs::read_to_string(&out).expect("the file reads"),
+            content,
+            "the refused write left the file exactly as it was"
+        );
+    }
+
+    salvor(&store_path)
+        .args(["anchor", "--force", "--out"])
+        .arg(&out)
+        .assert()
+        .success();
+    assert_eq!(read_anchor(&out)["anchor"], "salvor.anchor.v1");
+}
+
+/// The custody advice is one sentence on every anchor, and the one case that
+/// is provably wrong gets a warning of its own.
+#[tokio::test]
+async fn an_anchor_written_beside_its_own_store_is_warned_about() {
+    let dir = tempdir().expect("tempdir");
+    let store_path = dir.path().join("salvor.db");
+    seed_run(&store_path, 1).await;
+
+    let beside = dir.path().join("anchor.json");
+    let written = salvor(&store_path)
+        .args(["anchor", "--out"])
+        .arg(&beside)
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&written.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains(&format!(
+            "anchored 1 run(s) (written to {}). Keep it somewhere this store cannot reach.",
+            beside.display()
+        )),
+        "the custody advice is one short sentence: {stderr}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "warning: {} is in the same directory as {}",
+            beside.display(),
+            store_path.display()
+        )),
+        "an anchor beside its store is called out by name: {stderr}"
+    );
+
+    // A directory of its own draws no warning: the warning is about the one
+    // case that is provably within reach of whoever can rewrite the store, not
+    // about custody in general, which is one sentence on every anchor.
+    let elsewhere = dir.path().join("off-box");
+    std::fs::create_dir(&elsewhere).expect("mkdir");
+    let away = elsewhere.join("anchor.json");
+    let written = salvor(&store_path)
+        .args(["anchor", "--out"])
+        .arg(&away)
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&written.get_output().stderr).into_owned();
+    assert!(
+        !stderr.contains("same directory"),
+        "another directory draws no warning: {stderr}"
     );
 }
