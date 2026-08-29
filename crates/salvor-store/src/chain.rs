@@ -242,6 +242,12 @@ pub fn row_hash(
 /// number of the first row that does not agree with the chain. A run with no
 /// rows and no recorded head verifies trivially, which is what makes an
 /// unknown run read back as an empty log rather than an error.
+///
+/// The two ways a recorded head can disagree with rows that are themselves
+/// consistent get their own variants, because neither has a row to blame:
+/// [`StoreError::HeadWithoutRows`] when the rows are gone and the head is
+/// still there, and [`StoreError::HeadLength`] when the head commits to a
+/// different count.
 pub fn verify(
     run_id: RunId,
     rows: &[ChainRow<'_>],
@@ -271,26 +277,39 @@ pub fn verify(
     }
 
     if let Some(head) = recorded_head {
-        // The seq to blame when the head disagrees is the last row that
-        // survived, or position 0 when every row is gone.
-        let seq = rows
-            .last()
-            .map_or_else(|| SequenceNumber::new(0), |row| row.seq);
+        let len = rows.len() as u64;
+        // A head over no rows at all is the one case where the recomputed hash
+        // is genesis, so the general wording would report "expected <64 hex>,
+        // found 000...0" and read as a corrupt first event. What happened is
+        // that the events were removed and the head was left behind, which is
+        // the shape a deletion takes, so it is named as itself.
+        if rows.is_empty() && (head.hash != running || head.len != len) {
+            return Err(StoreError::HeadWithoutRows {
+                run_id,
+                recorded: head.len,
+            });
+        }
         if head.hash != running {
             return Err(StoreError::TamperEvident {
                 run_id,
-                seq,
+                // The last row that survived: the hash the head disagrees with
+                // is the one that row produced.
+                seq: rows
+                    .last()
+                    .map_or_else(|| SequenceNumber::new(0), |row| row.seq),
                 expected: head.hash.to_owned(),
                 found: running,
             });
         }
-        let len = rows.len() as u64;
+        // No seq: a count is not a position, and the two printed as one
+        // ("expected 99 recorded rows ... at seq 9") sends an operator to a
+        // line that is not the problem. Nothing here is wrong at a row; the
+        // head is wrong about all of them.
         if head.len != len {
-            return Err(StoreError::TamperEvident {
+            return Err(StoreError::HeadLength {
                 run_id,
-                seq,
-                expected: format!("{} recorded rows", head.len),
-                found: format!("{len} recorded rows"),
+                recorded: head.len,
+                held: len,
             });
         }
     }
@@ -452,5 +471,78 @@ mod tests {
     #[test]
     fn an_empty_run_verifies() {
         verify(run(), &[], None).expect("no rows and no head is not tampering");
+    }
+
+    /// A head that disagrees with rows which are themselves consistent has no
+    /// row to blame, so neither refusal names a position: a count printed as a
+    /// sequence number, and the genesis hash printed as a finding, both point
+    /// an operator at a line that is not the problem.
+    #[test]
+    fn a_head_that_disagrees_with_its_rows_says_so_without_a_position() {
+        let body = envelope_json(1, "real");
+        let hash = row_hash(GENESIS_PREV_HASH, run(), SequenceNumber::new(1), &body);
+        let rows = [ChainRow {
+            seq: SequenceNumber::new(1),
+            envelope_json: &body,
+            prev_hash: GENESIS_PREV_HASH,
+            row_hash: &hash,
+        }];
+
+        // The rows chain perfectly; the head says there are ten of them.
+        match verify(
+            run(),
+            &rows,
+            Some(ChainHead {
+                len: 10,
+                hash: &hash,
+            }),
+        ) {
+            Err(error @ StoreError::HeadLength { .. }) => {
+                let message = error.to_string();
+                assert!(
+                    message.contains("says 10 rows and the log holds 1"),
+                    "{message}"
+                );
+                assert!(
+                    !message.contains("seq"),
+                    "a count is not a position: {message}"
+                );
+            }
+            other => panic!("expected HeadLength, got {other:?}"),
+        }
+
+        // Every row deleted, the head left behind.
+        match verify(
+            run(),
+            &[],
+            Some(ChainHead {
+                len: 1,
+                hash: &hash,
+            }),
+        ) {
+            Err(error @ StoreError::HeadWithoutRows { .. }) => {
+                let message = error.to_string();
+                assert!(
+                    message.contains(
+                        "the run's events are gone and only its recorded head \
+                                      remains (1 rows recorded)"
+                    ),
+                    "{message}"
+                );
+                assert!(!message.contains(GENESIS_PREV_HASH), "{message}");
+            }
+            other => panic!("expected HeadWithoutRows, got {other:?}"),
+        }
+
+        // A head over no rows that agrees with no rows is not a finding.
+        verify(
+            run(),
+            &[],
+            Some(ChainHead {
+                len: 0,
+                hash: GENESIS_PREV_HASH,
+            }),
+        )
+        .expect("a head recording nothing over no rows agrees with them");
     }
 }
