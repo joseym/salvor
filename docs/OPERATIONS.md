@@ -272,11 +272,11 @@ An anchor is a copy of what the heads were, kept where that writer
 cannot reach it:
 
 ```sh
-salvor anchor --store /var/lib/salvor/salvor.db --out /mnt/anchors/salvor-2026-08-28.json
+salvor anchor --store /var/lib/salvor/salvor.db --out /mnt/anchors/salvor-2026-08-28T02-00Z.json
 ```
 
 ```
-anchored 2 run(s) (written to /mnt/anchors/salvor-2026-08-28.json). Keep it somewhere this store cannot reach.
+anchored 2 run(s) (written to /mnt/anchors/salvor-2026-08-28T02-00Z.json). Keep it somewhere this store cannot reach.
 ```
 
 The file is JSON, one entry per run, ordered by run id: how many events
@@ -318,24 +318,49 @@ over zero runs commits to nothing and every later verify against it
 passes having checked nothing; pass `--allow-empty` when the store is
 empty on purpose and a file still has to appear on schedule. A write
 that fails, such as a `--out` under a directory that is not mounted, is
-exit 2 as well: no anchor was taken. Exit 1 is always about the file
-already at `--out`, which is the paragraph below.
+exit 2 as well: no anchor was taken. Exit 1 is the two paragraphs
+below: a run this store cannot read, or the file already at `--out`.
+
+Every run's log is read back before anything is written, and a store
+holding a run the store itself refuses is not anchored at all (exit 1),
+whatever is or is not at `--out`:
+
+```
+salvor anchor: not anchoring /var/lib/salvor/salvor.db: run 1f9c1f6d-0d3a-4a1c-9a0f-7f4a2d2b6c11 fails its recorded hash chain at seq 4: expected 4c26..., found 1b27.... An anchor must not record a head for a run nobody can read, so nothing was written and /mnt/anchors/salvor-2026-08-29T02-00Z.json was left as it is. Go back to a backup that reads clean and read docs/OPERATIONS.md, Anchoring the chain. --force does not lift this.
+```
+
+An anchor over an unreadable run is a file that records a head nothing
+can be checked against: it sits on the shelf looking like evidence, and
+every later verify against it reports the same run broken. `--force`
+does not lift this one, because `--force` is an answer about the file
+at `--out`, and no answer about that file makes a run readable.
 
 The file at `--out` is read before it is replaced. If it is an anchor
 this store no longer verifies against, the write is refused (exit 1):
 re-anchoring there would record the rewrite and destroy the only copy
 of what the heads used to be, which is the failure mode a nightly
-`--out /mnt/anchors/latest.json` walks straight into. Two more shapes
-refuse the same way. If every run in that file is missing here while
+`--out /mnt/anchors/latest.json` walks straight into. One more shape
+refuses the same way. If every run in that file is missing here while
 this store holds runs it never names, the refusal says it may be the
 wrong file and names both stores, because that reading and total loss
-look identical and lead to opposite actions. And if every anchored run
-stands while some run outside the anchor has a log this store refuses
-to read, the write waits too: anchoring then records a head for a run
-nobody can read. Each refusal prints the `salvor verify` line to run,
-with the `--store` it was given. A file that is not an anchor at all is
-refused as well (exit 2). `--force` overwrites any of them, once you
-know what you are overwriting.
+look identical and lead to opposite actions. Each refusal prints the
+`salvor verify` line to run, with the `--store` it was given. A file
+that is not an anchor at all is refused as well (exit 2).
+
+`--force` overwrites the file at `--out` whatever it holds, and does
+not silence what was found there. The comparison still runs and its
+answer still prints, as a warning rather than a refusal:
+
+```
+warning: this store fails verification against /mnt/anchors/salvor-2026-08-29T02-00Z.json (1 of 3 anchored runs); overwriting anyway as asked.
+anchored 3 run(s) (written to /mnt/anchors/salvor-2026-08-29T02-00Z.json). Keep it somewhere this store cannot reach.
+```
+
+Passing `--force` says "overwrite it", not "do not tell me what I am
+overwriting", and that line is the last moment anything can say what
+the old heads were. Capture stderr from a job that passes `--force`, or
+the one sentence describing the evidence you just destroyed goes to a
+terminal nobody is reading.
 
 #### Custody
 
@@ -356,8 +381,9 @@ which custody alone does not. Where none of that is available, a hash of
 the anchor recorded somewhere with its own retention, a ticket or a
 chat channel, is still better than the file alone.
 
-Give each anchor a dated name and keep the history:
-`salvor-2026-08-28.json`, not `latest.json`. One rolling file is one
+Give each anchor a name no later one reuses and keep the history:
+`salvor-2026-08-29T02-00Z.json`, not `latest.json`, and not a name to
+the day either if the job can run twice in one. One rolling file is one
 file to overwrite, and overwriting it is the whole attack. A directory
 of dated anchors is also what lets a restore be checked against the
 anchor from before the loss rather than one taken after it. Keep an
@@ -390,22 +416,63 @@ anchor and the incident as runs you will have to account for by other
 means.
 
 The order within one nightly job matters as much as the interval. Check
-the store against the newest anchor you already hold, and take today's
+the store against the newest anchor you already hold, and take tonight's
 anchor only if that check passed. A job that anchors first and verifies
 second has checked a store against a file it wrote a second earlier,
 which passes by construction and says nothing; a job that anchors first
 and stops has recorded whatever the store now holds as the truth. Never
 verify against an anchor the same job just took.
 
+Two things follow, and both have to be in the script rather than in the
+operator's head. The first night there is nothing to check against, and
+a job that treats that as a failure never gets off the ground; the
+answer is to take the first anchor and say that is all that happened.
+And the name has to be one no later run reuses, or the second run of
+the day overwrites the file the first one wrote, which is the whole
+attack performed by the cron job itself. A timestamp to the minute
+gives every run its own name and sorts chronologically:
+
 ```sh
 #!/bin/sh
-# Nightly: check yesterday's evidence, then record today's.
-set -e
+# Nightly: check the newest anchor on hand, then record a new one.
+set -eu
 store=/var/lib/salvor/salvor.db
-latest=$(ls -1 /mnt/anchors/salvor-*.json | tail -1)
-salvor verify --store "$store" --against "$latest"
-salvor anchor --store "$store" --out /mnt/anchors/salvor-$(date -u +%Y-%m-%d).json
+anchors=/mnt/anchors
+
+# The newest anchor already on hand, chosen before anything is written,
+# so this job can never verify against a file it wrote itself. Empty on
+# the first night; `ls` failing on an empty directory is not an error
+# here, which is why its status is not the pipeline's.
+latest=$(ls -1 "$anchors"/salvor-*.json 2>/dev/null | tail -1)
+
+# To the minute, and never reused: a rerun writes a new file beside the
+# old one rather than over it.
+out=$anchors/salvor-$(date -u +%Y-%m-%dT%H-%MZ).json
+if [ -e "$out" ]; then
+  echo "salvor: $out is already here; nothing checked and nothing written." >&2
+  exit 0
+fi
+
+if [ -n "$latest" ]; then
+  salvor verify --store "$store" --against "$latest"
+  salvor anchor --store "$store" --out "$out"
+else
+  salvor anchor --store "$store" --out "$out"
+  echo "salvor: no anchor was on hand, so nothing was checked; $out is the first one." >&2
+fi
 ```
+
+A second run inside the same minute stops there and checks nothing,
+which is the honest answer: the newest anchor on hand would be the one
+the previous run took seconds ago, and a store checked against an
+anchor that fresh passes by construction. The next minute the job runs
+normally.
+
+`set -e` is what makes the order mean anything: a verify that exits 1 or
+2 stops the job before the anchor is taken, so a store that no longer
+matches its evidence does not get a fresh file recording what it now
+holds. The exit code of the whole script is the exit code of whichever
+command stopped it, so alert on 1 and on 2 separately, as below.
 
 #### After a restore
 
@@ -413,7 +480,7 @@ Read the store (above), then check it against the anchor you took
 before the loss:
 
 ```sh
-salvor verify --store /var/lib/salvor/salvor.db --against /mnt/anchors/salvor-2026-08-28.json
+salvor verify --store /var/lib/salvor/salvor.db --against /mnt/anchors/salvor-2026-08-28T02-00Z.json
 ```
 
 ```
@@ -449,9 +516,20 @@ that stops early have no position to point at.
 * `rewritten`: this store holds at least as many, and the hash at the
   anchored length is not the anchored one. The events the anchor
   covered are not the events this store now holds.
-* `broken`: this store refuses the run's own log, at the sequence
-  number it names. That is the ordinary chain failure, found here
-  because verifying reads every log.
+* `broken`: this store refuses the run's own log. That is the ordinary
+  chain failure, found here because verifying reads every log. It names
+  the sequence number when a row is what disagrees, and no position
+  when the recorded head is: a head that commits to a different number
+  of rows, or that outlived the rows under it, is not wrong at any one
+  line.
+
+```
+run 8a2b0c44-51e7-4f0a-b3d1-9c6e5f2a7d90: broken. This store refuses its own log: the run's events are gone and only its recorded head remains (12 rows recorded).
+```
+
+That last line is what a deletion looks like: the rows were removed and
+the head was left behind. `salvor list` and `salvor history` refuse the
+same run in the same words.
 
 ```
 run 1f9c1f6d-0d3a-4a1c-9a0f-7f4a2d2b6c11: rewritten at seq 11 (the anchored length is 12). The events this anchor covered are not the events this store now holds.
@@ -485,11 +563,23 @@ chain failure and leads to the same backup.
 If every anchored run comes back missing while the store holds runs the
 anchor never names, the report says the anchor may simply be the wrong
 one, and names the store it was taken over beside the store just
-checked, before any advice about restoring. Being handed the wrong file
-looks exactly like total loss, and the two are a minute apart in effort
-and hours apart in consequence. `salvor anchor` says the same thing
-when it declines to overwrite such a file, rather than the wording that
-sends you to a backup.
+checked. It prints instead of the restore advice, not above it:
+
+```
+This may be the wrong anchor. Every run it records is missing here, and this store holds
+1 run(s) it never names. The anchor was taken over /var/lib/salvor/other.db; this check read
+/var/lib/salvor/salvor.db. Confirm the two belong together before doing anything else: if they do belong
+together, treat this as a loss and see the restore advice in docs/OPERATIONS.md,
+Anchoring the chain.
+```
+
+Being handed the wrong file looks exactly like total loss, and the two
+are a minute apart in effort and hours apart in consequence; an
+operator who reads "go back to a backup" first restores over a store
+that was fine. An anchor that does not record a `store` at all says so
+in that same sentence rather than naming an empty path. `salvor anchor`
+says the same thing when it declines to overwrite such a file, rather
+than the wording that sends you to a backup.
 
 #### The three exit codes
 
@@ -517,8 +607,12 @@ unmounted volume under that name.
 
 ```sh
 #!/bin/sh
-# Check this store against today's anchor, from cron.
-anchor=/mnt/anchors/salvor-$(date -u +%Y-%m-%d).json
+# Check this store against the newest anchor on hand, from cron.
+anchor=$(ls -1 /mnt/anchors/salvor-*.json 2>/dev/null | tail -1)
+if [ -z "$anchor" ]; then
+  alert "salvor: no anchor on hand; nothing was checked"
+  exit 2
+fi
 salvor verify --store /var/lib/salvor/salvor.db --against "$anchor" --json > /var/log/salvor-verify.json
 case $? in
   0) exit 0 ;;
@@ -544,16 +638,16 @@ your own tooling closes the rest, under a key the store's writer does
 not hold:
 
 ```sh
-salvor anchor --store /var/lib/salvor/salvor.db --out salvor-2026-08-28.json
-minisign -Sm salvor-2026-08-28.json           # writes salvor-2026-08-28.json.minisig
+salvor anchor --store /var/lib/salvor/salvor.db --out salvor-2026-08-28T02-00Z.json
+minisign -Sm salvor-2026-08-28T02-00Z.json           # writes salvor-2026-08-28T02-00Z.json.minisig
 ```
 
 Verify the signature first, and only run `verify` if it passes, so a
 substituted anchor is caught before salvor reads a word of it:
 
 ```sh
-minisign -Vm salvor-2026-08-28.json -p /etc/salvor/anchors.pub \
-  && salvor verify --store /var/lib/salvor/salvor.db --against salvor-2026-08-28.json
+minisign -Vm salvor-2026-08-28T02-00Z.json -p /etc/salvor/anchors.pub \
+  && salvor verify --store /var/lib/salvor/salvor.db --against salvor-2026-08-28T02-00Z.json
 ```
 
 `gpg --detach-sign` and `gpg --verify` do the same job. Salvor does not
