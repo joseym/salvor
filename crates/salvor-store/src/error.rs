@@ -63,7 +63,9 @@ pub enum StoreError {
     /// the read produces the same error, because the stored bytes are the
     /// problem.
     #[error(
-        "run {run_id:?} fails its recorded hash chain at seq {seq:?}: expected {expected}, found {found}"
+        "run {} fails its recorded hash chain at seq {}: expected {expected}, found {found}",
+        .run_id.as_uuid(),
+        .seq.get()
     )]
     TamperEvident {
         /// The run whose log failed verification.
@@ -85,4 +87,47 @@ pub enum StoreError {
     /// added here on purpose.
     #[error("storage backend error: {0}")]
     Backend(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every identifier in a message an operator reads prints as the thing it
+    /// names: a run id is the bare UUID they can paste into `salvor history`,
+    /// and a position is the bare number `history` prints beside the event.
+    /// Rust's derived `Debug` wraps both in their type name, which turns a
+    /// copyable identifier into something that has to be edited first.
+    #[test]
+    fn a_message_names_a_run_and_a_position_the_way_a_person_would_type_them() {
+        let uuid = uuid::Uuid::parse_str("e95cc04e-0000-4000-8000-00000000abcd").expect("uuid");
+        let error = StoreError::TamperEvident {
+            run_id: RunId::from_uuid(uuid),
+            seq: SequenceNumber::new(7),
+            expected: "a".repeat(64),
+            found: "b".repeat(64),
+        };
+        let message = error.to_string();
+        assert_eq!(
+            message,
+            format!(
+                "run e95cc04e-0000-4000-8000-00000000abcd fails its recorded hash chain at seq \
+                 7: expected {}, found {}",
+                "a".repeat(64),
+                "b".repeat(64)
+            )
+        );
+        assert!(!message.contains("RunId("), "{message}");
+        assert!(!message.contains("SequenceNumber("), "{message}");
+
+        // The sibling that was already right stays right.
+        let conflict = StoreError::Conflict {
+            run_id: RunId::from_uuid(uuid),
+            seq: SequenceNumber::new(3),
+        };
+        assert_eq!(
+            conflict.to_string(),
+            "event already recorded at run e95cc04e-0000-4000-8000-00000000abcd, seq 3"
+        );
+    }
 }
