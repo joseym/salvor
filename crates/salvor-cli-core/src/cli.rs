@@ -97,12 +97,18 @@ pub enum Command {
     /// it is refused, so a typo cannot produce an anchor over an empty store
     /// this command just made.
     ///
-    /// Exit codes. 0: the anchor was written. 1: the file at `--out` is an
-    /// anchor this store no longer verifies against, so it was not
-    /// overwritten. 2: no anchor was taken (no store at the path, a store
-    /// holding no runs without `--allow-empty`, a file at `--out` that is not
-    /// an anchor, or a write that failed, such as a `--out` under a directory
-    /// that is not there). Exit 2 never means the store is suspect.
+    /// Every run's log is read before anything is written, and a store holding
+    /// a run this store itself refuses is not anchored at all: an anchor must
+    /// not record a head for a run nobody can read. `--force` does not lift
+    /// that one.
+    ///
+    /// Exit codes. 0: the anchor was written. 1: the store holds a run it
+    /// refuses to read, or the file at `--out` is an anchor this store no
+    /// longer verifies against, so it was not overwritten. 2: no anchor was
+    /// taken (no store at the path, a store holding no runs without
+    /// `--allow-empty`, a file at `--out` that is not an anchor, or a write
+    /// that failed, such as a `--out` under a directory that is not there).
+    /// Exit 2 never means the store is suspect.
     Anchor(AnchorArgs),
     /// Check this store against an anchor taken earlier: every anchored run
     /// must still hold, unchanged, the events it was anchored at.
@@ -522,8 +528,13 @@ pub struct AnchorArgs {
     /// empty still has to produce a file on a schedule.
     #[arg(long)]
     pub allow_empty: bool,
-    /// Overwrite the file at `--out` whatever it holds, and skip verifying the
-    /// store against it first.
+    /// Overwrite the file at `--out` whatever it holds.
+    ///
+    /// The store is still verified against it first and the answer still
+    /// prints, as a warning rather than a refusal: this is the last moment
+    /// anything can say what the old heads were. It does not lift the one
+    /// refusal that is not about this file, a run this store cannot read,
+    /// because no answer about the file at `--out` makes a run readable.
     #[arg(long)]
     pub force: bool,
 }

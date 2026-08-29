@@ -280,11 +280,18 @@ pub fn verify_report(result: &crate::anchor::Verification) -> String {
                     None => out.push_str("  this store holds no event at that position\n"),
                 }
             }
-            Finding::Broken { seq, detail } => {
-                out.push_str(&format!(
+            // A position only when there is one. A recorded head that
+            // disagrees with every row at once, or that outlived the rows
+            // under it, has no line to send anybody to, and "at seq 0" over a
+            // run whose events are gone reads as a corrupt first event.
+            Finding::Broken { seq, detail } => match seq {
+                Some(seq) => out.push_str(&format!(
                     "run {run}: broken. This store refuses its own log at seq {seq}: {detail}.\n"
-                ));
-            }
+                )),
+                None => out.push_str(&format!(
+                    "run {run}: broken. This store refuses its own log: {detail}.\n"
+                )),
+            },
         }
     }
 
@@ -308,14 +315,31 @@ pub fn verify_report(result: &crate::anchor::Verification) -> String {
     // file looks exactly like total loss, and an operator who reads the
     // restore advice first restores over a store that was fine.
     if result.maybe_wrong_anchor {
+        // The anchor's own `store` is a note to a reader, not a field anything
+        // matches on, so a file that omits it is still an anchor. What it
+        // cannot do is name the store, and saying so is the difference between
+        // an operator checking one fact and hunting for a path that is not
+        // there.
+        let taken_over = if result.anchor_store.is_empty() {
+            "The anchor does not name the store it was taken over".to_owned()
+        } else {
+            format!("The anchor was taken over {}", result.anchor_store)
+        };
         out.push_str(&format!(
             "\nThis may be the wrong anchor. Every run it records is missing here, and this \
-             store holds\n{} run(s) it never names. The anchor was taken over {}; this check \
-             read\n{}. Confirm the two belong together before treating this as a loss.\n",
-            result.new, result.anchor_store, result.store,
+             store holds\n{} run(s) it never names. {taken_over}; this check read\n{}. Confirm \
+             the two belong together before doing anything else: if they do belong\ntogether, \
+             treat this as a loss and see the restore advice in docs/OPERATIONS.md,\nAnchoring \
+             the chain.\n",
+            result.new, result.store,
         ));
     }
-    if result.failed > 0 {
+    // Not beside the wrong-anchor paragraph. That paragraph says the two files
+    // may have nothing to do with each other, and following it with "go back
+    // to a backup" is telling an operator to restore over a store that is
+    // probably fine, which is the expensive half of the two answers. It ends
+    // by pointing at this advice for the case where they do belong together.
+    if result.failed > 0 && !result.maybe_wrong_anchor {
         out.push_str(
             "\nThis store no longer holds what the anchor says it held. Do not re-anchor it: a \
              fresh anchor\nover a rewritten store records the rewrite. Go back to a backup that \
@@ -325,7 +349,10 @@ pub fn verify_report(result: &crate::anchor::Verification) -> String {
     }
     // Said separately, because the anchor is not what found it: these runs are
     // outside what it covers, and the store is refusing its own log. The
-    // advice is the same backup, for a different reason.
+    // advice is the same backup, for a different reason. Printed even beside
+    // the wrong-anchor paragraph, which is exactly the case it survives: being
+    // handed the wrong file explains every anchored run coming back missing,
+    // and explains nothing about a log this store will not read.
     if result.broken_unanchored > 0 {
         out.push_str(&format!(
             "\n{} run(s) this anchor does not cover have logs this store refuses to read. The \

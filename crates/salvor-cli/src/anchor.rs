@@ -88,6 +88,13 @@ pub struct Anchor {
     /// reading the file later, never something `verify` matches on: an anchor
     /// is checked against whatever store the operator points it at, which
     /// after a restore is usually a different path.
+    ///
+    /// Optional on read, and always written. Nothing is compared against it,
+    /// so a file that omits it is still an anchor this binary can check a
+    /// store against; refusing one would turn a note into a requirement. The
+    /// one place it is read is the wrong-anchor hint, which says the anchor
+    /// does not name a store rather than naming an empty one.
+    #[serde(default)]
     pub store: String,
     /// When the anchor was taken, RFC 3339 in UTC, from the wall clock.
     pub taken_at: String,
@@ -102,9 +109,59 @@ pub struct AnchoredRun {
     /// The run id, lowercase and hyphenated.
     pub run: String,
     /// How many events the run held when the anchor was taken.
-    pub len: u64,
+    pub len: RecordedLen,
     /// The chain's head hash at that length: 64 lowercase hex characters.
     pub hash: String,
+}
+
+impl AnchoredRun {
+    /// The length this entry records, for an entry [`Anchor::check`] has
+    /// already accepted.
+    ///
+    /// Zero for an entry that never passed that check, which is not a length
+    /// any comparison here is reached with: the file is refused before a
+    /// single run is read.
+    #[must_use]
+    pub fn anchored_len(&self) -> u64 {
+        self.len.count().unwrap_or(0)
+    }
+}
+
+/// A `len` as the file records it, before anything has agreed it is a length.
+///
+/// A plain `u64` field makes serde the thing that refuses `-5`, and serde
+/// refuses it in serde's words: `invalid value: integer -5, expected u64 at
+/// line 1 column 318`. That is a parser talking about a byte offset, in the
+/// place an operator most needs a sentence about which entry of their anchor
+/// is wrong. So the value is taken as written and judged in
+/// [`Anchor::check_entries`], beside the entry it came from, with the same
+/// care a `len` of 0 already got.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RecordedLen(serde_json::Value);
+
+impl RecordedLen {
+    /// The length, when the file recorded one: a whole number of events, at
+    /// least one. `None` for anything else, including a negative number, a
+    /// fraction, and a value that is not a number at all.
+    #[must_use]
+    pub fn count(&self) -> Option<u64> {
+        self.0.as_u64().filter(|count| *count > 0)
+    }
+}
+
+impl From<u64> for RecordedLen {
+    fn from(count: u64) -> Self {
+        RecordedLen(serde_json::Value::from(count))
+    }
+}
+
+/// As the file wrote it, for a refusal that has to quote what it found: `-5`,
+/// `1.5`, `"twelve"`.
+impl std::fmt::Display for RecordedLen {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.0)
+    }
 }
 
 impl Anchor {
@@ -123,7 +180,7 @@ impl Anchor {
             .into_iter()
             .map(|(run_id, head)| AnchoredRun {
                 run: run_id.as_uuid().to_string(),
-                len: head.len,
+                len: head.len.into(),
                 hash: head.hash,
             })
             .collect();
@@ -195,8 +252,10 @@ impl Anchor {
     ///
     /// The three fields are checked against what the store can produce: a run
     /// id is a UUID, a chain hash is 64 lowercase hex characters (see
-    /// [`salvor_store::chain`]), and an anchored run holds at least one event,
-    /// since a run with no events has no head to record.
+    /// [`salvor_store::chain`]), and an anchored run holds a whole number of
+    /// events, at least one, since a run with no events has no head to record.
+    /// The length is judged here rather than by the deserializer for the same
+    /// reason the hash is: see [`RecordedLen`].
     ///
     /// A run named twice is refused as well, because the counts are what the
     /// summary reports and a duplicate inflates them: an anchor listing one
@@ -220,12 +279,17 @@ impl Anchor {
                     entry.run
                 ));
             }
-            if entry.len == 0 {
+            // Every shape a `len` can arrive in that is not a length gets one
+            // sentence, naming the entry and quoting what the file wrote. The
+            // alternative is a `u64` field, where serde refuses `-5` before
+            // this function is reached and refuses it as a parser: "invalid
+            // value: integer -5, expected u64 at line 1 column 318".
+            if entry.len.count().is_none() {
                 return Err(format!(
-                    "entry {position}, run {}, records a length of 0, and a run with no events \
-                     has no head to anchor. Nothing was checked: this file is not an anchor this \
-                     salvor can read.",
-                    entry.run
+                    "entry {position}, run {}, records a length of {}, and a length is a whole \
+                     number of events, at least one: a run with no events has no head to anchor. \
+                     Nothing was checked: this file is not an anchor this salvor can read.",
+                    entry.run, entry.len,
                 ));
             }
             if !is_chain_hash(&entry.hash) {
@@ -271,11 +335,13 @@ pub enum Observed {
     /// The store holds no events for this run at all.
     Missing,
     /// The store refused the run's log: its recorded rows do not match its own
-    /// chain, at `seq`.
+    /// chain.
     Broken {
-        /// The position the chain first disagrees at.
-        seq: u64,
-        /// What the store said it expected and what it found there.
+        /// The position the chain first disagrees at, and `None` when there is
+        /// no row to blame: a recorded head that disagrees with every row at
+        /// once, or with rows that are no longer there.
+        seq: Option<u64>,
+        /// What the store said disagreed with what.
         detail: String,
     },
     /// The run reads, with `len` events, and the chain carried
@@ -336,9 +402,12 @@ pub enum Finding {
     },
     /// The store refused the run's log: it does not match its own chain.
     Broken {
-        /// The position the chain first disagrees at.
-        seq: u64,
-        /// What the store said it expected and what it found.
+        /// The position the chain first disagrees at, and `None` when no
+        /// single row is the problem: a recorded head that commits to a
+        /// different count, or that outlived the rows under it. A report that
+        /// prints a position anyway names a line that is not where to look.
+        seq: Option<u64>,
+        /// What the store said disagreed with what.
         detail: String,
     },
     /// The store holds this run and the anchor does not: it was started after
@@ -397,16 +466,15 @@ pub struct RunFinding {
 /// anchored prefix is what the anchor commits to.
 #[must_use]
 pub fn finding_for(anchored: &AnchoredRun, observed: &Observed) -> Finding {
+    let anchored_len = anchored.anchored_len();
     match observed {
-        Observed::Missing => Finding::Missing {
-            anchored_len: anchored.len,
-        },
+        Observed::Missing => Finding::Missing { anchored_len },
         Observed::Broken { seq, detail } => Finding::Broken {
             seq: *seq,
             detail: detail.clone(),
         },
-        Observed::Present { len, .. } if *len < anchored.len => Finding::Shortened {
-            anchored_len: anchored.len,
+        Observed::Present { len, .. } if *len < anchored_len => Finding::Shortened {
+            anchored_len,
             len: *len,
         },
         Observed::Present {
@@ -415,13 +483,13 @@ pub fn finding_for(anchored: &AnchoredRun, observed: &Observed) -> Finding {
         } => {
             if hash_at_anchored_len.as_deref() == Some(anchored.hash.as_str()) {
                 Finding::Intact {
-                    anchored_len: anchored.len,
+                    anchored_len,
                     len: *len,
-                    events_since: len - anchored.len,
+                    events_since: len - anchored_len,
                 }
             } else {
                 Finding::Rewritten {
-                    anchored_len: anchored.len,
+                    anchored_len,
                     len: *len,
                     anchored_hash: anchored.hash.clone(),
                     found_hash: hash_at_anchored_len.clone(),
@@ -633,7 +701,7 @@ mod tests {
     fn anchored(len: u64, hash: &str) -> AnchoredRun {
         AnchoredRun {
             run: "6d1b7a7e-0000-4000-8000-00000000abcd".to_owned(),
-            len,
+            len: len.into(),
             hash: hash.to_owned(),
         }
     }
@@ -727,11 +795,11 @@ mod tests {
         let finding = finding_for(
             &anchored(3, "aa"),
             &Observed::Broken {
-                seq: 2,
+                seq: Some(2),
                 detail: "expected x, found y".to_owned(),
             },
         );
-        assert!(matches!(finding, Finding::Broken { seq: 2, .. }));
+        assert!(matches!(finding, Finding::Broken { seq: Some(2), .. }));
         assert!(finding.is_failure());
     }
 
@@ -756,7 +824,7 @@ mod tests {
     fn a_malformed_entry_is_refused_by_its_position() {
         let good = AnchoredRun {
             run: "6d1b7a7e-0000-4000-8000-00000000abcd".to_owned(),
-            len: 4,
+            len: 4u64.into(),
             hash: "a".repeat(64),
         };
 
@@ -785,7 +853,7 @@ mod tests {
         assert!(refusal.contains("UUID"), "{refusal}");
 
         let mut zero_len = anchor.clone();
-        zero_len.runs[0].len = 0;
+        zero_len.runs[0].len = 0u64.into();
         let refusal = zero_len.check().expect_err("a length of 0 is refused");
         assert!(refusal.contains("length of 0"), "{refusal}");
 
@@ -793,7 +861,7 @@ mod tests {
         let mut second_bad = anchor.clone();
         second_bad.runs.push(AnchoredRun {
             run: "7d1b7a7e-0000-4000-8000-00000000abcd".to_owned(),
-            len: 1,
+            len: 1u64.into(),
             hash: "zz".repeat(32),
         });
         let refusal = second_bad.check().expect_err("the second entry is refused");
@@ -808,7 +876,7 @@ mod tests {
         anchor.anchor = "someone.else.v1".to_owned();
         anchor.runs = vec![AnchoredRun {
             run: "not a uuid".to_owned(),
-            len: 0,
+            len: 0u64.into(),
             hash: String::new(),
         }];
         let refusal = anchor.check().expect_err("a foreign spec is refused");
@@ -919,12 +987,12 @@ mod tests {
         let mut anchor = Anchor::take("s.db", OffsetDateTime::UNIX_EPOCH, Vec::new());
         let entry = AnchoredRun {
             run: "6d1b7a7e-0000-4000-8000-00000000abcd".to_owned(),
-            len: 4,
+            len: 4u64.into(),
             hash: "a".repeat(64),
         };
         let other = AnchoredRun {
             run: "7d1b7a7e-0000-4000-8000-00000000abcd".to_owned(),
-            len: 2,
+            len: 2u64.into(),
             hash: "b".repeat(64),
         };
         anchor.runs = vec![entry.clone(), other, entry.clone()];
@@ -955,7 +1023,7 @@ mod tests {
         let mut anchor = Anchor::take("s.db", OffsetDateTime::UNIX_EPOCH, Vec::new());
         let bad = AnchoredRun {
             run: "run-7".to_owned(),
-            len: 1,
+            len: 1u64.into(),
             hash: "a".repeat(64),
         };
         anchor.runs = vec![bad.clone(), bad];
@@ -987,7 +1055,7 @@ mod tests {
                 RunFinding {
                     run: "9d1b7a7e-0000-4000-8000-00000000abcd".to_owned(),
                     finding: Finding::Broken {
-                        seq: 0,
+                        seq: Some(0),
                         detail: "expected x, found y".to_owned(),
                     },
                 },
@@ -1023,7 +1091,7 @@ mod tests {
                 RunFinding {
                     run: "9d1b7a7e-0000-4000-8000-00000000abcd".to_owned(),
                     finding: Finding::Broken {
-                        seq: 0,
+                        seq: Some(0),
                         detail: "expected x, found y".to_owned(),
                     },
                 },

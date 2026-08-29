@@ -1244,20 +1244,30 @@ pub async fn abandon(store_path: &Path, args: AbandonArgs) -> Result<u8> {
 /// `EventStore` trait, because a chain head is bookkeeping that backend keeps
 /// beside the rows and is deliberately not part of the trait's promise.
 ///
-/// Nothing about the store's own consistency is judged here. Taking an anchor
-/// records what the store says its heads are; whether the store still agrees
-/// with itself is what `salvor verify` and every ordinary read answer. The one
-/// verification this command does run is against the file it is about to
-/// overwrite, which is a question about that file, not about the store.
+/// One thing about the store's own consistency is judged here, and only one:
+/// every run's log is read back before anything is written, and a store any
+/// run of which the store itself refuses is not anchored ([`anchor::
+/// EXIT_TAMPER`]). An anchor over an unreadable run records a head nobody can
+/// check anything against. That refusal is the one `--force` does not lift:
+/// `--force` is about the file at `--out`, and no answer about that file makes
+/// a run readable. Whether the store agrees with itself in every other respect
+/// is what `salvor verify` and every ordinary read answer.
 ///
-/// Three ways it declines to write, all before anything is serialized: no
-/// store at the path, a store holding no runs (an anchor over nothing commits
-/// to nothing), and a `--out` file it would be destroying evidence to replace.
-/// A fourth is decided by the filesystem: a write that fails leaves no anchor,
-/// and says so with [`anchor::EXIT_NOT_CHECKED`] rather than as a generic
-/// error, so a cron line reading exit 1 as "the store no longer verifies
-/// against the file already there" is not handed an unmounted directory under
-/// that name. See [`anchor::EXIT_NOT_CHECKED`] and [`anchor::EXIT_TAMPER`].
+/// Four ways it declines to write, all before anything is serialized: no store
+/// at the path, a store holding no runs (an anchor over nothing commits to
+/// nothing), a run this store refuses to read, and a `--out` file it would be
+/// destroying evidence to replace. A fifth is decided by the filesystem: a
+/// write that fails leaves no anchor, and says so with
+/// [`anchor::EXIT_NOT_CHECKED`] rather than as a generic error, so a cron line
+/// reading exit 1 as "the store no longer verifies against the file already
+/// there" is not handed an unmounted directory under that name. See
+/// [`anchor::EXIT_NOT_CHECKED`] and [`anchor::EXIT_TAMPER`].
+///
+/// `--force` overwrites the file at `--out`, and does not silence what was
+/// found there: the comparison against it still runs and its answer prints as
+/// a warning. An operator passing `--force` is saying "overwrite it", not "do
+/// not tell me what I am overwriting", and this is the last moment anything
+/// can say what the old heads were.
 pub async fn anchor(store_path: &Path, args: AnchorArgs) -> Result<u8> {
     let store = match open_existing_store(store_path) {
         Ok(store) => store,
@@ -1282,8 +1292,34 @@ pub async fn anchor(store_path: &Path, args: AnchorArgs) -> Result<u8> {
         return Ok(anchor::EXIT_NOT_CHECKED);
     }
 
+    // Before anything is written, and before --force is consulted at all:
+    // every run's log is read back through the store, which recomputes its
+    // chain. An anchor over a run the store itself refuses records a head
+    // nobody can check anything against, and the file then sits on the shelf
+    // looking like evidence while every later verify against it reports the
+    // same run broken. The overwrite guard below already read every run for
+    // its own reasons; this is the same read, on every anchor.
+    for (run_id, _) in &heads {
+        if let Err(error) = store.read_log(*run_id).await {
+            if error.chain_refusal().is_none() {
+                return Err(error.into());
+            }
+            eprintln!(
+                "salvor anchor: not anchoring {}: {error}. An anchor must not record a head for \
+                 a run nobody can read, so nothing was written{}. Go back to a backup that reads \
+                 clean and read docs/OPERATIONS.md, Anchoring the chain. --force does not lift \
+                 this.",
+                store_path.display(),
+                match args.out.as_deref() {
+                    Some(out) => format!(" and {} was left as it is", out.display()),
+                    None => String::new(),
+                }
+            );
+            return Ok(anchor::EXIT_TAMPER);
+        }
+    }
+
     if let Some(out) = args.out.as_deref()
-        && !args.force
         && out.exists()
     {
         match read_anchor_file(out) {
@@ -1307,54 +1343,83 @@ pub async fn anchor(store_path: &Path, args: AnchorArgs) -> Result<u8> {
                 // the cheap one when the shape fits, rather than the integrity
                 // wording that sends an operator to a backup.
                 if result.maybe_wrong_anchor {
-                    eprintln!(
-                        "salvor anchor: not overwriting {}: this may be the wrong file. Every run \
-                         it records is missing from {}, which holds {} run(s) it never names, and \
-                         it was taken over {}. Run `{look}` to see the comparison. Confirm the two \
-                         belong together before overwriting; pass --force to overwrite anyway.",
-                        out.display(),
-                        store_path.display(),
-                        result.new,
-                        result.anchor_store,
-                    );
-                    return Ok(anchor::EXIT_TAMPER);
+                    if args.force {
+                        eprintln!(
+                            "warning: {} may be the wrong file: every run it records is missing \
+                             from {}, which holds {} run(s) it never names; overwriting anyway \
+                             as asked.",
+                            out.display(),
+                            store_path.display(),
+                            result.new,
+                        );
+                    } else {
+                        // An anchor that records no `store` is still an
+                        // anchor, so the sentence says it does not name one
+                        // rather than trailing off after "taken over".
+                        let taken_over = if result.anchor_store.is_empty() {
+                            "and it does not name the store it was taken over".to_owned()
+                        } else {
+                            format!("and it was taken over {}", result.anchor_store)
+                        };
+                        eprintln!(
+                            "salvor anchor: not overwriting {}: this may be the wrong file. \
+                             Every run it records is missing from {}, which holds {} run(s) it \
+                             never names, {taken_over}. Run `{look}` to see the comparison. \
+                             Confirm the two belong together before overwriting; pass --force \
+                             to overwrite anyway.",
+                            out.display(),
+                            store_path.display(),
+                            result.new,
+                        );
+                        return Ok(anchor::EXIT_TAMPER);
+                    }
+                } else if result.failed > 0 {
+                    // Under --force the comparison still runs, and its answer
+                    // is still printed. An operator who passes --force is
+                    // saying "overwrite it", not "do not tell me what I am
+                    // overwriting", and this is the last moment anything can
+                    // say what the old heads were.
+                    if args.force {
+                        eprintln!(
+                            "warning: this store fails verification against {} ({} of {} \
+                             anchored runs); overwriting anyway as asked.",
+                            out.display(),
+                            result.failed,
+                            result.anchored,
+                        );
+                    } else {
+                        eprintln!(
+                            "salvor anchor: this store no longer verifies against the anchor \
+                             already at {}; not overwriting. {} of {} anchored run(s) failed. \
+                             Run `{look}` to see which, and read docs/OPERATIONS.md, Anchoring \
+                             the chain, before re-anchoring. Pass --force to overwrite anyway.",
+                            out.display(),
+                            result.failed,
+                            result.anchored,
+                        );
+                        return Ok(anchor::EXIT_TAMPER);
+                    }
                 }
-                if result.failed > 0 {
-                    eprintln!(
-                        "salvor anchor: this store no longer verifies against the anchor already \
-                         at {}; not overwriting. {} of {} anchored run(s) failed. Run `{look}` to \
-                         see which, and read docs/OPERATIONS.md, Anchoring the chain, before \
-                         re-anchoring. Pass --force to overwrite anyway.",
-                        out.display(),
-                        result.failed,
-                        result.anchored,
-                    );
-                    return Ok(anchor::EXIT_TAMPER);
-                }
-                // Every anchored run stands, and a run outside the anchor has
-                // a log this store refuses. Anchoring over that records a head
-                // for a run nothing can read, so it waits for the operator.
-                if result.broken_unanchored > 0 {
-                    eprintln!(
-                        "salvor anchor: every run in the anchor at {} still stands, and {} run(s) \
-                         it does not cover have logs this store refuses to read; not overwriting. \
-                         Run `{look}` to see which. Go back to a backup that reads clean, or pass \
-                         --force to anchor this store as it is.",
-                        out.display(),
-                        result.broken_unanchored,
-                    );
-                    return Ok(anchor::EXIT_TAMPER);
-                }
+                // No branch here for a broken run outside the anchor: every
+                // run in this store was read above, and one the store refuses
+                // never reaches this point, --force or not.
             }
             // Not an anchor at all: whatever it is, this command did not write
             // it, and replacing an unread file is how an operator loses one.
             Err(why) => {
-                eprintln!(
-                    "salvor anchor: not overwriting {}: {why} Read it before replacing it, or \
-                     pass --force.",
-                    out.display(),
-                );
-                return Ok(anchor::EXIT_NOT_CHECKED);
+                if args.force {
+                    eprintln!(
+                        "warning: {}: {why} Overwriting anyway as asked.",
+                        out.display(),
+                    );
+                } else {
+                    eprintln!(
+                        "salvor anchor: not overwriting {}: {why} Read it before replacing it, \
+                         or pass --force.",
+                        out.display(),
+                    );
+                    return Ok(anchor::EXIT_NOT_CHECKED);
+                }
             }
         }
     }
@@ -1450,8 +1515,48 @@ fn open_existing_store(path: &Path) -> Result<SqliteStore, String> {
             path.display()
         ));
     }
-    SqliteStore::open(path)
-        .map_err(|error| format!("opening the store at {}: {error}", path.display()))
+    SqliteStore::open(path).map_err(|error| open_refusal(path, &error))
+}
+
+/// The message for a store that is there and would not open.
+///
+/// Two answers, because they are two different problems. SQLite's "file is not
+/// a database" means the path holds something else, which is a typo in
+/// `--store` and is fixed by pointing it somewhere else; anything else (no
+/// permission, a locked file, a migration that failed) is a store this command
+/// could not open, and telling an operator their real store is "not a salvor
+/// store" sends them looking for a path that was right all along.
+///
+/// Either way the backend's own words are kept, because they are the half that
+/// says which wrong thing happened. What is dropped is the framing: the error
+/// reads "storage backend error: ...", and "storage backend" is a sentence
+/// about salvor's insides where an operator needs one about their path.
+fn open_refusal(path: &Path, error: &StoreError) -> String {
+    let detail = match error {
+        StoreError::Backend(message) => message.clone(),
+        other => other.to_string(),
+    };
+    // SQLite ends some of its messages with the path it was handed, and this
+    // message has already named it: "could not open the store at /x: unable to
+    // open database file: /x" reads as two different files. Trimmed only when
+    // it is exactly the path just printed.
+    let detail = detail
+        .strip_suffix(&format!(": {}", path.display()))
+        .unwrap_or(&detail)
+        .to_owned();
+    if detail.contains("file is not a database") {
+        format!(
+            "{} is not a salvor store ({detail}). Nothing was read and nothing was created: \
+             check the path, or point --store at the database.",
+            path.display()
+        )
+    } else {
+        format!(
+            "could not open the store at {}: {detail}. Nothing was read and nothing was \
+             created.",
+            path.display()
+        )
+    }
 }
 
 /// Reads and validates an anchor file: it exists, it is JSON, it carries the
@@ -1492,7 +1597,7 @@ async fn verify_store_against(
         let run_id = parse_run_id(&run.run)
             .with_context(|| format!("in the anchor file {}", against.display()))?;
         anchored.insert(run.run.clone());
-        let observed = observe(store, run_id, run.len).await?;
+        let observed = observe(store, run_id, run.anchored_len()).await?;
         findings.push(anchor::RunFinding {
             run: run.run.clone(),
             finding: anchor::finding_for(run, &observed),
@@ -1618,7 +1723,7 @@ pub async fn verify(store_path: &Path, args: VerifyArgs) -> Result<u8> {
 /// Reads one run back for `verify`: the log (which recomputes its chain) and,
 /// when it reads, the hash the chain carried at the anchored length.
 ///
-/// A [`StoreError::TamperEvident`] is turned into an observation rather than
+/// A chain refusal is turned into an observation rather than
 /// propagated, because a refused log is exactly what this command exists to
 /// report.
 async fn observe(
@@ -1632,16 +1737,14 @@ async fn observe(
             len: log.len() as u64,
             hash_at_anchored_len: store.chain_hash_at(run_id, anchored_len)?,
         }),
-        Err(StoreError::TamperEvident {
-            seq,
-            expected,
-            found,
-            ..
-        }) => Ok(anchor::Observed::Broken {
-            seq: seq.get(),
-            detail: format!("expected {expected}, found {found}"),
-        }),
-        Err(error) => Err(error.into()),
+        // Every way the store can refuse a log, in the store's own words minus
+        // the run id, which this report has already printed. The position is
+        // whatever the refusal has: a rewritten row has one, a recorded head
+        // that disagrees with all of them at once does not.
+        Err(error) => match error.chain_refusal() {
+            Some((seq, detail)) => Ok(anchor::Observed::Broken { seq, detail }),
+            None => Err(error.into()),
+        },
     }
 }
 
@@ -3032,4 +3135,53 @@ fn parse_run_id(text: &str) -> Result<RunId> {
     let uuid = Uuid::parse_str(text)
         .with_context(|| format!("`{text}` is not a valid run id (expected a UUID)"))?;
     Ok(RunId::from_uuid(uuid))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A store that will not open has two different answers, because it is two
+    /// different problems. "file is not a database" is a typo in `--store`,
+    /// fixed by pointing it elsewhere; anything else is a real store this
+    /// command could not open, and calling that "not a salvor store" sends an
+    /// operator looking for a path that was right all along.
+    #[test]
+    fn a_store_that_will_not_open_says_which_of_the_two_problems_it_is() {
+        let path = Path::new("/var/lib/salvor/salvor.db");
+
+        let not_a_store = open_refusal(
+            path,
+            &StoreError::Backend("file is not a database".to_owned()),
+        );
+        assert_eq!(
+            not_a_store,
+            "/var/lib/salvor/salvor.db is not a salvor store (file is not a database). Nothing \
+             was read and nothing was created: check the path, or point --store at the database."
+        );
+
+        // SQLite repeats the path it was handed; the message has already
+        // named it, so it is not printed twice.
+        let unreadable = open_refusal(
+            path,
+            &StoreError::Backend(
+                "unable to open database file: /var/lib/salvor/salvor.db".to_owned(),
+            ),
+        );
+        assert_eq!(
+            unreadable,
+            "could not open the store at /var/lib/salvor/salvor.db: unable to open database \
+             file. Nothing was read and nothing was created."
+        );
+        assert!(
+            !unreadable.contains("is not a salvor store"),
+            "a store that cannot be opened is not a store that is not one: {unreadable}"
+        );
+
+        // The framing goes either way: "storage backend error" is a sentence
+        // about salvor's insides, and neither message repeats it.
+        for message in [&not_a_store, &unreadable] {
+            assert!(!message.contains("storage backend"), "{message}");
+        }
+    }
 }

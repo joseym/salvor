@@ -461,7 +461,7 @@
             "required": false,
             "repeatable": false,
             "global": false,
-            "help": "Overwrite the file at `--out` whatever it holds, and skip verifying the store against it first",
+            "help": "Overwrite the file at `--out` whatever it holds",
             "possible_values": null
           }
         ],
