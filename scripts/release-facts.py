@@ -19,8 +19,21 @@ flakes, and a flaky gate gets turned off. That also means facts about what a
 registry currently holds are not derivable here and stay prose.
 
 Usage:
-  scripts/release-facts.py            # check: fail if the checked-in block drifted
-  scripts/release-facts.py --write    # regenerate the block in place
+  scripts/release-facts.py                         # check: fail if the checked-in block drifted
+  scripts/release-facts.py --write                 # regenerate the block in place
+  scripts/release-facts.py --write --current vX    # regenerate as if vX had already shipped
+
+`--current` is how the pre-bump hook in cog.toml calls this: it runs before
+`cog bump` creates the tag, so `vX` names the version being bumped to while
+`git tag` still only lists the versions before it. When `vX` is not among the
+tags, this script treats it as shipped everywhere the block would otherwise
+read from the tag list: the version count, the enumerated version list, and
+the "first version that ran it" column (which falls back to checking
+ancestry against HEAD instead of a tag ref that does not exist yet). That
+makes the block a pre-bump write produces identical to the block check mode
+derives once the tag is actually pushed, so no release needs a follow-up
+commit just to catch the block up. Check mode (no `--current`) is unaffected
+by this: with no override, `current` always comes from the tag list itself.
 
 Both modes render through the same `render_block`, so the checked-in copy and
 the assertion can never disagree about the format.
@@ -146,12 +159,20 @@ def workspace_version() -> str:
     return version
 
 
-def first_version_containing(path: Path, versions: list[str]) -> str | None:
+def first_version_containing(
+    path: Path, versions: list[str], rev_for: dict[str, str] | None = None
+) -> str | None:
     """The earliest shipped version whose history holds `path`'s first commit.
 
     Answers "which release first ran this workflow" without asking any registry
     what it currently holds. Returns None for a workflow added since the last
     tag.
+
+    `versions` can include one entry that is not a real tag yet: the version a
+    pre-bump write names via `--current`, before `cog bump` creates its tag.
+    `rev_for` maps that entry to the git ref to check ancestry against instead
+    (`HEAD`, since the future tag will point at a descendant of it), so this
+    never runs `merge-base` against a ref that does not exist.
     """
     relative = path.relative_to(REPO_ROOT).as_posix()
     commits = git("log", "--diff-filter=A", "--format=%H", "--", relative).split()
@@ -164,9 +185,11 @@ def first_version_containing(path: Path, versions: list[str]) -> str | None:
     # was ever deleted and restored. The oldest such commit is the one every
     # later tag containing the file descends from.
     added = commits[-1]
+    rev_for = rev_for or {}
     for version in versions:
+        rev = rev_for.get(version, version)
         result = subprocess.run(
-            ["git", "-C", str(REPO_ROOT), "merge-base", "--is-ancestor", added, version],
+            ["git", "-C", str(REPO_ROOT), "merge-base", "--is-ancestor", added, rev],
             capture_output=True,
             text=True,
             check=False,
@@ -319,8 +342,13 @@ def pattern_to_regex(pattern: str) -> re.Pattern:
     return re.compile("^" + "".join(tokens) + "$")
 
 
-def tag_triggered_workflows(current_version: str, versions: list[str]) -> list[dict]:
-    """Workflows whose push-tag patterns match the current version tag."""
+def tag_triggered_workflows(
+    current_version: str, versions: list[str], rev_for: dict[str, str] | None = None
+) -> list[dict]:
+    """Workflows whose push-tag patterns match the current version tag.
+
+    See `first_version_containing` for what `rev_for` is for.
+    """
     matched = []
     for path in sorted(WORKFLOW_DIR.glob("*.yml")):
         triggers = workflow_triggers(path)
@@ -338,7 +366,7 @@ def tag_triggered_workflows(current_version: str, versions: list[str]) -> list[d
             {
                 "name": path.name,
                 "patterns": list(patterns),
-                "first_version": first_version_containing(path, versions),
+                "first_version": first_version_containing(path, versions, rev_for),
             }
         )
     return matched
@@ -393,7 +421,22 @@ def _paragraph(text: str) -> str:
 def render_block(override_current: str | None = None) -> str:
     versions = shipped_versions()
     current = override_current if override_current else versions[-1]
-    workflows = tag_triggered_workflows(current, versions)
+    if current in versions:
+        # The normal case: `current` is already a tag (check mode, or a
+        # `--current` that happens to name one), so the tag list already
+        # states everything the block needs.
+        effective_versions = versions
+        rev_for: dict[str, str] = {}
+    else:
+        # A pre-bump `--write --current vX` names the version `cog bump` is
+        # about to tag, before the tag exists. Treat it as shipped everywhere
+        # the block reads from the tag list, so this write already matches
+        # what check mode will derive once the tag is pushed. `first_version`
+        # lookups for `current` fall back to HEAD (see
+        # `first_version_containing`) since there is no tag ref to check yet.
+        effective_versions = sorted(versions + [current], key=version_sort_key)
+        rev_for = {current: "HEAD"}
+    workflows = tag_triggered_workflows(current, effective_versions, rev_for)
     dist = dist_config()
     targets = sorted(dist.get("targets") or [])
     installers = sorted(dist.get("installers") or [])
@@ -406,9 +449,11 @@ def render_block(override_current: str | None = None) -> str:
     lines += [
         "### Versions",
         "",
-        _paragraph(f"{len(versions)} versions have shipped, and `{current}` is current."),
+        _paragraph(
+            f"{len(effective_versions)} versions have shipped, and `{current}` is current."
+        ),
         "",
-        _paragraph(_code_list(versions) + "."),
+        _paragraph(_code_list(effective_versions) + "."),
         "",
     ]
 
