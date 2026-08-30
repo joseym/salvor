@@ -1,7 +1,7 @@
 # Salvor control-plane API
 
 This is the HTTP and server-sent-events contract the Salvor control plane
-serves. It is the surface the v0.3 SDKs and the dashboard build against, so it
+serves. It is the surface the SDKs and the dashboard build against, so it
 is specified here rather than left implicit in the handlers.
 
 The server is a thin network layer over the durable runtime. It owns one event
