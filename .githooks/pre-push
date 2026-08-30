@@ -30,15 +30,21 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   if is_zero "$local_sha"; then
     continue
   fi
+  # A tag ref carries the tag object's sha; the commit it points at is what
+  # the range and the stamp are about.
+  local_commit=$(git rev-parse --verify -q "$local_sha^{commit}") || {
+    echo "pre-push: $local_ref does not point at a commit; skipping" >&2
+    continue
+  }
 
   if [ -n "${remote_sha:-}" ] && ! is_zero "$remote_sha"; then
-    range="$remote_sha..$local_sha"
+    range="$remote_sha..$local_commit"
   elif git rev-parse --verify -q origin/main >/dev/null 2>&1; then
-    range="origin/main..$local_sha"
+    range="origin/main..$local_commit"
   elif git rev-parse --verify -q main >/dev/null 2>&1; then
-    range="main..$local_sha"
+    range="main..$local_commit"
   else
-    range="$local_sha^!"
+    range="$local_commit^!"
   fi
 
   if [ -x "$LINT" ]; then
@@ -52,7 +58,7 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     fi
   fi
 
-  if [ ! -f "$GIT_DIR/commit-review/$local_sha" ]; then
+  if [ ! -f "$GIT_DIR/commit-review/$local_commit" ]; then
     echo "pre-push: these commits have not been reviewed; run /review-commits (it writes .git/commit-review/<sha>) or push with --no-verify to skip." >&2
     status=1
   fi
