@@ -44,7 +44,7 @@ mcp = ["dep:rmcp", "dep:tokio", "dep:process-wrap", "dep:libc"]
 # idempotency paths, so it reaches `IdempotencyPath` in this crate from a
 # wasm32 build. Native builds are unaffected: Cargo unions features, and every
 # native consumer that wants `RunId::new` still asks for it.
-salvor-core = { path = "../salvor-core", version = "0.9.2", default-features = false }
+salvor-core = { path = "../salvor-core", version = "0.10.0", default-features = false }
 salvor-tools-macros.workspace = true
 # Only for `OffsetDateTime`, the wake instant a `Sleep` outcome carries. The
 # type alone: nothing here reads a clock, which is what keeps this crate

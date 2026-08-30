@@ -138,7 +138,7 @@ salvor-runtime.workspace = true
 # off: the CLI's own `ui` feature then governs whether the dashboard is
 # embedded, and `--no-default-features` yields a headless binary. (Cargo forbids
 # overriding `default-features` on a workspace-inherited dependency.)
-salvor-server = { path = "../salvor-server", version = "0.9.2", default-features = false }
+salvor-server = { path = "../salvor-server", version = "0.10.0", default-features = false }
 # Sandboxed wasm tools ([[wasm_tools]] in the agent file). A direct, unguarded
 # dependency: the CLI is the batteries-included tier; library users who must
 # not compile a wasm runtime depend on the library crates, never on this one.

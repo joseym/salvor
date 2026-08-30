@@ -2,6 +2,144 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.10.0 - 2026-08-30
+#### Features
+- (**bridge**) one-click label for a branch edge with no label - (60a90de) - Josey Morton
+- (**bridge**) an overdue sleeping run stands out in the runs list - (2c94b65) - Josey Morton
+- (**bridge**) one-click fix relabels a branch edge to its missing case - (56eb0b6) - Josey Morton
+- (**bridge**) an overdue sleeping run says so - (6954782) - Josey Morton
+- (**bridge**) one-click fix routes an unrouted branch case to a terminal node - (ad4c285) - Josey Morton
+- (**bridge**) a signal wait is progress, never an inbox card - (efa0645) - Josey Morton
+- (**bridge**) the workflows canvas knows the delay node - (ddcafe9) - Josey Morton
+- (**bridge**) a sleeping run reads as progress, never as attention - (2e621b3) - Josey Morton
+- (**cli**) salvor anchor and salvor verify --against - (9c96edc) - Josey Morton
+- (**cli**) a sleeping run wakes itself, by cron or by the server - (139e52e) - Josey Morton
+- (**config**) an agent file declares the shape its answers take - (e46c1be) - Josey Morton
+- (**engine**) a tool and a graph node are the two ways to start a timer - (fc5fe69) - Josey Morton
+- (**engine**) a fold's bound can be a failure, its value is the payload, and a dead run says so - (70ee511) - Josey Morton
+- (**engine**) drive the fold loop the format has promised all along - (a4a42e7) - Josey Morton
+- (**examples**) langchain desk proves declared keys and a refused resolve - (f6badce) - Josey Morton
+- (**examples**) a LangChain support desk that survives a crash - (1559be6) - Josey Morton
+- (**examples**) the accounts desk can wait on the payment webhook - (44f8e73) - Josey Morton
+- (**examples**) a run that sleeps for real, and salvor wake finishes it - (d29302c) - Josey Morton
+- (**examples**) a refine loop that converges, survives a kill, and refuses to settle - (2e46e53) - Josey Morton
+- (**graph**) a branch edge must have a label - (b9d1baa) - Josey Morton
+- (**graph**) a branch edge must name a declared case - (33b77a2) - Josey Morton
+- (**graph**) a branch case must name an outbound edge - (c5d4b30) - Josey Morton
+- (**graph**) a fold says what a reached bound means, and a dead reference fails at submit - (1c9787a) - Josey Morton
+- (**llm**) let a request constrain which tool the model calls - (e4e1dfb) - Josey Morton
+- (**replay**) a run can record that it is sleeping until an instant - (e701e6b) - Josey Morton
+- (**replay**) record and replay the fold markers through the cursor - (07a4e75) - Josey Morton
+- (**runtime**) the schema subset honours numeric, length and item bounds - (6e098e4) - Josey Morton
+- (**runtime**) a suspension says whether a signal or a person answers it - (6a2603c) - Josey Morton
+- (**runtime**) a run can sleep until an instant, and a wait can name what it waits on - (0c3f1a0) - Josey Morton
+- (**runtime**) an agent with a declared shape answers through a forced tool call - (3f5ad5c) - Josey Morton
+- (**sdk-py**) abandon a run from the client, as TypeScript can - (0c39665) - Josey Morton
+- (**sdk-py**) record a tool body that raises as the call's failure - (1b6c7d1) - Josey Morton
+- (**sdk-python**) the middleware works under invoke and ainvoke - (e6e6c07) - Josey Morton
+- (**sdk-python**) a LangChain middleware that makes an agent durable - (9f3f102) - Josey Morton
+- (**sdk-python**) client_model_intent and client_model_completion - (82303c1) - Josey Morton
+- (**sdk-python**) an async client and driver over one shared core - (45f7449) - Josey Morton
+- (**sdk-ts**) record a tool body that throws as the call's failure - (920d54a) - Josey Morton
+- (**sdk-typescript**) an unconfirmed tool stops the agent for a person - (c9c7f02) - Josey Morton
+- (**sdk-typescript**) finishThread and currentToolCall - (ebea552) - Josey Morton
+- (**sdk-typescript**) a LangChain middleware that makes an agent durable - (901cbe9) - Josey Morton
+- (**sdk-typescript**) clientModelIntent and clientModelCompletion - (64a7f6e) - Josey Morton
+- (**sdks**) RunStatus carries overdue and overdue_seconds - (1ccfd2b) - Josey Morton
+- (**sdks**) client-driven drivers can sleep and wake themselves - (2fe8199) - Josey Morton
+- (**server**) resolve checks the declaration, a client tool can fail - (6d2208e) - Josey Morton
+- (**server**) a client-run lease can be released and kept alive - (b27c9de) - Josey Morton
+- (**server**) a client-run lease is held until it lapses - (7605644) - Josey Morton
+- (**server**) a client-driven run records a model call the client made - (5476579) - Josey Morton
+- (**server**) a client-driven run may sleep, and its client wakes it - (4a64d45) - Josey Morton
+- (**server**) overdue sleepers say so, and the sweeper warns once - (ec1d2dd) - Josey Morton
+- (**store**) read every run's chain head and the hash at a position - (ce9ff2f) - Josey Morton
+- (**tools**) an MCP tool parks its run through _meta - (27915e9) - Josey Morton
+#### Bug Fixes
+- (**bridge**) start refusal names the code itself - (eeaff2a) - Josey Morton
+- (**cli**) anchor reads every log before writing - (04c2352) - Josey Morton
+- (**cli**) read-only verbs never create a store; list sees deleted rows - (c115464) - Josey Morton
+- (**cli**) anchor and verify refuse what they cannot check - (0134d94) - Josey Morton
+- (**cli**) resolve tells a client-driven run's owner what happens next - (c0bd53c) - Josey Morton
+- (**cli**) salvor wake leaves client-driven runs alone - (116fe9c) - Josey Morton
+- (**cli**) the unmet-tool refusal says the whole document is checked - (f96f082) - Josey Morton
+- (**cli**) a real wake names the remedy its dry run already did - (005feba) - Josey Morton
+- (**cli**) wake names its sweep instant and the next due run - (6cc8b3f) - Josey Morton
+- (**cli**) wake checks every file given and survives an unreadable log - (a48ade9) - Josey Morton
+- (**cli**) hints carry --store, list shows wake time, two-unit durations - (115f5ea) - Josey Morton
+- (**cli**) a run taken by another driver is named by its settled state only - (794c9eb) - Josey Morton
+- (**cli**) salvor wake reports what actually happened - (f2ce50a) - Josey Morton
+- (**cli**) a named but empty auth variable refuses to serve - (e5c98c6) - Josey Morton
+- (**cli**) the resolve report names the whole resume command a graph run needs - (a6de1b5) - Josey Morton
+- (**engine**) a fold folds bare payloads entering or produced, and every failure names itself - (f23eaf1) - Josey Morton
+- (**errors**) print run ids and sequence numbers plainly - (54c006b) - Josey Morton
+- (**examples**) follow-up expects the hint the CLI now prints - (7bb4245) - Josey Morton
+- (**examples**) follow-up passes the invoice id and nothing else - (72d63a8) - Josey Morton
+- (**examples**) follow-up says where its ledgers land and numbers by seq - (fcaa7ec) - Josey Morton
+- (**sdk**) a recorded failure survives a fork, so the refusal says so - (2719360) - Josey Morton
+- (**sdk**) only a write that throws is recorded as the call's failure - (977320c) - Josey Morton
+- (**sdk**) refusals quote the tool's error and stop repeating the code - (b5cca20) - Josey Morton
+- (**sdk**) an abandoned thread is refused by name in both middlewares - (3aa856a) - Josey Morton
+- (**sdk-python**) server refusals reach salvor_error with their code - (e9508f7) - Josey Morton
+- (**sdk-python**) lease release, heartbeat and error codes - (4537814) - Josey Morton
+- (**sdk-python**) one driver per thread under the held lease - (f0102cb) - Josey Morton
+- (**sdk-python**) tool results replay byte for byte, forks are marked - (a572a8f) - Josey Morton
+- (**sdk-typescript**) server refusals reach salvorError with their code - (c32c9ee) - Josey Morton
+- (**sdk-typescript**) lease release, heartbeat and error codes - (be1bb17) - Josey Morton
+- (**sdk-typescript**) one driver per thread under the held lease - (6533b28) - Josey Morton
+- (**sdk-typescript**) a refused re-open no longer blames a restart - (b11dee6) - Josey Morton
+- (**sdk-typescript**) tool results replay byte for byte, forks are marked - (e970186) - Josey Morton
+- (**sdk-typescript**) parallel tool calls record in the model's order - (2916f70) - Josey Morton
+- (**server**) a client-driven run's log stays readable without a lease - (22b9d77) - Josey Morton
+- (**server**) a restart no longer strands a client-driven run - (a6f29d8) - Josey Morton
+- (**server**) resume refuses a client-driven run - (d65c9f8) - Josey Morton
+- (**server**) a lost race is not an error, and the sweeper says what to do - (befd237) - Josey Morton
+- (**server**) a wire timestamp is never an empty string - (0af2323) - Josey Morton
+- (**server**) the wake sweeper leaves client-driven runs alone - (3c4309c) - Josey Morton
+- (**store**) two chain errors for a head-length mismatch and deleted rows - (56e2894) - Josey Morton
+- (**store**) read a log's rows and its chain head from one snapshot - (e45b639) - Josey Morton
+- (**store**) a position conflict names the run and seq plainly - (a261eef) - Josey Morton
+- (**store**) a writer waits for another writer instead of failing at once - (8307e39) - Josey Morton
+- (**tools**) a malformed park request fails the call once, on any effect - (7b8cf76) - Josey Morton
+#### Documentation
+- (**sdk**) fork notice fields, an error table for TypeScript, schema fix forks - (df44de7) - Josey Morton
+- (**sdk**) abandon sits beside resolve in both quick references - (9c8dab2) - Josey Morton
+- (**server**) the API page names the SDKs without a version - (78a6954) - Josey Morton
+- a nightly script that takes its first anchor, never overwrites one - (d865b97) - Josey Morton
+- nightly order, read-only verbs, and what an anchor cannot mark - (306b0ce) - Josey Morton
+- where to keep the anchor, how often to take one, and exit codes - (89d0e52) - Josey Morton
+- the anchor file is unsigned - (f0b4eb3) - Josey Morton
+- say which schema keywords count where a declaration is written - (323bef1) - Josey Morton
+- a fork re-runs the writes, and only a failed write is recorded - (9b955e4) - Josey Morton
+- a run waiting on a person waits until someone acts - (900746e) - Josey Morton
+- key fields name what makes two calls the same, one serve per store - (eada1c2) - Josey Morton
+- the client-tool declaration's idempotency_key field in the README - (d8f9e91) - Josey Morton
+- the fork seq is the first position that differed - (5f9dc18) - Josey Morton
+- a malformed park request is never retried - (dcbd890) - Josey Morton
+- parking from MCP, client-driven sleep, overdue runs, branch edges - (138ac40) - Josey Morton
+- show the Suspended event payload an SSE consumer receives - (3ff0055) - Josey Morton
+- point the MCP reassurance at the limit that follows it - (56fa2e3) - Josey Morton
+- how a signal wait is resumed, and who can park a run at all - (d6481a2) - Josey Morton
+- what the wake sweeper can and cannot wake - (4d65fde) - Josey Morton
+- how a run sleeps and what wakes it - (ae287de) - Josey Morton
+- the operations page describes an auth flag that now refuses to start - (b1f802c) - Josey Morton
+- close the gaps the operator pages left open - (f6649ef) - Josey Morton
+- count fold among the node kinds a graph runs - (2e8b110) - Josey Morton
+- say what the log keeps and why erasure cannot be granular - (f34d0c7) - Josey Morton
+- state the TLS, backup, and retention story an operator needs - (0b4e2ad) - Josey Morton
+#### Tests
+- (**replay**) a gate wait counts and a sleep does not, in one log - (2857d3f) - Josey Morton
+- (**sdk-python**) a salvor restart mid-invoke is survived - (ff8ef55) - Josey Morton
+- (**sdk-typescript**) a salvor restart mid-invoke is survived - (ad3b52d) - Josey Morton
+#### Build system
+- (**deps**) bump @hono/node-server in /examples/typescript-tools - (c242529) - dependabot[bot]
+- (**deps**) bump fast-uri in /examples/typescript-tools - (c9e3337) - dependabot[bot]
+- (**deps**) bump hono in /examples/typescript-tools - (558c277) - dependabot[bot]
+- (**deps**) bump ip-address in /examples/typescript-tools - (637fb16) - dependabot[bot]
+- (**deps**) bump @hono/node-server and @modelcontextprotocol/sdk - (ee521e2) - dependabot[bot]
+
+- - -
+
 ## v0.9.2 - 2026-08-03
 #### Features
 - (**wasm**) export the real history renderer, agent parse, and budget check - (8f47306) - Josey Morton

@@ -34,7 +34,7 @@ salvor-cli-core.workspace = true
 # the workspace entry (which leaves defaults on) would pull a randomness backend
 # back in and break the wasm32-unknown-unknown build. A browser reads run ids
 # out of a listing; it never mints one.
-salvor-replay = { path = "../salvor-replay", version = "0.9.2", default-features = false }
+salvor-replay = { path = "../salvor-replay", version = "0.10.0", default-features = false }
 clap.workspace = true
 # `strip_str`, the same ANSI stripper `salvor list` runs its table through when
 # stdout is not a terminal, so the plain variants here are plain in exactly the

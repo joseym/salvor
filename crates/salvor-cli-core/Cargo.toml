@@ -15,7 +15,7 @@ license.workspace = true
 # false` can turn off the host-only `rng` feature: that is what keeps this
 # crate free of a randomness backend and buildable for
 # wasm32-unknown-unknown. The types are the same ones salvor-core re-exports.
-salvor-replay = { path = "../salvor-replay", version = "0.9.2", default-features = false }
+salvor-replay = { path = "../salvor-replay", version = "0.10.0", default-features = false }
 # The graph document summary `graph validate` prints. A pure, IO-free leaf.
 salvor-graph.workspace = true
 # Only for `IdempotencyPath`, the dotted-path syntax an agent file declares an
@@ -26,7 +26,7 @@ salvor-graph.workspace = true
 # layer that remains is pure Rust and builds for wasm32-unknown-unknown, and CI
 # already builds salvor-tools that way. It also turns off salvor-core's `rng`
 # forward, which is what keeps the randomness backend out of this crate.
-salvor-tools = { path = "../salvor-tools", version = "0.9.2", default-features = false }
+salvor-tools = { path = "../salvor-tools", version = "0.10.0", default-features = false }
 # The agent file's own format. A pure parser (serde plus a hand-rolled lexer),
 # no IO of its own: the bytes arrive as a string from whoever read them.
 toml.workspace = true
