@@ -51,6 +51,10 @@ jobs:
         run: rustup target add wasm32-wasip2
 
       - name: Test
+        env:
+          # Shared runners are slower than a local machine; the strict bound
+          # in append_overhead_stays_under_five_ms stays the default there.
+          SALVOR_APPEND_BENCH_MS: "20"
         run: cargo test --workspace --locked
 
       # Compile-gates the wasm-tools example guest the same way the workspace
