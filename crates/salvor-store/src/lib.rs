@@ -36,6 +36,17 @@
 //! is refused with [`StoreError::TamperEvident`] naming the run and position.
 //! See the [`chain`] module for what that does and does not prove, and
 //! SECURITY.md for the posture around it.
+//!
+//! What the chain cannot see on its own is a writer who rewrites a run from
+//! its first event and recomputes every hash, since it is unkeyed and every
+//! input the verifier uses sits beside the rows. Closing that needs a copy of
+//! the heads kept where the store cannot reach it:
+//! [`SqliteStore::chain_heads`] hands out every run's recorded head, and
+//! [`SqliteStore::chain_hash_at`] answers what a held copy asks later, which
+//! is whether a run's chain still passes through a given hash at a given
+//! length. Both are inherent to the SQLite backend rather than on the trait: a
+//! head is bookkeeping a backend keeps beside its rows, not part of what
+//! [`EventStore`] promises.
 
 pub mod chain;
 mod error;

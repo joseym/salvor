@@ -74,7 +74,7 @@ use salvor_core::{EventEnvelope, RunId, SequenceNumber};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::chain::{self, ChainHead, ChainRow};
+use crate::chain::{self, ChainHead, ChainRow, OwnedChainHead};
 use crate::error::StoreError;
 use crate::store::{CallClaim, CallClaimant, CallCommitment, EventStore, RunSummary};
 
@@ -249,6 +249,97 @@ impl SqliteStore {
     pub fn in_memory() -> Result<Self, StoreError> {
         let conn = Connection::open_in_memory().map_err(backend)?;
         Self::init(conn)
+    }
+
+    /// Every run's recorded chain head, ordered by run id.
+    ///
+    /// One row per run the store holds: how many events it has recorded and
+    /// the hash of the last one. That pair is the whole of what a run's log
+    /// commits to, so this is the read behind `salvor anchor`, which writes
+    /// these values to a file kept somewhere the store cannot reach.
+    ///
+    /// This is a read of the recorded heads and nothing more: it verifies no
+    /// chain. A head is what a later verification is checked AGAINST, and the
+    /// check itself is [`read_log`](EventStore::read_log), which recomputes
+    /// every link. Taking an anchor over a store whose logs do not read is
+    /// therefore possible, and pointless; take one from a store you have just
+    /// read (see docs/OPERATIONS.md).
+    ///
+    /// Deliberately an inherent method rather than an [`EventStore`] one: a
+    /// head is bookkeeping this backend keeps beside the rows, not part of the
+    /// trait's promise, and adding it to the trait would oblige every future
+    /// backend to expose the same table shape.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Backend`] if the heads cannot be read, or if a
+    /// stored run id or length is not one this store could have written.
+    pub fn chain_heads(&self) -> Result<Vec<(RunId, OwnedChainHead)>, StoreError> {
+        let guard = self.conn()?;
+        let mut stmt = guard
+            .prepare("SELECT run_id, chain_len, head_hash FROM chain_heads ORDER BY run_id ASC")
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map(params![], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(backend)?;
+
+        let mut heads = Vec::new();
+        for row in rows {
+            let (run_id_text, chain_len, head_hash) = row.map_err(backend)?;
+            heads.push((
+                parse_run_id(&run_id_text)?,
+                OwnedChainHead {
+                    len: seq_to_u64(chain_len)?,
+                    hash: head_hash,
+                },
+            ));
+        }
+        Ok(heads)
+    }
+
+    /// The `row_hash` this run's chain carried when it held exactly `len`
+    /// rows: the hash of the row at position `len` in append order.
+    ///
+    /// The question a held anchor asks. An anchor records a run at some length,
+    /// and the run may honestly have grown since; what has to still be true is
+    /// that the chain passed through the anchored hash at the anchored length.
+    /// That is this value, and comparing it against the anchored one is the
+    /// whole check, with no re-hashing anywhere outside the store.
+    ///
+    /// `Ok(None)` means the run has no row at that position: it holds fewer
+    /// rows than `len`, or it is not in this store at all. `len` of 0 is
+    /// likewise `Ok(None)`, since no row sits before the first one.
+    ///
+    /// Like [`chain_heads`](Self::chain_heads), this returns what is recorded
+    /// and verifies nothing; [`read_log`](EventStore::read_log) is what
+    /// recomputes a chain.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Backend`] if the row cannot be read or `len`
+    /// exceeds what this store could have recorded.
+    pub fn chain_hash_at(&self, run_id: RunId, len: u64) -> Result<Option<String>, StoreError> {
+        let Some(position) = len.checked_sub(1) else {
+            return Ok(None);
+        };
+        let chain_idx = i64::try_from(position)
+            .map_err(|_| StoreError::Backend("chain length exceeds i64 range".to_owned()))?;
+        let guard = self.conn()?;
+        let hash: Option<String> = guard
+            .query_row(
+                "SELECT row_hash FROM events WHERE run_id = ?1 AND chain_idx = ?2",
+                params![run_id.as_uuid().to_string(), chain_idx],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(backend)?;
+        Ok(hash)
     }
 
     /// Brings the database up to the current schema and wraps the connection.

@@ -7,14 +7,17 @@
 //! salvor's output with the same code this binary does.
 //!
 //! What stays here is the `salvor serve --kill` table, because its input
-//! describes live processes on this machine, and the `agent validate` summary,
+//! describes live processes on this machine, the `agent validate` summary,
 //! because it formats a built [`salvor_runtime::Agent`] and that type is kept
 //! out of `salvor-cli-core` so the pure renderer stays buildable for
-//! `wasm32-unknown-unknown`.
+//! `wasm32-unknown-unknown`, and the `anchor`/`verify` reports, because they
+//! format [`crate::anchor`]'s documents and those describe a store on this
+//! machine.
 
 pub use salvor_cli_core::render::*;
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use salvor_runtime::Agent;
 
@@ -155,6 +158,208 @@ pub fn server_table(servers: &[RunningServer]) -> String {
             server.pid,
             server.bind,
             server.store,
+        ));
+    }
+    out
+}
+
+/// The line `salvor anchor` prints on stderr once the anchor is written: how
+/// many runs it covers and where it went.
+///
+/// On stderr, not stdout, because with no `--out` the anchor itself is on
+/// stdout and a caller redirecting it into a file must get the file and
+/// nothing else.
+///
+/// The custody advice is one sentence. It is printed on every anchor, and a
+/// paragraph printed every time is a paragraph nobody reads; the reasoning
+/// behind it belongs in `docs/OPERATIONS.md`, which this does not try to
+/// repeat.
+#[must_use]
+pub fn anchored_line(runs: usize, out: Option<&Path>) -> String {
+    let where_to = match out {
+        Some(path) => format!("written to {}", path.display()),
+        None => "printed on stdout".to_owned(),
+    };
+    if runs == 0 {
+        return format!(
+            "anchored 0 run(s) ({where_to}). This store holds no runs, so this anchor commits to \
+             nothing and a verify against it checks nothing. Keep it somewhere this store cannot \
+             reach."
+        );
+    }
+    format!("anchored {runs} run(s) ({where_to}). Keep it somewhere this store cannot reach.")
+}
+
+/// The warning `salvor anchor` prints when `--out` lands in the store file's
+/// own directory.
+///
+/// The general advice is easy to nod along to and then ignore; this is the one
+/// case where the file being written right now is provably within reach of
+/// whoever can rewrite the store, so it is named rather than implied.
+#[must_use]
+pub fn anchor_beside_store_warning(out: &Path, store: &Path) -> String {
+    format!(
+        "warning: {} is in the same directory as {}. Whoever can rewrite the store can rewrite \
+         this file along with it, so an anchor kept here answers nothing. Copy it somewhere the \
+         store's writer cannot reach and keep it there.",
+        out.display(),
+        store.display()
+    )
+}
+
+/// The report `salvor verify` prints: one line per run, then the summary, then
+/// what to do about it when something does not match.
+///
+/// Every run is named, including the ones that are fine, because the question
+/// this command answers is "does this store still hold what it held", and an
+/// answer that lists only trouble cannot tell "nothing is wrong" from "nothing
+/// was checked".
+#[must_use]
+pub fn verify_report(result: &crate::anchor::Verification) -> String {
+    use crate::anchor::Finding;
+
+    let mut out = String::new();
+    for entry in &result.runs {
+        let run = &entry.run;
+        match &entry.finding {
+            // Two shapes on purpose. A run that has not grown has one length
+            // worth naming and names it. A run that has grown has two, and
+            // printing only the anchored one reads as the current size of a
+            // run that is in fact longer, which is the number an operator
+            // would go on to compare against a backup.
+            Finding::Intact {
+                anchored_len,
+                len,
+                events_since,
+            } => {
+                if *events_since > 0 {
+                    out.push_str(&format!(
+                        "run {run}: intact: {len} event(s), anchored at {anchored_len}, \
+                         {events_since} recorded since\n"
+                    ));
+                } else {
+                    out.push_str(&format!("run {run}: intact at {anchored_len} event(s)\n"));
+                }
+            }
+            Finding::New { len } => {
+                out.push_str(&format!(
+                    "run {run}: new since the anchor, {len} event(s). Not covered by this \
+                     anchor; the next one covers it.\n"
+                ));
+            }
+            Finding::Missing { anchored_len } => {
+                out.push_str(&format!(
+                    "run {run}: missing. The anchor recorded {anchored_len} event(s); this store \
+                     holds none.\n"
+                ));
+            }
+            Finding::Shortened { anchored_len, len } => {
+                out.push_str(&format!(
+                    "run {run}: shortened. The anchor recorded {anchored_len} event(s); this \
+                     store holds {len}.\n"
+                ));
+            }
+            Finding::Rewritten {
+                anchored_len,
+                anchored_hash,
+                found_hash,
+                ..
+            } => {
+                // The position is a seq, the same number `salvor history`
+                // prints, so an operator can go straight there. The anchored
+                // length is a count, and saying which is which is the
+                // difference between an off-by-one and a wrong line.
+                out.push_str(&format!(
+                    "run {run}: rewritten at seq {} (the anchored length is {anchored_len}). The \
+                     events this anchor covered are not the events this store now holds.\n",
+                    anchored_len.saturating_sub(1)
+                ));
+                out.push_str(&format!("  the anchor recorded {anchored_hash}\n"));
+                match found_hash {
+                    Some(found) => out.push_str(&format!("  this store holds  {found}\n")),
+                    None => out.push_str("  this store holds no event at that position\n"),
+                }
+            }
+            // A position only when there is one. A recorded head that
+            // disagrees with every row at once, or that outlived the rows
+            // under it, has no line to send anybody to, and "at seq 0" over a
+            // run whose events are gone reads as a corrupt first event.
+            Finding::Broken { seq, detail } => match seq {
+                Some(seq) => out.push_str(&format!(
+                    "run {run}: broken. This store refuses its own log at seq {seq}: {detail}.\n"
+                )),
+                None => out.push_str(&format!(
+                    "run {run}: broken. This store refuses its own log: {detail}.\n"
+                )),
+            },
+        }
+    }
+
+    // `failed` counts anchored runs only, so the first three numbers close:
+    // intact plus failed is the anchored total. A broken run the anchor never
+    // named is a real finding and gets its own clause, printed only when there
+    // is one, so the ordinary summary keeps its four numbers.
+    out.push_str(&format!(
+        "{} run(s) anchored, {} intact, {} failed, ",
+        result.anchored, result.intact, result.failed
+    ));
+    if result.broken_unanchored > 0 {
+        out.push_str(&format!(
+            "{} broken outside the anchor, ",
+            result.broken_unanchored
+        ));
+    }
+    out.push_str(&format!("{} new since the anchor\n", result.new));
+
+    // The cheap explanation before the expensive one. Being handed the wrong
+    // file looks exactly like total loss, and an operator who reads the
+    // restore advice first restores over a store that was fine.
+    if result.maybe_wrong_anchor {
+        // The anchor's own `store` is a note to a reader, not a field anything
+        // matches on, so a file that omits it is still an anchor. What it
+        // cannot do is name the store, and saying so is the difference between
+        // an operator checking one fact and hunting for a path that is not
+        // there.
+        let taken_over = if result.anchor_store.is_empty() {
+            "The anchor does not name the store it was taken over".to_owned()
+        } else {
+            format!("The anchor was taken over {}", result.anchor_store)
+        };
+        out.push_str(&format!(
+            "\nThis may be the wrong anchor. Every run it records is missing here, and this \
+             store holds\n{} run(s) it never names. {taken_over}; this check read\n{}. Confirm \
+             the two belong together before doing anything else: if they do belong\ntogether, \
+             treat this as a loss and see the restore advice in docs/OPERATIONS.md,\nAnchoring \
+             the chain.\n",
+            result.new, result.store,
+        ));
+    }
+    // Not beside the wrong-anchor paragraph. That paragraph says the two files
+    // may have nothing to do with each other, and following it with "go back
+    // to a backup" is telling an operator to restore over a store that is
+    // probably fine, which is the expensive half of the two answers. It ends
+    // by pointing at this advice for the case where they do belong together.
+    if result.failed > 0 && !result.maybe_wrong_anchor {
+        out.push_str(
+            "\nThis store no longer holds what the anchor says it held. Do not re-anchor it: a \
+             fresh anchor\nover a rewritten store records the rewrite. Go back to a backup that \
+             reads clean and verifies\nagainst this anchor. See docs/OPERATIONS.md, Anchoring \
+             the chain.\n",
+        );
+    }
+    // Said separately, because the anchor is not what found it: these runs are
+    // outside what it covers, and the store is refusing its own log. The
+    // advice is the same backup, for a different reason. Printed even beside
+    // the wrong-anchor paragraph, which is exactly the case it survives: being
+    // handed the wrong file explains every anchored run coming back missing,
+    // and explains nothing about a log this store will not read.
+    if result.broken_unanchored > 0 {
+        out.push_str(&format!(
+            "\n{} run(s) this anchor does not cover have logs this store refuses to read. The \
+             anchor\nsays nothing about them either way; the refusal is the store disagreeing \
+             with itself.\nGo back to a backup that reads clean. See docs/OPERATIONS.md, \
+             Anchoring the chain.\n",
+            result.broken_unanchored
         ));
     }
     out

@@ -298,6 +298,8 @@ cargo run -p salvor-runtime --example approval_loop   # your own async loop over
 
 The kill demo is one crash at one boundary. The release gate is the property suite behind it: the same run killed at *every* event boundary, resumed through the full runtime, then checked for a byte-identical final log and zero duplicate writes at each one ([`crates/salvor-runtime/tests/release_gate.rs`](crates/salvor-runtime/tests/release_gate.rs)).
 
+Every run's log is also a SHA-256 hash chain over the exact stored bytes, recomputed in full on every read, so a log that was rewritten, reordered, or truncated after the fact is refused rather than served. The chain is unkeyed, so on its own it cannot see a writer who rewrites a run from its first event and recomputes every hash. `salvor anchor` writes each run's head hash to a JSON file you keep off the box, and `salvor verify --against <file>` checks a store back against it, naming any run that is gone, shorter, or no longer holding the events it was anchored at. [`docs/OPERATIONS.md`](docs/OPERATIONS.md#anchoring-the-chain) has the routine; [`SECURITY.md`](SECURITY.md) says what it does and does not close.
+
 <details>
 <summary><strong>Workspace layout</strong></summary>
 

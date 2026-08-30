@@ -7,6 +7,9 @@
 //! modules split by concern:
 //!
 //! - [`cli`] is the `clap` parse tree.
+//! - [`anchor`] is the anchor document `salvor anchor` writes and
+//!   `salvor verify` reads back: a copy of every run's chain head, kept where
+//!   the store cannot rewrite it along with itself.
 //! - [`agent_config`] is the TOML agent-definition schema and the mapping into
 //!   a live [`salvor_runtime::Agent`].
 //! - [`commands`] is one handler per verb, wiring [`salvor_runtime`] and
@@ -48,6 +51,7 @@
 #![warn(missing_docs)]
 
 pub mod agent_config;
+pub mod anchor;
 pub mod checkout;
 pub mod commands;
 pub mod completion;
@@ -127,6 +131,11 @@ pub async fn dispatch(cli: Cli) -> Result<u8> {
         Command::Completions(args) => commands::completions(args),
         Command::History(args) => commands::history(store, args).await,
         Command::Replay(args) => commands::replay(store, args).await,
+        // `anchor` writes, and reads the file it would overwrite: checking a
+        // store against that file is the same read `verify` does, so it awaits
+        // the same way.
+        Command::Anchor(args) => commands::anchor(store, args).await,
+        Command::Verify(args) => commands::verify(store, args).await,
         Command::Serve(args) => commands::serve(store, args).await,
         // `build` produces the product from a checkout; it reads no store.
         Command::Build(args) => commands::build(args).await,

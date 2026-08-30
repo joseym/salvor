@@ -63,14 +63,14 @@ pub enum RuntimeError {
     RecordedResponseDecode(serde_json::Error),
 
     /// `start` was called for a run id that already has recorded history.
-    #[error("run {run_id:?} already has recorded history; use recover or resume")]
+    #[error("run {} already has recorded history; use recover or resume", .run_id.as_uuid())]
     RunAlreadyStarted {
         /// The run that already exists.
         run_id: RunId,
     },
 
     /// The named run has no recorded history at all.
-    #[error("run {run_id:?} has no recorded history")]
+    #[error("run {} has no recorded history", .run_id.as_uuid())]
     UnknownRun {
         /// The run that was not found.
         run_id: RunId,
@@ -78,7 +78,7 @@ pub enum RuntimeError {
 
     /// `resume` was called on a run whose log does not end at a suspension
     /// or budget crossing.
-    #[error("run {run_id:?} is not parked (status: {status}); resume needs a parked run")]
+    #[error("run {} is not parked (status: {status}); resume needs a parked run", .run_id.as_uuid())]
     NotParked {
         /// The run that was not parked.
         run_id: RunId,
@@ -115,7 +115,8 @@ pub enum RuntimeError {
     /// hand-recorded completion is only ever appended to a run whose log ends
     /// at a dangling write intent; every other state is a caller mistake.
     #[error(
-        "run {run_id:?} does not need reconciliation (status: {status}); resolve records the completion of a dangling write intent, and this run has none"
+        "run {} does not need reconciliation (status: {status}); resolve records the completion of a dangling write intent, and this run has none",
+        .run_id.as_uuid()
     )]
     NotReconcilable {
         /// The run that was not awaiting reconciliation.
@@ -215,7 +216,8 @@ pub enum RuntimeError {
     /// at rest; there is nothing left to retire, so the operator action is
     /// refused rather than appending a second terminal.
     #[error(
-        "run {run_id:?} is already terminal (status: {status}); there is nothing left to abandon"
+        "run {} is already terminal (status: {status}); there is nothing left to abandon",
+        .run_id.as_uuid()
     )]
     AlreadyTerminal {
         /// The run that had already finished.

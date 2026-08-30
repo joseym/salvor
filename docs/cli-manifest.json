@@ -430,6 +430,82 @@
         "subcommands": []
       },
       {
+        "name": "anchor",
+        "about": "Take an anchor over this store: one line per run naming how many events it holds and the hash that commits to them. Keep the file somewhere the store cannot reach",
+        "hidden": false,
+        "args": [
+          {
+            "long": "--out",
+            "short": null,
+            "value_name": "FILE",
+            "required": false,
+            "repeatable": false,
+            "global": false,
+            "help": "Write the anchor to this file instead of standard output",
+            "possible_values": null
+          },
+          {
+            "long": "--allow-empty",
+            "short": null,
+            "value_name": null,
+            "required": false,
+            "repeatable": false,
+            "global": false,
+            "help": "Take an anchor over a store that holds no runs",
+            "possible_values": null
+          },
+          {
+            "long": "--force",
+            "short": null,
+            "value_name": null,
+            "required": false,
+            "repeatable": false,
+            "global": false,
+            "help": "Overwrite the file at `--out` whatever it holds",
+            "possible_values": null
+          }
+        ],
+        "subcommands": []
+      },
+      {
+        "name": "verify",
+        "about": "Check this store against an anchor taken earlier: every anchored run must still hold, unchanged, the events it was anchored at",
+        "hidden": false,
+        "args": [
+          {
+            "long": "--against",
+            "short": null,
+            "value_name": "FILE",
+            "required": true,
+            "repeatable": false,
+            "global": false,
+            "help": "The anchor file to check this store against, as `salvor anchor` wrote it",
+            "possible_values": null
+          },
+          {
+            "long": "--json",
+            "short": null,
+            "value_name": null,
+            "required": false,
+            "repeatable": false,
+            "global": false,
+            "help": "Print the result as JSON instead of the human report",
+            "possible_values": null
+          },
+          {
+            "long": "--allow-empty",
+            "short": null,
+            "value_name": null,
+            "required": false,
+            "repeatable": false,
+            "global": false,
+            "help": "Accept an anchor that commits to no runs",
+            "possible_values": null
+          }
+        ],
+        "subcommands": []
+      },
+      {
         "name": "serve",
         "about": "Run the control-plane HTTP + server-sent-events server over the store",
         "hidden": false,

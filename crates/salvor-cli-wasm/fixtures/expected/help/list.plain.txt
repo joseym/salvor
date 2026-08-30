@@ -1,4 +1,6 @@
-List runs in the store, newest activity last. Filters narrow what is printed; with none, every run is listed
+List runs in the store, newest activity last. Filters narrow what is printed; with none, every run is listed.
+
+Reading is the integrity check: every log listed is read back through its whole hash chain, and a store holding a run it refuses to read fails here rather than listing the rest. The store is read, never created, so a `--store` path with no database at it is refused (exit 2) instead of printing `no runs in <path>` and exiting 0.
 
 Usage: salvor list [OPTIONS]
 

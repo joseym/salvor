@@ -67,14 +67,67 @@ pub enum Command {
     Abandon(AbandonArgs),
     /// List runs in the store, newest activity last. Filters narrow what is
     /// printed; with none, every run is listed.
+    ///
+    /// Reading is the integrity check: every log listed is read back through
+    /// its whole hash chain, and a store holding a run it refuses to read
+    /// fails here rather than listing the rest. The store is read, never
+    /// created, so a `--store` path with no database at it is refused (exit 2)
+    /// instead of printing `no runs in <path>` and exiting 0.
     List(ListArgs),
     /// Print a shell completion script for `salvor` on stdout.
     Completions(CompletionsArgs),
     /// Print a run's event log.
+    ///
+    /// The store is read, never created: a `--store` path with no database at
+    /// it is refused (exit 2), rather than reading back as a store in which
+    /// this run does not exist.
     History(HistoryArgs),
     /// Re-derive a run's state from its log without executing anything. The
     /// only mode; nothing is ever executed.
+    ///
+    /// The store is read, never created: a `--store` path with no database at
+    /// it is refused (exit 2), rather than reading back as a store in which
+    /// this run does not exist.
     Replay(ReplayArgs),
+    /// Take an anchor over this store: one line per run naming how many events
+    /// it holds and the hash that commits to them. Keep the file somewhere the
+    /// store cannot reach.
+    ///
+    /// The store is read, never created: a `--store` path with no database at
+    /// it is refused, so a typo cannot produce an anchor over an empty store
+    /// this command just made.
+    ///
+    /// Every run's log is read before anything is written, and a store holding
+    /// a run this store itself refuses is not anchored at all: an anchor must
+    /// not record a head for a run nobody can read. `--force` does not lift
+    /// that one.
+    ///
+    /// Exit codes. 0: the anchor was written. 1: the store holds a run it
+    /// refuses to read, or the file at `--out` is an anchor this store no
+    /// longer verifies against, so it was not overwritten. 2: no anchor was
+    /// taken (no store at the path, a store holding no runs without
+    /// `--allow-empty`, a file at `--out` that is not an anchor, or a write
+    /// that failed, such as a `--out` under a directory that is not there).
+    /// Exit 2 never means the store is suspect.
+    Anchor(AnchorArgs),
+    /// Check this store against an anchor taken earlier: every anchored run
+    /// must still hold, unchanged, the events it was anchored at.
+    ///
+    /// The store is read, never created: a `--store` path with no database at
+    /// it is refused, so a typo cannot read back as a store in which every
+    /// anchored run is missing.
+    ///
+    /// Exit codes. 0: every anchored run is intact. 1: at least one is
+    /// missing, shortened, rewritten, or broken. 2: the check did not run (no
+    /// store at the path, or an anchor file that is missing, unreadable, not
+    /// JSON, written under another spec, carrying a malformed entry, or
+    /// committing to no runs at all without `--allow-empty`). Treat 2 as "I
+    /// still do not know", never as a pass.
+    ///
+    /// With `--json` a check that did not run still prints a document on
+    /// stdout, carrying `"checked": false` and the reason, so one parser reads
+    /// every outcome.
+    Verify(VerifyArgs),
     /// Run the control-plane HTTP + server-sent-events server over the store.
     Serve(ServeArgs),
     /// Build the whole product from a salvor checkout: the web dashboard, then
@@ -449,6 +502,64 @@ pub struct ReplayArgs {
     /// break.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+/// Arguments to `anchor`.
+#[derive(Debug, Args)]
+pub struct AnchorArgs {
+    /// Write the anchor to this file instead of standard output.
+    ///
+    /// An existing file is read before it is replaced. If it is an anchor this
+    /// store no longer verifies against, the write is refused (exit 1) rather
+    /// than recording the rewrite over the evidence of it; if it is not an
+    /// anchor at all, the write is refused too (exit 2). `--force` overwrites
+    /// either. A write that fails, such as one under a directory that is not
+    /// there, is exit 2 as well: no anchor was taken. Write it somewhere the
+    /// store cannot reach: an anchor kept beside the database it describes is
+    /// rewritten by whoever rewrites the database, and answers nothing.
+    #[arg(long, value_name = "FILE")]
+    pub out: Option<PathBuf>,
+    /// Take an anchor over a store that holds no runs.
+    ///
+    /// Without it, an empty store is refused (exit 2) and nothing is written.
+    /// An anchor over zero runs commits to nothing, and a later verify against
+    /// it passes having checked nothing, which is the one failure mode an
+    /// anchor exists to rule out. Pass this when a store that is legitimately
+    /// empty still has to produce a file on a schedule.
+    #[arg(long)]
+    pub allow_empty: bool,
+    /// Overwrite the file at `--out` whatever it holds.
+    ///
+    /// The store is still verified against it first and the answer still
+    /// prints, as a warning rather than a refusal: this is the last moment
+    /// anything can say what the old heads were. It does not lift the one
+    /// refusal that is not about this file, a run this store cannot read,
+    /// because no answer about the file at `--out` makes a run readable.
+    #[arg(long)]
+    pub force: bool,
+}
+
+/// Arguments to `verify`.
+#[derive(Debug, Args)]
+pub struct VerifyArgs {
+    /// The anchor file to check this store against, as `salvor anchor` wrote
+    /// it.
+    #[arg(long, value_name = "FILE")]
+    pub against: PathBuf,
+    /// Print the result as JSON instead of the human report.
+    ///
+    /// The exit code is the same either way. A check that did not run prints a
+    /// document too, carrying `"checked": false` and the reason, so a consumer
+    /// parses one shape whatever happened.
+    #[arg(long)]
+    pub json: bool,
+    /// Accept an anchor that commits to no runs.
+    ///
+    /// Without it, such an anchor is refused (exit 2) rather than passing: a
+    /// pass over zero runs is not evidence about a store, and it looks
+    /// identical to a real all-clear.
+    #[arg(long)]
+    pub allow_empty: bool,
 }
 
 /// Arguments to `build`.
