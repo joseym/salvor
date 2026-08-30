@@ -213,8 +213,9 @@ To cut a release:
    cog bump <version>     # e.g. cog bump 0.5.4
    ```
 
-   This runs the pre-bump hooks from `cog.toml`. `scripts/set-version.sh` stamps
-   the version everywhere it has to live: the root `Cargo.toml`
+   This runs three pre-bump hooks from `cog.toml`, in order: `scripts/set-version.sh`,
+   `scripts/release-facts.py --write --current`, and `cargo build`. `scripts/set-version.sh`
+   stamps the version everywhere it has to live: the root `Cargo.toml`
    `[workspace.package]` (every crate inherits it via `version.workspace =
    true`), the caret requirements on the internal `salvor-*` entries in
    `[workspace.dependencies]`, the `=`-pinned sibling versions in the `salvor`
@@ -224,9 +225,12 @@ To cut a release:
    `sdks/typescript/package.json` and `package-lock.json`, the version in
    `sdks/python/pyproject.toml`, and the `salvor_version` field in
    `docs/cli-manifest.json`. It then runs `cargo update --workspace` to refresh
-   `Cargo.lock`. `cargo build`, the second pre-bump hook, proves the bumped
-   workspace still compiles. `cog` then writes the version commit and the tag
-   `v<version>`. It does not push; that is the next step.
+   `Cargo.lock`. The second hook, `scripts/release-facts.py --write --current v<version>`,
+   regenerates the release facts block below and counts the version being bumped as
+   already shipped, so the block matches the repository once the tag exists.
+   `cargo build`, the third pre-bump hook, proves the bumped workspace still compiles.
+   `cog` then writes the version commit and the tag `v<version>`. It does not push;
+   that is the next step.
 
 2. Push the tag:
 
