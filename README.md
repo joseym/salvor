@@ -267,6 +267,8 @@ with Client("http://127.0.0.1:8080") as client:
 
 The TypeScript client mirrors this surface call for call. Both also drive the client-owned mode above. See [`sdks/typescript`](sdks/typescript) and [`sdks/python`](sdks/python).
 
+Both also carry a LangChain adapter that makes an existing `createAgent` / `create_agent` app durable with one middleware: `salvor[langchain]` in Python, `@salvor-run/client/langchain` in TypeScript. See [`examples/langchain/`](examples/langchain/).
+
 ### Client-performed tools
 
 Some tools have to run in the client's own process, under credentials the server never holds. An operator declares one in a TOML file and starts the server with `salvor serve --client-tool <FILE>`; the declaration carries a name, an effect class, an input schema, an output schema, and a `trust_completion` flag. There is no code behind it on the server and no HTTP endpoint that registers one.

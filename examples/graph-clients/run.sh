@@ -167,35 +167,14 @@ PY_APP="$HERE/python/service.py"
 if [[ ! -f "$PY_APP" ]]; then
   echo "SKIPPED: $PY_APP is missing."
 else
-  # DELIBERATE DIVERGENCE from `examples/polyglot-service/`, which installs the
-  # PUBLISHED `salvor` package from PyPI on purpose. This example installs THIS
-  # CHECKOUT's SDK instead, in editable form, because the graph methods it needs
-  # (`submit_graph`, `start_graph_run`, `validate_graph`, `get_graph`,
-  # `list_graphs`) are not in any published release yet. Installing 0.7.0 from
-  # PyPI would fail on a missing attribute rather than run.
-  #
-  # REVERT THIS once a release carrying those methods ships: change the editable
-  # install back to `pip install --quiet salvor` and drop the check below, so
-  # this example demonstrates the published package like its sibling does.
-  #
   # A venv beside the example keeps the install out of the caller's environment,
   # the same way the other Python examples do it.
   PYVENV="${SALVOR_EXAMPLE_PYVENV:-$HERE/.venv}"
   if [[ ! -x "$PYVENV/bin/python" ]]; then
-    echo "== creating a venv for the Python app =="
+    echo "== installing salvor for the Python app =="
     python3 -m venv "$PYVENV"
     "$PYVENV/bin/pip" install --quiet --upgrade pip
-  fi
-  # Re-installed on every invocation. A venv left over from an earlier version
-  # of this script may hold the published package, and the editable install has
-  # to win over it.
-  echo "== installing this checkout's Python SDK (editable) =="
-  "$PYVENV/bin/pip" install --quiet -e "$ROOT/sdks/python"
-  if ! "$PYVENV/bin/python" -c 'from salvor import Client; raise SystemExit(0 if hasattr(Client, "start_graph_run") else 1)'; then
-    echo "the installed salvor package has no Client.start_graph_run, so the" >&2
-    echo "graph methods this app needs are missing. Something other than" >&2
-    echo "$ROOT/sdks/python is being imported; inspect $PYVENV and reinstall." >&2
-    exit 1
+    "$PYVENV/bin/pip" install --quiet salvor
   fi
   "$PYVENV/bin/python" "$PY_APP" "$BASE_URL"
 fi
@@ -219,40 +198,9 @@ else
     echo "run.sh: node is required for the TypeScript app; install Node 24 or newer" >&2
     exit 1
   fi
-  # DELIBERATE DIVERGENCE from `examples/polyglot-service/`, which installs the
-  # PUBLISHED `@salvor-run/client` from npm on purpose. This example imports THIS
-  # CHECKOUT's SDK built output by relative path instead, because the graph
-  # methods it needs (`submitGraph`, `startGraphRun`, `validateGraph`) are not in
-  # any published release yet. Installing 0.7.0 from npm would fail on a missing
-  # method rather than run. The app therefore imports
-  # `../../../sdks/typescript/dist/index.js` rather than `@salvor-run/client`,
-  # which is also why it needs no package.json and no npm install of its own.
-  #
-  # REVERT THIS once a release carrying those methods ships: give the app a
-  # package.json depending on `@salvor-run/client`, restore the bare-specifier
-  # import, and drop everything from here to the build check below.
-  SDK_TS="$ROOT/sdks/typescript"
-  SDK_ENTRY="$SDK_TS/dist/index.js"
-  # `tsc` needs the SDK's own devDependencies before it can emit anything.
-  if [[ ! -d "$SDK_TS/node_modules" ]]; then
-    echo "== installing the TypeScript SDK's build dependencies =="
-    (cd "$SDK_TS" && npm install --silent)
-  fi
-  echo "== building the TypeScript SDK from this checkout =="
-  (cd "$SDK_TS" && npm run --silent build)
-  # Built output that predates the graph methods is worse than none at all: the
-  # import would succeed and the call would fail deep inside the app. So check
-  # for the method itself.
-  if [[ ! -f "$SDK_ENTRY" ]]; then
-    echo "no built SDK at $SDK_ENTRY after 'npm run build' in $SDK_TS." >&2
-    echo "Build it by hand and re-run; the app imports that path directly." >&2
-    exit 1
-  fi
-  if ! grep -q startGraphRun "$SDK_TS/dist/client.js" 2>/dev/null; then
-    echo "the built SDK at $SDK_TS/dist has no startGraphRun, so it is stale." >&2
-    echo "Rebuild it (npm run build in $SDK_TS) and re-run; importing it as it" >&2
-    echo "stands would fail inside the app instead of here." >&2
-    exit 1
+  if [[ ! -d "$HERE/typescript/node_modules" ]]; then
+    echo "== installing @salvor-run/client for the TypeScript app =="
+    (cd "$HERE/typescript" && npm install --silent)
   fi
   node --experimental-strip-types "$TS_APP" "$BASE_URL"
 fi

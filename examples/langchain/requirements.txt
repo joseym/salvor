@@ -8,11 +8,8 @@
 # so nothing runtime lands in the checkout. Point SALVOR_EXAMPLE_PYTHON at an
 # interpreter that already has these and it skips the install entirely.
 
-# This checkout's SDK with its LangChain extra, which pulls in langchain and
-# langchain-core. It is a path rather than a version range because the extra is
-# in the next release of `salvor` and is not on PyPI yet; once it ships, this
-# line becomes `salvor[langchain]` and nothing else here changes.
--e ../../sdks/python[langchain]
+# salvor with its LangChain extra, which pulls in langchain and langchain-core.
+salvor[langchain]>=0.10.0,<0.11
 
 # Optional, and only for the ANTHROPIC_API_KEY path: the provider `app.py`
 # imports when a key is set. Left commented out so the key-free run installs

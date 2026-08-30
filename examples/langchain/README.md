@@ -250,14 +250,12 @@ something if you can go and read the log yourself afterwards. Delete the
 directory when you are done reading it.
 
 The first run installs things. On the TypeScript side, `npm install
---install-links --omit=optional` into `examples/langchain/node_modules`
-(gitignored): `--install-links` copies this checkout's SDK in rather than
-symlinking it, so its `langchain` import resolves to the one copy installed
-beside it, and `--omit=optional` leaves out `@langchain/anthropic`, which the
-key-free path never loads. On the Python side, a `python3 -m venv` under the
-scratch directory with `pip install -e '../../sdks/python[langchain]'` in it.
-Point `SALVOR_EXAMPLE_PYTHON` at an interpreter that already has
-`salvor[langchain]` and the script uses that instead of building a venv at all:
+--omit=optional` into `examples/langchain/node_modules` (gitignored):
+`--omit=optional` leaves out `@langchain/anthropic`, which the key-free path
+never loads. On the Python side, a `python3 -m venv` under the scratch
+directory with `pip install 'salvor[langchain]>=0.10.0,<0.11'` in it. Point
+`SALVOR_EXAMPLE_PYTHON` at an interpreter that already has `salvor[langchain]`
+and the script uses that instead of building a venv at all:
 
 ```sh
 SALVOR_EXAMPLE_PYTHON=/path/to/venv/bin/python bash examples/langchain/run.sh
@@ -271,12 +269,12 @@ Everything else is overridable too: `SALVOR_BIN` for the binary,
 the repository except that `node_modules` directory, and no port near 8080 is
 ever bound.
 
-None of that is specific to this directory. Until the LangChain extra reaches
-the registry, an app of your own runs the same `npm install <path-to-checkout>/sdks/typescript`
-or `pip install '<path-to-checkout>/sdks/python[langchain]'` line from wherever
-that app lives, not only from inside `examples/langchain`; see the install
-notes in [`sdks/typescript/README.md`](../../sdks/typescript/README.md#langchain)
-and [`sdks/python/README.md`](../../sdks/python/README.md#langchain).
+None of that is specific to this directory. An app of your own installs the
+same `npm install @salvor-run/client langchain @langchain/core zod` or
+`pip install 'salvor[langchain]'` line from wherever that app lives, not only
+from inside `examples/langchain`; see the install notes in
+[`sdks/typescript/README.md`](../../sdks/typescript/README.md#langchain) and
+[`sdks/python/README.md`](../../sdks/python/README.md#langchain).
 
 Both apps take the same flags, so any step below can be run by hand:
 
@@ -769,11 +767,10 @@ again while a dangling `write` waits.
   counters.
 - [`tools/`](tools/): the three client-tool declarations, one per tool, with the
   reasoning for each field in the file.
-- [`package.json`](package.json): the TypeScript app's four dependencies, with
-  `@salvor-run/client` by relative path because the LangChain entry point is not
-  on npm yet, and `@langchain/anthropic` optional.
-- [`requirements.txt`](requirements.txt): the same for Python, this checkout's
-  SDK with its `langchain` extra.
+- [`package.json`](package.json): the TypeScript app's four dependencies,
+  `@salvor-run/client` pinned to `^0.10.0` and `@langchain/anthropic` optional.
+- [`requirements.txt`](requirements.txt): the same for Python, `salvor` with
+  its `langchain` extra.
 - [`run.sh`](run.sh): the whole sequence, twice, with every port and path
   overridable.
 

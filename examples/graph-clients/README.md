@@ -439,28 +439,15 @@ Rust the runtime is a library, so the Rust app embeds the engine in its own
 process and drives the same document against a store of its own, which `run.sh`
 passes it on the command line.
 
-### Why these apps use the SDK sources rather than the published packages
+### The published packages
 
-[`examples/polyglot-service/`](../polyglot-service/) installs the published
-`salvor` from PyPI and the published `@salvor-run/client` from npm, on purpose:
-an example that a reader can follow with an ordinary `pip install` is worth more
-than one that assumes a checkout.
-
-This example does not, and the reason is narrow. The graph methods these apps
-need (`submit_graph`, `start_graph_run`, `validate_graph`, `get_graph`,
-`list_graphs` in Python; `submitGraph`, `startGraphRun`, `validateGraph` in
-TypeScript) are newer than the latest release, 0.7.0. Installing that release
-would not produce a subtly different result; it would fail on a missing attribute
-before the app did anything. So `run.sh` installs this checkout's Python SDK in
-editable form from [`sdks/python`](../../sdks/python), and the TypeScript app
-imports [`sdks/typescript`](../../sdks/typescript)'s built output by relative path
-rather than by package name, with `run.sh` building it first and refusing to run
-against a build that predates the graph methods.
-
-**This should be reverted once a release ships them.** At that point both apps go
-back to the published packages, exactly like the sibling example, and `run.sh`
-loses the local-SDK handling entirely. The comments in `run.sh` say the same
-thing at each of the two places that would change.
+Like [`examples/polyglot-service/`](../polyglot-service/), both HTTP apps
+depend on ordinary published packages: `salvor` from PyPI and
+`@salvor-run/client` from npm, the same graph methods (`submit_graph`,
+`start_graph_run`, `validate_graph`, `get_graph`, `list_graphs` in Python;
+`submitGraph`, `startGraphRun`, `validateGraph` in TypeScript) and all. An
+example that a reader can follow with an ordinary `pip install` or
+`npm install` is worth more than one that assumes a checkout.
 
 ### Why the Rust app is an example target
 
@@ -514,6 +501,8 @@ shared with whatever ran before it, so its assertions are on deltas.
 - `python/service.py`, `typescript/service.ts`, `rust/main.rs`: the three client
   apps. The Rust one is built as an `[[example]]` on `salvor-cli` rather than as
   a project of its own, so its source sits here with no `Cargo.toml` beside it.
+- `typescript/package.json`: the TypeScript app's one dependency,
+  `@salvor-run/client` pinned to `^0.10.0`.
 
 The MCP server and its seed records are **not** copied here: the agents declare
 `examples/graph-service/server.py` by relative path, so both examples run the
