@@ -521,19 +521,11 @@ if ! "$NODE" -e 'const [major, minor] = process.versions.node.split(".").map(Num
   echo "Point SALVOR_EXAMPLE_NODE at a newer one." >&2
   exit 1
 fi
-if [[ ! -f "$HERE/node_modules/@salvor-run/client/dist/langchain/index.js" ]]; then
-  if [[ ! -f "$ROOT/sdks/typescript/dist/langchain/index.js" ]]; then
-    echo "the TypeScript SDK is not built: $ROOT/sdks/typescript/dist/langchain/index.js is missing." >&2
-    echo "Build it with:  cd sdks/typescript && npm install && npm run build" >&2
-    exit 1
-  fi
+if [[ ! -d "$HERE/node_modules" ]]; then
   echo "== installing the example's node packages =="
-  # --install-links copies this checkout's SDK in rather than symlinking it, so
-  # its `langchain` import resolves to the single copy installed here; two
-  # copies of LangChain in one process is a class of bug worth not having.
   # --omit=optional leaves `@langchain/anthropic` out, since the key-free path
   # never loads it.
-  (cd "$HERE" && "$NPM" install --install-links --omit=optional --no-audit --no-fund)
+  (cd "$HERE" && "$NPM" install --omit=optional --no-audit --no-fund)
 fi
 
 # --- Python: the SDK with its LangChain extra -------------------------------
@@ -549,19 +541,14 @@ else
     python3 -m venv "$PYVENV"
     "$PYVENV/bin/pip" install --quiet --upgrade pip
   fi
-  echo "== installing this checkout's Python SDK with its LangChain extra =="
-  # DELIBERATE DIVERGENCE from `examples/polyglot-service/`, which installs the
-  # PUBLISHED `salvor` package on purpose. The LangChain extra is not in any
-  # published release yet, so installing from PyPI would fail on a missing
-  # module rather than run. REVERT THIS to `pip install 'salvor[langchain]'`
-  # once a release carrying it ships.
-  "$PYVENV/bin/pip" install --quiet -e "$ROOT/sdks/python[langchain]"
+  echo "== installing salvor with its LangChain extra =="
+  "$PYVENV/bin/pip" install --quiet 'salvor[langchain]>=0.10.0,<0.11'
   PYTHON="$PYVENV/bin/python"
 fi
 if ! "$PYTHON" -c 'import salvor.langchain' 2>/dev/null; then
   echo "\`import salvor.langchain\` fails under $PYTHON." >&2
-  echo "Install this checkout's SDK with its extra:" >&2
-  echo "  $PYTHON -m pip install -e '$ROOT/sdks/python[langchain]'" >&2
+  echo "Install salvor with its extra:" >&2
+  echo "  $PYTHON -m pip install 'salvor[langchain]>=0.10.0,<0.11'" >&2
   exit 1
 fi
 echo "python $("$PYTHON" --version 2>&1), with salvor.langchain importable"

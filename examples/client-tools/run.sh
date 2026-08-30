@@ -127,28 +127,14 @@ DESK="$HERE/desk.py"
 if [[ ! -f "$DESK" ]]; then
   echo "SKIPPED: $DESK is missing."
 else
-  # DELIBERATE DIVERGENCE from `examples/polyglot-service/`, which installs the
-  # PUBLISHED `salvor` package from PyPI on purpose. This example installs THIS
-  # CHECKOUT's SDK instead, in editable form, because the client-performed tool
-  # methods it needs (`list_client_tools`, `client_tool_intent`,
-  # `client_tool_completion`) are not in any published release yet. Installing
-  # from PyPI would fail on a missing attribute rather than run.
-  #
-  # REVERT THIS once a release carrying those methods ships: change the editable
-  # install back to `pip install --quiet salvor` and drop the check below.
+  # A venv beside the example keeps the install out of the caller's environment,
+  # the same way the other Python examples do it.
   PYVENV="${SALVOR_EXAMPLE_PYVENV:-$HERE/.venv}"
   if [[ ! -x "$PYVENV/bin/python" ]]; then
-    echo "== creating a venv for the desk =="
+    echo "== installing salvor for the desk =="
     python3 -m venv "$PYVENV"
     "$PYVENV/bin/pip" install --quiet --upgrade pip
-  fi
-  echo "== installing this checkout's Python SDK (editable) =="
-  "$PYVENV/bin/pip" install --quiet -e "$ROOT/sdks/python"
-  if ! "$PYVENV/bin/python" -c 'from salvor import Client; raise SystemExit(0 if hasattr(Client, "list_client_tools") else 1)'; then
-    echo "the installed salvor package has no Client.list_client_tools, so the" >&2
-    echo "client-performed tool methods this desk needs are missing. Something" >&2
-    echo "other than $ROOT/sdks/python is being imported; inspect $PYVENV." >&2
-    exit 1
+    "$PYVENV/bin/pip" install --quiet salvor
   fi
   echo
   # The credential exists for this command and its children. The control plane

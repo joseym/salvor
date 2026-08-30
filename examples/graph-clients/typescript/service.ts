@@ -13,31 +13,9 @@
  *
  *     node --experimental-strip-types service.ts http://127.0.0.1:18962
  *
- * ---------------------------------------------------------------------------
- * A NOTE ON THE IMPORT BELOW, BEFORE YOU COPY IT
- * ---------------------------------------------------------------------------
- * The import a few lines down reaches across the repository by relative path:
- *
- *     import { SalvorClient, GraphBuilder } from "../../../sdks/typescript/dist/index.js";
- *
- * THAT IS NOT HOW A NORMAL PROJECT IMPORTS THIS SDK. It is done only because
- * this example needs graph methods (`submitGraph`, `startGraphRun`,
- * `validateGraph`) that are newer than the latest published release, 0.7.0.
- * Depending on the published `@salvor-run/client` from npm would resolve to
- * that release and fail on a missing method before this app did anything
- * useful, so `run.sh` builds THIS CHECKOUT's SDK from `sdks/typescript` and
- * this file imports its built output directly, by path, in place of a normal
- * package dependency.
- *
- * In your own project, once a release carries the graph methods, this becomes
- * an ordinary dependency and an ordinary import:
- *
- *     import { Client } from "@salvor-run/client";
- *
- * (see `../../polyglot-service/typescript/service.ts` for exactly that shape,
- * dependency in `package.json` and all). Do not carry the relative path into
- * a real project; it exists here only to reach a checkout's unreleased build.
- * ---------------------------------------------------------------------------
+ * `package.json` beside this file depends on `@salvor-run/client`, the
+ * published package, the same way `../../polyglot-service/typescript/service.ts`
+ * does.
  */
 
 import { readFileSync } from "node:fs";
@@ -51,7 +29,7 @@ import {
   type EventStream,
   type EndFrame,
   type Graph,
-} from "../../../sdks/typescript/dist/index.js"; // read the banner above before copying this relative path into your own project
+} from "@salvor-run/client";
 
 /** Raised for one of this app's own loud, predictable failures: a hash that does
  * not match, or a run that rested somewhere other than where the story expects

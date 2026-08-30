@@ -57,8 +57,8 @@ Then, inside a client-driven run:
   idempotency key, so a second call under a key already on file returns the same
   refund rather than making a new one. It refuses to run without
   `REFUND_PROVIDER_API_KEY` in its environment.
-- `desk.py`: the application. It drives three client-driven runs through this
-  checkout's Python SDK.
+- `desk.py`: the application. It drives three client-driven runs through the
+  Python SDK.
 - `model-script.json`: three scripted conversations, selected by the case name in
   the system prompt.
 - `run.sh`: the whole sequence, offline, with every port and path overridable.

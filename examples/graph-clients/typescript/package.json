@@ -1,0 +1,9 @@
+{
+  "name": "salvor-graph-clients-example",
+  "private": true,
+  "type": "module",
+  "description": "Runs the TypeScript half of the graph-clients example against the published client.",
+  "dependencies": {
+    "@salvor-run/client": "^0.10.0"
+  }
+}
