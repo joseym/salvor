@@ -397,12 +397,9 @@ an extra, so the plain `import salvor` pulls none of it in:
 pip install 'salvor[langchain]'
 ```
 
-The LangChain extra is in the next release of `salvor`; it is not on PyPI yet,
-so until that release ships, install the SDK from a checkout of this
-repository instead (`pip install '<path-to-checkout>/sdks/python[langchain]'`),
-and come back to the line above once it is. That checkout install works the
-same way from any directory, so an app of your own outside this repository
-installs against it exactly as `examples/langchain` does.
+That install works the same way from any directory, so an app of your own
+outside this repository installs against it exactly as `examples/langchain`
+does.
 
 Then add one middleware to the agent you already have:
 
@@ -533,10 +530,7 @@ answer = agent.invoke(
 print(answer["messages"][-1].content)
 ```
 
-Run it in a second terminal, with the server still up. The LangChain extra is
-in the next release of `salvor`, not yet on PyPI, so until then install from a
-checkout of this repository instead of the registry line below
-(`pip install '<path-to-checkout>/sdks/python[langchain]'`):
+Run it in a second terminal, with the server still up:
 
 ```sh
 pip install 'salvor[langchain]'

@@ -259,13 +259,9 @@ install LangChain alongside the client when you want it:
 npm install @salvor-run/client langchain @langchain/core zod
 ```
 
-The LangChain extra is in the next release of `@salvor-run/client`; it is not
-on npm yet, so until that release ships, install the SDK from a checkout of
-this repository instead (`npm install <path-to-checkout>/sdks/typescript
-langchain @langchain/core zod`), and come back to the line above once it is.
-That checkout install works the same way from any directory, so an app of
-your own outside this repository installs against it exactly as
-`examples/langchain` does.
+That install works the same way from any directory, so an app of your own
+outside this repository installs against it exactly as `examples/langchain`
+does.
 
 Then add one middleware to the agent you already have:
 
@@ -441,19 +437,13 @@ all it takes:
 {
   "type": "module",
   "dependencies": {
-    "@salvor-run/client": "^0.9.2",
+    "@salvor-run/client": "^0.10.0",
     "@langchain/core": "^1.2.9",
     "langchain": "^1.5.10",
     "zod": "^3.25.0"
   }
 }
 ```
-
-The LangChain extra is in the next release of the SDK, not yet in `0.9.2`
-above: until it is on npm, point that first dependency at a checkout of this
-repository instead (`npm install <path-to-checkout>/sdks/typescript` in place
-of the registry line, keeping the other three), and switch back to the
-registry version once the release with the extra is out.
 
 ```ts
 import { createAgent, tool } from "langchain";
