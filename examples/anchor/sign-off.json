@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "nodes": [
+    {
+      "kind": "gate",
+      "payload": {
+        "id": "sign_off",
+        "prompt": "Sign off on the salvage claim ledger for this quarter?",
+        "approval_schema": {
+          "type": "object",
+          "properties": {
+            "approved": { "type": "boolean" },
+            "by": { "type": "string" }
+          },
+          "required": ["approved"]
+        }
+      }
+    }
+  ],
+  "edges": []
+}
