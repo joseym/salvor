@@ -41,8 +41,8 @@ The SDK's `resume(run_id, {"extend": {"steps": 40}})` wraps the extension under
 `input` for you. The server validates it against the recorded budget shape
 before recording anything, records a `Resumed` event carrying the extension,
 and drives the run to completion. Because the extension lives in the log,
-replay sees the same budget the live run saw. The extension of 40 steps clears
-the 20-model-call run with headroom.
+replay reads the same budget the live run recorded. The extension of 40 steps
+clears the 20-model-call run with headroom.
 
 ## Bring up the offline stack
 
