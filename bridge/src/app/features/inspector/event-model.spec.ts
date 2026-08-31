@@ -31,6 +31,59 @@ describe('rowOf: a ToolCallRequested row shows who performed the call', () => {
   });
 });
 
+function event(kind: string, payload: Record<string, unknown>): SalvorEvent {
+  return {
+    runId: 'run-1',
+    seq: 0,
+    schemaVersion: 1,
+    recordedAt: '2026-07-30T23:46:58Z',
+    kind,
+    payload,
+  };
+}
+
+describe('rowOf: a row names the caller the event recorded', () => {
+  it('renders no caller badge on a RunStarted that recorded none', () => {
+    const html = rowOf(event('RunStarted', { agent_def_hash: 'sha256:abc', input: {} }), [], null);
+    expect(html).not.toContain('badge caller');
+  });
+
+  it('renders the caller badge on a RunStarted that recorded one', () => {
+    const html = rowOf(
+      event('RunStarted', { agent_def_hash: 'sha256:abc', input: {}, caller: 'ci' }),
+      [],
+      null,
+    );
+    expect(html).toContain('<span class="badge caller">ci</span>');
+  });
+
+  it('renders the caller badge on a Resumed that recorded one, and none otherwise', () => {
+    expect(rowOf(event('Resumed', { input: {} }), [], null)).not.toContain('badge caller');
+    expect(rowOf(event('Resumed', { input: {}, caller: 'ops' }), [], null)).toContain(
+      '<span class="badge caller">ops</span>',
+    );
+  });
+
+  it('names the settler and the person on a hand-recorded completion, and neither on the run\'s own', () => {
+    const own = rowOf(event('ToolCallCompleted', { seq: 2, output: {} }), [], null);
+    expect(own).not.toContain('>operator<');
+    expect(own).not.toContain('badge caller');
+
+    const settled = rowOf(
+      event('ToolCallCompleted', {
+        seq: 2,
+        output: {},
+        settled_by: 'operator',
+        settled_caller: 'ops',
+      }),
+      [],
+      null,
+    );
+    expect(settled).toContain('<span class="badge perf-client">operator</span>');
+    expect(settled).toContain('<span class="badge caller">ops</span>');
+  });
+});
+
 describe('zoneOf: the scrub zone a timeline row falls into', () => {
   it('marks every seq at or past the prefix as beyond', () => {
     expect(zoneOf(5, 5)).toBe('beyond');
