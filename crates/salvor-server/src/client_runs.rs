@@ -124,7 +124,7 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::body::Bytes;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::http::header::ACCEPT;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
@@ -147,6 +147,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
+use crate::auth::Caller;
 use crate::error::ApiError;
 use crate::executor::{ModelExecutor, ModelStream};
 use crate::state::{AppState, ClientRunLease, LeaseRelease};
@@ -585,6 +586,7 @@ pub async fn get_log(
 pub async fn append(
     State(state): State<AppState>,
     Path(run_id_text): Path<String>,
+    caller: Option<Extension<Caller>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -607,6 +609,8 @@ pub async fn append(
             request.events.len()
         )));
     }
+
+    let caller = caller.map(|Extension(caller)| caller.name().to_owned());
 
     let stored = state.store().read_log(run_id).await.map_err(store_error)?;
     let mut validator = LogValidator::new(stored);
@@ -648,6 +652,15 @@ pub async fn append(
             }
             *driven_by = Some(Performer::Client);
         }
+        // And who asked, on every event that has a place to record it. The
+        // client drives its own loop, but the name on these events is this
+        // server's to write, from the bearer it verified: a submitted value is
+        // discarded whether or not a bearer is configured, so a stored `caller`
+        // always means "this server verified this name". Stamped in the same
+        // place, and for the same reason, as `driven_by` just above, and
+        // before the retry comparison below, so a resubmitted event is
+        // canonicalized the way the recorded one was.
+        stamp_caller(&mut candidate.event, caller.as_deref());
 
         let next_seq = validator.next_seq();
         if candidate.seq < next_seq {
@@ -1523,6 +1536,7 @@ fn tool_output_body(output: &Value) -> Json<Value> {
 pub async fn resolve(
     State(state): State<AppState>,
     Path(run_id_text): Path<String>,
+    caller: Option<Extension<Caller>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<Value>, ApiError> {
@@ -1537,7 +1551,11 @@ pub async fn resolve(
     let log = state.store().read_log(run_id).await.map_err(store_error)?;
     crate::client_tools::check_client_resolution(&state.client_tools(), &log, &request.output)?;
 
-    match state.runtime().resolve(run_id, request.output).await {
+    let runtime = match caller {
+        Some(Extension(caller)) => state.runtime().with_caller(caller.name()),
+        None => state.runtime(),
+    };
+    match runtime.resolve(run_id, request.output).await {
         Ok(_) => {
             // The resolve rule, with this caller's own lease held back from
             // it. In the one case where the stored lease is no longer the one
@@ -2596,6 +2614,23 @@ fn is_sleeping(log: &[EventEnvelope]) -> bool {
 /// the two processes that must each leave a client-driven run alone read the
 /// same marker the same way. This wrapper only narrows visibility to the
 /// crate, matching the narrower one this module used before the check moved.
+/// Writes `caller` onto an event that carries one, overwriting whatever the
+/// submitted event held.
+///
+/// `None` clears the field rather than leaving it alone: a server running the
+/// pass-through posture verified no name, and a name it did not verify is
+/// worse than no name at all. An event with no caller field is untouched,
+/// which is every kind this endpoint accepts apart from these three.
+fn stamp_caller(event: &mut Event, caller: Option<&str>) {
+    let field = match event {
+        Event::RunStarted { caller, .. }
+        | Event::Resumed { caller, .. }
+        | Event::RunAbandoned { caller, .. } => caller,
+        _ => return,
+    };
+    *field = caller.map(str::to_owned);
+}
+
 pub(crate) fn log_is_client_driven(log: &[EventEnvelope]) -> bool {
     salvor_replay::log_is_client_driven(log)
 }
