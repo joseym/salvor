@@ -62,6 +62,7 @@ fn started() -> Event {
         input: json!({"topic": "otters", "nested": {"z": 1, "a": 2}}),
         labels: None,
         driven_by: None,
+        caller: None,
     }
 }
 
@@ -148,6 +149,7 @@ fn reference_logs() -> Vec<(&'static str, Vec<EventEnvelope>)> {
                 output: json!({"id": "TICKET-1"}),
                 deduplicated_from: None,
                 settled_by: None,
+                settled_caller: None,
             },
         ]),
     ));
@@ -163,6 +165,7 @@ fn reference_logs() -> Vec<(&'static str, Vec<EventEnvelope>)> {
             },
             Event::Resumed {
                 input: json!({"approved": true}),
+                caller: None,
             },
         ]),
     ));
@@ -219,6 +222,7 @@ fn reference_logs() -> Vec<(&'static str, Vec<EventEnvelope>)> {
             },
             Event::Resumed {
                 input: json!({"extend": {"steps": 2, "wall_time_seconds": 1.0}}),
+                caller: None,
             },
             Event::ModelCallRequested {
                 seq: SequenceNumber::new(7),

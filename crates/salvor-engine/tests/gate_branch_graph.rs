@@ -730,6 +730,7 @@ async fn a_recorded_approval_is_never_re_judged_on_replay() {
             .recorded_at,
         salvor_core::Event::Resumed {
             input: stale_approval,
+            caller: None,
         },
     ));
 

@@ -125,6 +125,7 @@ fn agent_head() -> Event {
         input: json!("go"),
         labels: None,
         driven_by: None,
+        caller: None,
     }
 }
 
@@ -138,6 +139,7 @@ fn client_driven_head() -> Event {
         input: json!("go"),
         labels: None,
         driven_by: Some(Performer::Client),
+        caller: None,
     }
 }
 

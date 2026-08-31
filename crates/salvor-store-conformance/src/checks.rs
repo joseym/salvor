@@ -94,6 +94,7 @@ fn all_event_kinds() -> Vec<Event> {
             input: serde_json::json!({"topic": "otters"}),
             labels: None,
             driven_by: None,
+            caller: None,
         },
         Event::ModelCallRequested {
             seq: SequenceNumber::new(1),
@@ -122,6 +123,7 @@ fn all_event_kinds() -> Vec<Event> {
             output: serde_json::json!({"id": "TICKET-1"}),
             deduplicated_from: None,
             settled_by: None,
+            settled_caller: None,
         },
         Event::NowObserved {
             now: OffsetDateTime::from_unix_timestamp(1_700_000_000).expect("timestamp in range"),
@@ -134,6 +136,7 @@ fn all_event_kinds() -> Vec<Event> {
         },
         Event::Resumed {
             input: serde_json::json!({"approved": true}),
+            caller: None,
         },
         Event::BudgetExceeded {
             budget: Budget {

@@ -379,6 +379,7 @@ mod tests {
                 input: serde_json::json!({}),
                 labels: None,
                 driven_by: None,
+                caller: None,
             },
             Event::RunCompleted {
                 output: serde_json::json!({"done": true}),

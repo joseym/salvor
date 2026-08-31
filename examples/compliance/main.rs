@@ -344,7 +344,7 @@ fn print_audit_trail(log: &[EventEnvelope]) {
             Event::NowObserved { .. } => "clock observed".to_owned(),
             Event::RandomObserved { .. } => "random observed".to_owned(),
             Event::Suspended { reason, .. } => format!("SUSPENDED for approval: {reason}"),
-            Event::Resumed { input } => format!("RESUMED with officer decision: {input}"),
+            Event::Resumed { input, .. } => format!("RESUMED with officer decision: {input}"),
             Event::ToolCallRequested {
                 tool,
                 effect,

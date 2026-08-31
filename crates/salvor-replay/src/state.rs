@@ -301,6 +301,7 @@ pub fn derive_state(log: &[EventEnvelope]) -> RunState {
             Event::RunAbandoned {
                 reason,
                 unresolved_write,
+                ..
             } => {
                 state.status = RunStatus::Abandoned {
                     reason: reason.clone(),
@@ -407,6 +408,7 @@ mod tests {
             input: serde_json::json!({"topic": "otters"}),
             labels: None,
             driven_by: None,
+            caller: None,
         }
     }
 
@@ -536,6 +538,7 @@ mod tests {
                 output: serde_json::json!({"id": "TICKET-1"}),
                 deduplicated_from: None,
                 settled_by: None,
+                settled_caller: None,
             },
         ]));
         assert_eq!(state.status, RunStatus::Running);
@@ -620,6 +623,7 @@ mod tests {
             },
             Event::Resumed {
                 input: serde_json::json!({"approved": true}),
+                caller: None,
             },
         ]));
         assert_eq!(state.status, RunStatus::Running);
@@ -772,6 +776,7 @@ mod tests {
             Event::RunAbandoned {
                 reason: Some("husk is dead forever".into()),
                 unresolved_write: None,
+                caller: None,
             },
         ]));
         assert_eq!(
@@ -805,6 +810,7 @@ mod tests {
                     seq: SequenceNumber::new(1),
                     tool: "create_ticket".into(),
                 }),
+                caller: None,
             },
         ]));
         assert_eq!(

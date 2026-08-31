@@ -249,6 +249,7 @@ fn started() -> Event {
         input: json!("go"),
         labels: None,
         driven_by: None,
+        caller: None,
     }
 }
 

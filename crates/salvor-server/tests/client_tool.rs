@@ -160,6 +160,7 @@ async fn started_run(client: &reqwest::Client, base: &str) -> (String, String) {
             input: json!({ "invoice": "INV-1" }),
             labels: None,
             driven_by: None,
+            caller: None,
         },
     );
     let (status, body) = post(

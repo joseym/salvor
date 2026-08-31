@@ -142,7 +142,7 @@ fn drive(script: &[Step], prefix: &[EventEnvelope]) -> Result<Drive, ReplayError
 
     for step in script {
         match step {
-            Step::Begin { hash, input } => match cursor.begin(hash, None)? {
+            Step::Begin { hash, input } => match cursor.begin(hash, None, None)? {
                 Outcome::Replayed(recorded) => assert_eq!(&recorded, input),
                 Outcome::Live(permit) => push!(permit.record(input.clone())),
             },
@@ -253,7 +253,7 @@ fn drive(script: &[Step], prefix: &[EventEnvelope]) -> Result<Drive, ReplayError
                 }
                 match cursor.await_resume()? {
                     Outcome::Replayed(recorded) => assert_eq!(&recorded, resume),
-                    Outcome::Live(parked) => push!(parked.resume(resume.clone())),
+                    Outcome::Live(parked) => push!(parked.resume(resume.clone(), None)),
                 }
             }
             // The scripted timer always wakes: this harness asks what a drive
@@ -280,7 +280,7 @@ fn drive(script: &[Step], prefix: &[EventEnvelope]) -> Result<Drive, ReplayError
                 }
                 match cursor.await_resume()? {
                     Outcome::Replayed(recorded) => assert_eq!(&recorded, resume),
-                    Outcome::Live(parked) => push!(parked.resume(resume.clone())),
+                    Outcome::Live(parked) => push!(parked.resume(resume.clone(), None)),
                 }
             }
             Step::Complete { output } => match cursor.complete_run(output)? {
@@ -377,7 +377,7 @@ fn expected_status(prefix: &[EventEnvelope]) -> RunStatus {
         Event::RunAbandoned {
             reason,
             unresolved_write,
-        } => RunStatus::Abandoned {
+        ..} => RunStatus::Abandoned {
             reason: reason.clone(),
             unresolved_write: unresolved_write.clone(),
         },

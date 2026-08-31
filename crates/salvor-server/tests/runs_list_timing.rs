@@ -43,6 +43,7 @@ async fn seed_run(store: &dyn EventStore, agent_def_hash: &str) {
             input: json!({"topic": "durable execution"}),
             labels: None,
             driven_by: None,
+            caller: None,
         },
     );
     store.append(&envelope).await.expect("append RunStarted");

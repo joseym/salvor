@@ -1416,6 +1416,7 @@ async fn append_tool_completion(
             output: output.clone(),
             deduplicated_from,
             settled_by: None,
+            settled_caller: None,
         },
     );
     let log = state.store().read_log(run_id).await.map_err(store_error)?;

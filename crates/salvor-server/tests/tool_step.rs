@@ -229,6 +229,7 @@ fn run_started_env(run: &str) -> Value {
             input: json!({ "topic": "otters" }),
             labels: None,
             driven_by: None,
+            caller: None,
         },
     )
 }
@@ -650,7 +651,7 @@ async fn full_loop_with_tool_then_replay_makes_no_live_call() {
     );
     let mut cursor = ReplayCursor::new(log).expect("the log is a well-formed run");
     assert!(matches!(
-        cursor.begin("sha256:agent", None).expect("begin"),
+        cursor.begin("sha256:agent", None, None).expect("begin"),
         Outcome::Replayed(_)
     ));
     assert!(matches!(

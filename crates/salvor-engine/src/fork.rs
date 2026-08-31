@@ -340,6 +340,7 @@ mod tests {
                     output: json!({"ok": true}),
                     deduplicated_from: None,
                     settled_by: None,
+                    settled_caller: None,
                 },
             ),
             envelope(
@@ -369,6 +370,7 @@ mod tests {
                 input: json!(null),
                 labels: None,
                 driven_by: None,
+                caller: None,
             },
         )];
         assert!(matches!(
