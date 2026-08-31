@@ -24,5 +24,14 @@ By default this CONNECTS: it runs the exact build every other verb that takes `-
           [env: SALVOR_STORE=]
           [default: ./salvor.db]
 
+      [1m--caller[0m <NAME>
+          The name to record as the caller on the events this command writes.
+          
+          A verb that starts, resumes, resolves, or abandons a run records who asked for it. Left unset, that is the operating system user this process runs as; this flag names someone else, for a wrapper script or a job runner that knows better than the account it happens to run under. The precedence is the flag, then `SALVOR_CALLER`, then the operating system user, which `salvor_cli::caller_name` resolves.
+          
+          It is a label on the events, never a credential: nothing checks it and nothing is granted by it. A store written by whoever can write the file carries whatever name they chose, which is why the server takes its own name from a verified token instead.
+          
+          [env: SALVOR_CALLER=]
+
   [1m-h[0m, [1m--help[0m
           Print help (see a summary with '-h')
