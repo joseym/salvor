@@ -116,7 +116,14 @@ enum GraphVerb {
         input: Value,
         labels: Option<BTreeMap<String, String>>,
     },
-    Resume(Value),
+    /// Continue a parked run with this input, recording who supplied it. The
+    /// name rides on the verb rather than beside it because a resume is the
+    /// only graph verb that records an event with a place to put one: a graph
+    /// run's head is a `GraphRunStarted`, which carries no caller.
+    Resume {
+        input: Value,
+        caller: Option<String>,
+    },
     Recover,
 }
 
@@ -550,6 +557,7 @@ pub async fn drive_resume(
     run_id: RunId,
     log: &[EventEnvelope],
     input: Option<Value>,
+    caller: Option<String>,
 ) -> Result<Response, ApiError> {
     let hash = recorded_graph_hash(log).ok_or_else(|| {
         ApiError::Internal("graph run log has no GraphRunStarted event".to_owned())
@@ -575,7 +583,7 @@ pub async fn drive_resume(
     let (agents, servers) = build_agents(&state, &graph).await?;
 
     let verb = match input {
-        Some(input) => GraphVerb::Resume(input),
+        Some(input) => GraphVerb::Resume { input, caller },
         None => GraphVerb::Recover,
     };
     spawn_graph_drive(state, run_id, graph, agents, servers, registry, verb);
@@ -732,7 +740,13 @@ async fn drive_graph(
             }
             input
         }
-        GraphVerb::Resume(input) => {
+        GraphVerb::Resume { input, caller } => {
+            // Who supplied the input, recorded on the `Resumed` this drive is
+            // about to write. A start or a recover records no name because it
+            // records no event with anywhere to put one.
+            if let Some(caller) = caller {
+                ctx = ctx.with_caller(caller);
+            }
             ctx.set_resume_input(input);
             // The recorded input wins on replay; begin_graph ignores this one.
             Value::Null

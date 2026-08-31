@@ -82,6 +82,9 @@ pub struct Runtime {
     /// stamps on a genuinely fresh run. Unset unless
     /// [`with_labels`](Runtime::with_labels) sets them.
     labels: Option<BTreeMap<String, String>>,
+    /// The name every event this runtime records on someone's behalf carries.
+    /// Unset unless [`with_caller`](Runtime::with_caller) sets it.
+    caller: Option<String>,
 }
 
 impl Runtime {
@@ -106,6 +109,7 @@ impl Runtime {
             random,
             record_prompts: false,
             labels: None,
+            caller: None,
         }
     }
 
@@ -134,6 +138,25 @@ impl Runtime {
     #[must_use]
     pub fn with_labels(mut self, labels: BTreeMap<String, String>) -> Self {
         self.labels = Some(labels);
+        self
+    }
+
+    /// Sets the name of whoever asked for the work this runtime does, stamped
+    /// on every event it records on their behalf: `caller` on a fresh
+    /// `RunStarted`, on a live `Resumed`, and on the terminal
+    /// [`abandon`](Self::abandon) appends, and `settled_caller` on the
+    /// completion [`resolve`](Self::resolve) records.
+    ///
+    /// The surface that took the request supplies the name: a server with a
+    /// bearer configured passes the token's name, the CLI passes the operating
+    /// system user. Unset by default and unset is honest, so a surface with
+    /// nobody to name records nothing rather than inventing a name. Chained
+    /// builder style, mirroring [`with_labels`](Self::with_labels); the
+    /// per-run half is [`RunCtx::with_caller`](crate::RunCtx::with_caller),
+    /// which this passes it through to.
+    #[must_use]
+    pub fn with_caller(mut self, caller: impl Into<String>) -> Self {
+        self.caller = Some(caller.into());
         self
     }
 
@@ -294,7 +317,11 @@ impl Runtime {
             // output below is their report of an effect nothing in this
             // process witnessed, so the completion says who recorded it.
             settled_by: Some(SettledBy::Operator),
-            settled_caller: None,
+            // And, when the surface that took the request had a name to give,
+            // which one of them. `settled_by` says a person did this;
+            // `settled_caller` says which person. See
+            // [`with_caller`](Self::with_caller).
+            settled_caller: self.caller.clone(),
         };
         let envelope = EventEnvelope::new(run_id, state.next_seq, (self.clock)(), completion);
 
@@ -389,7 +416,10 @@ impl Runtime {
         let event = Event::RunAbandoned {
             reason,
             unresolved_write,
-            caller: None,
+            // Abandonment is the one terminal a person appends by hand, so the
+            // record says which person, when the surface that took the request
+            // had a name to give. See [`with_caller`](Self::with_caller).
+            caller: self.caller.clone(),
         };
         let envelope = EventEnvelope::new(run_id, state.next_seq, (self.clock)(), event);
         self.store.append(&envelope).await?;
@@ -418,6 +448,9 @@ impl Runtime {
         .with_record_prompts(self.record_prompts);
         if let Some(labels) = &self.labels {
             ctx = ctx.with_labels(labels.clone());
+        }
+        if let Some(caller) = &self.caller {
+            ctx = ctx.with_caller(caller.clone());
         }
         Ok(ctx)
     }

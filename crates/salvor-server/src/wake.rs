@@ -52,6 +52,17 @@
 //! leaves a napping client-driven run to its client, rather than adopting
 //! every one it no longer remembers.
 //!
+//! # What the sweeper records as its caller
+//!
+//! Nobody asked for a wake: a deadline passed. So the name this sweep hands
+//! the drive is [`SWEEPER_CALLER`], not a person, and a reader of the log can
+//! tell a timer firing apart from an operator answering a gate. In practice it
+//! reaches no event today: waking a run is a recover (see
+//! [`crate::runs::redrive`]), and a recover records no `RunStarted`, `Resumed`,
+//! or `RunAbandoned`, which are the only events with a caller field. The name
+//! travels with the drive so that stays true by construction rather than by
+//! nobody having passed one.
+//!
 //! # One bad run does not stop the sweep
 //!
 //! Every failure is per-run: an agent this server has never had registered, a
@@ -75,6 +86,10 @@ use salvor_core::RunId;
 use tokio::task::JoinHandle;
 
 use crate::state::AppState;
+
+/// The name a wake this sweeper drove records as its caller: a machine, and it
+/// says so. Nobody asked for a wake, so the name never claims a person did.
+pub const SWEEPER_CALLER: &str = "server:wake";
 
 /// A running sweeper, which stops when this value is dropped.
 ///
@@ -194,7 +209,14 @@ pub async fn sweep(state: &AppState) -> Vec<RunId> {
             );
             continue;
         }
-        match crate::runs::redrive(state.clone(), run.run_id, &log).await {
+        match crate::runs::redrive(
+            state.clone(),
+            run.run_id,
+            &log,
+            Some(SWEEPER_CALLER.to_owned()),
+        )
+        .await
+        {
             Ok(_) => {
                 state.clear_unwakeable_warned(run.run_id);
                 tracing::info!(

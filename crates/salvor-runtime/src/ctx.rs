@@ -223,6 +223,10 @@ pub struct RunCtx {
     /// Correlation tags to stamp on a genuinely fresh `RunStarted`. Unset
     /// unless [`with_labels`](Self::with_labels) sets them. See that method.
     labels: Option<BTreeMap<String, String>>,
+    /// The name to stamp on a genuinely fresh `RunStarted` and on a live
+    /// `Resumed`. Unset unless [`with_caller`](Self::with_caller) sets it.
+    /// See that method.
+    caller: Option<String>,
 }
 
 impl RunCtx {
@@ -278,6 +282,7 @@ impl RunCtx {
             sleeping_until: None,
             record_prompts: false,
             labels: None,
+            caller: None,
         })
     }
 
@@ -321,6 +326,25 @@ impl RunCtx {
     #[must_use]
     pub fn with_labels(mut self, labels: BTreeMap<String, String>) -> Self {
         self.labels = Some(labels);
+        self
+    }
+
+    /// Sets the name of whoever asked for this drive, stamped on a genuinely
+    /// fresh `RunStarted` and on a `Resumed` this context records live.
+    ///
+    /// The name comes from the surface that took the request: a server with a
+    /// bearer configured passes the token's name, the CLI passes the operating
+    /// system user. Additive and unset by default, so a caller that predates
+    /// this method records no name, which is what a surface with nobody to
+    /// name should pass anyway.
+    ///
+    /// It plays no part in replay. A recorded `RunStarted` or `Resumed` is
+    /// returned as recorded, name included, exactly as `labels` are: the name
+    /// says who asked at the moment the event was written, so a later drive
+    /// under a different account never rewrites it.
+    #[must_use]
+    pub fn with_caller(mut self, caller: impl Into<String>) -> Self {
+        self.caller = Some(caller.into());
         self
     }
 
@@ -387,7 +411,10 @@ impl RunCtx {
         agent_def_hash: &str,
         input: &Value,
     ) -> Result<Value, RuntimeError> {
-        match self.cursor.begin(agent_def_hash, self.labels.clone())? {
+        match self
+            .cursor
+            .begin(agent_def_hash, self.labels.clone(), self.caller.clone())?
+        {
             Outcome::Replayed(recorded) => Ok(recorded),
             Outcome::Live(permit) => {
                 if let Some(labels) = &self.labels {
@@ -1289,7 +1316,7 @@ impl RunCtx {
             Outcome::Replayed(input) => Ok(Resumption::Resumed(input)),
             Outcome::Live(parked) => match self.resume_input.take() {
                 Some(input) => {
-                    let emitted = parked.resume(input.clone());
+                    let emitted = parked.resume(input.clone(), self.caller.clone());
                     persist(self.store.as_ref(), self.run_id, &self.clock, &emitted).await?;
                     Ok(Resumption::Resumed(input))
                 }

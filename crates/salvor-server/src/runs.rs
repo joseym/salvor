@@ -30,12 +30,24 @@
 //! the run's recorded `agent_def_hash`. The registry is in-process, so after a
 //! restart the definition is re-registered first; its hash is stable, so the
 //! run's recorded reference still resolves.
+//!
+//! # Who asked, and where the name comes from
+//!
+//! Every handler here that records a run's start, its resume, its
+//! abandonment, or a hand-recorded completion reads the [`Caller`] the auth
+//! layer attached to the verified request and hands the name to the runtime,
+//! which stamps it on the event. The name comes from the token and never from
+//! a request body: no body type in this module has a caller field, and none
+//! may grow one, because a request that could name itself would make the
+//! recorded name worth nothing. A server running the pass-through posture
+//! attaches no `Caller`, so the extractor is `Option`, and those events record
+//! no name at all.
 
 use std::collections::BTreeMap;
 
 use axum::Json;
 use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use salvor_core::{Event, EventEnvelope, PendingCall, RunId, RunStatus, derive_state};
@@ -48,6 +60,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
+use crate::auth::Caller;
 use crate::dispatch::{Disposition, ResumeKind, classify};
 use crate::error::ApiError;
 use crate::json;
@@ -124,6 +137,7 @@ enum DriveVerb {
 /// `POST /v1/runs`: start a fresh run and return its id at once.
 pub async fn start(
     State(state): State<AppState>,
+    caller: Option<Extension<Caller>>,
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
     let request: StartRequest = parse_body(&body)?;
@@ -160,6 +174,7 @@ pub async fn start(
         run_id,
         built,
         DriveVerb::Start(request.input, request.labels),
+        caller_name(caller.as_ref()),
     );
     Ok((
         StatusCode::CREATED,
@@ -268,6 +283,9 @@ pub async fn list(State(state): State<AppState>) -> Result<impl IntoResponse, Ap
                 if let Some(labels) = recorded_labels(&log) {
                     map.insert("labels".to_owned(), json!(labels));
                 }
+                if let Some(caller) = recorded_caller(&log) {
+                    map.insert("caller".to_owned(), json!(caller));
+                }
                 if let Some(driver) = driver_evidence(&state, summary.run_id, &derived.status) {
                     map.insert("driver".to_owned(), json!(driver));
                 }
@@ -325,6 +343,9 @@ pub async fn get(
         "first_recorded_at": rfc3339(log[0].recorded_at),
         "last_recorded_at": rfc3339(log[log.len() - 1].recorded_at),
     });
+    if let Some(caller) = recorded_caller(&log) {
+        body["caller"] = json!(caller);
+    }
     if let Some(driver) = driver_evidence(&state, run_id, &derived.status) {
         body["driver"] = json!(driver);
     }
@@ -371,6 +392,7 @@ fn client_driven_refusal(run_id: RunId) -> ApiError {
 pub async fn resume(
     State(state): State<AppState>,
     Path(run_id_text): Path<String>,
+    caller: Option<Extension<Caller>>,
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
     let run_id = parse_run_id(&run_id_text)?;
@@ -473,11 +495,12 @@ pub async fn resume(
             // the engine, resolving its document by the hash the log records,
             // where an agent run rebuilds its agent and continues the built-in
             // loop. This is the sole graph-specific branch the resume path needs.
+            let who = caller_name(caller.as_ref());
             if crate::graph::is_graph_run(&log) {
-                return crate::graph::drive_resume(state, run_id, &log, Some(input)).await;
+                return crate::graph::drive_resume(state, run_id, &log, Some(input), who).await;
             }
             let built = rebuild_agent(&state, &log).await?;
-            spawn_drive(state, run_id, built, DriveVerb::Resume(input));
+            spawn_drive(state, run_id, built, DriveVerb::Resume(input), who);
             Ok(driving(run_id).into_response())
         }
         // A due run re-drives here, through the recover path, which is why
@@ -503,7 +526,7 @@ pub async fn resume(
                     remaining_seconds: remaining.whole_seconds(),
                 });
             }
-            redrive(state, run_id, &log).await
+            redrive(state, run_id, &log, caller_name(caller.as_ref())).await
         }
         Disposition::Recover => {
             if request.input.is_some() {
@@ -512,8 +535,24 @@ pub async fn resume(
                     "this run crashed mid-step; the resume input is ignored when recovering"
                 );
             }
-            redrive(state, run_id, &log).await
+            redrive(state, run_id, &log, caller_name(caller.as_ref())).await
         }
+    }
+}
+
+/// The name the auth layer attached to a verified request, or `None` on a
+/// server running the pass-through posture, where there is no caller to name.
+fn caller_name(caller: Option<&Extension<Caller>>) -> Option<String> {
+    caller.map(|Extension(caller)| caller.name().to_owned())
+}
+
+/// A runtime for the inline verbs, carrying the verified request's caller name
+/// so the one event each of them appends records who asked for it.
+fn runtime_as(state: &AppState, caller: Option<&Extension<Caller>>) -> salvor_runtime::Runtime {
+    let runtime = state.runtime();
+    match caller_name(caller) {
+        Some(name) => runtime.with_caller(name),
+        None => runtime,
     }
 }
 
@@ -542,12 +581,13 @@ pub(crate) async fn redrive(
     state: AppState,
     run_id: RunId,
     log: &[EventEnvelope],
+    caller: Option<String>,
 ) -> Result<Response, ApiError> {
     if crate::graph::is_graph_run(log) {
-        return crate::graph::drive_resume(state, run_id, log, None).await;
+        return crate::graph::drive_resume(state, run_id, log, None, caller).await;
     }
     let built = rebuild_agent(&state, log).await?;
-    spawn_drive(state, run_id, built, DriveVerb::Recover);
+    spawn_drive(state, run_id, built, DriveVerb::Recover, caller);
     Ok(driving(run_id).into_response())
 }
 
@@ -602,6 +642,7 @@ pub(crate) async fn redrive(
 pub async fn resolve(
     State(state): State<AppState>,
     Path(run_id_text): Path<String>,
+    caller: Option<Extension<Caller>>,
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
     let run_id = parse_run_id(&run_id_text)?;
@@ -621,8 +662,13 @@ pub async fn resolve(
     crate::client_tools::check_client_resolution(&state.client_tools(), &log, &request.output)?;
 
     // resolve records exactly one completion and drives nothing, so it runs
-    // inline rather than in a task.
-    match state.runtime().resolve(run_id, request.output).await {
+    // inline rather than in a task. The completion carries `settled_by:
+    // operator` for the mechanism and `settled_caller` for the person, taken
+    // from the verified token rather than the body.
+    match runtime_as(&state, caller.as_ref())
+        .resolve(run_id, request.output)
+        .await
+    {
         Ok(_) => {
             // The driver whose write dangled is gone (see above), so the lease
             // it left is holding the run for nobody. Asked of a server-driven
@@ -681,6 +727,7 @@ pub async fn resolve(
 pub async fn abandon(
     State(state): State<AppState>,
     Path(run_id_text): Path<String>,
+    caller: Option<Extension<Caller>>,
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
     let run_id = parse_run_id(&run_id_text)?;
@@ -688,7 +735,10 @@ pub async fn abandon(
 
     // abandon appends exactly one terminal event and drives nothing, so it runs
     // inline rather than in a task, exactly like resolve.
-    match state.runtime().abandon(run_id, request.reason).await {
+    match runtime_as(&state, caller.as_ref())
+        .abandon(run_id, request.reason)
+        .await
+    {
         Ok(_) => {
             let log = state.store().read_log(run_id).await.map_err(store_error)?;
             let derived = derive_state(&log);
@@ -714,7 +764,13 @@ pub async fn abandon(
 /// Spawns the task that drives a run to its next resting point, then closes its
 /// MCP sessions. Marks the run active before spawning so a concurrent stream
 /// cannot miss it.
-fn spawn_drive(state: AppState, run_id: RunId, built: BuiltAgent, verb: DriveVerb) {
+fn spawn_drive(
+    state: AppState,
+    run_id: RunId,
+    built: BuiltAgent,
+    verb: DriveVerb,
+    caller: Option<String>,
+) {
     state.begin_run(run_id);
     let task_state = state.clone();
     let handle = tokio::spawn(async move {
@@ -725,6 +781,13 @@ fn spawn_drive(state: AppState, run_id: RunId, built: BuiltAgent, verb: DriveVer
         let mut runtime = task_state
             .runtime()
             .with_record_prompts(agent.record_prompts());
+        // Who asked for this drive, read off the verified request before the
+        // task was spawned. The runtime stamps it on whatever this drive
+        // records on their behalf: the `RunStarted` of a start, the `Resumed`
+        // of a resume. A recover records neither, so it records no name.
+        if let Some(caller) = caller {
+            runtime = runtime.with_caller(caller);
+        }
         let result = match verb {
             DriveVerb::Start(input, labels) => {
                 // The caller's labels win over any static labels on the
@@ -862,6 +925,23 @@ fn recorded_labels(log: &[EventEnvelope]) -> Option<BTreeMap<String, String>> {
         })
         .flatten()
         .filter(|labels: &BTreeMap<String, String>| !labels.is_empty())
+}
+
+/// The caller recorded in a run's `RunStarted` event, when one was named.
+/// Read off the same `RunStarted` `recorded_labels` reads, off the same
+/// in-memory log; no second read or second fold.
+///
+/// `None` follows the same absence rule the labels do: a run whose start named
+/// nobody carries no key at all rather than a `null` or an invented name, and
+/// that covers every run a pass-through server started and every run recorded
+/// before the field existed.
+fn recorded_caller(log: &[EventEnvelope]) -> Option<String> {
+    log.iter()
+        .find_map(|envelope| match &envelope.event {
+            Event::RunStarted { caller, .. } => Some(caller.clone()),
+            _ => None,
+        })
+        .flatten()
 }
 
 /// The reconciliation evidence: the recorded write intent, plus when it was
