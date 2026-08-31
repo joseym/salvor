@@ -80,6 +80,15 @@ export interface RunState {
   firstRecordedAt?: string;
   lastRecordedAt?: string;
   driver?: Driver;
+  /**
+   * The name of whoever asked for this run, read off its `RunStarted`. On a
+   * server with a bearer configured this is the name the token was declared
+   * under; from the CLI it is the operating system user who ran the verb.
+   * Absent when the run recorded no caller, which is every run a
+   * pass-through server started and every run recorded before the field
+   * existed. See {@link RunSummary.caller}.
+   */
+  caller?: string;
   raw: Record<string, unknown>;
 }
 
@@ -119,6 +128,13 @@ export interface RunSummary {
    * `lastRecordedAt` has gone stale.
    */
   driver?: Driver;
+  /**
+   * The name of whoever asked for this run, read off its `RunStarted`: the
+   * token's name on a server with a bearer configured, the operating system
+   * user from the CLI. Absent when the run recorded no caller, which a
+   * pass-through server never records, and never a fabricated default.
+   */
+  caller?: string;
   raw: Record<string, unknown>;
 }
 
@@ -447,6 +463,7 @@ export function parseRunState(obj: Json): RunState {
     firstRecordedAt: obj.first_recorded_at as string | undefined,
     lastRecordedAt: obj.last_recorded_at as string | undefined,
     driver: parseDriver(obj.driver),
+    caller: obj.caller as string | undefined,
     raw: obj,
   };
 }
@@ -470,6 +487,7 @@ export function parseRunSummary(obj: Json): RunSummary {
     agentDefHash: obj.agent_def_hash as string | undefined,
     labels: obj.labels as Labels | undefined,
     driver: parseDriver(obj.driver),
+    caller: obj.caller as string | undefined,
     raw: obj,
   };
 }
