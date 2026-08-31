@@ -150,6 +150,7 @@ use uuid::Uuid;
 use crate::error::ApiError;
 use crate::executor::{ModelExecutor, ModelStream};
 use crate::state::{AppState, ClientRunLease, LeaseRelease};
+use crate::tokens;
 use std::sync::Arc;
 
 /// The header carrying the per-run drive token on a guarded append.
@@ -419,7 +420,9 @@ pub async fn open(
             let presented = headers
                 .get(DRIVE_TOKEN_HEADER)
                 .and_then(|value| value.to_str().ok());
-            if presented != Some(held.drive_token.as_str()) {
+            // Constant-time, like every other comparison of secret material
+            // in this crate: a drive token is a lease credential.
+            if !presented.is_some_and(|token| tokens::secrets_equal(token, &held.drive_token)) {
                 return Err(lease_held(run_id, remaining));
             }
             // The holder re-opening its own run. It is the only writer either
@@ -2616,10 +2619,12 @@ fn authorize_drive(
             "run {} requires a drive token in the `{DRIVE_TOKEN_HEADER}` header",
             run_id.as_uuid()
         ))),
-        Some(token) if token != lease.drive_token => Err(ApiError::InvalidDriveToken(format!(
-            "the presented drive token is not the current lease for run {}",
-            run_id.as_uuid()
-        ))),
+        Some(token) if !tokens::secrets_equal(token, &lease.drive_token) => {
+            Err(ApiError::InvalidDriveToken(format!(
+                "the presented drive token is not the current lease for run {}",
+                run_id.as_uuid()
+            )))
+        }
         Some(_) => {
             // The driver presented its current token: it is alive. Refresh the
             // lease's `last_seen` so the liveness evidence on GET /v1/runs reads

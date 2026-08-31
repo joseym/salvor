@@ -39,7 +39,7 @@ use salvor_core::{EventEnvelope, RunId};
 use crate::auth::Auth;
 use crate::client_tools::ClientToolRegistry;
 use crate::executor::ModelExecutor;
-use crate::tokens::TokenStore;
+use crate::tokens::{self, TokenStore};
 use crate::tool_registry::ToolRegistry;
 
 /// The format a submitted agent definition is written in.
@@ -775,7 +775,10 @@ impl AppState {
         let Some(lease) = leases.get(&run_id) else {
             return LeaseRelease::NoLease;
         };
-        if presented != Some(lease.drive_token.as_str()) {
+        // Constant-time, like every other comparison of secret material in
+        // this crate: a drive token is a lease credential, so a timing
+        // difference here would be a way to learn one byte at a time.
+        if !presented.is_some_and(|token| tokens::secrets_equal(token, &lease.drive_token)) {
             return LeaseRelease::NotTheHolder;
         }
         leases.remove(&run_id);
@@ -798,7 +801,7 @@ impl AppState {
         let Some(lease) = leases.get(&run_id) else {
             return false;
         };
-        if keep == Some(lease.drive_token.as_str()) {
+        if keep.is_some_and(|token| tokens::secrets_equal(token, &lease.drive_token)) {
             return false;
         }
         leases.remove(&run_id);
