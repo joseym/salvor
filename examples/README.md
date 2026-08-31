@@ -5,9 +5,10 @@ point: the smallest fixture there is, the no-key local-model path, the CLI
 over real MCP-backed agents, the durability guarantees on their own, the two
 library tiers, the polyglot control plane over HTTP in both its server-driven
 and client-driven modes, the v0.4 graph authoring surface driven from the
-CLI and from application code, and the durable timer a run parks on while
-holding no process at all. The ones marked "no key" run for free against a
-local or scripted model.
+CLI and from application code, the durable timer a run parks on while
+holding no process at all, and the anchor that catches what a store cannot
+check about itself. The ones marked "no key" run for free against a local or
+scripted model.
 
 | Directory | Shows | Run it |
 |---|---|---|
@@ -19,6 +20,7 @@ local or scripted model.
 | [`support-ops/`](support-ops/) | A product-shaped support-triage agent whose MCP tools show a real Read/Write/Idempotent effect mix. Two tools carry the same idempotency hint and get opposite operator treatment, because the effect system records the operator's determination of what a tool does, whatever the tool claims. Runs under a budget rail. | `salvor --store /tmp/salvor-support-ops.db run --agent examples/support-ops/agent.toml --input @examples/support-ops/input.json` (needs a model; see the README) |
 | [`wasm-tools/`](wasm-tools/) | Untrusted code as a tool: a WebAssembly component (the `salvor:tool@0.1.0` WIT world) runs in a wasmtime sandbox with operator-declared effect, limits, and grants; the binary's self-description is never used. Includes the Python (componentize-py) and JavaScript (jco) guest recipes. | Build the guest first (see [`wasm-tools/README.md`](wasm-tools/README.md)), then `salvor --store /tmp/salvor-wasm.db run --agent examples/wasm-tools/agent.toml --input @examples/wasm-tools/input.json` |
 | [`reconciliation/`](reconciliation/) | The write-safety guarantee on its own: a run killed mid-write leaves a dangling write intent, resume refuses with `NeedsReconciliation` and shows the recorded intent as evidence, and `salvor resolve` records the outcome by hand. The write happens exactly once. | `bash examples/reconciliation/run.sh`; no key |
+| [`anchor/`](anchor/) | The tamper-evidence guarantee and the limit it cannot close on its own: `salvor anchor` writes every run's head hash and length to a file kept off the box, and `salvor verify --against` checks a store back against it. One run is rewritten from its first event forward with every hash and the recorded head recomputed, through SQLite and SHA-256 and no salvor code at all, and `list` and `history` read the forgery back as clean history while the anchor names it `rewritten` and exits 1. A run cut short comes back `shortened`, a run that grew honestly since the anchor is still intact, the two checks that would mean nothing (an anchor over zero runs, a mistyped store path) are refused with exit 2 rather than passed, and re-anchoring over the file that would catch the rewrite is refused. | `bash examples/anchor/run.sh`; no key |
 | [`compliance/`](compliance/) | A compliance control in the library tier: a consequential Write is gated behind a mandatory, recorded human approval, and the append-only event log is the audit trail. Approve issues the action exactly once; reject records the decision and writes nothing. | `cargo run -p salvor-runtime --example compliance_gate` (see the README for the approve and reject steps); no key |
 | [`todo-agent/`](todo-agent/) | The batteries-included library tier: `Agent::builder()` plus a `Runtime`, with typed native tools and the built-in loop driving them. | To depend on the library: `cargo add salvor`; to run the sample: `cargo run -p salvor-runtime --example todo_agent` |
 | [`approval-loop/`](approval-loop/) | The library-first tier: a hand-written async function over the public `RunCtx`, with no built-in loop, and with the same durability, replay, and human-in-the-loop suspension. | To depend on the library: `cargo add salvor`; to run the sample: `cargo run -p salvor-runtime --example approval_loop` |
