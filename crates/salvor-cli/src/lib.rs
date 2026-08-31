@@ -197,6 +197,11 @@ pub async fn dispatch(cli: Cli) -> Result<u8> {
             crate::cli::GraphCommand::Schema => commands::graph_schema(),
             crate::cli::GraphCommand::Run(args) => commands::graph_run(store, args).await,
         },
+        // `token new` reads and writes a token file only; it opens no store
+        // and starts no server.
+        Command::Token { command } => match command {
+            crate::cli::TokenCommand::New(args) => commands::token_new(args),
+        },
     }
 }
 
