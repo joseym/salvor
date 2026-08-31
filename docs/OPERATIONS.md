@@ -169,16 +169,36 @@ characters, exactly what `sha256sum` prints. `role` is reserved for a
 later build and loads clean today; any other per-token key is ignored
 with a warning naming it, so a misspelled `hash` is visible in the log.
 
+A token `salvor token new` (below) mints is `sv_` then 43 base62
+characters (32 bytes from the OS CSPRNG) then `_` then a 6-character
+checksum: `sv_<43 chars>_<6 chars>`. The checksum is a copy-paste
+guard, not a security check: `hash` covers the whole presented string,
+checksum included, so verification never decodes a token to check it.
+`hash` itself carries no length signal about what produced it, so a
+token pasted straight into the file by hand (its hash computed
+separately) has no shape check at all; `token new --stdin` imports one
+minted elsewhere and holds it to the same 16-byte floor `--auth-token`
+checks.
+
 The file must be mode `0600` or tighter and owned by the user serving.
 Both are checked at startup and again on every read, so a file loosened
 or handed to another owner after the server started is refused on its
 next read: the last set that loaded stays in force and one warning
-names the file and the mode. Start it right:
+names the file and the mode. `salvor token new` checks the identical
+two things before it writes, so a file that verb accepts is a file
+`serve --token-file` accepts, and a file it refuses names the same fix.
+Start it right:
 
 ```sh
-install -m 0600 /dev/null /etc/salvor/tokens.toml
+salvor token new ci --file /etc/salvor/tokens.toml --create
 salvor serve --bind 127.0.0.1:8080 --token-file /etc/salvor/tokens.toml
 ```
+
+`--create` makes the file at mode `0600` if it is not already there;
+drop it once the file exists and `token new` only ever appends to it.
+The token itself prints once, to stdout, and nowhere else; only its
+SHA-256 goes into the file, so losing the terminal scrollback loses the
+only copy.
 
 The server refuses to start, before it binds the port, on a file that
 is readable by group or other, is owned by another user, is not valid
@@ -198,26 +218,23 @@ when the modification time or the length differs from the last read, so
 adding a token and revoking one both take effect on the next request.
 There is no reload signal and no restart.
 
-Mint a token. The wire format is `sv_` then 43 base62 characters then
-`_` then a 6-character checksum, and the stored hash covers the whole
-string:
+Mint a token under a new name, alongside the one it replaces. The wire
+format is `sv_` then 43 base62 characters then `_` then a 6-character
+checksum (a copy-paste guard, not a security check: see
+`salvor_server::tokens`'s module docs for why verification never
+decodes it), and `salvor token new` is the one place that assembles
+one, appends `[tokens.ci-2026-09]` with its SHA-256, and never writes
+the token itself anywhere but this terminal:
 
 ```sh
-NEW="sv_$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 43)_$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom | head -c 6)"
-printf '%s' "$NEW" | shasum -a 256
+NEW=$(salvor token new ci-2026-09 --file /etc/salvor/tokens.toml)
 ```
 
-Add it to the file under a new name, alongside the one it replaces:
-
-```sh
-cat >> /etc/salvor/tokens.toml <<EOF
-
-[tokens.ci-2026-09]
-hash = "<the hash printed above>"
-EOF
-```
-
-Verify it, against the address `--bind` opened:
+`token new` refuses before it touches the file if the name is already
+taken, is not `[a-z0-9-]{1,64}`, or the file is missing, wrong mode, or
+wrong owner, each refusal naming the fix (`--create` for a missing
+file, `chmod`/`chown` for the other two). Verify the new token, against
+the address `--bind` opened:
 
 ```sh
 curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $NEW" \
@@ -226,7 +243,8 @@ curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $NEW" \
 ```
 
 Hand it to the caller, wait for that caller to be using it, then revoke
-the old one by deleting its table from the file:
+the old one by deleting its table from the file. There is no `salvor
+token` verb for this: revoking is a plain edit.
 
 ```sh
 curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $OLD" \
