@@ -218,8 +218,8 @@ async fn an_anchor_is_written_and_an_untouched_store_verifies() {
 }
 
 /// A run that has grown since the anchor is intact: the anchor commits to the
-/// prefix it saw, and ordinary appending is not a discrepancy. A run started
-/// after the anchor is reported as new and fails nothing.
+/// prefix it recorded, and ordinary appending is not a discrepancy. A run
+/// started after the anchor is reported as new and fails nothing.
 #[tokio::test]
 async fn growth_since_the_anchor_is_intact_and_a_later_run_is_new() {
     let dir = tempdir().expect("tempdir");
