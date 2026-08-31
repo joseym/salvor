@@ -32,7 +32,7 @@ use std::error::Error as StdError;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use salvor_core::{
     Event, EventEnvelope, PendingCall, RunId, RunStatus, derive_state, log_is_client_driven,
 };
@@ -2061,9 +2061,32 @@ pub async fn serve(store_path: &Path, args: ServeArgs) -> Result<u8> {
             "client-driven run lease TTL set from SALVOR_CLIENT_LEASE_TTL_SECS"
         );
     }
+    // The named-token file, loaded and checked before a port is bound: a file
+    // readable by group or other, owned by another user, malformed, or empty
+    // is a refusal to start, not a server running on whatever parsed. The
+    // store re-reads the file when it changes, so add and revoke need no
+    // restart from here on.
+    if let Some(path) = &args.token_file {
+        let store = salvor_server::TokenStore::load(path)
+            .with_context(|| format!("loading the token file {}", path.display()))?;
+        let names: Vec<String> = store
+            .current()
+            .names()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        tracing::info!(
+            file = %path.display(),
+            tokens = ?names,
+            "named bearer tokens loaded; the file is re-read when it changes"
+        );
+        state = state.with_token_file(store);
+    }
     if let Some(env_name) = &args.auth_token {
         match std::env::var(env_name) {
             Ok(token) if !token.is_empty() => {
+                salvor_server::tokens::check_single_token(&token)
+                    .map_err(|detail| anyhow!("--auth-token names ${env_name}, and {detail}"))?;
                 state = state.with_auth_token(token);
                 tracing::info!("bearer auth required (token read from ${env_name})");
             }
