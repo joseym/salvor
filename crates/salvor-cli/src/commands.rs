@@ -78,7 +78,7 @@ use crate::serve_kill;
 /// It changes only where those three things come from: everything below the
 /// resolution is the same store, the same runtime, and the same event log a
 /// `--agent`/`--input` run gets.
-pub async fn run(store_path: &Path, args: RunArgs) -> Result<u8> {
+pub async fn run(store_path: &Path, caller: Option<&str>, args: RunArgs) -> Result<u8> {
     // Resolve the two ways of naming a run into the one shape the rest of this
     // handler works in. clap already guarantees exactly one of them is present
     // (see `RunArgs`), so the `None` arms below are unreachable in practice;
@@ -128,7 +128,10 @@ pub async fn run(store_path: &Path, args: RunArgs) -> Result<u8> {
     // The agent carries the resolved prompt-recording flag (per-agent config
     // over SALVOR_RECORD_PROMPTS over off); hand it to the runtime so the
     // RunCtx driving this run records the body only when opted in.
-    let mut runtime = Runtime::new(store.clone()).with_record_prompts(agent.record_prompts());
+    let mut runtime = with_caller(
+        Runtime::new(store.clone()).with_record_prompts(agent.record_prompts()),
+        caller,
+    );
     // Labels set on the agent definition (via the Rust builder; there is no
     // TOML surface for them yet) ride along the same way record_prompts does.
     if let Some(labels) = agent.labels() {
@@ -190,7 +193,7 @@ fn contextualize_auth_error(error: RuntimeError, config: &AgentConfig) -> anyhow
 /// evidence; a parked run (suspended or budget-exceeded) needs `--input` and
 /// resumes; a crashed run (running or awaiting a step) recovers with no input;
 /// a finished run is reported and left alone.
-pub async fn resume(store_path: &Path, args: ResumeArgs) -> Result<u8> {
+pub async fn resume(store_path: &Path, caller: Option<&str>, args: ResumeArgs) -> Result<u8> {
     let run_id = parse_run_id(&args.run_id)?;
     let uuid = run_id.as_uuid().to_string();
     let store = open_store(store_path)?;
@@ -293,7 +296,10 @@ pub async fn resume(store_path: &Path, args: ResumeArgs) -> Result<u8> {
     let agent_path = single_agent(&args.agents)?;
     let config = AgentConfig::load(agent_path)?;
     let (agent, servers) = agent_config::build_agent(&config, agent_path, false).await?;
-    let mut runtime = Runtime::new(store.clone()).with_record_prompts(agent.record_prompts());
+    let mut runtime = with_caller(
+        Runtime::new(store.clone()).with_record_prompts(agent.record_prompts()),
+        caller,
+    );
     if let Some(labels) = agent.labels() {
         runtime = runtime.with_labels(labels.clone());
     }
@@ -380,7 +386,7 @@ pub async fn resume(store_path: &Path, args: ResumeArgs) -> Result<u8> {
 /// a file the operator gave could not itself be loaded even if no due run
 /// currently needs it (see [`check_wake_files`]), so the crontab line an
 /// operator is about to save can be smoke-tested by running it.
-pub async fn wake(store_path: &Path, args: WakeArgs) -> Result<u8> {
+pub async fn wake(store_path: &Path, caller: Option<&str>, args: WakeArgs) -> Result<u8> {
     let store = open_store(store_path)?;
     // The real clock, read once, so every run in this sweep is measured
     // against one instant rather than against a time that drifts as the sweep
@@ -455,6 +461,7 @@ pub async fn wake(store_path: &Path, args: WakeArgs) -> Result<u8> {
         let events_before = log_before.len();
         let outcome = resume(
             store_path,
+            caller,
             ResumeArgs {
                 run_id: uuid.clone(),
                 agents: args.agents.clone(),
@@ -1134,7 +1141,7 @@ pub async fn fork(store_path: &Path, args: ForkArgs) -> Result<u8> {
 /// prints, matching what a graph run's own parked report already does. The
 /// log itself, not the presence of `--graph`, decides whether that command
 /// hints at a graph run: see [`render::resolved_report`].
-pub async fn resolve(store_path: &Path, args: ResolveArgs) -> Result<u8> {
+pub async fn resolve(store_path: &Path, caller: Option<&str>, args: ResolveArgs) -> Result<u8> {
     let run_id = parse_run_id(&args.run_id)?;
     let uuid = run_id.as_uuid().to_string();
     let output = parse_input(&args.output)?;
@@ -1149,7 +1156,7 @@ pub async fn resolve(store_path: &Path, args: ResolveArgs) -> Result<u8> {
     let graph_run = is_graph_run(&log);
     let client_driven = log_is_client_driven(&log);
 
-    let runtime = Runtime::new(store);
+    let runtime = with_caller(Runtime::new(store), caller);
     match runtime.resolve(run_id, output).await {
         Ok(_) => {
             print!(
@@ -1178,6 +1185,18 @@ pub async fn resolve(store_path: &Path, args: ResolveArgs) -> Result<u8> {
     }
 }
 
+/// Attaches the caller name to a runtime, when the command resolved one.
+///
+/// `None` leaves the runtime unnamed, which records nothing. That is what a
+/// build with no user account to read passes, and it is honest: a name nobody
+/// supplied is not worth inventing.
+fn with_caller(runtime: Runtime, caller: Option<&str>) -> Runtime {
+    match caller {
+        Some(name) => runtime.with_caller(name),
+        None => runtime,
+    }
+}
+
 /// `salvor abandon`: retire a run by hand, appending a terminal `RunAbandoned`.
 ///
 /// The operator's "we do not care about this run anymore" path, for a run that
@@ -1187,7 +1206,7 @@ pub async fn resolve(store_path: &Path, args: ResolveArgs) -> Result<u8> {
 /// dangling write is abandoned with the outstanding write recorded as
 /// `unresolved_write`, so the receipt states plainly that the write stays
 /// unresolved. Refuses (exit 1) a run that is already terminal.
-pub async fn abandon(store_path: &Path, args: AbandonArgs) -> Result<u8> {
+pub async fn abandon(store_path: &Path, caller: Option<&str>, args: AbandonArgs) -> Result<u8> {
     let run_id = parse_run_id(&args.run_id)?;
     let uuid = run_id.as_uuid().to_string();
     let store = open_store(store_path)?;
@@ -1195,7 +1214,7 @@ pub async fn abandon(store_path: &Path, args: AbandonArgs) -> Result<u8> {
         bail!("no run {uuid} in this store");
     }
 
-    let runtime = Runtime::new(store.clone());
+    let runtime = with_caller(Runtime::new(store.clone()), caller);
     match runtime.abandon(run_id, args.reason).await {
         Ok(_) => {
             // Re-read to report the appended position and the recorded

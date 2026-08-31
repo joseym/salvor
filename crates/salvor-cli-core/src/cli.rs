@@ -2,8 +2,9 @@
 //!
 //! Keeping the parse tree in one module (separate from the handlers in
 //! `salvor_cli::commands`) means the shape of the CLI reads top to bottom here,
-//! and the handlers take already-parsed, typed arguments. The one global
-//! option, `--store`, is defined once and shared by every subcommand.
+//! and the handlers take already-parsed, typed arguments. The two global
+//! options, `--store` and `--caller`, are defined once and shared by every
+//! subcommand.
 
 use std::path::PathBuf;
 
@@ -40,6 +41,22 @@ pub struct Cli {
         value_name = "PATH"
     )]
     pub store: PathBuf,
+
+    /// The name to record as the caller on the events this command writes.
+    ///
+    /// A verb that starts, resumes, resolves, or abandons a run records who
+    /// asked for it. Left unset, that is the operating system user this
+    /// process runs as; this flag names someone else, for a wrapper script or
+    /// a job runner that knows better than the account it happens to run
+    /// under. The precedence is the flag, then `SALVOR_CALLER`, then the
+    /// operating system user, which `salvor_cli::caller_name` resolves.
+    ///
+    /// It is a label on the events, never a credential: nothing checks it and
+    /// nothing is granted by it. A store written by whoever can write the file
+    /// carries whatever name they chose, which is why the server takes its own
+    /// name from a verified token instead.
+    #[arg(long, global = true, env = "SALVOR_CALLER", value_name = "NAME")]
+    pub caller: Option<String>,
 
     /// The subcommand to run.
     #[command(subcommand)]

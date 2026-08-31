@@ -14,6 +14,16 @@
         "global": true,
         "help": "Path to the SQLite event store",
         "possible_values": null
+      },
+      {
+        "long": "--caller",
+        "short": null,
+        "value_name": "NAME",
+        "required": false,
+        "repeatable": false,
+        "global": true,
+        "help": "The name to record as the caller on the events this command writes",
+        "possible_values": null
       }
     ],
     "subcommands": [

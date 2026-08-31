@@ -166,6 +166,11 @@ struct ClapMessage {
 #[derive(Serialize)]
 struct CliDto {
     store: String,
+    /// The global `--caller`, omitted from the wire form when unset, so a
+    /// parse that names nobody serializes exactly as it did before the flag
+    /// existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    caller: Option<String>,
     command: CommandDto,
 }
 
@@ -322,6 +327,7 @@ impl From<&Cli> for CliDto {
     fn from(cli: &Cli) -> Self {
         CliDto {
             store: path(&cli.store),
+            caller: cli.caller.clone(),
             command: (&cli.command).into(),
         }
     }
