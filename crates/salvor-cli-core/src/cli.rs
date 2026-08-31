@@ -837,13 +837,33 @@ pub struct ServeArgs {
     #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:8080")]
     pub bind: String,
     /// The NAME of an environment variable holding a shared-secret bearer
-    /// token. The variable must be set and non-empty: every request must then
-    /// carry `Authorization: Bearer <that value>`, and the server refuses to
-    /// start if the named variable is unset or empty. Omit this flag
-    /// entirely to run without auth, trusting a reverse proxy to guard it.
-    /// Never the token itself, matching how agent files name key variables.
+    /// token. The variable must be set and non-empty, and its value must
+    /// carry at least 16 bytes: every request must then carry
+    /// `Authorization: Bearer <that value>`, and the server refuses to start
+    /// if the named variable is unset, empty, or shorter than the floor.
+    /// Omit this flag and `--token-file` both to run without auth, trusting a
+    /// reverse proxy to guard it. Never the token itself, matching how agent
+    /// files name key variables.
     #[arg(long, value_name = "ENV_VAR")]
     pub auth_token: Option<String>,
+    /// A TOML file of NAMED bearer tokens, each stored as the SHA-256 hash of
+    /// the token rather than the token itself, so a copy of the file hands
+    /// nobody a working credential.
+    ///
+    /// One `[tokens.<name>]` table per token with a `hash` key of 64
+    /// lowercase hex characters. The file must be mode 0600 or tighter and
+    /// owned by the user serving, and both are checked on every read, so a
+    /// file loosened after the server started is refused on its next read.
+    /// The server re-reads the file when it changes, so adding a token and
+    /// revoking one both take effect on the next request with no restart, and
+    /// a reload that changes the set logs the names it added, removed, and
+    /// rotated.
+    ///
+    /// Unions with `--auth-token`: with both set, a request matching either
+    /// one is let through, and a request matching a named token is attributed
+    /// to that name.
+    #[arg(long, value_name = "FILE")]
+    pub token_file: Option<PathBuf>,
     /// Kill the running `salvor serve` instead of serving. With no value,
     /// discovers every running `salvor serve` (by inspecting the process
     /// table, since there are no pid files): zero found is reported and this

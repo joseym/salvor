@@ -527,7 +527,17 @@
             "required": false,
             "repeatable": false,
             "global": false,
-            "help": "The NAME of an environment variable holding a shared-secret bearer token. The variable must be set and non-empty: every request must then carry `Authorization: Bearer <that value>`, and the server refuses to start if the named variable is unset or empty. Omit this flag entirely to run without auth, trusting a reverse proxy to guard it. Never the token itself, matching how agent files name key variables",
+            "help": "The NAME of an environment variable holding a shared-secret bearer token. The variable must be set and non-empty, and its value must carry at least 16 bytes: every request must then carry `Authorization: Bearer <that value>`, and the server refuses to start if the named variable is unset, empty, or shorter than the floor. Omit this flag and `--token-file` both to run without auth, trusting a reverse proxy to guard it. Never the token itself, matching how agent files name key variables",
+            "possible_values": null
+          },
+          {
+            "long": "--token-file",
+            "short": null,
+            "value_name": "FILE",
+            "required": false,
+            "repeatable": false,
+            "global": false,
+            "help": "A TOML file of NAMED bearer tokens, each stored as the SHA-256 hash of the token rather than the token itself, so a copy of the file hands nobody a working credential",
             "possible_values": null
           },
           {
