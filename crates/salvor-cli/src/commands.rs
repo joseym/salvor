@@ -63,7 +63,7 @@ use crate::checkout;
 use crate::cli::{
     AbandonArgs, AgentHashArgs, AgentValidateArgs, AnchorArgs, BuildArgs, CompletionsArgs,
     ForkArgs, GraphRunArgs, GraphValidateArgs, HistoryArgs, ListArgs, ReplayArgs, ResolveArgs,
-    ResumeArgs, RunArgs, ServeArgs, VerifyArgs, WakeArgs,
+    ResumeArgs, RunArgs, ServeArgs, TokenNewArgs, VerifyArgs, WakeArgs,
 };
 use crate::dev_server::DevServer;
 use crate::render;
@@ -2173,6 +2173,157 @@ fn load_client_tool(path: &Path) -> Result<ClientToolDecl> {
         .with_context(|| format!("reading the client tool declaration {}", path.display()))?;
     toml::from_str(&text)
         .with_context(|| format!("parsing the client tool declaration {}", path.display()))
+}
+
+/// `salvor token new NAME --file FILE`: add one named bearer token to a token
+/// file, minted from the OS CSPRNG or, with `--stdin`, read in from another
+/// source.
+///
+/// Every refusal here is checked before the token itself is obtained, so a
+/// bad name or a bad file never costs a mint or a stdin read: the name's
+/// shape first (the cheapest check), then the file (missing without
+/// `--create`, or wrong mode or owner through
+/// `salvor_server::tokens::check_file_guard`, the exact function
+/// `salvor serve --token-file` runs on every read, so the two refuse the
+/// identical file for the identical reason), then whether the name is
+/// already taken. Only the token itself is ever printed, to stdout, and only
+/// once; the file records nothing but its SHA-256.
+pub fn token_new(args: TokenNewArgs) -> Result<u8> {
+    if !valid_token_name(&args.name) {
+        bail!(
+            "`{}` is not a valid token name: a name is 1 to 64 characters of lowercase letters, \
+             digits, and hyphens (`[a-z0-9-]{{1,64}}`)",
+            args.name
+        );
+    }
+
+    if !args.file.exists() {
+        if !args.create {
+            bail!(
+                "token file {} does not exist; pass --create to make one at mode 0600, or point \
+                 --file at an existing token file",
+                args.file.display()
+            );
+        }
+        create_token_file(&args.file)?;
+    }
+
+    salvor_server::tokens::check_file_guard(&args.file)
+        .with_context(|| format!("checking the token file {}", args.file.display()))?;
+
+    let existing = std::fs::read_to_string(&args.file)
+        .with_context(|| format!("reading the token file {}", args.file.display()))?;
+    if token_name_present(&existing, &args.name)? {
+        bail!(
+            "token file {} already has a `{}` entry; choose a different name, or delete that \
+             table first if you mean to replace it",
+            args.file.display(),
+            args.name
+        );
+    }
+
+    let token = if args.stdin {
+        let mut raw = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut raw)
+            .context("reading a token from stdin")?;
+        let trimmed = raw.trim_end_matches(['\n', '\r']);
+        salvor_server::tokens::check_single_token(trimmed)
+            .map_err(|detail| anyhow!("--stdin: {detail}"))?;
+        trimmed.to_owned()
+    } else {
+        salvor_server::tokens::mint()
+            .map_err(|error| anyhow!("minting a token: the OS randomness source failed: {error}"))?
+    };
+
+    let hex: String = salvor_server::tokens::digest(&token)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+
+    eprintln!(
+        "token `{}` {}; shown once below and never again, copy it now",
+        args.name,
+        if args.stdin { "imported" } else { "minted" }
+    );
+    println!("{token}");
+
+    append_token_entry(&args.file, &args.name, &hex)?;
+    eprintln!(
+        "appended `{}` to {} (hash only; the token itself is not stored)",
+        args.name,
+        args.file.display()
+    );
+
+    Ok(0)
+}
+
+/// Whether `name` is `[a-z0-9-]{1,64}`, the shape `salvor token new` requires.
+fn valid_token_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// Creates an empty token file at mode 0600, refusing if one already exists
+/// (a TOCTOU guard between the existence check above and this call, not just
+/// a convenience). On a platform without unix permissions the file is
+/// created with whatever mode the platform defaults to; there is nothing to
+/// set.
+fn create_token_file(path: &Path) -> Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+        .open(path)
+        .with_context(|| format!("creating the token file {}", path.display()))?;
+    Ok(())
+}
+
+/// Whether `existing` (the token file's current text) already declares a
+/// `[tokens.<name>]` table. An empty or all-whitespace file (a freshly
+/// created one) declares none, without needing to be valid TOML at all,
+/// unlike `TokenSet::parse`, which refuses an empty file outright for the
+/// server's own reasons.
+fn token_name_present(existing: &str, name: &str) -> Result<bool> {
+    if existing.trim().is_empty() {
+        return Ok(false);
+    }
+    let doc: toml::Value = existing
+        .parse()
+        .context("the token file is not valid TOML")?;
+    Ok(doc
+        .get("tokens")
+        .and_then(|tokens| tokens.as_table())
+        .is_some_and(|table| table.contains_key(name)))
+}
+
+/// Appends `[tokens.<name>]\nhash = "<hex>"\n` to the token file, with a
+/// blank line ahead of it when the file already carries content, matching
+/// the spacing between tables in `docs/OPERATIONS.md`'s own examples.
+fn append_token_entry(path: &Path, name: &str, hex: &str) -> Result<()> {
+    let existing = std::fs::read_to_string(path)
+        .with_context(|| format!("reading the token file {}", path.display()))?;
+    let mut block = String::new();
+    if !existing.is_empty() {
+        if !existing.ends_with('\n') {
+            block.push('\n');
+        }
+        block.push('\n');
+    }
+    block.push_str(&format!("[tokens.{name}]\nhash = \"{hex}\"\n"));
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .with_context(|| format!("opening the token file {} to append", path.display()))?;
+    std::io::Write::write_all(&mut file, block.as_bytes())
+        .with_context(|| format!("appending to the token file {}", path.display()))?;
+    Ok(())
 }
 
 /// Waits for Ctrl-C (`SIGINT`) or, on Unix, `SIGTERM` (what `salvor serve

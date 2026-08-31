@@ -165,6 +165,48 @@ pub enum Command {
         #[command(subcommand)]
         command: GraphCommand,
     },
+    /// Bearer token file tools, over the file `salvor serve --token-file`
+    /// reads. Reads no store and starts no server.
+    Token {
+        /// The token subcommand to run.
+        #[command(subcommand)]
+        command: TokenCommand,
+    },
+}
+
+/// The verbs under `salvor token`.
+#[derive(Debug, Subcommand)]
+pub enum TokenCommand {
+    /// Add a named bearer token to a token file: mint one from the OS CSPRNG
+    /// (or read one from stdin with `--stdin`), print it once, and append its
+    /// SHA-256 under `[tokens.<name>]`.
+    New(TokenNewArgs),
+}
+
+/// Arguments to `token new`.
+#[derive(Debug, Args)]
+pub struct TokenNewArgs {
+    /// The name to add: `[a-z0-9-]`, 1 to 64 characters. This is the name an
+    /// auth-failure or auth-success log line carries; it is never the token
+    /// itself.
+    #[arg(value_name = "NAME")]
+    pub name: String,
+    /// The token file to append to (the same file `--token-file` names).
+    /// Refused unless it is mode 0600 or tighter and owned by the user
+    /// running this command, the same rules `salvor serve --token-file`
+    /// checks on every read.
+    #[arg(long, value_name = "FILE")]
+    pub file: PathBuf,
+    /// Create `--file` at mode 0600 if it does not already exist, rather than
+    /// refusing on a missing file.
+    #[arg(long)]
+    pub create: bool,
+    /// Read the token from stdin instead of minting one, for importing a
+    /// token minted elsewhere (a value another tool generated, or one moved
+    /// from another token file). Held to the same 16-byte floor
+    /// `--auth-token` checks; trailing newline is trimmed.
+    #[arg(long)]
+    pub stdin: bool,
 }
 
 /// The verbs under `salvor agent`.
