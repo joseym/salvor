@@ -1711,7 +1711,7 @@ Refusals, each of which writes nothing:
 - a different `request_hash` at an already-recorded position: `409 divergence`;
 - a non-model event at that position: `409 divergence`;
 - an intent at that position that this SERVER performed: `409 divergence`. The
-  client's cursor and the log disagree about who owns that step;
+  client's cursor and the log point to different owners of that step;
 - a `seq` the log is not ready for: `409 divergence`.
 
 A re-post at a recorded position with the same hash is a `200` that writes

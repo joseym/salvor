@@ -47,8 +47,8 @@ Read it back at any time with `salvor history <run-id>`.
 Two things to note. Event 4 records the tool call **before** the tool runs,
 which is what the next section depends on. Events 1 and 6 are the driver's
 clock observations, one per loop iteration: a replay has to see the same
-`now()` the first run saw, so the reading is logged rather than read from the
-ambient clock.
+`now()` the first run recorded, so the reading is logged rather than read from
+the ambient clock.
 
 ## Now kill it
 

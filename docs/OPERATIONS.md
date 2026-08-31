@@ -266,7 +266,7 @@ every value the verification uses sits in the database beside the rows,
 so somebody who can write the file can rewrite a run from its first
 event and recompute every hash and the recorded head. The store then
 reads clean and says nothing, because there is nothing left inside it
-to disagree with.
+to compare against.
 
 An anchor is a copy of what the heads were, kept where that writer
 cannot reach it:
@@ -492,8 +492,8 @@ run 8a2b0c44-51e7-4f0a-b3d1-9c6e5f2a7d90: new since the anchor, 4 event(s). Not 
 Every run is named, including the ones that are fine, because an answer
 that lists only trouble cannot tell "nothing is wrong" from "nothing
 was checked". A run that has grown since the anchor is intact: the
-anchor commits to the prefix it saw, and ordinary appending is not a
-discrepancy. A run started after the anchor was taken is reported as
+anchor commits to the prefix it recorded, and ordinary appending is not
+a discrepancy. A run started after the anchor was taken is reported as
 new and fails nothing; the next anchor covers it. The store's path is
 never matched against the one recorded in the anchor, because a restore
 to a new path is ordinary.
@@ -785,8 +785,8 @@ salvor: events is append-only, DELETE refused
 ```
 
 Dropping those triggers and reaching around them with `sqlite3` does
-not get you anywhere useful either, because the hash chain notices. A
-delete off the end of a run is caught when the recorded chain head
+not get you anywhere useful either, because the hash chain detects it.
+A delete off the end of a run is caught when the recorded chain head
 disagrees with what is left; a delete or an edit in the middle breaks
 the `prev_hash` link at that position; and clearing the run's row from
 `chain_heads` to hide the first case is itself refused, because a run

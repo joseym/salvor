@@ -76,7 +76,7 @@ That prints a run id and the model's answer. `salvor history <run-id>` prints wh
    4  2026-07-14 02:44:30Z  RunCompleted         output "Durability means the run's state survives a crash: every event is written befor…
 ```
 
-Five events, each written before the run moved past it. Even the clock reading is recorded, because a replay has to see the same `now()` the first run saw.
+Five events, each written before the run moved past it. Even the clock reading is recorded, because a replay has to read the same `now()` the first run recorded.
 
 An agent answers in prose unless it says otherwise. Give the file an `[output_schema]` table and it answers in that shape instead: the runtime offers the model a `salvor_answer` tool carrying the schema, requires the call, and validates the answer before recording it, so the run's output is an object a caller reads a field from rather than a sentence it has to parse. `output_schema_path = "answer.json"` keeps a growing schema in its own file. A graph's `agent` node can declare a schema too, and for that node it wins; the agent file's is what every other run of that agent uses. The declaration is part of what the agent produces, so it is hashed into the agent's identity: adding it to an existing file mints a new `salvor agent hash`, and any graph pinning the old one needs repinning.
 
@@ -125,7 +125,7 @@ every verb, flag, and fixed value set:
 salvor completions zsh > ~/.zfunc/_salvor      # or bash, fish, elvish, powershell
 ```
 
-The dynamic one adds the values only your store knows: the run ids for
+The dynamic one adds the values only your store holds: the run ids for
 `history`, `replay`, `resume`, `abandon`, `resolve` and `fork`, and the agent
 identities for `salvor list --agent`. It works by calling `salvor` back on each
 Tab, so add one line to your shell's rc file rather than writing a script to disk:
