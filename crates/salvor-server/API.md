@@ -45,6 +45,17 @@ the name its `[tokens.<name>]` table carries, or to `token` for the
 extensions and appears in the server's log. It grants nothing different: any
 token that verifies reads and drives every run in the store.
 
+**The name is stamped into the log.** Every endpoint that appends a run's
+start, its resume, its abandonment, or a hand-recorded completion writes that
+verified name onto the event: `caller` on `RunStarted`, `Resumed`, and
+`RunAbandoned`, and `settled_caller` beside `settled_by` on the
+`ToolCallCompleted` that `resolve` records. The server takes the name from the
+token it verified and never from a request body, so no request can name itself
+something else, and no body field on any of these endpoints carries a caller.
+A server running with no bearer configured has no verified name to record and
+stamps nothing, which is what every event recorded before this field existed
+carries too.
+
 A refusal logs one `WARN` naming the source address and the outcome
 (`missing_header`, `bad_scheme`, `unknown_token`), never the presented value,
 and repeated refusals from one source are held 100ms doubling to a 2s cap
@@ -219,6 +230,11 @@ most 256 bytes; a label is a tag, not a payload. A run started with no
 object (see [`GET /v1/runs`](#get-v1runs) below): omit the field rather than
 send `{}` unless an explicit empty set is genuinely what is meant.
 
+The run's `RunStarted` also records `caller`, the name of the token this
+request came in under, stamped by the server (see [Auth](#auth)). It is not a
+body field: there is no way to ask for a different name, and a server with no
+bearer configured records none.
+
 - Response `201`:
 
 ```json
@@ -240,6 +256,7 @@ send `{}` unless an explicit empty set is genuinely what is meant.
     "step_count": 2,
     "agent_def_hash": "sha256:34e0...",
     "labels": { "build": "42", "env": "prod" },
+    "caller": "ci",
     "driver": "attached" }
 ] }
 ```
@@ -277,6 +294,14 @@ labels existed) *and* when it recorded an explicit empty set. The API never
 emits `"labels": {}`, because an empty map is not a fact worth asserting any
 more than an unknown count is. A run that recorded at least one label reports
 exactly what was recorded.
+
+**Who asked for the run: `caller`.** `caller` is the name recorded on the
+run's `RunStarted`, read from the same fold: the token's name for a run
+started through this API, the operating system user for one started by
+`salvor run`. It is omitted under the same absence rule as `labels`: a run
+that recorded no caller (one a pass-through server started, one from before
+the field existed) carries no key at all rather than a `null` or an invented
+name.
 
 **Liveness evidence: `driver`.** `driver` reports whether a driver is currently
 running the run: `"attached"` or `"none"`. It reads no log. It consults only
@@ -325,11 +350,15 @@ The run's derived state:
                "effect": "write", "idempotency_key": null },
   "first_recorded_at": "2026-...",
   "last_recorded_at": "2026-...",
+  "caller": "ci",
   "driver": "attached"
 }
 ```
 
 `404 unknown_run` when the id has no history and no run is being driven under it.
+
+`caller` is the same recorded name [`GET /v1/runs`](#get-v1runs) carries, under
+the same absence rule: omitted for a run that recorded none.
 
 `driver` is the same liveness evidence [`GET /v1/runs`](#get-v1runs) carries,
 under the same rules: `"attached"` / `"none"` for a non-terminal run, omitted
@@ -494,6 +523,11 @@ the same mapping `salvor resume` uses:
 { "input": <any json> }
 ```
 
+A resume that records a `Resumed` event stamps `caller` on it, the name of the
+token the request came in under (see [Auth](#auth)); the body cannot supply
+one. A crashed or sleeping run recovers rather than resuming, records no
+`Resumed`, and so records no caller either.
+
 - Response `202` for a run now driving:
 
 ```json
@@ -625,6 +659,14 @@ the field existed; `salvor log` renders it as `[Operator]`, in the same
 bracketed register a client-performed intent renders as `[Client]`. The app's
 own completions omit the key entirely.
 
+Beside it rides `settled_caller`, the name of the person: the token this
+request came in under (see [Auth](#auth)), stamped by the server and never
+taken from the body. The two answer different questions and a reader wants
+both. `settled_by` says a person recorded this completion rather than the run;
+`settled_caller` says which one. A server with no bearer configured records
+`settled_by` alone, and `salvor log` renders that as the same `[Operator]` it
+always did, `[Operator: ci]` when a name is recorded.
+
 **It clears a client-driven run's lease.** A dangling write is a driver that
 never came back to record what its write did, and this caller presents no drive
 token, so it is not that driver. Recording the completion over its head
@@ -688,6 +730,11 @@ refuses the abandonment.
 
 - `409 wrong_state` when the run is already terminal (completed, failed, or
   previously abandoned); there is nothing left to abandon.
+
+The recorded `RunAbandoned` carries `caller`, the name of the token the request
+came in under (see [Auth](#auth)). Abandonment is the one terminal a person
+appends by hand, so the record says which person; the body cannot supply the
+name, and a server with no bearer configured records none.
 - `404 unknown_run` when the id has no history.
 
 ## Graphs and graph runs
@@ -1307,6 +1354,16 @@ lease, so the run is client-driven, and its head is where that fact is recorded
 durably; a caller cannot set the marker anywhere else. The stamp happens before
 the retry comparison below, so re-appending the same `RunStarted` bytes is
 still the byte-identical no-op it was.
+
+A `RunStarted`, `Resumed`, or `RunAbandoned` event in the batch is stamped the
+same way with `caller`, the name of the token the batch came in under (see
+[Auth](#auth)), whatever the submitted event carried in that field. A client
+drives its own loop, but the name on these events is this server's to record,
+from the bearer it verified: a client cannot name itself. A server with no
+bearer configured stamps no name, and clears whatever the submitted event
+carried, so `caller` on a stored event always means "this server verified this
+name". Like the `driven_by` stamp above, it happens before the retry
+comparison, so re-appending the same bytes is still a byte-identical no-op.
 
 Every envelope's `recorded_at` is **server-stamped**: the server overwrites it
 with its own clock reading before folding or writing the event, regardless of

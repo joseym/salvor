@@ -278,6 +278,37 @@ for a minute starts over at 100ms, and a token that verifies drops that
 source's count immediately. There is no lockout at any count, so nobody
 is ever shut out of their own server by someone else's traffic.
 
+### Reading who asked for a run
+
+The `DEBUG` line above is per request and lives as long as the log file
+does. The durable answer is on the events themselves. With a bearer
+configured, the server stamps the verified token's name onto every event
+a caller acts through: `caller` on `RunStarted`, `Resumed`, and
+`RunAbandoned`, and `settled_caller` beside `settled_by` on the
+completion `resolve` records. `salvor run`, `salvor resume`, `salvor
+resolve`, and `salvor abandon` stamp the operating system user instead,
+or whatever `--caller <NAME>` (or `SALVOR_CALLER`) names.
+
+Read it back a run at a time with `salvor history <run-id> --store
+<path>`, which renders the name in the same bracketed register the
+performer and settler markers use:
+
+```
+   0  2026-08-31 14:02:11  RunStarted           agent sha256:34e0f4a input "ship it" [caller: ci]
+   6  2026-08-31 14:09:40  ToolCallCompleted    output {"charge_id":"po_1"} [Operator: ops]
+```
+
+Over the API, `GET /v1/runs` and `GET /v1/runs/{id}` both carry the
+run's `caller` key, folded from its `RunStarted`. A run that recorded no
+caller carries no key at all, which is what every run a pass-through
+server started and every run recorded before the field existed reports.
+`salvor history <run-id> --json` prints the untruncated envelopes, where
+`settled_caller` and the abandonment's `caller` are readable too.
+
+The name says which token was presented, or which account ran the CLI.
+It is recorded bytes like every other field, so it is worth what control
+of that credential is worth and no more; SECURITY.md sets out the limit.
+
 ## Backup and restore
 
 Everything durable is in the store: `--store` names it, else
