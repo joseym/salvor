@@ -1658,8 +1658,8 @@ fn not_checked(json: bool, message: &str) -> Result<u8> {
 /// Every run in the anchor is read back through `read_log`, which recomputes
 /// its whole chain, and then asked the one question the anchor can answer: does
 /// the chain still carry the anchored hash at the anchored length. A run that
-/// has grown since is intact, because the anchor commits to the prefix it saw
-/// and says nothing about what came after.
+/// has grown since is intact, because the anchor commits to the prefix it
+/// recorded and says nothing about what came after.
 ///
 /// A log the store itself refuses is a finding here, not a crash: `verify` is
 /// the command an operator reaches for when they already suspect something, so
