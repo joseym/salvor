@@ -73,7 +73,7 @@ use salvor_cli_core::cli::{
     AbandonArgs, AgentCommand, AgentHashArgs, AgentValidateArgs, AnchorArgs, BuildArgs, Cli,
     Command, CompletionsArgs, ForkArgs, GraphCommand, GraphEditArgs, GraphRunArgs,
     GraphValidateArgs, HistoryArgs, ListArgs, ReplayArgs, ResolveArgs, ResumeArgs, RunArgs,
-    ServeArgs, VerifyArgs, WakeArgs,
+    ServeArgs, TokenCommand, TokenNewArgs, VerifyArgs, WakeArgs,
 };
 use salvor_cli_core::render;
 use salvor_replay::{EventEnvelope, RunSummary};
@@ -274,6 +274,21 @@ enum CommandDto {
     Graph {
         command: GraphCommandDto,
     },
+    Token {
+        command: TokenCommandDto,
+    },
+}
+
+/// The verbs under `salvor token`, tagged like their parent.
+#[derive(Serialize)]
+#[serde(tag = "token_verb", rename_all = "kebab-case")]
+enum TokenCommandDto {
+    New {
+        name: String,
+        file: String,
+        create: bool,
+        stdin: bool,
+    },
 }
 
 /// The verbs under `salvor agent`, tagged like their parent.
@@ -460,6 +475,27 @@ impl From<&Command> for CommandDto {
             },
             Command::Graph { command } => CommandDto::Graph {
                 command: command.into(),
+            },
+            Command::Token { command } => CommandDto::Token {
+                command: command.into(),
+            },
+        }
+    }
+}
+
+impl From<&TokenCommand> for TokenCommandDto {
+    fn from(command: &TokenCommand) -> Self {
+        match command {
+            TokenCommand::New(TokenNewArgs {
+                name,
+                file,
+                create,
+                stdin,
+            }) => TokenCommandDto::New {
+                name: name.clone(),
+                file: path(file),
+                create: *create,
+                stdin: *stdin,
             },
         }
     }
