@@ -17,7 +17,23 @@ Run the control-plane HTTP + server-sent-events server over the store
           [default: ./salvor.db]
 
       [1m--auth-token[0m <ENV_VAR>
-          The NAME of an environment variable holding a shared-secret bearer token. The variable must be set and non-empty: every request must then carry `Authorization: Bearer <that value>`, and the server refuses to start if the named variable is unset or empty. Omit this flag entirely to run without auth, trusting a reverse proxy to guard it. Never the token itself, matching how agent files name key variables
+          The NAME of an environment variable holding a shared-secret bearer token. The variable must be set and non-empty, and its value must carry at least 16 bytes: every request must then carry `Authorization: Bearer <that value>`, and the server refuses to start if the named variable is unset, empty, or shorter than the floor. Omit this flag and `--token-file` both to run without auth, trusting a reverse proxy to guard it. Never the token itself, matching how agent files name key variables
+
+      [1m--caller[0m <NAME>
+          The name to record as the caller on the events this command writes.
+          
+          A verb that starts, resumes, resolves, or abandons a run records who asked for it. Left unset, that is the operating system user this process runs as; this flag names someone else, for a wrapper script or a job runner that knows better than the account it happens to run under. The precedence is the flag, then `SALVOR_CALLER`, then the operating system user, which `salvor_cli::caller_name` resolves.
+          
+          It is a label on the events, never a credential: nothing checks it and nothing is granted by it. A store written by whoever can write the file carries whatever name they chose, which is why the server takes its own name from a verified token instead.
+          
+          [env: SALVOR_CALLER=]
+
+      [1m--token-file[0m <FILE>
+          A TOML file of NAMED bearer tokens, each stored as the SHA-256 hash of the token rather than the token itself, so a copy of the file hands nobody a working credential.
+          
+          One `[tokens.<name>]` table per token with a `hash` key of 64 lowercase hex characters. The file must be mode 0600 or tighter and owned by the user serving, and both are checked on every read, so a file loosened after the server started is refused on its next read. The server re-reads the file when it changes, so adding a token and revoking one both take effect on the next request with no restart, and a reload that changes the set logs the names it added, removed, and rotated.
+          
+          Unions with `--auth-token`: with both set, a request matching either one is let through, and a request matching a named token is attributed to that name.
 
       [1m--kill[0m [<PID|PORT>]
           Kill the running `salvor serve` instead of serving. With no value, discovers every running `salvor serve` (by inspecting the process table, since there are no pid files): zero found is reported and this exits; exactly one is killed; multiple print a numbered table and prompt for a choice. Given a value (a pid or a listening port), kills that one directly with no prompt. When present at all, this short-circuits before `--bind` or `--store` are acted on: the process never binds a port
