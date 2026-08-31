@@ -50,12 +50,26 @@ axum.workspace = true
 rust-embed = { workspace = true, optional = true }
 tokio.workspace = true
 tokio-stream.workspace = true
+# The token file: named bearer tokens stored as SHA-256 hashes. `toml` parses
+# the file (the server re-reads it when it changes, so file reading is this
+# crate's rather than the CLI's, unlike an agent definition or a client-tool
+# declaration), `sha2` hashes a presented bearer, and `subtle` compares two
+# digests in constant time.
+toml.workspace = true
+sha2.workspace = true
+subtle.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 time.workspace = true
+
+# The token file's mode and owner are checked on every read, and the owner
+# check needs the uid this process runs as, which `libc::geteuid` is the only
+# way to ask for. Unix only, and already resolved in the tree.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 # The tests drive the bound server over real loopback HTTP with reqwest, script
@@ -69,11 +83,6 @@ tempfile.workspace = true
 # prove `GET /v1/runs` degrades that one run's entry rather than the whole
 # list.
 rusqlite.workspace = true
-# A client-performed tool declaration defines its own TOML format (the
-# `Deserialize` derive on `ClientToolDecl`), so the unit tests that pin that
-# format parse real TOML. The crate itself never reads a file: the CLI owns
-# file reading and hands the bytes to `toml`, exactly as it does for agents.
-toml.workspace = true
 futures-util = "0.3"
 bytes = "1"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "time"] }

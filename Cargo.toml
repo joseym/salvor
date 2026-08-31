@@ -120,6 +120,11 @@ terminal_size = "0.4"
 # for wasm32-unknown-unknown.
 rustyline = { version = "18", default-features = false }
 toml = "0.8"
+# Constant-time byte comparison, for every place a presented secret is
+# compared against a stored one (bearer tokens, drive tokens). Already
+# resolved in the tree through the hashing crates; naming it here makes it a
+# direct dependency of the crate that relies on the property.
+subtle = "2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Process discovery behind `salvor serve --kill`: finding a running
 # `salvor serve` by inspecting the process table, cross-platform. Verified
