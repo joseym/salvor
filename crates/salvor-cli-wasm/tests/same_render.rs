@@ -849,6 +849,7 @@ fn reference_logs() -> Vec<(&'static str, Vec<EventEnvelope>)> {
                 input: json!({"item": "ss-waratah"}),
                 labels: None,
                 driven_by: None,
+                caller: None,
             },
             Event::NowObserved { now: ts(0) },
             Event::ModelCallRequested {
@@ -880,6 +881,7 @@ fn reference_logs() -> Vec<(&'static str, Vec<EventEnvelope>)> {
                 output: json!({"content": [{"text": "claim recorded: ss-waratah"}]}),
                 deduplicated_from: None,
                 settled_by: None,
+                settled_caller: None,
             },
             Event::NowObserved { now: ts(1) },
             Event::ModelCallRequested {
@@ -916,6 +918,7 @@ fn reference_logs() -> Vec<(&'static str, Vec<EventEnvelope>)> {
                 input: json!({"claim": "wreck-9931"}),
                 labels: None,
                 driven_by: None,
+                caller: None,
             },
             Event::BudgetExceeded {
                 budget: salvor_replay::Budget {
@@ -926,6 +929,7 @@ fn reference_logs() -> Vec<(&'static str, Vec<EventEnvelope>)> {
             },
             Event::Resumed {
                 input: json!({"extend": {"cost_usd": 1.0}}),
+                caller: None,
             },
             Event::Suspended {
                 reason: "a human must approve the payout".to_owned(),
@@ -934,6 +938,7 @@ fn reference_logs() -> Vec<(&'static str, Vec<EventEnvelope>)> {
             },
             Event::Resumed {
                 input: json!({"approved": true}),
+                caller: None,
             },
             Event::RandomObserved {
                 value: 17_014_118_346_046_923_173,

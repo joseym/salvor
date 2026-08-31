@@ -294,6 +294,7 @@ impl Runtime {
             // output below is their report of an effect nothing in this
             // process witnessed, so the completion says who recorded it.
             settled_by: Some(SettledBy::Operator),
+            settled_caller: None,
         };
         let envelope = EventEnvelope::new(run_id, state.next_seq, (self.clock)(), completion);
 
@@ -388,6 +389,7 @@ impl Runtime {
         let event = Event::RunAbandoned {
             reason,
             unresolved_write,
+            caller: None,
         };
         let envelope = EventEnvelope::new(run_id, state.next_seq, (self.clock)(), event);
         self.store.append(&envelope).await?;

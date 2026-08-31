@@ -405,6 +405,7 @@ mod tests {
             input: serde_json::json!({"topic": "otters"}),
             labels: None,
             driven_by: None,
+            caller: None,
         }
     }
 
@@ -445,6 +446,7 @@ mod tests {
             output: serde_json::json!({"ok": true}),
             deduplicated_from: None,
             settled_by: None,
+            settled_caller: None,
         }
     }
 
@@ -463,6 +465,7 @@ mod tests {
             },
             Event::Resumed {
                 input: serde_json::json!({"approved": true}),
+                caller: None,
             },
             Event::BudgetExceeded {
                 budget: Budget {
@@ -810,6 +813,7 @@ mod tests {
                 Event::RunAbandoned {
                     reason: Some("husk is dead forever".into()),
                     unresolved_write: None,
+                    caller: None,
                 },
             ),
         ];

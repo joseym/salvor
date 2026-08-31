@@ -55,6 +55,7 @@ async fn seed_sleeping(
             input: json!("go"),
             labels: None,
             driven_by: None,
+            caller: None,
         },
         Event::SleepStarted { wake_at },
     ]
@@ -81,6 +82,7 @@ async fn seed_sleeping_client_driven(
             input: json!("go"),
             labels: None,
             driven_by: Some(Performer::Client),
+            caller: None,
         },
         Event::SleepStarted { wake_at },
     ]

@@ -142,7 +142,7 @@ fn research_run(
     io: &mut dyn Io,
     sink: &mut Vec<EventEnvelope>,
 ) -> Result<DriveResult, ReplayError> {
-    let input = match cursor.begin(AGENT_HASH, None)? {
+    let input = match cursor.begin(AGENT_HASH, None, None)? {
         Outcome::Replayed(input) => input,
         Outcome::Live(permit) => {
             let input = json!({"topic": "otters"});
@@ -203,7 +203,7 @@ fn research_run(
         Outcome::Replayed(input) => input,
         Outcome::Live(parked) => {
             let input = io.resume_input();
-            sink.push(wrap(parked.resume(input.clone())));
+            sink.push(wrap(parked.resume(input.clone(), None)));
             input
         }
     };
@@ -348,7 +348,7 @@ fn handoff_to_live_at_first_unrecorded_step() {
 fn divergence_on_kind_mismatch() {
     let (log, _, _) = record_reference_run();
     let mut cursor = ReplayCursor::new(log).expect("log is valid");
-    let Outcome::Replayed(_) = cursor.begin(AGENT_HASH, None).expect("begin replays") else {
+    let Outcome::Replayed(_) = cursor.begin(AGENT_HASH, None, None).expect("begin replays") else {
         panic!("begin must replay");
     };
 
@@ -370,7 +370,7 @@ fn divergence_on_kind_mismatch() {
 fn divergence_on_payload_mismatch() {
     let (log, _, _) = record_reference_run();
     let mut cursor = ReplayCursor::new(log).expect("log is valid");
-    cursor.begin(AGENT_HASH, None).expect("begin replays");
+    cursor.begin(AGENT_HASH, None, None).expect("begin replays");
     cursor.now().expect("now replays");
     cursor.random().expect("random replays");
 
@@ -425,7 +425,7 @@ fn divergence_when_orchestration_outruns_a_terminal_log() {
 fn divergence_when_orchestration_ends_before_the_log() {
     let (log, _, _) = record_reference_run();
     let mut cursor = ReplayCursor::new(log).expect("log is valid");
-    cursor.begin(AGENT_HASH, None).expect("begin replays");
+    cursor.begin(AGENT_HASH, None, None).expect("begin replays");
     cursor.now().expect("now replays");
     cursor.random().expect("random replays");
 
@@ -464,6 +464,7 @@ fn dangling_write_intent_needs_reconciliation() {
                 input: json!({}),
                 labels: None,
                 driven_by: None,
+                caller: None,
             },
         ),
         EventEnvelope::new(
@@ -483,7 +484,7 @@ fn dangling_write_intent_needs_reconciliation() {
     assert_eq!(derive_state(&log).status, RunStatus::NeedsReconciliation);
 
     let mut cursor = ReplayCursor::new(log).expect("log is valid");
-    cursor.begin(AGENT_HASH, None).expect("begin replays");
+    cursor.begin(AGENT_HASH, None, None).expect("begin replays");
     let err = cursor
         .tool_call("create_ticket", &ticket, Effect::Write, None)
         .expect_err("a dangling write must not re-execute");
@@ -515,6 +516,7 @@ fn dangling_idempotent_intent_retries_under_recorded_key() {
                 input: json!({}),
                 labels: None,
                 driven_by: None,
+                caller: None,
             },
         ),
         EventEnvelope::new(
@@ -533,7 +535,7 @@ fn dangling_idempotent_intent_retries_under_recorded_key() {
     ];
 
     let mut cursor = ReplayCursor::new(log).expect("log is valid");
-    cursor.begin(AGENT_HASH, None).expect("begin replays");
+    cursor.begin(AGENT_HASH, None, None).expect("begin replays");
     let Outcome::Live(permit) = cursor
         .tool_call("store", &doc, Effect::Idempotent, Some("key-9"))
         .expect("a dangling idempotent intent goes live")
@@ -553,6 +555,7 @@ fn dangling_idempotent_intent_retries_under_recorded_key() {
             output: json!({"stored": true}),
             deduplicated_from: None,
             settled_by: None,
+            settled_caller: None
         }
     );
 }
@@ -575,6 +578,7 @@ fn recorded_request_body_does_not_change_replay() {
                 input: json!({"topic": "otters"}),
                 labels: None,
                 driven_by: None,
+                caller: None,
             },
             Event::ModelCallRequested {
                 seq: SequenceNumber::new(1),
@@ -609,7 +613,7 @@ fn recorded_request_body_does_not_change_replay() {
     fn replay_all(log: Vec<EventEnvelope>) -> (RunStatus, Value, ModelReply) {
         let status = derive_state(&log).status;
         let mut cursor = ReplayCursor::new(log).expect("log is valid");
-        let Outcome::Replayed(input) = cursor.begin(AGENT_HASH, None).expect("begin replays")
+        let Outcome::Replayed(input) = cursor.begin(AGENT_HASH, None, None).expect("begin replays")
         else {
             panic!("begin should replay from a recorded log");
         };
@@ -662,7 +666,7 @@ fn labels_recorded_live_survive_a_replayed_log() {
         ("env".to_owned(), "prod".to_owned()),
     ]);
     let Outcome::Live(permit) = cursor
-        .begin(AGENT_HASH, Some(labels.clone()))
+        .begin(AGENT_HASH, Some(labels.clone()), None)
         .expect("begin")
     else {
         panic!("an empty log must hand back a live begin permit");
@@ -712,7 +716,7 @@ fn labels_recorded_live_survive_a_replayed_log() {
     // proves for `request_body`.
     let mut replay_cursor = ReplayCursor::new(vec![restored]).expect("log is valid");
     let Outcome::Replayed(_) = replay_cursor
-        .begin(AGENT_HASH, None)
+        .begin(AGENT_HASH, None, None)
         .expect("begin replays")
     else {
         panic!("begin should replay from a recorded log");
@@ -735,6 +739,7 @@ fn head_only_log() -> Vec<EventEnvelope> {
             input: json!({"topic": "otters"}),
             labels: None,
             driven_by: None,
+            caller: None,
         },
     )]
 }
@@ -745,7 +750,7 @@ fn head_only_log() -> Vec<EventEnvelope> {
 #[test]
 fn a_recorded_sleep_replays_from_the_log() {
     let mut cursor = ReplayCursor::new(head_only_log()).expect("log is valid");
-    cursor.begin(AGENT_HASH, None).expect("begin replays");
+    cursor.begin(AGENT_HASH, None, None).expect("begin replays");
 
     let Outcome::Live(emitted) = cursor.sleep_started(WAKE_AT).expect("sleep starts") else {
         panic!("an exhausted log must hand back a live emission");
@@ -771,7 +776,7 @@ fn a_recorded_sleep_replays_from_the_log() {
         })
         .collect();
     let mut cursor = ReplayCursor::new(log).expect("recorded log is valid");
-    cursor.begin(AGENT_HASH, None).expect("begin replays");
+    cursor.begin(AGENT_HASH, None, None).expect("begin replays");
     let Outcome::Replayed(()) = cursor.sleep_started(WAKE_AT).expect("sleep start replays") else {
         panic!("the recorded sleep must replay");
     };
@@ -795,7 +800,7 @@ fn a_mismatched_wake_instant_diverges() {
         Event::SleepStarted { wake_at: WAKE_AT },
     ));
     let mut cursor = ReplayCursor::new(log).expect("log is valid");
-    cursor.begin(AGENT_HASH, None).expect("begin replays");
+    cursor.begin(AGENT_HASH, None, None).expect("begin replays");
 
     let drifted = WAKE_AT + Duration::nanoseconds(1);
     let err = cursor
@@ -836,7 +841,7 @@ fn an_unrecorded_wake_parks_and_a_recorded_one_continues() {
     ));
 
     let mut cursor = ReplayCursor::new(parked_log.clone()).expect("log is valid");
-    cursor.begin(AGENT_HASH, None).expect("begin replays");
+    cursor.begin(AGENT_HASH, None, None).expect("begin replays");
     cursor.sleep_started(WAKE_AT).expect("sleep start replays");
     // Never redeeming the value is how a driver leaves the run parked: the log
     // is unchanged and the fold reads the run as sleeping.
@@ -856,7 +861,7 @@ fn an_unrecorded_wake_parks_and_a_recorded_one_continues() {
         Event::SleepCompleted {},
     ));
     let mut cursor = ReplayCursor::new(woken_log.clone()).expect("log is valid");
-    cursor.begin(AGENT_HASH, None).expect("begin replays");
+    cursor.begin(AGENT_HASH, None, None).expect("begin replays");
     cursor.sleep_started(WAKE_AT).expect("sleep start replays");
     let Outcome::Replayed(()) = cursor.sleep_completed().expect("wake replays") else {
         panic!("a recorded wake must continue the run");
@@ -896,12 +901,13 @@ fn dangling_intent_reports_the_gap_without_advancing() {
             input: json!({}),
             labels: None,
             driven_by: None,
+            caller: None,
         },
     );
 
     let mut cursor = ReplayCursor::new(vec![started.clone(), intent(1)]).expect("log is valid");
     assert_eq!(cursor.dangling_intent(), None, "not there yet");
-    cursor.begin(AGENT_HASH, None).expect("begin replays");
+    cursor.begin(AGENT_HASH, None, None).expect("begin replays");
     let Some(PendingCall::Tool {
         seq,
         tool,
@@ -927,10 +933,11 @@ fn dangling_intent_reports_the_gap_without_advancing() {
             output: json!({"charge_id": "po_1"}),
             deduplicated_from: None,
             settled_by: None,
+            settled_caller: None,
         },
     );
     let mut cursor = ReplayCursor::new(vec![started, intent(1), completed]).expect("log is valid");
-    cursor.begin(AGENT_HASH, None).expect("begin replays");
+    cursor.begin(AGENT_HASH, None, None).expect("begin replays");
     assert_eq!(cursor.dangling_intent(), None);
 }
 
@@ -956,6 +963,7 @@ fn a_proven_unexecuted_intent_records_a_deduplicated_completion() {
                 input: json!({}),
                 labels: None,
                 driven_by: None,
+                caller: None,
             },
         ),
         EventEnvelope::new(
@@ -976,7 +984,7 @@ fn a_proven_unexecuted_intent_records_a_deduplicated_completion() {
     // The ordinary path still refuses it, which is the behavior every other
     // dangling write keeps.
     let mut cursor = ReplayCursor::new(log.clone()).expect("log is valid");
-    cursor.begin(AGENT_HASH, None).expect("begin replays");
+    cursor.begin(AGENT_HASH, None, None).expect("begin replays");
     assert!(matches!(
         cursor.tool_call(
             "pay_claim",
@@ -988,7 +996,7 @@ fn a_proven_unexecuted_intent_records_a_deduplicated_completion() {
     ));
 
     let mut cursor = ReplayCursor::new(log).expect("log is valid");
-    cursor.begin(AGENT_HASH, None).expect("begin replays");
+    cursor.begin(AGENT_HASH, None, None).expect("begin replays");
     // A different call cannot borrow the escape.
     assert!(
         cursor
@@ -1046,7 +1054,7 @@ fn signal_schema() -> Value {
 #[test]
 fn a_signal_suspension_round_trips_and_replays() {
     let mut cursor = ReplayCursor::new(head_only_log()).expect("log is valid");
-    cursor.begin(AGENT_HASH, None).expect("begin replays");
+    cursor.begin(AGENT_HASH, None, None).expect("begin replays");
 
     let reason = "awaiting the carrier webhook";
     let Outcome::Live(emitted) = cursor
@@ -1069,7 +1077,7 @@ fn a_signal_suspension_round_trips_and_replays() {
         panic!("an unrecorded resume must park the run");
     };
     let payload = json!({"tracking_number": "1Z999"});
-    let resumed = wrap(parked.resume(payload.clone()));
+    let resumed = wrap(parked.resume(payload.clone(), None));
 
     // Through the wire form, exactly as a store would carry it, then replayed.
     let log: Vec<EventEnvelope> = [head_only_log(), vec![suspended, resumed]]
@@ -1081,7 +1089,7 @@ fn a_signal_suspension_round_trips_and_replays() {
         })
         .collect();
     let mut cursor = ReplayCursor::new(log).expect("recorded log is valid");
-    cursor.begin(AGENT_HASH, None).expect("begin replays");
+    cursor.begin(AGENT_HASH, None, None).expect("begin replays");
     let Outcome::Replayed(()) = cursor
         .suspend_for_signal(reason, &signal_schema())
         .expect("the signal wait replays")
@@ -1102,7 +1110,7 @@ fn a_signal_suspension_round_trips_and_replays() {
 #[test]
 fn a_gate_suspension_replays_unchanged() {
     let mut cursor = ReplayCursor::new(head_only_log()).expect("log is valid");
-    cursor.begin(AGENT_HASH, None).expect("begin replays");
+    cursor.begin(AGENT_HASH, None, None).expect("begin replays");
     let schema = json!({"type": "object", "required": ["approved"]});
 
     let Outcome::Live(emitted) = cursor
@@ -1123,7 +1131,7 @@ fn a_gate_suspension_replays_unchanged() {
 
     let log = [head_only_log(), vec![wrap(emitted)]].concat();
     let mut cursor = ReplayCursor::new(log).expect("recorded log is valid");
-    cursor.begin(AGENT_HASH, None).expect("begin replays");
+    cursor.begin(AGENT_HASH, None, None).expect("begin replays");
     let Outcome::Replayed(()) = cursor
         .suspend("awaiting approval", &schema)
         .expect("the gate replays")
@@ -1158,7 +1166,7 @@ fn a_suspension_whose_kind_changed_diverges() {
     // Recorded as a signal, recomputed as a gate.
     let mut cursor =
         ReplayCursor::new(recorded(Some(SuspensionKind::Signal))).expect("log is valid");
-    cursor.begin(AGENT_HASH, None).expect("begin replays");
+    cursor.begin(AGENT_HASH, None, None).expect("begin replays");
     let err = cursor
         .suspend(reason, &signal_schema())
         .expect_err("a gate must not replay a recorded signal wait");
@@ -1190,7 +1198,7 @@ fn a_suspension_whose_kind_changed_diverges() {
 
     // Recorded as a gate, recomputed as a signal.
     let mut cursor = ReplayCursor::new(recorded(None)).expect("log is valid");
-    cursor.begin(AGENT_HASH, None).expect("begin replays");
+    cursor.begin(AGENT_HASH, None, None).expect("begin replays");
     let err = cursor
         .suspend_for_signal(reason, &signal_schema())
         .expect_err("a signal wait must not replay a recorded gate");

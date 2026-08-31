@@ -203,6 +203,7 @@ fn renderer_matches_runtime_decoders() {
             output: output.clone(),
             deduplicated_from: None,
             settled_by: None,
+            settled_caller: None,
         };
         assert_eq!(
             event_detail(&event),

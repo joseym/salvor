@@ -374,7 +374,9 @@ async fn drive_to_completion(
 /// `input` at `position`, the seam a continuation's resume writes into.
 fn assert_recorded_resume(control: &[EventEnvelope], position: usize, input: &Value) {
     match &control[position].event {
-        Event::Resumed { input: recorded } => assert_eq!(
+        Event::Resumed {
+            input: recorded, ..
+        } => assert_eq!(
             recorded, input,
             "the resume input must be the recorded one (control position {position})"
         ),

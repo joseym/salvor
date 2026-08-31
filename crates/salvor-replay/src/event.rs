@@ -83,6 +83,15 @@ use crate::id::{RunId, SequenceNumber};
 /// settler, so the key is omitted everywhere else and those logs serialize
 /// byte for byte as they did before, and the version stays 1.
 ///
+/// The optional `caller` on [`Event::RunStarted`], [`Event::Resumed`], and
+/// [`Event::RunAbandoned`], and the optional `settled_caller` on
+/// [`Event::ToolCallCompleted`], are the eighth. Absent means no caller was
+/// named, which is what every event recorded before these fields existed was:
+/// a server running the pass-through posture has no verified name to record,
+/// and neither does the runtime used directly. Each key is omitted entirely
+/// when absent, so those logs serialize byte for byte as they did before, and
+/// the version stays 1.
+///
 /// # Why the durable-timer events do not bump this
 ///
 /// [`Event::SleepStarted`] and [`Event::SleepCompleted`] are two more new
@@ -346,6 +355,29 @@ pub enum Event {
         /// and serializes byte for byte as it did before this field existed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         driven_by: Option<Performer>,
+        /// The name of whoever asked for this run, recorded once at the head
+        /// of the log.
+        ///
+        /// On a server with a bearer configured this is the name the token was
+        /// declared under; from the CLI writing to a store it is the operating
+        /// system user who ran the verb. Absent means nobody was named: a
+        /// server in the pass-through posture has no verified name to record,
+        /// and neither does the runtime used directly.
+        ///
+        /// It sits beside `driven_by` and answers a different question.
+        /// `driven_by` says which process owns the run's loop; `caller` says
+        /// who asked for the run. A client-driven run opened under the `ci`
+        /// token records both, and neither substitutes for the other.
+        ///
+        /// The server stamps it from the token it verified and never from the
+        /// request body, exactly as it stamps `driven_by`, so a request cannot
+        /// name itself. Additive-optional under the same
+        /// `#[serde(default, skip_serializing_if = "Option::is_none")]`
+        /// contract as `labels` and `driven_by`: a run with no caller named
+        /// omits the key entirely and serializes byte for byte as it did
+        /// before this field existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller: Option<String>,
     },
     /// A model call was requested. Records the correlating sequence number and
     /// the hash of the request, so a later completion can be matched to it.
@@ -502,6 +534,25 @@ pub enum Event {
         /// `deduplicated_from`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         settled_by: Option<SettledBy>,
+        /// The name of whoever recorded this completion by hand.
+        ///
+        /// `settled_by` and `settled_caller` are two different facts, and a
+        /// hand-recorded completion wants both. `settled_by` names the
+        /// mechanism: [`SettledBy::Operator`] says a person recorded the
+        /// completion over the run's head rather than the run recording what
+        /// it saw. `settled_caller` names that person: the token's name on a
+        /// server with a bearer configured, the operating system user from the
+        /// CLI. A completion the run recorded itself carries neither. A
+        /// hand-recorded completion always carries `settled_by`, and carries
+        /// `settled_caller` alongside it whenever a caller was named, which a
+        /// server in the pass-through posture never has.
+        ///
+        /// Additive-optional under the same contract `settled_by` above holds
+        /// to, and placed after it so a completion carrying both writes them
+        /// in the order the two fields were added and every earlier pinned
+        /// shape is untouched. Replay never reads it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        settled_caller: Option<String>,
     },
     /// The value `ctx.now()` returned, captured once while the run executed
     /// live. On replay the recorded value is returned again, bit for bit; the
@@ -562,6 +613,16 @@ pub enum Event {
     Resumed {
         /// The input supplied on resume.
         input: serde_json::Value,
+        /// The name of whoever supplied that input, under the same contract as
+        /// `caller` on [`Event::RunStarted`]: the token's name on a server with
+        /// a bearer configured, the operating system user from the CLI, and
+        /// absent when nobody was named.
+        ///
+        /// The wake sweeper inside `salvor serve` resumes a sleeping run with
+        /// no person behind it and records `server:wake`, so a reader of the
+        /// log can tell a timer firing apart from a person answering a gate.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller: Option<String>,
     },
     /// The run parked until a recorded instant: a durable timer. Nothing holds
     /// the run while it sleeps. A parked run is passive data in the store, and
@@ -674,6 +735,12 @@ pub enum Event {
         /// same additive-optional contract as `reason`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         unresolved_write: Option<UnresolvedWrite>,
+        /// The name of whoever retired the run, under the same contract as
+        /// `caller` on [`Event::RunStarted`]. Abandonment is the one terminal a
+        /// person appends by hand, so this is the field that says which person,
+        /// and it rides after the two fields the variant was born with.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller: Option<String>,
     },
     /// A graph run began. The head of a run that executes a graph document
     /// rather than a single agent loop.
@@ -981,6 +1048,7 @@ mod tests {
             input: serde_json::json!({"topic": "otters"}),
             labels: None,
             driven_by: None,
+            caller: None,
         });
         assert_round_trips(Event::RunStarted {
             agent_def_hash: "sha256:abc".into(),
@@ -990,6 +1058,30 @@ mod tests {
                 ("env".to_owned(), "prod".to_owned()),
             ])),
             driven_by: None,
+            caller: None,
+        });
+        assert_round_trips(Event::RunStarted {
+            agent_def_hash: "sha256:abc".into(),
+            input: serde_json::json!({"topic": "otters"}),
+            labels: None,
+            driven_by: Some(Performer::Client),
+            caller: Some("ci".to_owned()),
+        });
+        assert_round_trips(Event::Resumed {
+            input: serde_json::json!({"approved": true}),
+            caller: Some("ops".to_owned()),
+        });
+        assert_round_trips(Event::RunAbandoned {
+            reason: Some("husk is dead forever".to_owned()),
+            unresolved_write: None,
+            caller: Some("ops".to_owned()),
+        });
+        assert_round_trips(Event::ToolCallCompleted {
+            seq: SequenceNumber::new(2),
+            output: serde_json::json!({"id": "TICKET-1"}),
+            deduplicated_from: None,
+            settled_by: Some(SettledBy::Operator),
+            settled_caller: Some("ops".to_owned()),
         });
         assert_round_trips(Event::ModelCallRequested {
             seq: SequenceNumber::new(1),
@@ -1038,6 +1130,7 @@ mod tests {
             output: serde_json::json!({"id": "TICKET-1"}),
             deduplicated_from: None,
             settled_by: None,
+            settled_caller: None,
         });
         assert_round_trips(Event::NowObserved {
             now: datetime!(2026-07-09 12:00:00.123456789 UTC),
@@ -1055,6 +1148,7 @@ mod tests {
         });
         assert_round_trips(Event::Resumed {
             input: serde_json::json!({"approved": true}),
+            caller: None,
         });
         assert_round_trips(Event::SleepStarted {
             wake_at: datetime!(2026-07-16 12:00:00.123456789 UTC),
@@ -1076,6 +1170,7 @@ mod tests {
         assert_round_trips(Event::RunAbandoned {
             reason: None,
             unresolved_write: None,
+            caller: None,
         });
         assert_round_trips(Event::RunAbandoned {
             reason: Some("husk is dead forever".into()),
@@ -1083,6 +1178,7 @@ mod tests {
                 seq: SequenceNumber::new(5),
                 tool: "create_ticket".into(),
             }),
+            caller: None,
         });
         assert_round_trips(Event::GraphRunStarted {
             graph_hash: "sha256:graph".into(),
@@ -1321,6 +1417,7 @@ mod tests {
             output: serde_json::json!({"id": "TICKET-1"}),
             deduplicated_from: None,
             settled_by: None,
+            settled_caller: None,
         });
         let json = serde_json::to_string(&env).expect("serialize");
         assert_eq!(
@@ -1347,6 +1444,7 @@ mod tests {
                 seq: SequenceNumber::new(7),
             }),
             settled_by: None,
+            settled_caller: None,
         });
         let json = serde_json::to_string(&env).expect("serialize");
         assert_eq!(
@@ -1385,6 +1483,7 @@ mod tests {
             output: serde_json::json!({"id": "TICKET-1"}),
             deduplicated_from: None,
             settled_by: None,
+            settled_caller: None,
         });
         let json = serde_json::to_string(&env).expect("serialize");
         assert_eq!(
@@ -1406,6 +1505,7 @@ mod tests {
             output: serde_json::json!({"id": "TICKET-1"}),
             deduplicated_from: None,
             settled_by: Some(SettledBy::Operator),
+            settled_caller: None,
         });
         let json = serde_json::to_string(&env).expect("serialize");
         assert_eq!(
@@ -1430,6 +1530,141 @@ mod tests {
             panic!("expected ToolCallCompleted");
         };
         assert_eq!(settled_by, None);
+    }
+
+    /// Pins `RunStarted` with a caller: the name rides last, after the
+    /// `driven_by` slot, so a run that records both writes them in the order
+    /// the two fields were added and the pinned bytes for a run that records
+    /// neither are untouched.
+    #[test]
+    fn run_started_with_a_caller_serializes_to_pinned_json() {
+        let env = envelope(Event::RunStarted {
+            agent_def_hash: "sha256:abc".into(),
+            input: serde_json::json!({"topic": "otters"}),
+            labels: None,
+            driven_by: Some(Performer::Client),
+            caller: Some("ci".into()),
+        });
+        let json = serde_json::to_string(&env).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"RunStarted","payload":{"agent_def_hash":"sha256:abc","input":{"topic":"otters"},"driven_by":"client","caller":"ci"}}}"#
+        );
+    }
+
+    /// Pins a `Resumed` with no caller: the payload is the single `input` key
+    /// it was before the field existed.
+    #[test]
+    fn resumed_without_a_caller_serializes_to_pinned_json() {
+        let env = envelope(Event::Resumed {
+            input: serde_json::json!({"approved": true}),
+            caller: None,
+        });
+        let json = serde_json::to_string(&env).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"Resumed","payload":{"input":{"approved":true}}}}"#
+        );
+        assert!(
+            !json.contains("caller"),
+            "a resume with nobody named must not emit the key: {json}"
+        );
+    }
+
+    /// Pins a `Resumed` that names who supplied the input, and a bare
+    /// `RunAbandoned` that names who retired the run.
+    #[test]
+    fn a_named_resume_and_abandonment_serialize_to_pinned_json() {
+        let resumed = serde_json::to_string(&envelope(Event::Resumed {
+            input: serde_json::json!({"approved": true}),
+            caller: Some("ops".into()),
+        }))
+        .expect("serialize");
+        assert_eq!(
+            resumed,
+            r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"Resumed","payload":{"input":{"approved":true},"caller":"ops"}}}"#
+        );
+
+        let abandoned = serde_json::to_string(&envelope(Event::RunAbandoned {
+            reason: None,
+            unresolved_write: None,
+            caller: Some("ops".into()),
+        }))
+        .expect("serialize");
+        assert_eq!(
+            abandoned,
+            r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"RunAbandoned","payload":{"caller":"ops"}}}"#
+        );
+    }
+
+    /// Pins a hand-recorded completion that names its settler: the mechanism
+    /// first, the person after it, in the order the two fields were added.
+    #[test]
+    fn tool_call_completed_with_a_named_settler_serializes_to_pinned_json() {
+        let env = envelope(Event::ToolCallCompleted {
+            seq: SequenceNumber::new(2),
+            output: serde_json::json!({"id": "TICKET-1"}),
+            deduplicated_from: None,
+            settled_by: Some(SettledBy::Operator),
+            settled_caller: Some("ops".into()),
+        });
+        let json = serde_json::to_string(&env).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"ToolCallCompleted","payload":{"seq":2,"output":{"id":"TICKET-1"},"settled_by":"operator","settled_caller":"ops"}}}"#
+        );
+    }
+
+    /// The four event shapes as an earlier binary wrote them, with no caller
+    /// key anywhere, all deserialize with the field defaulted to `None`. The
+    /// strings are the exact pinned bytes the tests above already assert for
+    /// logs written before the field existed, read back under the build that
+    /// has it.
+    #[test]
+    fn events_recorded_before_a_caller_existed_read_back_unnamed() {
+        let started = r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"RunStarted","payload":{"agent_def_hash":"sha256:abc","input":{"topic":"otters"}}}}"#;
+        let Event::RunStarted { caller, .. } = serde_json::from_str::<EventEnvelope>(started)
+            .expect("deserialize")
+            .event
+        else {
+            panic!("expected RunStarted");
+        };
+        assert_eq!(caller, None);
+
+        let resumed = r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"Resumed","payload":{"input":{"approved":true}}}}"#;
+        let Event::Resumed { caller, .. } = serde_json::from_str::<EventEnvelope>(resumed)
+            .expect("deserialize")
+            .event
+        else {
+            panic!("expected Resumed");
+        };
+        assert_eq!(caller, None);
+
+        let abandoned = r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"RunAbandoned","payload":{}}}"#;
+        let Event::RunAbandoned { caller, .. } = serde_json::from_str::<EventEnvelope>(abandoned)
+            .expect("deserialize")
+            .event
+        else {
+            panic!("expected RunAbandoned");
+        };
+        assert_eq!(caller, None);
+
+        let settled = r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"ToolCallCompleted","payload":{"seq":2,"output":{"id":"TICKET-1"},"settled_by":"operator"}}}"#;
+        let Event::ToolCallCompleted {
+            settled_by,
+            settled_caller,
+            ..
+        } = serde_json::from_str::<EventEnvelope>(settled)
+            .expect("deserialize")
+            .event
+        else {
+            panic!("expected ToolCallCompleted");
+        };
+        assert_eq!(settled_by, Some(SettledBy::Operator));
+        assert_eq!(
+            settled_caller, None,
+            "a completion recorded before the name existed names its mechanism only"
+        );
     }
 
     /// `Performer` round-trips through the envelope in both variants.
@@ -1478,6 +1713,7 @@ mod tests {
             input: serde_json::json!({"topic": "otters"}),
             labels: None,
             driven_by: None,
+            caller: None,
         });
         let json = serde_json::to_string(&env).expect("serialize");
         assert_eq!(
@@ -1503,6 +1739,7 @@ mod tests {
                 ("build".to_owned(), "42".to_owned()),
             ])),
             driven_by: None,
+            caller: None,
         });
         let json = serde_json::to_string(&env).expect("serialize");
         assert_eq!(
@@ -1520,6 +1757,7 @@ mod tests {
         let env = envelope(Event::RunAbandoned {
             reason: None,
             unresolved_write: None,
+            caller: None,
         });
         let json = serde_json::to_string(&env).expect("serialize");
         assert_eq!(
@@ -1544,6 +1782,7 @@ mod tests {
                 seq: SequenceNumber::new(5),
                 tool: "create_ticket".into(),
             }),
+            caller: None,
         });
         let json = serde_json::to_string(&env).expect("serialize");
         assert_eq!(

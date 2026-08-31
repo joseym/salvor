@@ -66,6 +66,7 @@ fn envelope(run_id: RunId, seq: u64, tag: &str) -> EventEnvelope {
             input: json!("anchor me"),
             labels: None,
             driven_by: None,
+            caller: None,
         }
     } else {
         Event::RunFailed { error: tag.into() }

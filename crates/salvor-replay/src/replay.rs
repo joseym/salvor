@@ -468,6 +468,11 @@ impl ReplayCursor {
     /// when replaying. Bounds on `labels` are not checked here (see the
     /// field's docs for why); a caller enforces them before calling.
     ///
+    /// `caller` is the name of whoever asked for the run, under the identical
+    /// rule: it lands on a genuinely fresh `RunStarted` and is ignored on the
+    /// replayed path, where the recorded name wins. `None` records no name,
+    /// which is what a surface with nobody to name passes.
+    ///
     /// # Errors
     ///
     /// [`ReplayError::Divergence`] on a hash mismatch, a different recorded
@@ -476,6 +481,7 @@ impl ReplayCursor {
         &mut self,
         agent_def_hash: &str,
         labels: Option<BTreeMap<String, String>>,
+        caller: Option<String>,
     ) -> Result<Outcome<Value, BeginPermit<'_>>, ReplayError> {
         let requested = RequestedStep::Begin {
             agent_def_hash: agent_def_hash.to_owned(),
@@ -501,6 +507,7 @@ impl ReplayCursor {
         Ok(Outcome::Live(BeginPermit {
             agent_def_hash: agent_def_hash.to_owned(),
             labels,
+            caller,
             cursor: self,
         }))
     }
@@ -1475,7 +1482,7 @@ impl ReplayCursor {
         let requested = RequestedStep::AwaitResume;
         self.guard_terminal(&requested)?;
         if self.pos < self.log.len() {
-            if let Event::Resumed { input } = &self.log[self.pos].event {
+            if let Event::Resumed { input, .. } = &self.log[self.pos].event {
                 let input = input.clone();
                 self.pos += 1;
                 return Ok(Outcome::Replayed(input));
@@ -1702,12 +1709,13 @@ impl ReplayCursor {
 ///
 /// Handed out by [`ReplayCursor::begin`] when the log is empty. Redeem it
 /// with the run's input to obtain the [`Event::RunStarted`] to persist. The
-/// `labels` passed to [`begin`](ReplayCursor::begin) ride along on the permit
-/// and land on the recorded event unchanged.
+/// `labels` and `caller` passed to [`begin`](ReplayCursor::begin) ride along
+/// on the permit and land on the recorded event unchanged.
 #[derive(Debug)]
 pub struct BeginPermit<'c> {
     agent_def_hash: String,
     labels: Option<BTreeMap<String, String>>,
+    caller: Option<String>,
     cursor: &'c mut ReplayCursor,
 }
 
@@ -1721,6 +1729,7 @@ impl BeginPermit<'_> {
             input,
             labels: self.labels,
             driven_by: None,
+            caller: self.caller,
         };
         self.cursor.emit(event)
     }
@@ -1883,6 +1892,7 @@ impl ToolCallPermit<'_> {
             output,
             deduplicated_from: None,
             settled_by: None,
+            settled_caller: None,
         })
     }
 
@@ -1906,6 +1916,7 @@ impl ToolCallPermit<'_> {
             output,
             deduplicated_from: Some(origin),
             settled_by: None,
+            settled_caller: None,
         })
     }
 }
@@ -1922,10 +1933,12 @@ pub struct Parked<'c> {
 }
 
 impl Parked<'_> {
-    /// Records the resume input, returning the event to persist.
+    /// Records the resume input and the name of whoever supplied it,
+    /// returning the event to persist. `None` records no name, which is what a
+    /// surface with nobody to name passes.
     #[must_use]
-    pub fn resume(self, input: Value) -> Emitted {
-        self.cursor.emit(Event::Resumed { input })
+    pub fn resume(self, input: Value, caller: Option<String>) -> Emitted {
+        self.cursor.emit(Event::Resumed { input, caller })
     }
 }
 
@@ -2127,6 +2140,7 @@ mod tests {
                 input: serde_json::json!({}),
                 labels: None,
                 driven_by: None,
+                caller: None,
             },
         )];
         let err = ReplayCursor::new(log).expect_err("a truncated head must be rejected");

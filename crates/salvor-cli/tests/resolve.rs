@@ -40,6 +40,7 @@ async fn seed_dangling_write(path: &Path) -> RunId {
             input: json!("publish otters"),
             labels: None,
             driven_by: None,
+            caller: None,
         },
         Event::ToolCallRequested {
             seq: SequenceNumber::new(1),
@@ -154,6 +155,7 @@ async fn seed_client_driven_dangling_write(path: &Path) -> RunId {
             input: json!("publish otters"),
             labels: None,
             driven_by: Some(Performer::Client),
+            caller: None,
         },
         Event::ToolCallRequested {
             seq: SequenceNumber::new(1),

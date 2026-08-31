@@ -69,11 +69,13 @@ pub fn event_detail(event: &Event) -> String {
         Event::RunStarted {
             agent_def_hash,
             input,
+            caller,
             ..
         } => format!(
-            "agent {} input {}",
+            "agent {} input {}{}",
             short_hash(agent_def_hash),
-            truncate_json(input)
+            truncate_json(input),
+            caller_marker(caller.as_deref())
         ),
         Event::ModelCallRequested {
             request_hash,
@@ -111,6 +113,7 @@ pub fn event_detail(event: &Event) -> String {
             output,
             deduplicated_from,
             settled_by,
+            settled_caller,
             ..
         } => {
             // Absent (the field's default, and every completion recorded before
@@ -129,7 +132,7 @@ pub fn event_detail(event: &Event) -> String {
             // `[Client]`, and it goes on every shape a completion can take,
             // because a hand-recorded completion is a hand-recorded completion
             // whatever output it carries.
-            let settler = settled_by_marker(*settled_by);
+            let settler = settled_by_marker(*settled_by, settled_caller.as_deref());
             if let Some(reason) = suspension_reason(output) {
                 format!("suspends: {reason}{settler}{copied}")
             } else if let Some(wake_at) = sleep_wake_at(output) {
@@ -148,7 +151,11 @@ pub fn event_detail(event: &Event) -> String {
         Event::NowObserved { now } => format_ts(*now),
         Event::RandomObserved { value } => format!("value {value}"),
         Event::Suspended { reason, .. } => format!("reason: {reason}"),
-        Event::Resumed { input } => format!("input {}", truncate_json(input)),
+        Event::Resumed { input, caller } => format!(
+            "input {}{}",
+            truncate_json(input),
+            caller_marker(caller.as_deref())
+        ),
         // The wake instant is the whole of what a reader wants here, rendered
         // by the same component-wise formatter `NowObserved` uses.
         Event::SleepStarted { wake_at } => format!("until {}", format_ts(*wake_at)),
@@ -166,17 +173,19 @@ pub fn event_detail(event: &Event) -> String {
         Event::RunAbandoned {
             reason,
             unresolved_write,
+            caller,
         } => {
             let why = reason
                 .as_deref()
                 .map_or_else(|| "no reason given".to_owned(), truncate_str);
+            let who = caller_marker(caller.as_deref());
             match unresolved_write {
                 Some(write) => format!(
-                    "abandoned: {why} (unresolved write at seq {}, tool {})",
+                    "abandoned: {why} (unresolved write at seq {}, tool {}){who}",
                     write.seq.get(),
                     write.tool
                 ),
-                None => format!("abandoned: {why}"),
+                None => format!("abandoned: {why}{who}"),
             }
         }
         Event::GraphRunStarted {
@@ -324,10 +333,30 @@ fn performer_marker(performed_by: Option<Performer>) -> &'static str {
 /// hand gets a marker, in the same bracketed register
 /// [`performer_marker`] uses on the intent line, so "who did this" reads the
 /// same way on both halves of a call.
-fn settled_by_marker(settled_by: Option<SettledBy>) -> &'static str {
-    match settled_by {
-        Some(SettledBy::Operator) => " [Operator]",
-        None => "",
+/// `settled_caller` names that person when the surface that recorded the
+/// completion had a name to record, and rides inside the same brackets:
+/// `[Operator: ci]`. With no name recorded the marker is the `[Operator]` it
+/// has always been, so a log written before the name existed renders exactly
+/// as it did.
+fn settled_by_marker(settled_by: Option<SettledBy>, settled_caller: Option<&str>) -> String {
+    match (settled_by, settled_caller) {
+        (Some(SettledBy::Operator), Some(name)) => format!(" [Operator: {name}]"),
+        (Some(SettledBy::Operator), None) => " [Operator]".to_owned(),
+        (None, _) => String::new(),
+    }
+}
+
+/// The bracketed marker naming who asked for an event, for the detail line.
+///
+/// Absent (the field's default, and every event recorded before the field
+/// existed) means no caller was named: a server running the pass-through
+/// posture records none, so it renders nothing. A recorded name reads in the
+/// same bracketed register [`performer_marker`] and [`settled_by_marker`] use,
+/// labelled so a name is never read as one of the fixed markers.
+fn caller_marker(caller: Option<&str>) -> String {
+    match caller {
+        Some(name) => format!(" [caller: {name}]"),
+        None => String::new(),
     }
 }
 
@@ -424,6 +453,7 @@ mod tests {
             output: json!({"charge_id": "po_1"}),
             deduplicated_from: None,
             settled_by: None,
+            settled_caller: None,
         });
         assert_eq!(executed, r#"output {"charge_id":"po_1"}"#);
 
@@ -432,6 +462,7 @@ mod tests {
             output: json!({"charge_id": "po_1"}),
             deduplicated_from: Some(origin),
             settled_by: None,
+            settled_caller: None,
         });
         assert_eq!(
             copied,
@@ -450,6 +481,7 @@ mod tests {
             output: json!({"charge_id": "po_1"}),
             deduplicated_from: None,
             settled_by: Some(crate::event::SettledBy::Operator),
+            settled_caller: None,
         });
         assert_eq!(resolved, r#"output {"charge_id":"po_1"} [Operator]"#);
 
@@ -469,6 +501,71 @@ mod tests {
         );
     }
 
+    /// The name rides inside the settler's own brackets when the surface that
+    /// recorded the completion had one, so the mechanism and the person read
+    /// as one fact rather than two markers.
+    #[test]
+    fn a_named_settler_reads_inside_the_operator_marker() {
+        let resolved = event_detail(&Event::ToolCallCompleted {
+            seq: SequenceNumber::new(1),
+            output: json!({"charge_id": "po_1"}),
+            deduplicated_from: None,
+            settled_by: Some(crate::event::SettledBy::Operator),
+            settled_caller: Some("ops".into()),
+        });
+        assert_eq!(resolved, r#"output {"charge_id":"po_1"} [Operator: ops]"#);
+    }
+
+    /// The three events that record who asked for them render the name in the
+    /// same bracketed register, and render nothing at all when no name was
+    /// recorded, so every line written before the field existed reads exactly
+    /// as it did.
+    #[test]
+    fn the_caller_marker_names_who_asked_and_is_silent_otherwise() {
+        let started = |caller: Option<&str>| {
+            event_detail(&Event::RunStarted {
+                agent_def_hash: "sha256:abcdef0123456789".into(),
+                input: json!("ship it"),
+                labels: None,
+                driven_by: None,
+                caller: caller.map(str::to_owned),
+            })
+        };
+        assert_eq!(
+            started(None),
+            "agent sha256:abcdef0\u{2026} input \"ship it\""
+        );
+        assert_eq!(
+            started(Some("ci")),
+            "agent sha256:abcdef0\u{2026} input \"ship it\" [caller: ci]"
+        );
+
+        let resumed = |caller: Option<&str>| {
+            event_detail(&Event::Resumed {
+                input: json!({"approved": true}),
+                caller: caller.map(str::to_owned),
+            })
+        };
+        assert_eq!(resumed(None), r#"input {"approved":true}"#);
+        assert_eq!(
+            resumed(Some("ops")),
+            r#"input {"approved":true} [caller: ops]"#
+        );
+
+        let abandoned = |caller: Option<&str>| {
+            event_detail(&Event::RunAbandoned {
+                reason: Some("husk is dead forever".into()),
+                unresolved_write: None,
+                caller: caller.map(str::to_owned),
+            })
+        };
+        assert_eq!(abandoned(None), "abandoned: husk is dead forever");
+        assert_eq!(
+            abandoned(Some("ops")),
+            "abandoned: husk is dead forever [caller: ops]"
+        );
+    }
+
     /// A long input is truncated, so a raw payload never reaches the stream in
     /// full: the detail line stays capped even for a large value.
     #[test]
@@ -479,6 +576,7 @@ mod tests {
             input: json!({ "prompt": big }),
             labels: None,
             driven_by: None,
+            caller: None,
         });
         assert!(detail.contains('\u{2026}'), "detail should be truncated");
         assert!(

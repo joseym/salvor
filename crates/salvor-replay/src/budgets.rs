@@ -375,7 +375,7 @@ impl BudgetExtensions {
 pub fn budget_extensions(log: &[EventEnvelope]) -> BudgetExtensions {
     let mut extensions = BudgetExtensions::default();
     for pair in log.windows(2) {
-        if let (Event::BudgetExceeded { .. }, Event::Resumed { input }) =
+        if let (Event::BudgetExceeded { .. }, Event::Resumed { input, .. }) =
             (&pair[0].event, &pair[1].event)
         {
             extensions.absorb(input);
@@ -481,6 +481,7 @@ mod tests {
             input: json!({}),
             labels: None,
             driven_by: None,
+            caller: None,
         }
     }
 
@@ -621,6 +622,7 @@ mod tests {
                 WEEK,
                 Event::Resumed {
                     input: json!({"approved": true}),
+                    caller: None,
                 },
             ),
             (
@@ -661,6 +663,7 @@ mod tests {
                 GATE_MINUTES,
                 Event::Resumed {
                     input: json!({"approved": true}),
+                    caller: None,
                 },
             ),
             (

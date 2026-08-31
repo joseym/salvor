@@ -49,6 +49,7 @@ fn run_started() -> Event {
         input: json!({ "topic": "otters" }),
         labels: None,
         driven_by: None,
+        caller: None,
     }
 }
 
@@ -148,7 +149,7 @@ async fn open_append_legal_sequence_and_read_back() {
     assert!(cursor.is_replaying(), "a full log replays");
     // Drive the recorded run: each step comes from the log, none executes.
     assert!(matches!(
-        cursor.begin("sha256:agent", None).expect("begin"),
+        cursor.begin("sha256:agent", None, None).expect("begin"),
         salvor_core::Outcome::Replayed(_)
     ));
     assert!(matches!(
@@ -236,6 +237,7 @@ async fn divergent_bytes_at_existing_seq_is_409() {
             input: json!({ "topic": "badgers" }),
             labels: None,
             driven_by: None,
+            caller: None,
         },
     );
     let (status, body) = append(&client, &server.base, &run, Some(&token), vec![divergent]).await;
@@ -1025,6 +1027,7 @@ async fn appended_run_started_with_too_many_labels_is_rejected() {
         input: json!({ "topic": "otters" }),
         labels: Some(labels),
         driven_by: None,
+        caller: None,
     };
     let (status, body) = append(
         &client,
@@ -1068,6 +1071,7 @@ async fn appended_run_started_with_labels_round_trips() {
             "42".to_owned(),
         )])),
         driven_by: None,
+        caller: None,
     };
     let (status, body) = append(
         &client,
@@ -1152,7 +1156,7 @@ async fn absurd_client_recorded_at_is_overwritten_with_the_server_stamp() {
     // still folds to completion from the stamped log.
     let mut cursor = ReplayCursor::new(envelopes).expect("the log is a well-formed run");
     assert!(matches!(
-        cursor.begin("sha256:agent", None).expect("begin"),
+        cursor.begin("sha256:agent", None, None).expect("begin"),
         salvor_core::Outcome::Replayed(_)
     ));
     assert!(matches!(
@@ -1514,6 +1518,7 @@ async fn resuming_a_client_driven_run_through_the_server_endpoint_is_refused() {
                     input: json!({ "topic": "otters" }),
                     labels: None,
                     driven_by: None,
+                    caller: None,
                 },
             ),
             env_value(&run, 1, Event::NowObserved { now: ts() }),

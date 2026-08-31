@@ -35,6 +35,7 @@ async fn seed_running(path: &Path) -> RunId {
             input: json!("research otters"),
             labels: None,
             driven_by: None,
+            caller: None,
         },
     );
     store.append(&envelope).await.expect("seed append");
@@ -51,6 +52,7 @@ async fn seed_dangling_write(path: &Path) -> RunId {
             input: json!("publish otters"),
             labels: None,
             driven_by: None,
+            caller: None,
         },
         Event::ToolCallRequested {
             seq: SequenceNumber::new(1),
@@ -103,6 +105,7 @@ async fn abandon_retires_a_run_then_refuses_a_second() {
         Event::RunAbandoned {
             reason,
             unresolved_write,
+            ..
         } => {
             assert_eq!(reason.as_deref(), Some("husk is dead forever"));
             assert!(unresolved_write.is_none(), "no dangling write to record");

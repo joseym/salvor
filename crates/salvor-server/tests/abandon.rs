@@ -32,6 +32,7 @@ fn started() -> Event {
         input: json!({"topic": "otters"}),
         labels: None,
         driven_by: None,
+        caller: None,
     }
 }
 
