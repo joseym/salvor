@@ -252,6 +252,8 @@ enum CommandDto {
         #[serde(skip_serializing_if = "Option::is_none")]
         auth_token: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        token_file: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         kill: Option<String>,
         dev: bool,
         demo_tools: bool,
@@ -412,6 +414,7 @@ impl From<&Command> for CommandDto {
             Command::Serve(ServeArgs {
                 bind,
                 auth_token,
+                token_file,
                 kill,
                 dev,
                 demo_tools,
@@ -420,6 +423,7 @@ impl From<&Command> for CommandDto {
             }) => CommandDto::Serve {
                 bind: bind.clone(),
                 auth_token: auth_token.clone(),
+                token_file: token_file.as_deref().map(path),
                 kill: kill.clone(),
                 dev: *dev,
                 demo_tools: *demo_tools,
