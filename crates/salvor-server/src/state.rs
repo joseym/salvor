@@ -36,8 +36,10 @@ use tokio::task::JoinHandle;
 
 use salvor_core::{EventEnvelope, RunId};
 
+use crate::auth::Auth;
 use crate::client_tools::ClientToolRegistry;
 use crate::executor::ModelExecutor;
+use crate::tokens::TokenStore;
 use crate::tool_registry::ToolRegistry;
 
 /// The format a submitted agent definition is written in.
@@ -140,7 +142,12 @@ struct Inner {
     // `crate::client_tools` for why that rule is load-bearing.
     client_tools: Arc<ClientToolRegistry>,
     hooks: Option<(ClockFn, RandomFn)>,
-    auth_token: Option<String>,
+    // Every configured bearer, plus the per-source refusal counters. `None`
+    // is the pass-through posture: no shared secret and no token file, so the
+    // server trusts its caller and a reverse proxy owns auth. Nothing here
+    // holds a token as plaintext; a shared secret is hashed at startup and a
+    // named token was only ever a hash on disk. See `crate::auth`.
+    auth: Option<Auth>,
     poll_interval: Duration,
     // How often the wake sweeper looks for runs whose durable timer has come
     // due. A `Duration` with a real default rather than an `Option`, exactly
@@ -260,7 +267,7 @@ impl AppState {
                 tool_registry: None,
                 client_tools: Arc::new(ClientToolRegistry::new()),
                 hooks: None,
-                auth_token: None,
+                auth: None,
                 poll_interval: Duration::from_millis(50),
                 wake_interval: DEFAULT_WAKE_INTERVAL,
                 agents: Mutex::new(HashMap::new()),
@@ -289,13 +296,48 @@ impl AppState {
         self
     }
 
-    /// Requires `Authorization: Bearer <token>` on every request. Without this,
-    /// the server trusts its caller (the reverse-proxy posture).
+    /// Requires `Authorization: Bearer <token>` on every request, against one
+    /// shared secret. Without this and without
+    /// [`with_token_file`](Self::with_token_file), the server trusts its
+    /// caller (the reverse-proxy posture).
+    ///
+    /// The token is hashed here and the plaintext is dropped, so the process
+    /// holds a SHA-256 digest and never the secret itself. A request that
+    /// matches it is attributed to
+    /// [`SINGLE_TOKEN_CALLER`](crate::auth::SINGLE_TOKEN_CALLER), the name
+    /// this path has in place of one an operator chose.
+    ///
+    /// The entropy floor ([`tokens::MIN_SINGLE_TOKEN_BYTES`]) belongs to the
+    /// surface that reads the operator's value, not here: `salvor serve`
+    /// checks it with
+    /// [`check_single_token`](crate::tokens::check_single_token) and refuses
+    /// before a port is bound.
     #[must_use]
     pub fn with_auth_token(mut self, token: impl Into<String>) -> Self {
+        let token = token.into();
         Arc::get_mut(&mut self.inner)
             .expect("with_auth_token is called before the state is shared")
-            .auth_token = Some(token.into());
+            .auth
+            .get_or_insert_with(Auth::new)
+            .set_single(&token);
+        self
+    }
+
+    /// Requires `Authorization: Bearer <token>` on every request, against the
+    /// named tokens in a loaded token file.
+    ///
+    /// Unions with [`with_auth_token`](Self::with_auth_token): with both set,
+    /// a request matching either one is let through, and one matching a named
+    /// token is attributed to that name. The store re-reads its file when the
+    /// file changes, so adding a token and revoking one both take effect on
+    /// the next request with no restart.
+    #[must_use]
+    pub fn with_token_file(mut self, store: TokenStore) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("with_token_file is called before the state is shared")
+            .auth
+            .get_or_insert_with(Auth::new)
+            .set_token_file(store);
         self
     }
 
@@ -386,10 +428,17 @@ impl AppState {
         self.inner.store.clone()
     }
 
-    /// The expected bearer token, when auth is required.
+    /// The configured bearers and their refusal counters, when auth is
+    /// required. `None` is the pass-through posture.
     #[must_use]
-    pub fn auth_token(&self) -> Option<&str> {
-        self.inner.auth_token.as_deref()
+    pub fn auth(&self) -> Option<&Auth> {
+        self.inner.auth.as_ref()
+    }
+
+    /// Whether this server requires a bearer on every request.
+    #[must_use]
+    pub fn auth_required(&self) -> bool {
+        self.inner.auth.is_some()
     }
 
     /// How often the event stream polls for new events.

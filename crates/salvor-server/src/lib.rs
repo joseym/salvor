@@ -31,10 +31,14 @@
 //!
 //! # Auth
 //!
-//! One optional shared-secret bearer, a single-tenant posture.
-//! With a token set on the state, every route requires
-//! `Authorization: Bearer <token>`; without one, the server trusts its caller
-//! and a reverse proxy owns auth. No user model, no RBAC.
+//! An optional bearer, a single-tenant posture. Two ways to configure one and
+//! they union: `--auth-token` names an environment variable holding a shared
+//! secret, hashed at startup, and `--token-file` names a TOML file of named
+//! tokens stored as SHA-256 hashes ([`tokens`]). With either set, every `/v1`
+//! route requires `Authorization: Bearer <token>` and a request that is let
+//! through carries a [`Caller`] naming the token it came in under; with
+//! neither, the server trusts its caller and a reverse proxy owns auth. No
+//! user model, no RBAC.
 
 #![warn(missing_docs)]
 
@@ -50,6 +54,7 @@ pub mod json;
 pub mod runs;
 pub mod sse;
 pub mod state;
+pub mod tokens;
 pub mod tool_registry;
 #[cfg(feature = "ui")]
 pub mod ui;
@@ -60,6 +65,7 @@ use axum::middleware::from_fn_with_state;
 use axum::routing::{get, post};
 use tokio::net::TcpListener;
 
+pub use auth::{Auth, Caller, Refusal};
 pub use client_tools::{ClientToolDecl, ClientToolRegistry};
 pub use dispatch::{Disposition, ResumeKind, classify};
 pub use error::ApiError;
@@ -68,6 +74,7 @@ pub use state::{
     AgentDefinition, AgentFactory, AppState, BuildFuture, BuiltAgent, ClientRunLease,
     DEFAULT_WAKE_INTERVAL, DefFormat, LeaseRelease, RegisteredAgent,
 };
+pub use tokens::{TokenFileError, TokenSet, TokenStore};
 pub use tool_registry::ToolRegistry;
 pub use wake::{Sweeper, spawn_sweeper, sweep};
 
@@ -192,5 +199,14 @@ pub async fn serve(listener: TcpListener, state: AppState) -> std::io::Result<()
     // Held for exactly as long as this future lives, so a server that is
     // dropped or aborted takes its sweeper with it. See [`wake::Sweeper`].
     let _sweeper = wake::spawn_sweeper(state.clone());
-    axum::serve(listener, build_router(state)).await
+    // `into_make_service_with_connect_info` is what puts the peer address in
+    // each request's extensions, which is the source the auth layer names in
+    // its refusal log and counts refusals against. A router built by
+    // [`build_router`] and served some other way still works; requests then
+    // carry no connection info and every refusal shares one counter.
+    axum::serve(
+        listener,
+        build_router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
 }
