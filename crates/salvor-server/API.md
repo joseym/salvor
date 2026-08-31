@@ -16,16 +16,41 @@ registration (which may be TOML) and the event stream (which is
 
 ## Auth
 
-One optional shared-secret bearer token, the single-tenant posture. Two modes:
+An optional bearer, the single-tenant posture. Two modes:
 
-- **Token set.** Every request must carry `Authorization: Bearer <token>`. A
-  missing or wrong token is answered `401` with the standard error envelope.
-- **No token.** The server trusts its caller; a reverse proxy is expected to
+- **A bearer configured.** Every request must carry `Authorization: Bearer
+  <token>`. A missing or unknown token is answered `401` with the standard
+  error envelope.
+- **No bearer.** The server trusts its caller; a reverse proxy is expected to
   own auth. This is the default.
 
-There is no user model and no role system. The `salvor serve --auth-token
-<ENV_VAR>` flag names an environment variable holding the token, never the
-token itself.
+There is no user model and no role system. Two flags configure a bearer and
+they union, so a request matching either one is let through:
+
+- `salvor serve --auth-token <ENV_VAR>` names an environment variable holding
+  one shared secret, never the token itself. Its value must carry at least 16
+  bytes, and it is hashed once at startup.
+- `salvor serve --token-file <FILE>` names a TOML file of named tokens, one
+  `[tokens.<name>]` table each with a `hash` key of 64 lowercase hex
+  characters: the SHA-256 of the token, never the token. The file must be mode
+  0600 or tighter and owned by the user serving. It is re-read when it
+  changes, so adding a token and revoking one both take effect on the next
+  request with no restart. A minted token is `sv_` + 43 base62 characters + `_`
+  + a 6-character checksum, and the stored hash covers the whole string.
+
+Verification hashes the presented bearer with SHA-256 and compares the digest
+against a stored one in constant time. A token that verifies is attributed to
+the name its `[tokens.<name>]` table carries, or to `token` for the
+`--auth-token` shared secret; that name reaches handlers in the request
+extensions and appears in the server's log. It grants nothing different: any
+token that verifies reads and drives every run in the store.
+
+A refusal logs one `WARN` naming the source address and the outcome
+(`missing_header`, `bad_scheme`, `unknown_token`), never the presented value,
+and repeated refusals from one source are held 100ms doubling to a 2s cap
+before the `401`. A revoked token and one that never existed are the same
+`unknown_token`. No status code or body distinguishes a delayed `401` from a
+prompt one.
 
 ## Error envelope
 

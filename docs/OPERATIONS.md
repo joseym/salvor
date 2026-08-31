@@ -86,16 +86,30 @@ sees nothing until the response ends, which for a long run means it
 sees nothing at all; a short read timeout on top of that drops the
 connection outright.
 
-Pass `Authorization` through. nginx and Caddy both forward it by
-default. A proxy configured to strip or replace request headers turns
-every call into a `401`, and a proxy that injects the token on the
-client's behalf hands the whole store to anyone who reaches the proxy.
+Pass `Authorization` through, and keep it out of the access log. nginx
+and Caddy both forward the header by default. A proxy configured to
+strip or replace request headers turns every call into a `401`, and a
+proxy that injects the token on the client's behalf hands the whole
+store to anyone who reaches the proxy. Neither proxy logs request
+headers by default; a log format that names `$http_authorization` (or
+Caddy's `request>headers>Authorization`) writes every caller's bearer
+into a file with a different retention policy and different readers
+than the store has, so leave it out of the format.
 
-### Auth is one shared secret, and it fails open
+Salvor itself reads no `X-Forwarded-For` and writes none. Behind a
+proxy, the source address in an auth-failure log line is the proxy's,
+so every caller shares one refusal counter; an operator who wants
+per-client counters has that header untouched to work with. A salvor
+exposed directly has no caller-supplied header steering its throttle.
 
-`--auth-token` takes the NAME of an environment variable holding the
-token, never the token itself, matching how an agent file names its key
-variable:
+### Auth: one shared secret, or a file of named tokens
+
+There are two ways to configure a bearer and they union. A request
+matching either one is let through.
+
+`--auth-token` takes the NAME of an environment variable holding one
+shared secret, never the token itself, matching how an agent file names
+its key variable:
 
 ```sh
 export SALVOR_TOKEN="$(openssl rand -hex 32)"
@@ -104,11 +118,12 @@ salvor serve --bind 127.0.0.1:8080 --auth-token SALVOR_TOKEN
 
 Every `/v1` route then requires `Authorization: Bearer <that value>`.
 The posture is single-tenant: no users, no roles, no per-run access
-control. Whoever holds the token reads and drives every run in the
-store.
+control. Whoever holds a token reads and drives every run in the store.
 
-If the named variable is unset or empty, **the server refuses to
-start**, before it binds the port:
+The value must carry at least 16 bytes. `openssl rand -hex 32` gives 64.
+
+If the named variable is unset, empty, or under that floor, **the
+server refuses to start**, before it binds the port:
 
 ```
 salvor: --auth-token names $SALVOR_TOKN, but it is unset or empty; export $SALVOR_TOKN with the bearer token before serving, or drop --auth-token to serve without auth
@@ -133,6 +148,135 @@ Without a proxy in front, run the same check against the address
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/v1/runs
 # 401: auth is on. 200: it is not, whatever the flags say.
 ```
+
+### A token file: named tokens, hashed at rest
+
+`--token-file` names a TOML file of named bearer tokens. Each entry
+stores the SHA-256 of a token rather than the token, so a copy of the
+file hands nobody a working credential, and each carries a name, so an
+auth-failure or auth-success log line says which token was presented:
+
+```toml
+[tokens.ci]
+hash = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+
+[tokens.dashboard]
+hash = "60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752"
+```
+
+One `[tokens.<name>]` table per token. `hash` is 64 lowercase hex
+characters, exactly what `sha256sum` prints. `role` is reserved for a
+later build and loads clean today; any other per-token key is ignored
+with a warning naming it, so a misspelled `hash` is visible in the log.
+
+The file must be mode `0600` or tighter and owned by the user serving.
+Both are checked at startup and again on every read, so a file loosened
+or handed to another owner after the server started is refused on its
+next read: the last set that loaded stays in force and one warning
+names the file and the mode. Start it right:
+
+```sh
+install -m 0600 /dev/null /etc/salvor/tokens.toml
+salvor serve --bind 127.0.0.1:8080 --token-file /etc/salvor/tokens.toml
+```
+
+The server refuses to start, before it binds the port, on a file that
+is readable by group or other, is owned by another user, is not valid
+TOML, gives a hash that is not 64 lowercase hex, or declares no tokens
+at all.
+
+Both flags together are the usual shape while a shared secret is being
+retired: `--auth-token` keeps the old callers working and
+`--token-file` names the new ones. A request matching a named token is
+attributed to that name; one matching the shared secret is attributed
+to `token`.
+
+### Rotating a token, with no restart
+
+The server stats the token file on every auth attempt and re-reads it
+when the modification time or the length differs from the last read, so
+adding a token and revoking one both take effect on the next request.
+There is no reload signal and no restart.
+
+Mint a token. The wire format is `sv_` then 43 base62 characters then
+`_` then a 6-character checksum, and the stored hash covers the whole
+string:
+
+```sh
+NEW="sv_$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 43)_$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom | head -c 6)"
+printf '%s' "$NEW" | shasum -a 256
+```
+
+Add it to the file under a new name, alongside the one it replaces:
+
+```sh
+cat >> /etc/salvor/tokens.toml <<EOF
+
+[tokens.ci-2026-09]
+hash = "<the hash printed above>"
+EOF
+```
+
+Verify it, against the address `--bind` opened:
+
+```sh
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $NEW" \
+  http://127.0.0.1:8080/v1/runs
+# 200: the new token verifies.
+```
+
+Hand it to the caller, wait for that caller to be using it, then revoke
+the old one by deleting its table from the file:
+
+```sh
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $OLD" \
+  http://127.0.0.1:8080/v1/runs
+# 401: the revoked token no longer verifies, with the same process serving.
+```
+
+**Revoking is deleting the entry.** A token whose `[tokens.<name>]`
+table is gone from the file fails closed on the next request that
+presents it, with no restart and no grace period; there is no separate
+revocation list and no expiry field.
+
+Every reload that changes the set logs one line naming what changed, by
+name and never by hash:
+
+```
+INFO token file reloaded file=/etc/salvor/tokens.toml added=["ci-2026-09"] removed=["ci"] rotated=[] tokens=2
+```
+
+A reload that changes nothing logs nothing, so a `touch` is silent.
+Ship these lines off the box: someone who can write the file can add an
+entry, use it, and take it out again, and that sequence leaves two
+lines here that a later comparison of the file cannot produce.
+
+A version of the file that will not load (a half-written save, a
+mistyped hash) keeps the last set that loaded in force and logs one
+warning for that version. It never empties the set and never opens the
+server up.
+
+### What a failed request writes down
+
+Every refusal logs one `WARN` carrying the source address, the outcome
+(`missing_header`, `bad_scheme`, or `unknown_token`), and how long the
+answer was held. The presented value is never logged, and a revoked
+token is indistinguishable from one that never existed, so the outcome
+is `unknown_token` for both:
+
+```
+WARN bearer refused source=203.0.113.9 outcome=unknown_token delay_ms=200
+```
+
+A request that verified logs one `DEBUG` naming the token it came in
+under (`caller=ci`), so turning on `RUST_LOG=salvor_server=debug` shows
+which token is driving what.
+
+Repeated refusals from one source address are held before the `401`:
+100ms on the first, doubling to a 2s cap. A source that has been quiet
+for a minute starts over at 100ms, and a token that verifies drops that
+source's count immediately. There is no lockout at any count, so nobody
+is ever shut out of their own server by someone else's traffic.
 
 ## Backup and restore
 
