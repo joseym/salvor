@@ -1,0 +1,841 @@
+//! Named bearer tokens, hashed at rest, with the file re-read when it changes.
+//!
+//! The single shared secret in [`crate::auth`] answers one question: is the
+//! caller allowed in. A token file answers a second one: which caller. Each
+//! entry pairs a name an operator chose with the SHA-256 of a token that was
+//! minted once and never written down here, so a copy of the file hands
+//! nobody a working credential.
+//!
+//! # File format
+//!
+//! ```toml
+//! [tokens.ci]
+//! hash = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+//!
+//! [tokens.dashboard]
+//! hash = "60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752"
+//! ```
+//!
+//! One table per token, the table's key is the name. `hash` is 64 lowercase
+//! hex characters, the SHA-256 of the whole presented bearer string. `role` is
+//! reserved: a file that carries one loads clean today and the key keeps its
+//! meaning when a later build reads it. Any other per-token key is ignored
+//! with a warning naming it, so a typo in `hash` is visible in the log rather
+//! than silent.
+//!
+//! # Token wire format
+//!
+//! A minted token is `sv_` + 43 base62 characters (32 CSPRNG bytes) + `_` +
+//! a 6-character checksum: `sv_<43 chars>_<6 chars>`. Verification never
+//! takes that string apart. It hashes the whole presented value, checksum
+//! included, and compares the digest against a stored one, so the format is
+//! the minting verb's contract and the stored hash covers every byte of it.
+//!
+//! # Why an mtime poll and not a filesystem watcher
+//!
+//! [`TokenStore::current`] stats the file on each auth attempt and re-parses
+//! only when the modification time or the length differs from the last read.
+//! A stat is one syscall against a file of a few hundred bytes that the page
+//! cache already holds, and it costs nothing on the pass-through path, where
+//! no token file is configured at all. The alternative is a watcher crate
+//! (`notify`) plus a background thread, which adds a dependency tree and a
+//! platform matrix to save a syscall per request. A rewrite that lands within
+//! the filesystem's timestamp resolution AND keeps the byte length identical
+//! is the case a stat misses; `touch` on the file, or any edit that changes
+//! its size, is read on the next request.
+//!
+//! # What a reload writes down
+//!
+//! A reload that changes the set logs one `INFO` naming the entries added,
+//! the entries removed, and the entries whose hash was replaced under the
+//! same name. Names only, never hashes. Someone who can write the file can
+//! add an entry, use it, and take it out again; that sequence leaves two
+//! lines in a log that ships off the box, which is the record a file
+//! comparison after the fact cannot produce. A reload that changes nothing
+//! logs nothing, so a `touch` is silent.
+//!
+//! The mode and owner checks run on every read, not only at startup. A file
+//! made group- or world-readable after the server started, or handed to
+//! another owner, is refused on its next read: the last set that loaded stays
+//! in force and one warning names the file and the mode.
+
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
+
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
+
+/// The prefix every minted token carries, ahead of its random half.
+pub const TOKEN_PREFIX: &str = "sv_";
+
+/// The fewest bytes a `--auth-token` value may carry.
+///
+/// 16 bytes is the floor for the env-var single token, which an operator
+/// types or pastes and which is therefore the one that gets set to a
+/// memorable word. A stored hash needs no such floor: it hides the length of
+/// what produced it, so [`TokenSet`] checks the hash's shape and nothing
+/// about the token behind it.
+pub const MIN_SINGLE_TOKEN_BYTES: usize = 16;
+
+/// Checks an operator-supplied single token against the entropy floor.
+///
+/// # Errors
+///
+/// A message naming the floor and the value's length, for the surface that
+/// read the value to print before it binds a port. The value itself is never
+/// part of the message.
+pub fn check_single_token(token: &str) -> Result<(), String> {
+    if token.len() < MIN_SINGLE_TOKEN_BYTES {
+        return Err(format!(
+            "the token is {} bytes and the floor is {MIN_SINGLE_TOKEN_BYTES}; generate one with \
+             `openssl rand -hex 32`",
+            token.len()
+        ));
+    }
+    Ok(())
+}
+
+/// Per-token keys this build reads but does not act on. `role` is reserved
+/// for the build that gives a token a role, so a file written against that
+/// build loads here without a warning about a key on its way in.
+const RESERVED_KEYS: &[&str] = &["role"];
+
+/// The SHA-256 of a presented bearer string, the one digest both auth paths
+/// compare.
+#[must_use]
+pub fn digest(presented: &str) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(presented.as_bytes());
+    hasher.finalize().into()
+}
+
+/// Whether two digests are equal, compared in constant time.
+///
+/// The comparison runs over all 32 bytes whatever the inputs are, so the time
+/// it takes carries no information about how many leading bytes matched.
+#[must_use]
+pub fn digests_equal(left: &[u8; 32], right: &[u8; 32]) -> bool {
+    left.ct_eq(right).into()
+}
+
+/// Whether two secret strings are equal, compared in constant time.
+///
+/// Both sides are hashed first, so the comparison is over two fixed-width
+/// digests and the time it takes carries nothing about the lengths either.
+/// This is what every secret comparison in the crate goes through, in place
+/// of `==` on the strings themselves.
+#[must_use]
+pub fn secrets_equal(left: &str, right: &str) -> bool {
+    digests_equal(&digest(left), &digest(right))
+}
+
+/// Why a token file was refused at load.
+#[derive(Debug, thiserror::Error)]
+pub enum TokenFileError {
+    /// The file could not be read.
+    #[error("token file {path} could not be read: {source}")]
+    Read {
+        /// The file named on the command line.
+        path: PathBuf,
+        /// The underlying IO failure.
+        source: std::io::Error,
+    },
+    /// The file is readable by group or other.
+    #[error(
+        "token file {path} has mode {mode:04o}, which is readable by group or other; \
+         token hashes are credentials, so run `chmod 0600 {path}` and start again"
+    )]
+    Mode {
+        /// The file named on the command line.
+        path: PathBuf,
+        /// The permission bits the file carries.
+        mode: u32,
+    },
+    /// The file is not valid TOML. A repeated `[tokens.<name>]` table lands
+    /// here: TOML refuses a duplicate key outright, so two entries under one
+    /// name never reach the parser below.
+    #[error("token file {path} is not valid TOML: {source}")]
+    Parse {
+        /// The file named on the command line.
+        path: PathBuf,
+        /// The parser's own message, which names the line and column.
+        source: toml::de::Error,
+    },
+    /// An entry's `hash` is not 64 lowercase hex characters.
+    #[error(
+        "token file {path} gives token `{name}` a hash of {len} characters that is not 64 \
+         lowercase hex; `hash` is the SHA-256 of the whole token, as `sha256sum` prints it"
+    )]
+    BadHash {
+        /// The file named on the command line.
+        path: PathBuf,
+        /// The token name whose hash is malformed.
+        name: String,
+        /// How many characters the value carries.
+        len: usize,
+    },
+    /// The file belongs to some other user than the one serving.
+    #[error(
+        "token file {path} is owned by uid {uid} and this process runs as uid {serving}; \
+         a token file another user can rewrite is a token file another user controls, so run \
+         `chown {serving} {path}` and start again"
+    )]
+    Owner {
+        /// The file named on the command line.
+        path: PathBuf,
+        /// The uid that owns the file.
+        uid: u32,
+        /// The uid this process runs as.
+        serving: u32,
+    },
+    /// The file parsed and declared no tokens at all.
+    #[error(
+        "token file {path} declares no tokens; add a [tokens.<name>] table with a `hash` key, \
+         or drop --token-file and use --auth-token for a single shared secret"
+    )]
+    Empty {
+        /// The file named on the command line.
+        path: PathBuf,
+    },
+}
+
+/// One named token: the name an operator chose and the digest to compare
+/// against.
+#[derive(Debug, Clone)]
+struct Named {
+    name: String,
+    hash: [u8; 32],
+}
+
+/// The token file's contents as this build reads them.
+#[derive(Debug, Clone, Default)]
+pub struct TokenSet {
+    entries: Vec<Named>,
+}
+
+/// One `[tokens.<name>]` table as TOML hands it over.
+#[derive(Debug, Deserialize)]
+struct RawEntry {
+    hash: String,
+    #[serde(flatten)]
+    other: BTreeMap<String, toml::Value>,
+}
+
+/// The whole document.
+#[derive(Debug, Deserialize)]
+struct RawFile {
+    #[serde(default)]
+    tokens: BTreeMap<String, RawEntry>,
+}
+
+impl TokenSet {
+    /// Parses a token file's text, naming `path` in every refusal.
+    ///
+    /// # Errors
+    ///
+    /// [`TokenFileError::Parse`] for text that is not valid TOML (a repeated
+    /// token name included), [`TokenFileError::BadHash`] for a `hash` that is
+    /// not 64 lowercase hex, and [`TokenFileError::Empty`] for a file that
+    /// declares no tokens.
+    pub fn parse(path: &Path, text: &str) -> Result<Self, TokenFileError> {
+        let raw: RawFile = toml::from_str(text).map_err(|source| TokenFileError::Parse {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if raw.tokens.is_empty() {
+            return Err(TokenFileError::Empty {
+                path: path.to_path_buf(),
+            });
+        }
+        let mut entries = Vec::with_capacity(raw.tokens.len());
+        for (name, entry) in raw.tokens {
+            let Some(hash) = parse_hash(&entry.hash) else {
+                return Err(TokenFileError::BadHash {
+                    path: path.to_path_buf(),
+                    name,
+                    len: entry.hash.chars().count(),
+                });
+            };
+            let ignored: Vec<&str> = entry
+                .other
+                .keys()
+                .map(String::as_str)
+                .filter(|key| !RESERVED_KEYS.contains(key))
+                .collect();
+            if !ignored.is_empty() {
+                tracing::warn!(
+                    token = %name,
+                    file = %path.display(),
+                    keys = ?ignored,
+                    "token file entry carries keys this build does not read"
+                );
+            }
+            entries.push(Named { name, hash });
+        }
+        Ok(Self { entries })
+    }
+
+    /// The name of the entry whose stored hash equals `presented`, if any.
+    ///
+    /// Every entry is compared, with no early exit on a match, so the number
+    /// of comparisons a request pays for depends on how many tokens the file
+    /// declares and not on which one was presented.
+    #[must_use]
+    pub fn match_name(&self, presented: &[u8; 32]) -> Option<&str> {
+        let mut found: Option<&str> = None;
+        for entry in &self.entries {
+            if digests_equal(&entry.hash, presented) {
+                found = Some(entry.name.as_str());
+            }
+        }
+        found
+    }
+
+    /// How many tokens the file declares.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the file declares no tokens. A loaded set is never empty:
+    /// [`parse`](Self::parse) refuses that file.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Every declared name, in the file's sorted order. Names, never hashes.
+    #[must_use]
+    pub fn names(&self) -> Vec<&str> {
+        self.entries.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    /// The digest stored under `name`, for comparing two loads of the file.
+    fn hash_for(&self, name: &str) -> Option<&[u8; 32]> {
+        self.entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .map(|entry| &entry.hash)
+    }
+
+    /// What changed between the set loaded before and this one: names added,
+    /// names removed, and names kept whose hash was replaced. Names only.
+    #[must_use]
+    fn diff(&self, previous: &Self) -> Change {
+        let mut change = Change::default();
+        for name in self.names() {
+            match previous.hash_for(name) {
+                None => change.added.push(name.to_owned()),
+                Some(before) if self.hash_for(name) != Some(before) => {
+                    change.rotated.push(name.to_owned());
+                }
+                Some(_) => {}
+            }
+        }
+        for name in previous.names() {
+            if self.hash_for(name).is_none() {
+                change.removed.push(name.to_owned());
+            }
+        }
+        change
+    }
+}
+
+/// What one reload did to the set, by name.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Change {
+    added: Vec<String>,
+    removed: Vec<String>,
+    rotated: Vec<String>,
+}
+
+impl Change {
+    /// Whether the reload left the set exactly as it was.
+    fn is_empty(&self) -> bool {
+        self.added.is_empty() && self.removed.is_empty() && self.rotated.is_empty()
+    }
+}
+
+/// Reads 64 lowercase hex characters into a digest, or `None` for anything
+/// else. Uppercase hex is refused rather than folded, so the file has one
+/// spelling and a diff between two of them is a real difference.
+fn parse_hash(text: &str) -> Option<[u8; 32]> {
+    if text.len() != 64
+        || !text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase())
+    {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (slot, pair) in out.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
+        let hi = (pair[0] as char).to_digit(16)?;
+        let lo = (pair[1] as char).to_digit(16)?;
+        *slot = ((hi << 4) | lo) as u8;
+    }
+    Some(out)
+}
+
+/// What a stat says about the file, and the whole basis for deciding a
+/// re-parse is due. Length rides along with the modification time because a
+/// filesystem's timestamp resolution is coarser than an edit can be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Stamp {
+    modified: Option<SystemTime>,
+    len: u64,
+}
+
+impl Stamp {
+    /// The stamp a stat carries.
+    fn of(meta: &fs::Metadata) -> Self {
+        Self {
+            modified: meta.modified().ok(),
+            len: meta.len(),
+        }
+    }
+}
+
+/// The last good set, the stamp it was read at, and the stamp of the last
+/// version that would not parse.
+#[derive(Debug)]
+struct Loaded {
+    stamp: Stamp,
+    set: Arc<TokenSet>,
+    warned_for: Option<Stamp>,
+}
+
+/// A token file plus the last set that parsed cleanly from it.
+///
+/// [`current`](Self::current) is what auth calls. It re-reads the file when
+/// the file changed and keeps the last good set otherwise, so adding a token
+/// and revoking one both take effect on the next request with no restart.
+#[derive(Debug)]
+pub struct TokenStore {
+    path: PathBuf,
+    loaded: Mutex<Loaded>,
+}
+
+impl TokenStore {
+    /// Reads and parses `path`, refusing a file that is readable by group or
+    /// other, does not parse, gives a malformed hash, or declares no tokens.
+    ///
+    /// # Errors
+    ///
+    /// A [`TokenFileError`] naming the file and what is wrong with it.
+    pub fn load(path: &Path) -> Result<Self, TokenFileError> {
+        let (stamp, text) = read_checked(path)?;
+        let set = TokenSet::parse(path, &text)?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            loaded: Mutex::new(Loaded {
+                stamp,
+                set: Arc::new(set),
+                warned_for: None,
+            }),
+        })
+    }
+
+    /// The file this store reads.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The current token set: re-read when the file changed since the last
+    /// read, the last good set otherwise.
+    ///
+    /// Three things happen on every call, whether or not the file changed.
+    /// The file is stat'd. Its mode and owner are checked, so a file loosened
+    /// or handed to another user after the server started is refused on its
+    /// next read rather than at the next restart. And a reload that changes
+    /// the set logs what it changed, by name.
+    ///
+    /// A version of the file that will not load keeps the last good set in
+    /// place and logs one warning for that version, so a half-written file
+    /// mid-save neither opens the server up nor empties it, and a file left
+    /// broken does not warn once per request.
+    #[must_use]
+    pub fn current(&self) -> Arc<TokenSet> {
+        let mut loaded = self.loaded.lock().expect("token store lock");
+        let meta = match fs::metadata(&self.path) {
+            Ok(meta) => meta,
+            Err(source) => {
+                let error = TokenFileError::Read {
+                    path: self.path.clone(),
+                    source,
+                };
+                self.refuse(&mut loaded, None, &error.to_string());
+                return loaded.set.clone();
+            }
+        };
+        let stamp = Stamp::of(&meta);
+        // Before the change check, not after: a chmod changes neither the
+        // modification time nor the length, so a mode this call refused would
+        // otherwise be read only on the next content edit.
+        if let Err(error) = check_guard(&self.path, &meta) {
+            self.refuse(&mut loaded, Some(stamp), &error.to_string());
+            return loaded.set.clone();
+        }
+        if stamp == loaded.stamp {
+            return loaded.set.clone();
+        }
+        let read = fs::read_to_string(&self.path)
+            .map_err(|source| TokenFileError::Read {
+                path: self.path.clone(),
+                source,
+            })
+            .and_then(|text| TokenSet::parse(&self.path, &text));
+        match read {
+            Ok(set) => {
+                let change = set.diff(&loaded.set);
+                loaded.stamp = stamp;
+                loaded.set = Arc::new(set);
+                loaded.warned_for = None;
+                if !change.is_empty() {
+                    tracing::info!(
+                        file = %self.path.display(),
+                        added = ?change.added,
+                        removed = ?change.removed,
+                        rotated = ?change.rotated,
+                        tokens = loaded.set.len(),
+                        "token file reloaded"
+                    );
+                }
+                loaded.set.clone()
+            }
+            Err(error) => {
+                self.refuse(&mut loaded, Some(stamp), &error.to_string());
+                loaded.set.clone()
+            }
+        }
+    }
+
+    /// Logs one warning per refused version of the file, then keeps quiet
+    /// about that version. The last good set is untouched either way, and so
+    /// is the stamp it was read at, so a fixed file reloads on the next call.
+    fn refuse(&self, loaded: &mut Loaded, stamp: Option<Stamp>, message: &str) {
+        if loaded.warned_for == stamp && stamp.is_some() {
+            return;
+        }
+        loaded.warned_for = stamp;
+        tracing::warn!(
+            file = %self.path.display(),
+            detail = %message,
+            "token file reload refused; the last set that loaded stays in force"
+        );
+    }
+}
+
+/// Refuses a token file whose mode or owner puts it in reach of anyone but
+/// the user serving. Runs at load and on every read.
+///
+/// On a platform without unix permissions there is nothing to check and every
+/// file passes.
+fn check_guard(path: &Path, meta: &fs::Metadata) -> Result<(), TokenFileError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let mode = meta.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            return Err(TokenFileError::Mode {
+                path: path.to_path_buf(),
+                mode,
+            });
+        }
+        // SAFETY: `geteuid` reads a field of the calling process and cannot
+        // fail; it takes no arguments and touches no memory the caller owns.
+        let serving = unsafe { libc::geteuid() };
+        if meta.uid() != serving {
+            return Err(TokenFileError::Owner {
+                path: path.to_path_buf(),
+                uid: meta.uid(),
+                serving,
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (path, meta);
+    Ok(())
+}
+
+/// Checks the file's mode and owner and reads its text, returning the stamp
+/// it was read at alongside.
+fn read_checked(path: &Path) -> Result<(Stamp, String), TokenFileError> {
+    let meta = fs::metadata(path).map_err(|source| TokenFileError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    check_guard(path, &meta)?;
+    let text = fs::read_to_string(path).map_err(|source| TokenFileError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok((Stamp::of(&meta), text))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use super::*;
+
+    /// Hex of the SHA-256 of `text`, the way `sha256sum` prints it.
+    fn hex(text: &str) -> String {
+        digest(text).iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn write_mode(path: &Path, text: &str, mode: u32) {
+        let mut file = fs::File::create(path).expect("create the token file");
+        file.write_all(text.as_bytes()).expect("write it");
+        drop(file);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("chmod");
+        }
+        let _ = mode;
+    }
+
+    #[test]
+    fn a_minted_token_verifies_against_its_stored_hash() {
+        // The wire format the minting verb produces: prefix, 43 base62
+        // characters, an underscore, a 6-character checksum. Verification
+        // hashes the whole string, so the checksum is covered by the digest
+        // like every other byte.
+        let token = format!("{TOKEN_PREFIX}{}_{}", "a".repeat(43), "9f3k2q");
+        assert_eq!(token.len(), 3 + 43 + 1 + 6);
+        let file = format!("[tokens.ci]\nhash = \"{}\"\n", hex(&token));
+        let set = TokenSet::parse(Path::new("tokens.toml"), &file).expect("parse");
+        assert_eq!(set.match_name(&digest(&token)), Some("ci"));
+        assert_eq!(set.match_name(&digest("sv_wrong")), None);
+    }
+
+    #[test]
+    fn a_hash_that_is_not_64_lowercase_hex_is_refused_by_name() {
+        for bad in ["deadbeef", &hex("x").to_uppercase(), &"z".repeat(64)] {
+            let text = format!("[tokens.ci]\nhash = \"{bad}\"\n");
+            let error = TokenSet::parse(Path::new("tokens.toml"), &text).expect_err("refused");
+            let message = error.to_string();
+            assert!(message.contains("tokens.toml"), "names the file: {message}");
+            assert!(message.contains("`ci`"), "names the token: {message}");
+            assert!(
+                message.contains("64 lowercase hex"),
+                "says what a hash is: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_with_no_tokens_names_the_single_secret_flag() {
+        let error = TokenSet::parse(Path::new("tokens.toml"), "").expect_err("refused");
+        let message = error.to_string();
+        assert!(message.contains("declares no tokens"), "{message}");
+        assert!(message.contains("--auth-token"), "{message}");
+    }
+
+    #[test]
+    fn a_repeated_token_name_is_refused() {
+        let text = format!(
+            "[tokens.ci]\nhash = \"{h}\"\n\n[tokens.ci]\nhash = \"{h}\"\n",
+            h = hex("one")
+        );
+        let error = TokenSet::parse(Path::new("tokens.toml"), &text).expect_err("refused");
+        let message = error.to_string();
+        assert!(message.contains("tokens.toml"), "names the file: {message}");
+        assert!(
+            message.contains("not valid TOML"),
+            "a repeated name is a TOML duplicate key: {message}"
+        );
+    }
+
+    #[test]
+    fn a_reserved_key_loads_and_an_unknown_one_still_loads() {
+        let text = format!(
+            "[tokens.ci]\nhash = \"{h}\"\nrole = \"admin\"\nnickname = \"builder\"\n",
+            h = hex("one")
+        );
+        let set = TokenSet::parse(Path::new("tokens.toml"), &text).expect("parse");
+        assert_eq!(set.names(), vec!["ci"]);
+        assert_eq!(set.match_name(&digest("one")), Some("ci"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_file_readable_by_group_or_other_is_refused_at_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("tokens.toml");
+        let text = format!("[tokens.ci]\nhash = \"{}\"\n", hex("one"));
+        write_mode(&path, &text, 0o644);
+        let error = TokenStore::load(&path).expect_err("refused");
+        let message = error.to_string();
+        assert!(message.contains("0644"), "names the mode: {message}");
+        assert!(message.contains("chmod 0600"), "says what to do: {message}");
+
+        write_mode(&path, &text, 0o600);
+        let store = TokenStore::load(&path).expect("0600 loads");
+        assert_eq!(store.current().names(), vec!["ci"]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_rewrite_adds_and_revokes_without_a_reload_call() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("tokens.toml");
+        write_mode(
+            &path,
+            &format!("[tokens.ci]\nhash = \"{}\"\n", hex("one")),
+            0o600,
+        );
+        let store = TokenStore::load(&path).expect("load");
+        assert_eq!(store.current().match_name(&digest("one")), Some("ci"));
+
+        write_mode(
+            &path,
+            &format!(
+                "[tokens.ci]\nhash = \"{}\"\n\n[tokens.ops]\nhash = \"{}\"\n",
+                hex("one"),
+                hex("two")
+            ),
+            0o600,
+        );
+        assert_eq!(store.current().match_name(&digest("two")), Some("ops"));
+
+        write_mode(
+            &path,
+            &format!("[tokens.ops]\nhash = \"{}\"\n", hex("two")),
+            0o600,
+        );
+        let set = store.current();
+        assert_eq!(set.match_name(&digest("one")), None, "revoked by rewrite");
+        assert_eq!(set.match_name(&digest("two")), Some("ops"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_reload_reports_what_it_added_removed_and_rotated() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("tokens.toml");
+        write_mode(
+            &path,
+            &format!(
+                "[tokens.ci]\nhash = \"{}\"\n\n[tokens.ops]\nhash = \"{}\"\n",
+                hex("one"),
+                hex("two")
+            ),
+            0o600,
+        );
+        let store = TokenStore::load(&path).expect("load");
+        let before = store.current();
+
+        // `ci` keeps its name and gets a new hash, `ops` goes, `bot` arrives.
+        write_mode(
+            &path,
+            &format!(
+                "[tokens.ci]\nhash = \"{}\"\n\n[tokens.bot]\nhash = \"{}\"\n",
+                hex("one-rotated"),
+                hex("three")
+            ),
+            0o600,
+        );
+        let after = store.current();
+        let change = after.diff(&before);
+        assert_eq!(change.added, vec!["bot".to_owned()]);
+        assert_eq!(change.removed, vec!["ops".to_owned()]);
+        assert_eq!(change.rotated, vec!["ci".to_owned()]);
+
+        // A reload that changes nothing has nothing to report, which is what
+        // keeps a `touch` out of the log.
+        assert!(after.diff(&after).is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_file_loosened_after_startup_is_refused_on_its_next_read() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("tokens.toml");
+        let text = format!("[tokens.ci]\nhash = \"{}\"\n", hex("one"));
+        write_mode(&path, &text, 0o600);
+        let store = TokenStore::load(&path).expect("load");
+        assert_eq!(store.current().match_name(&digest("one")), Some("ci"));
+
+        // A chmod alone changes neither the modification time nor the length,
+        // so this is exactly the case a change check on its own would miss.
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("chmod");
+        }
+        let set = store.current();
+        assert_eq!(
+            set.match_name(&digest("one")),
+            Some("ci"),
+            "the last set that loaded stays in force"
+        );
+        // The refusal is real: a token added while the file is loose does not
+        // reach the set.
+        write_mode(
+            &path,
+            &format!(
+                "[tokens.ci]\nhash = \"{}\"\n\n[tokens.sneak]\nhash = \"{}\"\n",
+                hex("one"),
+                hex("sneaky")
+            ),
+            0o644,
+        );
+        assert_eq!(store.current().match_name(&digest("sneaky")), None);
+
+        // Tightened again, the same file loads.
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("chmod");
+        }
+        assert_eq!(store.current().match_name(&digest("sneaky")), Some("sneak"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_broken_rewrite_keeps_the_last_good_set() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("tokens.toml");
+        write_mode(
+            &path,
+            &format!("[tokens.ci]\nhash = \"{}\"\n", hex("one")),
+            0o600,
+        );
+        let store = TokenStore::load(&path).expect("load");
+        assert_eq!(store.current().match_name(&digest("one")), Some("ci"));
+
+        write_mode(&path, "[tokens.ci]\nhash = \"nope\"\n", 0o600);
+        let set = store.current();
+        assert_eq!(
+            set.match_name(&digest("one")),
+            Some("ci"),
+            "a broken file leaves the last good set in force"
+        );
+        assert_eq!(set.len(), 1, "and never empties it");
+    }
+
+    #[test]
+    fn the_entropy_floor_names_itself_and_never_the_value() {
+        let short = "hunter2";
+        let message = check_single_token(short).expect_err("refused");
+        assert!(message.contains("7 bytes"), "{message}");
+        assert!(
+            message.contains(&MIN_SINGLE_TOKEN_BYTES.to_string()),
+            "names the floor: {message}"
+        );
+        assert!(!message.contains(short), "never the value: {message}");
+        check_single_token(&"x".repeat(MIN_SINGLE_TOKEN_BYTES)).expect("the floor itself passes");
+    }
+
+    #[test]
+    fn secrets_compare_equal_only_to_themselves() {
+        assert!(secrets_equal("dt_abc", "dt_abc"));
+        assert!(!secrets_equal("dt_abc", "dt_abd"));
+        assert!(!secrets_equal("dt_abc", "dt_abc "));
+        assert!(!secrets_equal("", "dt_abc"));
+    }
+}
