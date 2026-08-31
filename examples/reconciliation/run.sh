@@ -23,11 +23,26 @@ MODEL_URL="http://127.0.0.1:$PORT"
 rm -f "$STORE" "$REPORT" "$STORE"-wal "$STORE"-shm
 
 cleanup() {
-  [[ -n "${MODEL_PID:-}" ]] && kill "$MODEL_PID" 2>/dev/null || true
+  # Only ever by the exact pid this script recorded, never by pattern.
+  [[ -n "${SERVER_PID:-}" ]] && kill -9 "$SERVER_PID" 2>/dev/null || true
   [[ -n "${RUN_PID:-}" ]] && kill -9 "$RUN_PID" 2>/dev/null || true
-  pkill -f "examples/reconciliation/server.py" 2>/dev/null || true
+  [[ -n "${MODEL_PID:-}" ]] && kill "$MODEL_PID" 2>/dev/null || true
 }
 trap cleanup EXIT
+
+# Kill an exact pid and wait out its death, polling `kill -0` rather than the
+# `wait` builtin: `wait` only works on a direct child of this shell, and the
+# pid this is used for (the MCP tool server) is a grandchild, spawned by the
+# salvor process rather than by this script.
+kill_and_confirm() {
+  local pid="$1"
+  [[ -n "$pid" ]] || return 0
+  kill -9 "$pid" 2>/dev/null || true
+  for _ in $(seq 1 50); do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 0.1
+  done
+}
 
 echo "== Building salvor =="
 cargo build -q
@@ -56,6 +71,14 @@ done
 [[ -n "$RUN_ID" ]] || { echo "FAILED: no run id"; cat /tmp/recon-run.err; exit 1; }
 echo "run id: $RUN_ID"
 
+# The agent's one MCP tool server (examples/reconciliation/server.py) is a
+# grandchild: the salvor process (RUN_PID) spawns it over stdio, not this
+# script, so there is no `$!` for it here. It is already running by the time a
+# run id is printed (the tool list is fetched from it before the run starts),
+# so its pid is looked up from the OS's own process table by parentage of
+# RUN_PID, which names exactly this run's server and nothing else.
+SERVER_PID=$(pgrep -P "$RUN_PID" | head -1 || true)
+
 # Wait until the write lands on disk. Write-ahead ordering guarantees the intent
 # was recorded before the tool executed, so once the line appears the tool is
 # blocking with the completion not yet recorded: the exact dangling-write window.
@@ -67,7 +90,11 @@ done
 echo "the write has landed; killing the process mid-write"
 kill -9 "$RUN_PID"; wait "$RUN_PID" 2>/dev/null || true
 RUN_PID=""
-pkill -f "examples/reconciliation/server.py" 2>/dev/null || true
+# The server is blocking mid-tool-call (RECON_BLOCK_SECONDS), so it will not
+# notice the closed stdin pipe on its own for a long time; kill it by its own
+# pid rather than leaving it to run out the clock.
+kill_and_confirm "$SERVER_PID"
+SERVER_PID=""
 
 echo
 echo "== The recorded log ends at a dangling write intent =="
