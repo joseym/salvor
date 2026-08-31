@@ -102,6 +102,32 @@ PUNCHLINE=(
   '\bknows or cares\b'
 )
 
+# Personification: perception and mental-state verbs on an inanimate subject.
+# A store sees nothing, so "the store cannot see tampering" is out while "the
+# store cannot detect tampering" and "the store reads it back clean" are in.
+# The mechanical verbs (read, check, record, refuse, compute, compare, hold,
+# serve, accept, detect, report) are fine on any subject and are absent from
+# the list below on purpose. Same tuning rule as the punchline list: each
+# entry must flag a real instance and no line of this repo's legitimate
+# prose. The subject is a fixed list of the things this project writes about
+# rather than any noun, because a bare verb list would flag every sentence
+# with a person in it. "the server trusts its caller" and "cannot be
+# satisfied in place" are deliberately absent: a trust boundary and a
+# satisfied condition are the ordinary technical senses of those words. So is
+# "they saw", where the subject is usually a person; a bare "it saw" is not.
+# The last entry is the same rule applied to discretion: CI widens nothing,
+# the person who edits the workflow does, so "CI can widen the budget" is out
+# and "ci.yml sets it to 20" is in. It stays narrow for the same reason:
+# "before CI can publish it" is a plain statement of what the job does.
+PERSONIFICATION=(
+  '\b(stores?|logs?|databases?|chains?|runs?|files?|code|tests?|anchors?|binary|binaries) (sees?|saw|knows?|knew|believes?|notices?|noticed|cares?|remembers?|forgets?|forgot|thinks?|wants?|feels?|felt|agrees?|disagrees?|trusts?)\b'
+  '\b(stores?|logs?|databases?|chains?|runs?|files?|code|tests?|anchors?|binary|binaries) (can|could|does|do|did|will|would|must)( ?n.t| not)? (see|know|believe|notice|care|remember|forget|think|want|feel|agree|disagree|trust)\b'
+  '\bto disagree with\b'
+  '\bthe only thing that (knows|sees|remembers|cares)\b'
+  '\bit (saw|sees|knew|knows)\b'
+  '\bci (can |could |may |might )?(widens?|relaxes|loosens|chooses?|decides?|prefers?)\b'
+)
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -112,12 +138,14 @@ Usage: prose-lint.sh [FILE...]
 
 Scan the given files (or standard input when none are named) for AI writing
 tells: em and en dashes, stock vocabulary, negation pivots, attribution
-footers, process narration, meta-discourse openers, and punchline rhythm
+footers, process narration, meta-discourse openers, punchline rhythm
 (aphoristic closers like "... is the whole point.", dismissals like "not a
-bug", and personified verbs on non-human subjects). Each hit prints its
-location and reason, and any hit exits 1; a leading short-phrase question
-only warns. Extend a check by adding one line to the labeled arrays near the
-top of this script.
+bug"), and personified subjects (perception and mental-state verbs on a
+store, a log, a run or a file: "the store cannot see it" where "the store
+cannot detect it" is what is meant). Each hit prints its location and
+reason, and any hit exits 1; a leading short-phrase question only warns.
+Extend a check by adding one line to the labeled arrays near the top of
+this script.
 EOF
 }
 
@@ -190,6 +218,7 @@ check 'attribution footer' '-i' "$(join_alt "${ATTRIBUTION[@]}")"
 check 'process narration' '-i' "$(join_alt "${PROCESS_NARRATION[@]}")"
 check 'meta-discourse opener' '-i' "$(join_alt "${META_DISCOURSE[@]}")"
 check 'punchline rhythm' '-i' "$(join_alt "${PUNCHLINE[@]}")"
+check 'personified subject' '-i' "$(join_alt "${PERSONIFICATION[@]}")"
 
 # ---------------------------------------------------------------------------
 # Warning-only check: a line that opens with one to four words then a '?'.
