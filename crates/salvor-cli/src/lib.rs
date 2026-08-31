@@ -113,6 +113,37 @@ pub fn init_tracing() {
         .try_init();
 }
 
+/// The name to record as the caller on the events a verb writes: the global
+/// `--caller` when given, else the operating system user this process runs as.
+///
+/// The account is read from the environment rather than from a system call:
+/// `USER` on Unix, `USERNAME` on Windows, which is the pair every shell sets
+/// and the only source available without a dependency that reaches for
+/// `getpwuid`. A process started with neither set (a bare container, a daemon
+/// with a scrubbed environment) resolves to `None` and records no name, which
+/// is the honest answer rather than a guess. An empty value is treated the
+/// same way as an unset one.
+///
+/// The name is a label on the events, never a credential. Anyone who can write
+/// the store can write any name into it; what makes a name worth something is
+/// the server verifying a token before it stamps one.
+#[must_use]
+pub fn caller_name(flag: Option<&str>) -> Option<String> {
+    if let Some(name) = flag {
+        return non_empty(name);
+    }
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .ok()
+        .and_then(|name| non_empty(&name))
+}
+
+/// The value when it carries something, `None` when it is blank.
+fn non_empty(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
 /// Runs the parsed command, returning the process exit code.
 ///
 /// # Errors
@@ -120,13 +151,22 @@ pub fn init_tracing() {
 /// Propagates any handler failure; the caller reports it and exits non-zero.
 pub async fn dispatch(cli: Cli) -> Result<u8> {
     let store = cli.store.as_path();
+    // Who to record on the events these verbs write. Resolved once, here,
+    // rather than per handler, so every verb answers the question the same
+    // way. See [`caller_name`].
+    let caller = caller_name(cli.caller.as_deref());
+    let caller = caller.as_deref();
     match cli.command {
-        Command::Run(args) => commands::run(store, args).await,
-        Command::Resume(args) => commands::resume(store, args).await,
-        Command::Wake(args) => commands::wake(store, args).await,
+        Command::Run(args) => commands::run(store, caller, args).await,
+        Command::Resume(args) => commands::resume(store, caller, args).await,
+        Command::Wake(args) => commands::wake(store, caller, args).await,
+        // `fork` copies the origin's recorded envelopes verbatim under a new
+        // run id and then recovers the child, so it writes no event with a
+        // caller field of its own: restamping copied bytes would rewrite what
+        // the origin recorded, and a graph run's head carries no such field.
         Command::Fork(args) => commands::fork(store, args).await,
-        Command::Resolve(args) => commands::resolve(store, args).await,
-        Command::Abandon(args) => commands::abandon(store, args).await,
+        Command::Resolve(args) => commands::resolve(store, caller, args).await,
+        Command::Abandon(args) => commands::abandon(store, caller, args).await,
         Command::List(args) => commands::list(store, args).await,
         Command::Completions(args) => commands::completions(args),
         Command::History(args) => commands::history(store, args).await,

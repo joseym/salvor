@@ -178,6 +178,94 @@ async fn seed_client_driven_dangling_write(path: &Path) -> RunId {
     run_id
 }
 
+/// A store-direct resolve records who ran it: the operating system user by
+/// default, and whatever `--caller` names when the operator supplies one. The
+/// name rides inside the settler's own marker, so `salvor history` reads the
+/// mechanism and the person as one fact.
+#[tokio::test]
+async fn resolve_records_the_os_user_and_the_caller_flag_overrides_it() {
+    let dir = tempdir().expect("tempdir");
+
+    for (args, expected) in [
+        (vec!["--output", r#"{"published": true}"#], "seeded-user"),
+        (
+            vec!["--output", r#"{"published": true}"#, "--caller", "ops"],
+            "ops",
+        ),
+    ] {
+        let store_path = dir.path().join(format!("{expected}.db"));
+        let run_id = seed_dangling_write(&store_path).await;
+        let uuid = run_id.as_uuid().to_string();
+
+        let mut command = salvor(&store_path);
+        command
+            .env("USER", "seeded-user")
+            .env_remove("SALVOR_CALLER")
+            .arg("resolve")
+            .arg(&uuid);
+        command.args(&args).assert().success();
+
+        let store = SqliteStore::open(&store_path).expect("store opens");
+        let log = store.read_log(run_id).await.expect("log reads");
+        match &log[2].event {
+            Event::ToolCallCompleted {
+                settled_by,
+                settled_caller,
+                ..
+            } => {
+                assert_eq!(
+                    *settled_by,
+                    Some(SettledBy::Operator),
+                    "the mechanism is unchanged: a person recorded this"
+                );
+                assert_eq!(
+                    settled_caller.as_deref(),
+                    Some(expected),
+                    "and the person is named"
+                );
+            }
+            other => panic!("expected a tool completion, got {other:?}"),
+        }
+
+        salvor(&store_path)
+            .args(["history", &uuid])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(format!("[Operator: {expected}]")));
+    }
+}
+
+/// `SALVOR_CALLER` names the caller when the flag does not, and a run started
+/// under it records that name at its head, where `salvor history` shows it.
+#[tokio::test]
+async fn the_environment_names_the_caller_and_history_shows_it() {
+    let dir = tempdir().expect("tempdir");
+    let store_path = dir.path().join("salvor.db");
+    let run_id = seed_dangling_write(&store_path).await;
+    let uuid = run_id.as_uuid().to_string();
+
+    salvor(&store_path)
+        .env("SALVOR_CALLER", "nightly-job")
+        .args(["abandon", &uuid, "--reason", "husk is dead forever"])
+        .assert()
+        .success();
+
+    let store = SqliteStore::open(&store_path).expect("store opens");
+    let log = store.read_log(run_id).await.expect("log reads");
+    match &log[2].event {
+        Event::RunAbandoned { caller, .. } => {
+            assert_eq!(caller.as_deref(), Some("nightly-job"));
+        }
+        other => panic!("expected an abandonment, got {other:?}"),
+    }
+
+    salvor(&store_path)
+        .args(["history", &uuid])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[caller: nightly-job]"));
+}
+
 #[tokio::test]
 async fn client_driven_resolve_prints_client_pickup_message() {
     let dir = tempdir().expect("tempdir");
