@@ -262,7 +262,7 @@ pub async fn require_bearer(
         .and_then(|value| value.to_str().ok());
     match auth.check(presented) {
         Ok(caller) => {
-            tracing::debug!(
+            tracing::info!(
                 caller = %caller.name(),
                 source = %SourceLabel(source),
                 "bearer accepted"

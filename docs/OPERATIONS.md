@@ -286,9 +286,16 @@ is `unknown_token` for both:
 WARN bearer refused source=203.0.113.9 outcome=unknown_token delay_ms=200
 ```
 
-A request that verified logs one `DEBUG` naming the token it came in
-under (`caller=ci`), so turning on `RUST_LOG=salvor_server=debug` shows
-which token is driving what.
+A request that verified logs one `INFO` naming the token it came in
+under (`caller=ci`) and the source address:
+
+```
+INFO bearer accepted caller=ci source=203.0.113.9
+```
+
+Every acceptance and every refusal is a log line at the default level;
+an operator who wants a quieter log filters the target down with
+`RUST_LOG=salvor_server::auth=warn` rather than losing the record.
 
 Repeated refusals from one source address are held before the `401`:
 100ms on the first, doubling to a 2s cap. A source that has been quiet
@@ -298,7 +305,7 @@ is ever shut out of their own server by someone else's traffic.
 
 ### Reading who asked for a run
 
-The `DEBUG` line above is per request and lives as long as the log file
+The `INFO` line above is per request and lives as long as the log file
 does. The durable answer is on the events themselves. With a bearer
 configured, the server stamps the verified token's name onto every event
 a caller acts through: `caller` on `RunStarted`, `Resumed`, and
