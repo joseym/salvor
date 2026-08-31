@@ -601,6 +601,12 @@
 .badge.perf-client {
   border-style: dotted;
 }
+/* who asked for the event: a recorded name, in the same plain register as the performer badge
+   above, so "who did this" reads the same way wherever it appears. */
+.badge.caller {
+  border-style: dotted;
+  font-family: var(--font-mono);
+}
 
 .ev-note {
   margin: var(--space-2) 0 0;

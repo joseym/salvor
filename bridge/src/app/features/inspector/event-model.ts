@@ -111,6 +111,22 @@ export function zoneOf(seq: number, n: number): ScrubZone {
   return 'folded';
 }
 
+/**
+ * The badge naming who asked for an event, and the empty string when the payload records
+ * nobody.
+ *
+ * A server with a bearer configured stamps the token's name; the CLI stamps the operating
+ * system user. Absent (the field's default, every event recorded before it existed, and
+ * everything a pass-through server writes) means no caller was named, so it renders nothing,
+ * the same way an absent `performed_by` renders no badge above.
+ */
+function callerBadge(payload: Record<string, unknown>, key = 'caller'): string {
+  const name = payload[key];
+  return typeof name === 'string' && name !== ''
+    ? ` <span class="badge caller">${esc(name)}</span>`
+    : '';
+}
+
 /** One log row's full `.levent` HTML, over a decoded {@link SalvorEvent}. */
 export function rowOf(e: SalvorEvent, events: readonly SalvorEvent[], arrivedSeq: number | null): string {
   const p = e.payload;
@@ -123,7 +139,7 @@ export function rowOf(e: SalvorEvent, events: readonly SalvorEvent[], arrivedSeq
   switch (kind) {
     case 'RunStarted': {
       const a = String(p['agent_def_hash'] ?? '');
-      detail = `agent ${esc(a)}${p['record_prompts'] ? ' · prompts recorded' : ''}`;
+      detail = `agent ${esc(a)}${p['record_prompts'] ? ' · prompts recorded' : ''}${callerBadge(p)}`;
       body = pane('input', p['input']);
       break;
     }
@@ -207,10 +223,17 @@ export function rowOf(e: SalvorEvent, events: readonly SalvorEvent[], arrivedSeq
       const paired = p['seq'] !== undefined ? events.find((x) => x.seq === p['seq']) : undefined;
       const toolName = (paired?.payload['tool'] ?? p['tool']) as string | undefined;
       const toolRef = toolName !== undefined ? `<b>${esc(String(toolName))}</b>` : 'A tool call';
+      // `settled_by` names the mechanism (a person recorded this completion over the run's
+      // head) and `settled_caller` names that person. The run's own completions carry
+      // neither and get no badge, exactly as a server-performed intent gets none above.
+      const settler =
+        p['settled_by'] === 'operator'
+          ? ` <span class="badge perf-client">operator</span>${callerBadge(p, 'settled_caller')}`
+          : '';
       detail =
         output && output['ok'] === false
-          ? `${toolRef} returned a failure: recorded, not thrown`
-          : `${toolRef} returned`;
+          ? `${toolRef} returned a failure: recorded, not thrown${settler}`
+          : `${toolRef} returned${settler}`;
       body = pane('output', p['output']);
       break;
     }
@@ -220,9 +243,11 @@ export function rowOf(e: SalvorEvent, events: readonly SalvorEvent[], arrivedSeq
       body = `<p class="ev-note">${esc(String(p['reason']))}</p>${pane('input_schema', p['input_schema'])}`;
       break;
     case 'Resumed':
-      detail = 'resumed with recorded input';
-      body = `<p class="ev-honest">The event carries the input only: no actor. There is no user model
-                (single tenant), so there is no actor to record.</p>${pane('input', p['input'])}`;
+      detail = `resumed with recorded input${callerBadge(p)}`;
+      body = `<p class="ev-honest">The event carries the input, and the caller name when the server
+                verified a bearer or the CLI ran under a user. There is still no user model
+                (single tenant): the name says which token or account supplied the input, and
+                grants nothing.</p>${pane('input', p['input'])}`;
       break;
     case 'BudgetExceeded': {
       // The event records the ceiling as { budget: { kind, limit }, observed }; a budget can be
