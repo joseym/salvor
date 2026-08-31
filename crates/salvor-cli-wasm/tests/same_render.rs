@@ -208,6 +208,8 @@ fn reference_help_paths() -> Vec<(&'static str, &'static str)> {
         ("graph-edit", "graph edit"),
         ("graph-validate", "graph validate"),
         ("graph-run", "graph run"),
+        ("token", "token"),
+        ("token-new", "token new"),
     ]
 }
 
