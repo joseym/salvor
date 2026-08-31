@@ -265,9 +265,21 @@ INFO token file reloaded file=/etc/salvor/tokens.toml added=["ci-2026-09"] remov
 ```
 
 A reload that changes nothing logs nothing, so a `touch` is silent.
-Ship these lines off the box: someone who can write the file can add an
-entry, use it, and take it out again, and that sequence leaves two
-lines here that a later comparison of the file cannot produce.
+Someone who can write the file can add an entry, use it, and take it
+out again, and that sequence leaves two lines here that a later
+comparison of the file cannot produce, so these are the lines an audit
+wants kept.
+
+salvor writes its log to stderr and nowhere else; durable capture is
+not this process's job, it belongs to whatever supervises it. Under
+systemd, a unit with no `StandardError=` override lands in the
+journal, and `journalctl -u salvor` reads it back, `--since` and
+`--until` bounding a range. Under a container runtime, the configured
+log driver (`json-file`, `journald`, an external shipper) already
+captures the container's stderr, so nothing in salvor needs to change
+to keep it. The reload lines above and the bearer accept and refusal
+lines are the ones an audit wants kept for twelve months, whichever
+mechanism carries them off the box.
 
 A version of the file that will not load (a half-written save, a
 mistyped hash) keeps the last set that loaded in force and logs one
@@ -347,6 +359,18 @@ before the call returns, so an abrupt stop loses nothing that was
 acknowledged. `WAL` means the store is really three files while a
 writer holds it open: `salvor.db`, `salvor.db-wal`, and
 `salvor.db-shm`. Both facts shape the procedure below.
+
+### The token file sits outside the store
+
+Everything below covers the store files. The token file `--token-file`
+names is separate and holds names and SHA-256 hashes, never a secret,
+so a lost copy is recreated by minting new tokens with `salvor token
+new` and distributing them to the callers who need them; backing it up
+is optional. What an audit needs kept is the credential history, the
+reload log lines above naming every add and remove, not old copies of
+the file itself. A backup of the file, if one is kept anyway, must
+land on a target no looser than mode `0600`; a wider target exposes
+the hashes the file exists to protect.
 
 ### One `salvor serve` per store
 
