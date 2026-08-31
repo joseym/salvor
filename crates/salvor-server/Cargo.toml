@@ -54,10 +54,13 @@ tokio-stream.workspace = true
 # the file (the server re-reads it when it changes, so file reading is this
 # crate's rather than the CLI's, unlike an agent definition or a client-tool
 # declaration), `sha2` hashes a presented bearer, and `subtle` compares two
-# digests in constant time.
+# digests in constant time. `getrandom` is the OS CSPRNG `salvor token new`
+# mints from; already resolved in the tree through uuid's `v4` feature, so
+# naming it here adds no new crate.
 toml.workspace = true
 sha2.workspace = true
 subtle.workspace = true
+getrandom.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

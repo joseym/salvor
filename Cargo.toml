@@ -60,6 +60,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
+# The OS CSPRNG behind `salvor token new`'s minting. Already resolved in the
+# tree at 0.4.3 through uuid's own `v4` feature, so naming it here promotes an
+# existing transitive dependency to a direct one rather than adding a new
+# crate.
+getrandom = "0.4"
 time = { version = "0.3", features = ["serde-well-known", "macros"] }
 anyhow = "1"
 tokio = { version = "1", features = ["full"] }

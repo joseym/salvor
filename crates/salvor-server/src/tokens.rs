@@ -26,10 +26,19 @@
 //! # Token wire format
 //!
 //! A minted token is `sv_` + 43 base62 characters (32 CSPRNG bytes) + `_` +
-//! a 6-character checksum: `sv_<43 chars>_<6 chars>`. Verification never
-//! takes that string apart. It hashes the whole presented value, checksum
-//! included, and compares the digest against a stored one, so the format is
-//! the minting verb's contract and the stored hash covers every byte of it.
+//! a 6-character checksum: `sv_<43 chars>_<6 chars>`. [`mint`] is the only
+//! place that assembles one; [`checksum`] is the only place that computes the
+//! trailing six characters, so a caller that mints and a caller that ever
+//! checks a checksum read the same six characters off the same payload.
+//!
+//! Verification never takes that string apart. It hashes the whole presented
+//! value, checksum included, through [`digest`], and compares the result
+//! against a stored one, so the checksum needs no decoder anywhere in this
+//! crate: it is a copy-paste guard for the human moving the token around, not
+//! a byte [`TokenSet::match_name`] ever inspects on its own. A token with a
+//! checksum some other tool computed differently still verifies, as long as
+//! the whole string hashes to a stored entry; a checksum only ever protects
+//! against a slip made before the token reaches here.
 //!
 //! # Why an mtime poll and not a filesystem watcher
 //!
@@ -131,6 +140,111 @@ pub fn digests_equal(left: &[u8; 32], right: &[u8; 32]) -> bool {
 #[must_use]
 pub fn secrets_equal(left: &str, right: &str) -> bool {
     digests_equal(&digest(left), &digest(right))
+}
+
+/// How many base62 characters a minted token's random half carries.
+///
+/// `62^43 > 2^256`, so every 256-bit value (32 CSPRNG bytes) fits in 43
+/// base62 digits with room to spare; no 32-byte value this crate ever mints
+/// needs a 44th.
+pub const TOKEN_RANDOM_CHARS: usize = 43;
+
+/// How many characters a minted token's trailing checksum carries.
+pub const CHECKSUM_LEN: usize = 6;
+
+/// The alphabet a minted token's random half is drawn from: digits, then
+/// uppercase, then lowercase letters. Encoding only; nothing in this crate
+/// ever decodes a token back out of it (see the module docs), so this
+/// ordering is a minting detail, not a wire contract a reader depends on.
+const BASE62_ALPHABET: &[u8; 62] =
+    b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+/// The alphabet a checksum is drawn from: lowercase letters and digits. 36^6
+/// is over two billion, so a typo lands on the right checksum by chance only
+/// rarely.
+const CHECKSUM_ALPHABET: &[u8; 36] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+
+/// Encodes 32 bytes, most significant first, as [`TOKEN_RANDOM_CHARS`] base62
+/// characters, left-padded with the alphabet's zero digit.
+///
+/// Ordinary base conversion by repeated division: `bytes` is read as one
+/// big-endian 256-bit integer and divided down by 62 in place, one base62
+/// digit per pass, until nothing is left.
+fn base62(bytes: &[u8; 32]) -> String {
+    let mut digits = Vec::with_capacity(TOKEN_RANDOM_CHARS);
+    let mut remaining = *bytes;
+    while remaining.iter().any(|&byte| byte != 0) {
+        let mut remainder: u32 = 0;
+        for byte in remaining.iter_mut() {
+            let acc = remainder * 256 + u32::from(*byte);
+            *byte = (acc / 62) as u8;
+            remainder = acc % 62;
+        }
+        digits.push(BASE62_ALPHABET[remainder as usize]);
+    }
+    while digits.len() < TOKEN_RANDOM_CHARS {
+        digits.push(BASE62_ALPHABET[0]);
+    }
+    digits.reverse();
+    String::from_utf8(digits).expect("BASE62_ALPHABET is ASCII")
+}
+
+/// The checksum for a token's payload: everything before the trailing
+/// checksum, i.e. [`TOKEN_PREFIX`] plus the base62 random half.
+///
+/// A corruption check, not a security boundary (see the module docs):
+/// [`digest`] hashes the whole presented string, checksum included, so a
+/// wrong checksum is never by itself a reason a request fails. What it
+/// catches is a slip made copying a token by hand. It is the first
+/// [`CHECKSUM_LEN`] bytes of `SHA-256(payload)`, each mapped into
+/// [`CHECKSUM_ALPHABET`] by remainder, so the same payload always yields the
+/// same six characters and a one-character change to the payload almost
+/// always yields different ones. Defined once, here, so [`mint`] and any
+/// future caller that chooses to check a checksum read the same six
+/// characters off the same payload.
+#[must_use]
+pub fn checksum(payload: &str) -> String {
+    let hash = digest(payload);
+    hash[..CHECKSUM_LEN]
+        .iter()
+        .map(|byte| CHECKSUM_ALPHABET[(*byte as usize) % CHECKSUM_ALPHABET.len()] as char)
+        .collect()
+}
+
+/// Mints a fresh token: 32 bytes from the OS CSPRNG, encoded as
+/// [`TOKEN_PREFIX`] + [`TOKEN_RANDOM_CHARS`] base62 characters + `_` + a
+/// [`checksum`] of the prefix and the random characters together.
+///
+/// # Errors
+///
+/// The underlying `getrandom` call failing, which means the OS's own
+/// randomness source is unavailable; this is not expected to happen on any
+/// platform this crate ships for.
+pub fn mint() -> Result<String, getrandom::Error> {
+    let mut random = [0u8; 32];
+    getrandom::fill(&mut random)?;
+    let payload = format!("{TOKEN_PREFIX}{}", base62(&random));
+    let sum = checksum(&payload);
+    Ok(format!("{payload}_{sum}"))
+}
+
+/// Checks that `path` is mode 0600 or tighter and owned by the user running
+/// this process: the same guard [`TokenStore::current`] runs on every read,
+/// exposed here so `salvor token new` can refuse a bad token file with the
+/// identical message the server would print, rather than a second
+/// implementation of the same two checks.
+///
+/// # Errors
+///
+/// [`TokenFileError::Read`] if `path` cannot be stat'd, [`TokenFileError::Mode`]
+/// if it is readable by group or other, [`TokenFileError::Owner`] if it
+/// belongs to another user.
+pub fn check_file_guard(path: &Path) -> Result<(), TokenFileError> {
+    let meta = fs::metadata(path).map_err(|source| TokenFileError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    check_guard(path, &meta)
 }
 
 /// Why a token file was refused at load.
@@ -612,6 +726,62 @@ mod tests {
         let set = TokenSet::parse(Path::new("tokens.toml"), &file).expect("parse");
         assert_eq!(set.match_name(&digest(&token)), Some("ci"));
         assert_eq!(set.match_name(&digest("sv_wrong")), None);
+    }
+
+    #[test]
+    fn mint_produces_the_documented_wire_shape() {
+        let token = mint().expect("the OS CSPRNG is available in a test process");
+        assert!(token.starts_with(TOKEN_PREFIX), "{token}");
+        assert_eq!(
+            token.len(),
+            3 + TOKEN_RANDOM_CHARS + 1 + CHECKSUM_LEN,
+            "{token}"
+        );
+        let rest = &token[TOKEN_PREFIX.len()..];
+        let (random, sum) = rest
+            .split_once('_')
+            .expect("one underscore before the checksum");
+        assert_eq!(random.len(), TOKEN_RANDOM_CHARS);
+        assert!(
+            random.bytes().all(|b| BASE62_ALPHABET.contains(&b)),
+            "{random}"
+        );
+        assert_eq!(sum.len(), CHECKSUM_LEN);
+        assert!(sum.bytes().all(|b| CHECKSUM_ALPHABET.contains(&b)), "{sum}");
+        // The checksum is exactly what checksum() computes over the payload
+        // mint() assembled, so a caller that recomputes it agrees with mint.
+        let payload = format!("{TOKEN_PREFIX}{random}");
+        assert_eq!(checksum(&payload), sum);
+    }
+
+    #[test]
+    fn two_mints_never_repeat_and_never_share_a_checksum_by_construction() {
+        let a = mint().expect("mint");
+        let b = mint().expect("mint");
+        assert_ne!(
+            a, b,
+            "32 CSPRNG bytes colliding twice in a row is not a real risk to guard"
+        );
+    }
+
+    #[test]
+    fn a_one_character_change_to_the_payload_almost_always_changes_the_checksum() {
+        // The checksum is a corruption check, not a security boundary (see the
+        // module docs): nothing in this crate ever checks it again after
+        // minting. What is provable is that it is SENSITIVE to corruption, so a
+        // caller who did wire up a check would catch the typo this simulates.
+        let payload = format!("{TOKEN_PREFIX}{}", base62(&[7u8; 32]));
+        let original = checksum(&payload);
+        let mut corrupted = payload.clone();
+        // Flip the last character to something else in the same alphabet.
+        let last = corrupted.pop().expect("payload is non-empty");
+        let replacement = if last == b'0' as char { '1' } else { '0' };
+        corrupted.push(replacement);
+        assert_ne!(
+            checksum(&corrupted),
+            original,
+            "a corrupted payload's checksum does not have to collide with the original's"
+        );
     }
 
     #[test]
