@@ -2,7 +2,7 @@
 #
 # commit-lint.sh: check the commit messages in a revision range.
 #
-# For every commit in `git rev-list --reverse <range>` it checks the subject
+# For every commit in `git rev-list --reverse --no-merges <range>` it checks the subject
 # shape and length, the body width, stray trailer lines, the AI writing tells
 # that prose-lint.sh already knows about, and a short list of before/after
 # narrative and process talk that only belongs in a chat log. A failing commit
@@ -64,7 +64,7 @@ if [ ! -r "$PROSE_LINT" ]; then
   exit 2
 fi
 
-if ! COMMITS=$(git rev-list --reverse "$RANGE" 2>/dev/null); then
+if ! COMMITS=$(git rev-list --reverse --no-merges "$RANGE" 2>/dev/null); then
   echo "commit-lint: not a revision range: $RANGE" >&2
   exit 2
 fi
