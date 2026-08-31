@@ -250,6 +250,32 @@ class TransportScenarios:
 
         self.drive({"/v1/runs": lambda h, body: h._send(200, runs_body)}, scenario)
 
+    def test_list_runs_decodes_the_caller_when_the_server_sends_one(self) -> None:
+        runs_body = {
+            "runs": [
+                {
+                    "run": "named",
+                    "status": {"state": "completed", "output": "ok"},
+                    "event_count": 3,
+                    "caller": "ci",
+                },
+                {
+                    "run": "unnamed",
+                    "status": {"state": "completed", "output": "ok"},
+                    "event_count": 3,
+                },
+            ]
+        }
+
+        async def scenario(client, server):
+            runs = await call(client.list_runs)
+            named = next(r for r in runs if r.run == "named")
+            unnamed = next(r for r in runs if r.run == "unnamed")
+            self.assertEqual(named.caller, "ci")
+            self.assertIsNone(unnamed.caller)
+
+        self.drive({"/v1/runs": lambda h, body: h._send(200, runs_body)}, scenario)
+
     def test_get_run_and_replay_decode_the_derived_state(self) -> None:
         state = {
             "run": "r1",

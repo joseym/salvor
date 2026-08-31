@@ -174,6 +174,7 @@ class RunState:
     first_recorded_at: Optional[str] = None
     last_recorded_at: Optional[str] = None
     driver: Optional[str] = None
+    caller: Optional[str] = None
     raw: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -187,6 +188,7 @@ class RunState:
             first_recorded_at=obj.get("first_recorded_at"),
             last_recorded_at=obj.get("last_recorded_at"),
             driver=_parse_driver(obj.get("driver")),
+            caller=obj.get("caller"),
             raw=obj,
         )
 
@@ -211,6 +213,12 @@ class RunSummary:
     server). Paired with ``last_recorded_at``, it is how a client derives a
     stalled run -- one that folds to ``running`` yet has no driver and has gone
     quiet.
+
+    ``caller`` names whoever asked for the run, read off its ``RunStarted``:
+    the name the token was declared under on a server with a bearer
+    configured, the operating system user from the CLI. ``None`` when the run
+    recorded no caller, which is every run a pass-through server started and
+    every run recorded before the field existed.
     """
 
     run: str
@@ -223,6 +231,7 @@ class RunSummary:
     agent_def_hash: Optional[str] = None
     labels: Optional[dict[str, str]] = None
     driver: Optional[str] = None
+    caller: Optional[str] = None
     raw: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -239,6 +248,7 @@ class RunSummary:
             agent_def_hash=obj.get("agent_def_hash"),
             labels=obj.get("labels"),
             driver=_parse_driver(obj.get("driver")),
+            caller=obj.get("caller"),
             raw=obj,
         )
 

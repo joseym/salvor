@@ -172,6 +172,42 @@ test("listRuns decodes labels when the server sends them, and leaves it undefine
   }
 });
 
+test("listRuns decodes the caller when the server sends one, and leaves it undefined otherwise", async () => {
+  const s = stub({
+    "/v1/runs": () => ({
+      status: 200,
+      body: {
+        runs: [
+          {
+            run: "named",
+            status: { state: "completed", output: "ok" },
+            event_count: 3,
+            caller: "ci",
+          },
+          {
+            run: "unnamed",
+            status: { state: "completed", output: "ok" },
+            event_count: 3,
+          },
+        ],
+      },
+    }),
+  });
+  const base = await s.ready;
+  try {
+    const client = new SalvorClient(base);
+    const runs = await client.listRuns();
+    strictEqual(runs.find((r) => r.run === "named")!.caller, "ci");
+    strictEqual(
+      runs.find((r) => r.run === "unnamed")!.caller,
+      undefined,
+      "a run that recorded no caller decodes to undefined, never a fabricated name",
+    );
+  } finally {
+    s.server.close();
+  }
+});
+
 test("listRuns decodes overdue and overdueSeconds when the server sends them, and leaves both undefined otherwise", async () => {
   const s = stub({
     "/v1/runs": () => ({
