@@ -65,7 +65,7 @@ use axum::middleware::from_fn_with_state;
 use axum::routing::{get, post};
 use tokio::net::TcpListener;
 
-pub use auth::{Auth, Caller, Refusal};
+pub use auth::{Auth, Caller, Refusal, StreamCredential};
 pub use client_tools::{ClientToolDecl, ClientToolRegistry};
 pub use dispatch::{Disposition, ResumeKind, classify};
 pub use error::ApiError;
