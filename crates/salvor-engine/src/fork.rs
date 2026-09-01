@@ -297,6 +297,7 @@ mod tests {
                     input: json!({"topic": "otters"}),
                     labels: None,
                     forked_from: None,
+                    caller: None,
                 },
             ),
             envelope(

@@ -47,6 +47,14 @@
 //! above use: it names no intent and carries no correlation seq, so the
 //! no-dangling-completion rule has nothing to say about it.
 //!
+//! `RunRedriven` is looser still, and has to be. It records that somebody drove
+//! a crashed or sleeping run again, and the position it lands at is whatever
+//! the log ended at, which for a crashed run is very often a dangling intent.
+//! So a mark may follow anything a non-terminal log can end at, and a trailing
+//! mark is looked past when the rules ask what the log ends at, leaving the
+//! intent underneath it still awaiting its completion. Nothing may follow a
+//! terminal, marks included: an abandoned or finished run is not driven again.
+//!
 //! # Purity
 //!
 //! Like the rest of this crate, nothing here performs IO, reads a clock, or
@@ -176,7 +184,19 @@ pub fn validate_next(
         });
     }
 
-    let Some(last) = log.last() else {
+    // The log's last event that the rules below turn on. Trailing
+    // `RunRedriven` marks are looked past: a redrive records that somebody
+    // drove the run again, which resolves nothing and awaits nothing, so a run
+    // redriven at a dangling intent is still awaiting that intent's completion
+    // and the next append is still that completion. The cursor drops the same
+    // marks before replaying (see `ReplayCursor::new`); this is the guard's
+    // half of one rule. A log is never all marks, because its head is a run
+    // head, so a non-empty log always has one of these.
+    let last = log
+        .iter()
+        .rev()
+        .find(|envelope| !matches!(envelope.event, Event::RunRedriven { .. }));
+    let Some(last) = last else {
         // Empty log: the candidate opens the run. It must be a run head
         // (`RunStarted` for an agent run or `GraphRunStarted` for a graph run)
         // and its position (already checked to be `expected_seq` == 0) stands
@@ -222,6 +242,17 @@ pub fn validate_next(
     // A well-formed log resolves every intent with the immediately following
     // completion, so an intent that is still the last event is the only pending
     // call, which is where "one pending call at a time" falls out for free.
+    // A redrive mark may follow anything the log can end at, a dangling intent
+    // included, because that is exactly where it lands: a crashed run is
+    // redriven at the position after the intent it is about to re-issue. It
+    // resolves nothing and claims nothing, so the intent below is still the
+    // pending one, and the cursor drops the mark before replaying (see
+    // `ReplayCursor::new`). Checked before the correlation rules so it is not
+    // read as a candidate completion that got the kind wrong.
+    if matches!(candidate.event, Event::RunRedriven { .. }) {
+        return Ok(());
+    }
+
     match &last.event {
         Event::ModelCallRequested {
             seq: intent_seq, ..
@@ -353,6 +384,7 @@ fn kind_name(event: &Event) -> &'static str {
         Event::RandomObserved { .. } => "RandomObserved",
         Event::Suspended { .. } => "Suspended",
         Event::Resumed { .. } => "Resumed",
+        Event::RunRedriven { .. } => "RunRedriven",
         Event::SleepStarted { .. } => "SleepStarted",
         Event::SleepCompleted {} => "SleepCompleted",
         Event::BudgetExceeded { .. } => "BudgetExceeded",
@@ -486,6 +518,51 @@ mod tests {
         }
     }
 
+    /// A redrive mark may land after a dangling intent, which is where a
+    /// crashed run's redrive puts it, and the intent underneath it still
+    /// awaits its completion afterward. Both halves matter: refusing the mark
+    /// would refuse the ordinary redrive, and letting the mark hide the intent
+    /// would refuse the completion the re-issued call goes on to record.
+    #[test]
+    fn a_redrive_mark_rides_over_a_dangling_intent() {
+        let mut v = LogValidator::new(vec![]);
+        v.push(env(0, started())).unwrap();
+        v.push(env(1, tool_intent(1, Effect::Idempotent))).unwrap();
+        v.push(env(
+            2,
+            Event::RunRedriven {
+                caller: Some("ops".into()),
+            },
+        ))
+        .expect("a crashed run is redriven at the position after its dangling intent");
+        v.push(env(3, tool_done(1)))
+            .expect("the re-issued call still completes the intent the mark rode over");
+    }
+
+    /// Nothing follows a terminal, a redrive mark included: an abandoned or
+    /// finished run is not driven again, and the guard says so in the same
+    /// words it uses for every other kind.
+    #[test]
+    fn a_redrive_mark_after_a_terminal_is_refused() {
+        let closed = vec![
+            env(0, started()),
+            env(
+                1,
+                Event::RunCompleted {
+                    output: serde_json::json!({"ok": true}),
+                },
+            ),
+        ];
+        let error = validate_next(&closed, &env(2, Event::RunRedriven { caller: None }))
+            .expect_err("a finished run is not driven again");
+        assert_eq!(
+            error,
+            ValidationError::AfterTerminal {
+                terminal: "RunCompleted"
+            }
+        );
+    }
+
     /// The durable-timer pair validates as free-standing context events, in
     /// either arrangement a real log can hold: a sleep that ends and a run that
     /// continues, and a sleep that is still open when the log stops. The guard
@@ -602,6 +679,7 @@ mod tests {
             input: serde_json::json!({"topic": "otters"}),
             labels: None,
             forked_from: None,
+            caller: None,
         }
     }
 

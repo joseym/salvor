@@ -146,6 +146,7 @@ pub fn event_kinds(log: &[EventEnvelope]) -> Vec<&'static str> {
             Event::RandomObserved { .. } => "RandomObserved",
             Event::Suspended { .. } => "Suspended",
             Event::Resumed { .. } => "Resumed",
+            Event::RunRedriven { .. } => "RunRedriven",
             Event::SleepStarted { .. } => "SleepStarted",
             Event::SleepCompleted {} => "SleepCompleted",
             Event::BudgetExceeded { .. } => "BudgetExceeded",

@@ -355,6 +355,7 @@ mod tests {
             input: serde_json::json!({"topic": "otters"}),
             labels: None,
             forked_from: None,
+            caller: None,
         }
     }
 
@@ -405,6 +406,7 @@ mod tests {
             input: serde_json::json!({}),
             labels: None,
             forked_from: Some(origin.clone()),
+            caller: None,
         }]));
         assert_eq!(projection.graph_hash, Some("sha256:graph".to_owned()));
         assert_eq!(projection.forked_from, Some(origin));

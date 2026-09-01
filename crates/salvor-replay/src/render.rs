@@ -36,6 +36,7 @@ pub fn event_kind(event: &Event) -> &'static str {
         Event::RandomObserved { .. } => "RandomObserved",
         Event::Suspended { .. } => "Suspended",
         Event::Resumed { .. } => "Resumed",
+        Event::RunRedriven { .. } => "RunRedriven",
         Event::SleepStarted { .. } => "SleepStarted",
         Event::SleepCompleted {} => "SleepCompleted",
         Event::BudgetExceeded { .. } => "BudgetExceeded",
@@ -156,6 +157,11 @@ pub fn event_detail(event: &Event) -> String {
             truncate_json(input),
             caller_marker(caller.as_deref())
         ),
+        // A redrive has nothing to report but who asked for it, so the marker
+        // that names them on `RunStarted` and `Resumed` is the whole line.
+        Event::RunRedriven { caller } => {
+            format!("redriven{}", caller_marker(caller.as_deref()))
+        }
         // The wake instant is the whole of what a reader wants here, rendered
         // by the same component-wise formatter `NowObserved` uses.
         Event::SleepStarted { wake_at } => format!("until {}", format_ts(*wake_at)),
@@ -189,11 +195,15 @@ pub fn event_detail(event: &Event) -> String {
             }
         }
         Event::GraphRunStarted {
-            graph_hash, input, ..
+            graph_hash,
+            input,
+            caller,
+            ..
         } => format!(
-            "graph {} input {}",
+            "graph {} input {}{}",
             short_hash(graph_hash),
-            truncate_json(input)
+            truncate_json(input),
+            caller_marker(caller.as_deref())
         ),
         Event::NodeEntered { node } => format!("enter {node}"),
         Event::NodeExited { node } => format!("exit {node}"),
@@ -516,7 +526,7 @@ mod tests {
         assert_eq!(resolved, r#"output {"charge_id":"po_1"} [Operator: ops]"#);
     }
 
-    /// The three events that record who asked for them render the name in the
+    /// The five events that record who asked for them render the name in the
     /// same bracketed register, and render nothing at all when no name was
     /// recorded, so every line written before the field existed reads exactly
     /// as it did.
@@ -563,6 +573,35 @@ mod tests {
         assert_eq!(
             abandoned(Some("ops")),
             "abandoned: husk is dead forever [caller: ops]"
+        );
+
+        let redriven = |caller: Option<&str>| {
+            event_detail(&Event::RunRedriven {
+                caller: caller.map(str::to_owned),
+            })
+        };
+        assert_eq!(redriven(None), "redriven");
+        assert_eq!(
+            redriven(Some("server:wake")),
+            "redriven [caller: server:wake]"
+        );
+
+        let graph = |caller: Option<&str>| {
+            event_detail(&Event::GraphRunStarted {
+                graph_hash: "sha256:abcdef0123456789".into(),
+                input: json!("ship it"),
+                labels: None,
+                forked_from: None,
+                caller: caller.map(str::to_owned),
+            })
+        };
+        assert_eq!(
+            graph(None),
+            "graph sha256:abcdef0\u{2026} input \"ship it\""
+        );
+        assert_eq!(
+            graph(Some("ci")),
+            "graph sha256:abcdef0\u{2026} input \"ship it\" [caller: ci]"
         );
     }
 

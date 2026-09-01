@@ -27,6 +27,7 @@ export const KINDS: Readonly<Record<string, { dot: string; cat: string }>> = {
   BudgetExceeded: { dot: 'k-amber', cat: 'lifecycle' },
   Suspended: { dot: 'k-amber', cat: 'lifecycle' },
   Resumed: { dot: 'k-life', cat: 'lifecycle' },
+  RunRedriven: { dot: 'k-life', cat: 'lifecycle' },
   ModelCallRequested: { dot: 'k-model', cat: 'model' },
   ModelCallCompleted: { dot: 'k-model', cat: 'model' },
   ToolCallRequested: { dot: 'k-tool', cat: 'tool' },
@@ -241,6 +242,13 @@ export function rowOf(e: SalvorEvent, events: readonly SalvorEvent[], arrivedSeq
       detail = 'awaiting human input';
       cls = 'attn';
       body = `<p class="ev-note">${esc(String(p['reason']))}</p>${pane('input_schema', p['input_schema'])}`;
+      break;
+    case 'RunRedriven':
+      detail = `driven again${callerBadge(p)}`;
+      body = `<p class="ev-honest">A crashed or sleeping run was driven again. The event marks the
+                act, not a state change: the run is where its earlier events left it, and the
+                replay that follows continues from there. The name says which token or account
+                asked, or is absent when nobody was named.</p>${pane('payload', p)}`;
       break;
     case 'Resumed':
       detail = `resumed with recorded input${callerBadge(p)}`;
