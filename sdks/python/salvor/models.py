@@ -159,11 +159,55 @@ class PendingCall:
 
 
 @dataclass
+class Resolution:
+    """Attribution for a hand-recorded tool-call resolution, from ``GET
+    /v1/runs/{id}``'s ``resolution``.
+
+    Present only when a run's log holds a ``ToolCallCompleted`` an operator
+    recorded by hand (see ``POST /v1/runs/{id}/resolve`` in ``API.md``) rather
+    than the run recording its own output; a run never resolved this way
+    carries no ``resolution`` at all. A run with more than one hand-recorded
+    completion over its life reports the last.
+
+    ``settled_by`` is always ``"operator"`` when this object is present.
+    ``settled_caller`` names the person: the token's name on a server with a
+    bearer configured, ``None`` on a server running the pass-through posture.
+    ``seq`` is the completed call's own recorded sequence number.
+
+    ``settled_caller`` carries the same trust limit ``caller`` on
+    :class:`RunState` does: a name recorded like any other field, worth what
+    control of that credential is worth (see ``SECURITY.md``).
+    """
+
+    settled_by: str
+    seq: int
+    settled_caller: Optional[str] = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_json(cls, obj: Optional[dict[str, Any]]) -> Optional["Resolution"]:
+        if obj is None:
+            return None
+        return cls(
+            settled_by=obj.get("settled_by", "operator"),
+            seq=int(obj.get("seq", 0)),
+            settled_caller=obj.get("settled_caller"),
+            raw=obj,
+        )
+
+
+@dataclass
 class RunState:
     """The derived state of one run, as returned by ``GET /v1/runs/{id}``.
 
     Status is always current because the server folds it from the log on every
     read rather than storing it.
+
+    ``caller`` names attribution to a token or an operating system account,
+    not to a person: it is recorded like any other field, so it is only as
+    trustworthy as write access to the store (see ``SECURITY.md``).
+    ``resolution``, when present, carries the same limit on its
+    ``settled_caller``.
     """
 
     run: str
@@ -175,6 +219,7 @@ class RunState:
     last_recorded_at: Optional[str] = None
     driver: Optional[str] = None
     caller: Optional[str] = None
+    resolution: Optional[Resolution] = None
     raw: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -189,6 +234,7 @@ class RunState:
             last_recorded_at=obj.get("last_recorded_at"),
             driver=_parse_driver(obj.get("driver")),
             caller=obj.get("caller"),
+            resolution=Resolution.from_json(obj.get("resolution")),
             raw=obj,
         )
 

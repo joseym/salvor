@@ -49,6 +49,7 @@ export {
   type ResumeResult,
   type AbandonResult,
   type PendingCall,
+  type Resolution,
   type Usage,
   type Labels,
   type GraphShape,

@@ -70,6 +70,31 @@ export interface PendingCall {
  */
 export type Driver = "attached" | "none";
 
+/**
+ * Attribution for a hand-recorded tool-call resolution, from `GET
+ * /v1/runs/{id}`'s `resolution`. Present only when a run's log holds a
+ * `ToolCallCompleted` an operator recorded by hand (see `POST
+ * /v1/runs/{id}/resolve` in `API.md`) rather than the run recording its own
+ * output; a run never resolved this way carries no `resolution` at all. A
+ * run with more than one hand-recorded completion over its life reports the
+ * last.
+ *
+ * `settledBy` is always `"operator"` when this object is present.
+ * `settledCaller` names the person: the token's name on a server with a
+ * bearer configured, absent on a server running the pass-through posture.
+ * `seq` is the completed call's own recorded sequence number.
+ *
+ * `settledCaller` carries the same trust limit {@link RunState.caller} does:
+ * a name recorded like any other field, worth what control of that
+ * credential is worth (see `SECURITY.md`).
+ */
+export interface Resolution {
+  settledBy: string;
+  settledCaller?: string;
+  seq: number;
+  raw: Record<string, unknown>;
+}
+
 /** The derived state of one run, from `GET /v1/runs/{id}`. */
 export interface RunState {
   run: string;
@@ -87,8 +112,16 @@ export interface RunState {
    * Absent when the run recorded no caller, which is every run a
    * pass-through server started and every run recorded before the field
    * existed. See {@link RunSummary.caller}.
+   *
+   * The name is attribution to the token or the operating system account,
+   * worth what control of that credential is worth: it is recorded like any
+   * other field, so it is only as trustworthy as write access to the store
+   * (see `SECURITY.md`).
    */
   caller?: string;
+  /** Who resolved a dangling write by hand, when the log records one. See
+   * {@link Resolution}. Absent for a run never resolved this way. */
+  resolution?: Resolution;
   raw: Record<string, unknown>;
 }
 
@@ -453,6 +486,17 @@ function parsePending(obj: unknown): PendingCall | undefined {
   };
 }
 
+function parseResolution(obj: unknown): Resolution | undefined {
+  if (!obj || typeof obj !== "object") return undefined;
+  const o = obj as Json;
+  return {
+    settledBy: (o.settled_by as string) ?? "operator",
+    settledCaller: o.settled_caller as string | undefined,
+    seq: Number(o.seq ?? 0),
+    raw: o,
+  };
+}
+
 export function parseRunState(obj: Json): RunState {
   return {
     run: obj.run as string,
@@ -464,6 +508,7 @@ export function parseRunState(obj: Json): RunState {
     lastRecordedAt: obj.last_recorded_at as string | undefined,
     driver: parseDriver(obj.driver),
     caller: obj.caller as string | undefined,
+    resolution: parseResolution(obj.resolution),
     raw: obj,
   };
 }
