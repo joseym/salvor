@@ -1992,9 +1992,9 @@ class: the request is already in hand, so reading it a second time reaches
 the same refusal, and the tool executes exactly once. A result with no
 `_meta.salvor` records exactly as it always has.
 
-That order is the point. The completion settles the call, and for a call
-carrying an idempotency key it settles the store's claim in the same atomic
-append, so a run that sleeps for a week holds no claim while it sleeps and a
-second run under the same key is never told `CallInFlight` by a sleeper. It
-also means a process death during the sleep leaves no dangling write intent:
-the write already completed.
+That order is what the two halves buy. The completion settles the call, and
+for a call carrying an idempotency key it settles the store's claim in the
+same atomic append, so a run that sleeps for a week holds no claim while it
+sleeps and a second run under the same key is never told `CallInFlight` by a
+sleeper. It also means a process death during the sleep leaves no dangling
+write intent: the write already completed.
