@@ -354,6 +354,7 @@ The run's derived state:
   "first_recorded_at": "2026-...",
   "last_recorded_at": "2026-...",
   "caller": "ci",
+  "resolution": { "settled_by": "operator", "settled_caller": "ops", "seq": 5 },
   "driver": "attached"
 }
 ```
@@ -362,6 +363,19 @@ The run's derived state:
 
 `caller` is the same recorded name [`GET /v1/runs`](#get-v1runs) carries, under
 the same absence rule: omitted for a run that recorded none.
+
+**Who resolved a dangling write: `resolution`.** Present only when the run's
+log holds a hand-recorded `ToolCallCompleted` (see
+[`POST /v1/runs/{id}/resolve`](#post-v1runsidresolve)): `{ "settled_by":
+"operator", "settled_caller": "<name>", "seq": n }`, `seq` naming the
+completed call. `settled_caller` sits inside the object only when the
+completion recorded one, which a server with no bearer configured never does;
+`settled_by` is always present when `resolution` is. A run with more than one
+hand-recorded completion over its life reports the last. A run never resolved
+by hand carries no `resolution` key at all, the same absence rule `caller`
+follows above. Not carried by [`GET /v1/runs`](#get-v1runs): a hand-recorded
+resolution is rare enough that a full-history read for it is only worth doing
+for one run at a time.
 
 `driver` is the same liveness evidence [`GET /v1/runs`](#get-v1runs) carries,
 under the same rules: `"attached"` / `"none"` for a non-terminal run, omitted

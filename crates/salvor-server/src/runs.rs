@@ -308,7 +308,8 @@ pub async fn list(State(state): State<AppState>) -> Result<impl IntoResponse, Ap
     Ok(Json(json!({ "runs": runs })))
 }
 
-/// `GET /v1/runs/{id}`: the run's folded status, usage, and pending intent.
+/// `GET /v1/runs/{id}`: the run's folded status, usage, pending intent, and,
+/// when the log carries one, the attribution for a hand-recorded resolution.
 pub async fn get(
     State(state): State<AppState>,
     Path(run_id_text): Path<String>,
@@ -347,6 +348,9 @@ pub async fn get(
     });
     if let Some(caller) = recorded_caller(&log) {
         body["caller"] = json!(caller);
+    }
+    if let Some(resolution) = recorded_resolution(&log) {
+        body["resolution"] = resolution;
     }
     if let Some(driver) = driver_evidence(&state, run_id, &derived.status) {
         body["driver"] = json!(driver);
@@ -944,6 +948,48 @@ fn recorded_caller(log: &[EventEnvelope]) -> Option<String> {
             _ => None,
         })
         .flatten()
+}
+
+/// The `resolution` object for [`GET /v1/runs/{id}`](get), read off the last
+/// `ToolCallCompleted` in the log that carries `settled_by`: a completion an
+/// operator recorded by hand over the run's head rather than the run
+/// recording its own output. `None` when the log carries no such completion,
+/// which is every ordinary run and every run recorded before the field
+/// existed; that run carries no `resolution` key at all.
+///
+/// The object is `{ "settled_by": "operator", "settled_caller": "<name>"
+/// (present only when one was recorded), "seq": n }`, `seq` being the
+/// completed call's own recorded sequence number, the same number the
+/// pending-call object under `pending` names a dangling write by before it is
+/// resolved. A run can carry more than one hand-recorded completion over its
+/// life (an operator resolves a dangling write, the run runs again, a second
+/// write gets stuck and resolved too); this reports the last one recorded.
+///
+/// Not surfaced on [`list`]: a run's history there is folded once per entry
+/// for the fields every listing needs, and a hand-recorded resolution is rare
+/// enough that carrying it on every row would be noise; a caller wanting it
+/// reads this endpoint instead.
+fn recorded_resolution(log: &[EventEnvelope]) -> Option<Value> {
+    log.iter()
+        .filter_map(|envelope| match &envelope.event {
+            Event::ToolCallCompleted {
+                seq,
+                settled_by: Some(settled_by),
+                settled_caller,
+                ..
+            } => {
+                let mut resolution = json!({
+                    "settled_by": settled_by,
+                    "seq": seq.get(),
+                });
+                if let Some(name) = settled_caller {
+                    resolution["settled_caller"] = json!(name);
+                }
+                Some(resolution)
+            }
+            _ => None,
+        })
+        .next_back()
 }
 
 /// The reconciliation evidence: the recorded write intent, plus when it was
