@@ -223,6 +223,36 @@ caller. A demo or a single-caller box served with `--auth-token` alone
 is therefore the shape where every stamped event carries
 `caller: shared:token`, one name for whoever holds that secret.
 
+### Calling an authenticated server
+
+The token goes in an `Authorization` header, verbatim, on every `/v1`
+request:
+
+```sh
+TOKEN=$(salvor token new ci --file /etc/salvor/tokens.toml)
+
+# Every run in the store, each with the caller it recorded.
+curl -s -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:8080/v1/runs
+
+# Start one. `agent` is the hash POST /v1/agents assigned the
+# definition; `input` is whatever that agent takes.
+RUN=$(curl -s -X POST -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"agent":"sha256:34e0f4a...","input":{"topic":"otters"}}' \
+  http://127.0.0.1:8080/v1/runs | jq -r .run)
+
+# The started run carries the name of the token that started it.
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:8080/v1/runs/$RUN"
+# {"run":"6f...","status":"running","caller":"ci", ...}
+```
+
+The `caller` on that run is the token's name and nothing else. A body
+that carries a `caller` (or a `settled_caller` on `resolve`) is answered
+`400` naming the field, rather than accepted with the field dropped, so
+a client asking for a name it will not get is told so.
+
 ### Rotating a token, with no restart
 
 The server stats the token file on every auth attempt and re-reads it
@@ -353,6 +383,13 @@ caller carries no key at all, which is what every run a pass-through
 server started and every run recorded before the field existed reports.
 `salvor history <run-id> --json` prints the untruncated envelopes, where
 `settled_caller` and the abandonment's `caller` are readable too.
+
+A label keyed `caller` is an ordinary label, held to the same bounds as
+any other and recorded in the run's `labels`, while the event's own
+`caller` field is the name the server stamped from the token it
+verified; nothing folds one into the other, and both are readable side
+by side wherever a run's events are, in `GET /v1/runs` and in `salvor
+history <run-id> --json`.
 
 The name says which token was presented, or which account ran the CLI.
 It is recorded bytes like every other field, so it is worth what control
