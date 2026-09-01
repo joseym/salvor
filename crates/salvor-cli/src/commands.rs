@@ -290,7 +290,7 @@ pub async fn resume(store_path: &Path, caller: Option<&str>, args: ResumeArgs) -
     // only the re-drive differs, because the log records the graph's hash, not
     // the document. See `resume_graph`.
     if is_graph_run(&log) {
-        return resume_graph(store, run_id, &uuid, &log, &args, disposition, store_path).await;
+        return resume_graph(store, run_id, caller, &log, &args, disposition, store_path).await;
     }
 
     // An agent run rebuilds its one agent. Exactly one `--agent` is expected.
@@ -340,7 +340,19 @@ pub async fn resume(store_path: &Path, caller: Option<&str>, args: ResumeArgs) -
             } else {
                 tracing::info!(run_id = %uuid, "recovering crashed run");
             }
-            runtime.recover(&agent, run_id).await
+            // Nothing is supplied on this path, so no `Resumed` will be
+            // written and this mark is the only durable record of who reached
+            // for the run. `salvor wake` routes every due run through this very
+            // function, so its sweep records the act here too, under the same
+            // resolved name. It is appended after the agent is built and before
+            // the drive: a run this invocation could not rebuild is refused
+            // with its log untouched, and a drive that records nothing (an
+            // early wake, a lost position race) still says who tried. Written
+            // as a match rather than a `?` so `close_servers` below still runs.
+            match runtime.record_redrive(run_id).await {
+                Ok(_) => runtime.recover(&agent, run_id).await,
+                Err(error) => Err(error),
+            }
         }
     };
 
@@ -459,7 +471,12 @@ pub async fn wake(store_path: &Path, caller: Option<&str>, args: WakeArgs) -> Re
             println!("  {uuid} is client-driven; its client wakes it, this sweep left it alone");
             continue;
         }
-        let events_before = log_before.len();
+        // The redrive mark this sweep is about to append is not work the run
+        // did, so it must not count as one: `classify_failed_wake` reads
+        // "nothing appended" off these two numbers, and a mark on one side of
+        // the comparison and not the other would make every failed drive look
+        // like it had moved the run.
+        let events_before = work_events(&log_before);
         let outcome = resume(
             store_path,
             caller,
@@ -491,10 +508,17 @@ pub async fn wake(store_path: &Path, caller: Option<&str>, args: WakeArgs) -> Re
             }
         };
         let status = derive_state(&log).status;
+        let events_after = work_events(&log);
         match outcome {
             Ok(_) => println!("  {uuid} is now {}", render::status_label(&status)),
             Err(error) => {
-                match classify_failed_wake(&error, run.wake_at, events_before, &status, log.len()) {
+                match classify_failed_wake(
+                    &error,
+                    run.wake_at,
+                    events_before,
+                    &status,
+                    events_after,
+                ) {
                     FailedWake::TakenByAnotherDriver => {
                         taken += 1;
                         tracing::info!(
@@ -674,6 +698,11 @@ pub fn describe_taken(status: &RunStatus) -> String {
 /// Decides which of the two a failed drive was, from the error it returned,
 /// the deadline the sweep found the run at, and the log before and after. See
 /// [`FailedWake`].
+///
+/// `events_before` and `events_after` count the run's own recorded work, which
+/// is every event except the `RunRedriven` marks: a mark says somebody reached
+/// for the run, never that the run moved, and a drive that recorded only its
+/// own mark left the run exactly as it was. See [`work_events`].
 #[must_use]
 pub fn classify_failed_wake(
     error: &anyhow::Error,
@@ -707,6 +736,21 @@ pub fn classify_failed_wake(
         RunStatus::Sleeping { wake_at } if *wake_at != due_at => FailedWake::TakenByAnotherDriver,
         _ => FailedWake::NotWoken,
     }
+}
+
+/// How many events of a run's own work a log holds: every event except the
+/// `RunRedriven` marks.
+///
+/// A mark records that somebody drove the run again, which is an act on the run
+/// rather than progress by it, and [`classify_failed_wake`] compares two of
+/// these counts to decide whether a failed drive left the run exactly as it
+/// found it. Counting the mark there would make a drive that recorded nothing
+/// at all look like a drive that had moved the run.
+#[must_use]
+pub fn work_events(log: &[EventEnvelope]) -> usize {
+    log.iter()
+        .filter(|envelope| !matches!(envelope.event, Event::RunRedriven { .. }))
+        .count()
 }
 
 /// Whether this one error IS the store refusing an append because that
@@ -2625,7 +2669,7 @@ pub fn graph_schema() -> Result<u8> {
 /// carry, the local counterpart of the server's tool registry, keeping one
 /// honest story: a tool no provided agent carries is refused, named, before the
 /// walk reaches it (as [`run_graph`] does through the resolver).
-pub async fn graph_run(store_path: &Path, args: GraphRunArgs) -> Result<u8> {
+pub async fn graph_run(store_path: &Path, caller: Option<&str>, args: GraphRunArgs) -> Result<u8> {
     let graph = load_and_validate_graph(&args.graph)?;
     let input = parse_input(&args.input)?;
     let labels = parse_label_args(&args.labels)?;
@@ -2650,6 +2694,11 @@ pub async fn graph_run(store_path: &Path, args: GraphRunArgs) -> Result<u8> {
     let mut ctx = RunCtx::new(store.clone(), run_id, vec![])?;
     if let Some(labels) = labels {
         ctx = ctx.with_labels(labels);
+    }
+    // Who asked for the run, stamped on the `GraphRunStarted` at the head of
+    // its log, exactly as `salvor run` stamps a `RunStarted`.
+    if let Some(caller) = caller {
+        ctx = ctx.with_caller(caller);
     }
     let outcome = run_graph(&mut ctx, &graph, &input, &agents, &tools).await;
     let outcome = settle_graph_drive(
@@ -2676,12 +2725,17 @@ pub async fn graph_run(store_path: &Path, args: GraphRunArgs) -> Result<u8> {
 async fn resume_graph(
     store: Arc<dyn EventStore>,
     run_id: RunId,
-    uuid: &str,
+    caller: Option<&str>,
     log: &[EventEnvelope],
     args: &ResumeArgs,
     disposition: Disposition,
     store_path: &Path,
 ) -> Result<u8> {
+    // Formed here rather than passed in: `resume` has one already, but taking
+    // it as a parameter puts this function over clippy's argument bound for
+    // a value one line of code re-derives.
+    let uuid = run_id.as_uuid().to_string();
+    let uuid = uuid.as_str();
     let (graph_path, graph) = resolve_graph_document(args.graph.as_deref(), log, uuid)?;
     // See the agent branch of `resume`: waking a due run and recovering a
     // crashed one take the same path, and only the disposition can keep the
@@ -2693,6 +2747,36 @@ async fn resume_graph(
         return Err(error);
     }
     let tools = AgentTools(&agents);
+
+    // A redrive supplies nothing, so no `Resumed` will be written and this mark
+    // is the only durable record of who reached for the run. Appended here, for
+    // the reasons the agent branch of `resume` gives: after the document and
+    // its agents resolved, so an undrivable run keeps an untouched log, and
+    // before the drive, so a drive that records nothing still says who tried.
+    // The log is then re-read, because the context below is built from the
+    // slice this function was handed and one built over a stale log would claim
+    // the position the mark now holds.
+    let redriven = if matches!(disposition, Disposition::Resume(_)) {
+        None
+    } else {
+        match with_caller(Runtime::new(store.clone()), caller)
+            .record_redrive(run_id)
+            .await
+        {
+            Ok(_) => match store.read_log(run_id).await {
+                Ok(log) => Some(log),
+                Err(error) => {
+                    close_servers(servers).await;
+                    return Err(error.into());
+                }
+            },
+            Err(error) => {
+                close_servers(servers).await;
+                return Err(error.into());
+            }
+        }
+    };
+    let log: &[EventEnvelope] = redriven.as_deref().unwrap_or(log);
 
     let mut ctx = RunCtx::new(store, run_id, log.to_vec())?;
     match disposition {
