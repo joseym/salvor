@@ -35,9 +35,10 @@
 //!
 //! A dropped connection resumes without gaps or duplicates in one of two ways:
 //!
-//! - **`Last-Event-ID`.** A browser `EventSource` resends the last `id` it saw
-//!   as the `Last-Event-ID` header on reconnect. The server resumes from that
-//!   sequence plus one, so the first event not yet seen is the first replayed.
+//! - **`Last-Event-ID`.** A browser `EventSource` resends the last `id` on
+//!   the stream as the `Last-Event-ID` header on reconnect. The server
+//!   resumes from that sequence plus one, so the first event not yet seen is
+//!   the first replayed.
 //! - **`?from_seq=<n>`.** A non-browser client that tracks its own position
 //!   asks for events from sequence `n` onward. Used when there is no
 //!   `Last-Event-ID` to lean on.
