@@ -209,7 +209,9 @@ only copy.
 The server refuses to start, before it binds the port, on a file that
 is readable by group or other, is owned by another user, is not valid
 TOML, has an entry with no `hash` key, gives a hash that is not 64
-lowercase hex, or declares no tokens at all.
+lowercase hex, or declares no tokens at all. A file that is not there
+at all is refused the same way, naming the `token new --create` that
+makes one.
 
 Both flags together are the usual shape while a shared secret is being
 retired: `--auth-token` keeps the old callers working and
