@@ -2088,7 +2088,7 @@ pub async fn serve(store_path: &Path, args: ServeArgs) -> Result<u8> {
     // restart from here on.
     if let Some(path) = &args.token_file {
         let store = salvor_server::TokenStore::load(path)
-            .with_context(|| format!("loading the token file {}", path.display()))?;
+            .map_err(|error| token_file_refusal(error, path))?;
         let names: Vec<String> = store
             .current()
             .names()
@@ -2159,6 +2159,29 @@ pub async fn serve(store_path: &Path, args: ServeArgs) -> Result<u8> {
     }
     dev.shutdown().await;
     Ok(0)
+}
+
+/// The refusal `serve --token-file` prints for a file it cannot load.
+///
+/// Every [`TokenFileError`](salvor_server::tokens::TokenFileError) already
+/// names the file and what is wrong with it, so it is printed on its own
+/// rather than under a context line that would name the same file and the same
+/// failure a second time. A file that is not there is the one case the error
+/// leaves without a next step, so this adds the two: mint into it, or check
+/// the path.
+fn token_file_refusal(error: salvor_server::tokens::TokenFileError, path: &Path) -> anyhow::Error {
+    use salvor_server::tokens::TokenFileError;
+
+    match &error {
+        TokenFileError::Read { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
+            anyhow!(
+                "token file {path} does not exist; create one with `salvor token new <name> \
+                 --file {path} --create`, or check the path",
+                path = path.display()
+            )
+        }
+        _ => error.into(),
+    }
 }
 
 /// Reads one `--client-tool` file and parses the declaration it holds.
