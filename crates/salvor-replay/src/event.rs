@@ -100,6 +100,18 @@ use crate::id::{RunId, SequenceNumber};
 /// under the new build, and the version stays 1. Neither carries an optional
 /// field, so there is no additive-field question to answer for them.
 ///
+/// # Why the redrive event does not bump this
+///
+/// [`Event::RunRedriven`] is one more new variant, added the same
+/// read-compatible way: a log written before it contains none of the kind, so
+/// every event in it parses to the identical value under the new build, and
+/// the version stays 1. Its `caller` is additive-optional under the contract
+/// above, so a redrive nobody was named for omits the key entirely. A reader
+/// older than the variant refuses a log containing it, exactly as an older
+/// reader refuses a log containing the durable-timer or graph kinds; that
+/// direction is not part of the contract, for the reason the first section
+/// gives.
+///
 /// # Why the graph events do not bump this
 ///
 /// The graph-run events ([`Event::GraphRunStarted`] and the node/branch/map/fold
@@ -108,10 +120,13 @@ use crate::id::{RunId, SequenceNumber};
 /// of the new kinds, so every event in it parses to the identical value under
 /// the new build. The fold markers ([`Event::FoldIterationStarted`],
 /// [`Event::FoldIterationJoined`], and [`Event::FoldConverged`]) were added
-/// last, the same way and for the same reason, and the version stayed 1. [`Event::GraphRunStarted`]'s own `labels` and `forked_from`
-/// are additive-optional under the same
+/// last, the same way and for the same reason, and the version stayed 1.
+/// [`Event::GraphRunStarted`]'s own `labels`, `forked_from`, and `caller` are
+/// additive-optional under the same
 /// `#[serde(default, skip_serializing_if = "Option::is_none")]` contract, so a
-/// graph run that is neither labeled nor forked omits both keys entirely.
+/// graph run that is unlabeled, unforked, and started by nobody named omits all
+/// three keys entirely and serializes byte for byte as it did before each field
+/// existed.
 /// [`Event::GraphRunStarted`] is a separate variant rather than a field on
 /// [`Event::RunStarted`] because `RunStarted`'s `agent_def_hash` is required and
 /// names one agent, while a graph run has many agent hashes and none at its
@@ -624,6 +639,49 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caller: Option<String>,
     },
+    /// A crashed or sleeping run was driven again, naming the credential or
+    /// account that asked for it. A redrive replays the recorded log and
+    /// continues from the first unrecorded step, so this event marks the act,
+    /// not a state change: the run is in exactly the state its earlier events
+    /// put it in, both before this event and after it.
+    ///
+    /// It is the only durable record that a redrive happened. Recovering a
+    /// crashed run and waking a due one both continue with nothing supplied, so
+    /// neither writes a [`Event::Resumed`] and neither leaves a trace of who
+    /// reached for the run; every event the drive goes on to record belongs to
+    /// the run's own work rather than to the person or the timer that started
+    /// it. This event is appended before the drive, so a drive that records
+    /// nothing at all still says who tried.
+    ///
+    /// # Wire compatibility
+    ///
+    /// Added the same read-compatible way the deterministic-context, graph,
+    /// abandonment, and durable-timer events were: a new variant, so a log
+    /// written before it contains none of the kind and every event in it parses
+    /// to the identical value under the new build. A reader older than this
+    /// variant refuses a log containing it, and that direction is not part of
+    /// the contract: the store is embedded, so the reader always upgrades
+    /// together with the binary that owns the log. [`SCHEMA_VERSION`] stays 1;
+    /// the constant's docs carry the full argument. `caller` is
+    /// additive-optional under the identical
+    /// `#[serde(default, skip_serializing_if = "Option::is_none")]` contract
+    /// the other caller fields hold to, so a redrive nobody was named for
+    /// serializes with an empty payload object:
+    /// `{"kind":"RunRedriven","payload":{}}`.
+    RunRedriven {
+        /// The name of whoever asked for the redrive, under the same contract
+        /// as `caller` on [`Event::RunStarted`]: the token's name on a server
+        /// with a bearer configured, the operating system user from the CLI,
+        /// and absent when nobody was named, which a server in the pass-through
+        /// posture never has.
+        ///
+        /// The wake sweeper inside `salvor serve` redrives a due run with no
+        /// person behind it and records `server:wake`, so a reader of the log
+        /// can tell a timer firing apart from an operator reaching for a
+        /// crashed run.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller: Option<String>,
+    },
     /// The run parked until a recorded instant: a durable timer. Nothing holds
     /// the run while it sleeps. A parked run is passive data in the store, and
     /// this event is the whole of what makes it a sleeping one, so the sleep
@@ -778,6 +836,22 @@ pub enum Event {
         /// contract, so an ordinary (non-forked) graph run omits the key.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         forked_from: Option<ForkOrigin>,
+        /// The name of whoever asked for this graph run, recorded once at the
+        /// head of the log. The same field [`Event::RunStarted`] carries and
+        /// the same rule: the token's name on a server with a bearer
+        /// configured, the operating system user from the CLI, absent when
+        /// nobody was named.
+        ///
+        /// A graph run is asked for exactly as an agent run is, so the head of
+        /// its log answers the question the same way rather than leaving it to
+        /// be guessed from surrounding events. Additive-optional under the same
+        /// `#[serde(default, skip_serializing_if = "Option::is_none")]`
+        /// contract as `labels` and `forked_from`, and placed after them so a
+        /// head carrying every key writes them in the order the fields were
+        /// added and the pinned bytes of a graph run that names nobody are
+        /// untouched.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller: Option<String>,
     },
     /// Execution entered a graph node. Marks the node as the run's current
     /// position; a later [`Event::NodeExited`] closes it.
@@ -1150,6 +1224,17 @@ mod tests {
             input: serde_json::json!({"approved": true}),
             caller: None,
         });
+        assert_round_trips(Event::RunRedriven { caller: None });
+        assert_round_trips(Event::RunRedriven {
+            caller: Some("ops".to_owned()),
+        });
+        assert_round_trips(Event::GraphRunStarted {
+            graph_hash: "sha256:graph".into(),
+            input: serde_json::json!({"topic": "otters"}),
+            labels: None,
+            forked_from: None,
+            caller: Some("ci".to_owned()),
+        });
         assert_round_trips(Event::SleepStarted {
             wake_at: datetime!(2026-07-16 12:00:00.123456789 UTC),
         });
@@ -1185,6 +1270,7 @@ mod tests {
             input: serde_json::json!({"topic": "otters"}),
             labels: None,
             forked_from: None,
+            caller: None,
         });
         assert_round_trips(Event::GraphRunStarted {
             graph_hash: "sha256:graph".into(),
@@ -1197,6 +1283,7 @@ mod tests {
                 graph_hash: "sha256:graph".into(),
                 acknowledged_writes: vec![3, 5],
             }),
+            caller: Some("ci".to_owned()),
         });
         assert_round_trips(Event::NodeEntered {
             node: "research".into(),
@@ -1904,6 +1991,87 @@ mod tests {
         );
     }
 
+    /// Pins the redrive mark in both shapes. A redrive nobody was named for
+    /// keeps the two-key wire shape every other event has, with an empty
+    /// payload object, exactly as a bare [`Event::RunAbandoned`] does; a named
+    /// one carries the single `caller` key.
+    ///
+    /// The other half of the contract, that adding this variant changed no byte
+    /// of any log written before it, is proven by every pinned test above
+    /// passing untouched.
+    #[test]
+    fn run_redriven_serializes_to_pinned_json() {
+        let unnamed = serde_json::to_string(&envelope(Event::RunRedriven { caller: None }))
+            .expect("serialize");
+        assert_eq!(
+            unnamed,
+            r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"RunRedriven","payload":{}}}"#
+        );
+        assert!(
+            !unnamed.contains("caller"),
+            "a redrive with nobody named must not emit the key: {unnamed}"
+        );
+
+        let named = serde_json::to_string(&envelope(Event::RunRedriven {
+            caller: Some("server:wake".to_owned()),
+        }))
+        .expect("serialize");
+        assert_eq!(
+            named,
+            r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"RunRedriven","payload":{"caller":"server:wake"}}}"#
+        );
+    }
+
+    /// A redrive recorded with no key at all, as a writer that predates the
+    /// field would have written it, reads back with the field defaulted to
+    /// `None`. The same additive-optional contract the caller fields on the
+    /// older variants hold to.
+    #[test]
+    fn a_redrive_with_no_caller_key_deserializes_to_none() {
+        let recorded = r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"RunRedriven","payload":{}}}"#;
+        let Event::RunRedriven { caller } = serde_json::from_str::<EventEnvelope>(recorded)
+            .expect("deserialize")
+            .event
+        else {
+            panic!("expected RunRedriven");
+        };
+        assert_eq!(caller, None);
+    }
+
+    /// Pins a `GraphRunStarted` that names who asked for the run: the name
+    /// rides last, after `labels` and `forked_from`, so a head recording every
+    /// key writes them in the order the fields were added.
+    #[test]
+    fn graph_run_started_with_a_caller_serializes_to_pinned_json() {
+        let env = envelope(Event::GraphRunStarted {
+            graph_hash: "sha256:graph".into(),
+            input: serde_json::json!({"topic": "otters"}),
+            labels: None,
+            forked_from: None,
+            caller: Some("ci".into()),
+        });
+        let json = serde_json::to_string(&env).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"GraphRunStarted","payload":{"graph_hash":"sha256:graph","input":{"topic":"otters"},"caller":"ci"}}}"#
+        );
+    }
+
+    /// A graph head recorded before the caller field existed, byte for byte as
+    /// [`graph_run_started_bare_serializes_to_pinned_json`] pins it, reads back
+    /// with the name defaulted to `None`.
+    #[test]
+    fn a_graph_head_recorded_before_a_caller_existed_reads_back_unnamed() {
+        let recorded = r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"GraphRunStarted","payload":{"graph_hash":"sha256:graph","input":{"topic":"otters"}}}}"#;
+        let Event::GraphRunStarted { caller, .. } = serde_json::from_str::<EventEnvelope>(recorded)
+            .expect("deserialize")
+            .event
+        else {
+            panic!("expected GraphRunStarted");
+        };
+        assert_eq!(caller, None);
+    }
+
     /// Pins `GraphRunStarted` with neither labels nor a fork origin: both
     /// optional keys are absent, so the payload is just `graph_hash` and
     /// `input`. This is the additive-optional contract the [`SCHEMA_VERSION`]
@@ -1915,6 +2083,7 @@ mod tests {
             input: serde_json::json!({"topic": "otters"}),
             labels: None,
             forked_from: None,
+            caller: None,
         });
         let json = serde_json::to_string(&env).expect("serialize");
         assert_eq!(
@@ -1922,8 +2091,9 @@ mod tests {
             r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"GraphRunStarted","payload":{"graph_hash":"sha256:graph","input":{"topic":"otters"}}}}"#
         );
         assert!(
-            !json.contains("labels") && !json.contains("forked_from"),
-            "an unlabeled, unforked graph run must omit both keys: {json}"
+            !json.contains("labels") && !json.contains("forked_from") && !json.contains("caller"),
+            "an unlabeled, unforked graph run started by nobody named must omit all three keys: \
+             {json}"
         );
     }
 
@@ -1947,11 +2117,12 @@ mod tests {
                 graph_hash: "sha256:graph".into(),
                 acknowledged_writes: vec![3, 5],
             }),
+            caller: Some("ci".to_owned()),
         });
         let json = serde_json::to_string(&env).expect("serialize");
         assert_eq!(
             json,
-            r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"GraphRunStarted","payload":{"graph_hash":"sha256:graph","input":{"topic":"otters"},"labels":{"build":"42","env":"prod"},"forked_from":{"run_id":"00000000-0000-4000-8000-000000000001","through_seq":7,"from_node":"review","graph_hash":"sha256:graph","acknowledged_writes":[3,5]}}}}"#
+            r#"{"run_id":"00000000-0000-4000-8000-000000000001","seq":3,"schema_version":1,"recorded_at":"2026-07-09T12:00:00Z","event":{"kind":"GraphRunStarted","payload":{"graph_hash":"sha256:graph","input":{"topic":"otters"},"labels":{"build":"42","env":"prod"},"forked_from":{"run_id":"00000000-0000-4000-8000-000000000001","through_seq":7,"from_node":"review","graph_hash":"sha256:graph","acknowledged_writes":[3,5]},"caller":"ci"}}}"#
         );
     }
 

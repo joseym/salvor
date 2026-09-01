@@ -146,7 +146,7 @@ fn drive(script: &[Step], prefix: &[EventEnvelope]) -> Result<Drive, ReplayError
                 Outcome::Replayed(recorded) => assert_eq!(&recorded, input),
                 Outcome::Live(permit) => push!(permit.record(input.clone())),
             },
-            Step::BeginGraph { hash, input } => match cursor.begin_graph(hash, None, None)? {
+            Step::BeginGraph { hash, input } => match cursor.begin_graph(hash, None, None, None)? {
                 Outcome::Replayed(recorded) => assert_eq!(&recorded, input),
                 Outcome::Live(permit) => push!(permit.record(input.clone())),
             },
@@ -341,6 +341,14 @@ fn expected_status(prefix: &[EventEnvelope]) -> RunStatus {
         // A recorded wake returns the run to running, exactly as a resume
         // does: the timer is spent and the run is between steps again.
         | Event::SleepCompleted {} => RunStatus::Running,
+        // A redrive mark records an act, not a step, and folds to no status
+        // at all: a prefix ending at one reads as whatever the event before it
+        // implied, which a helper reading the last event alone cannot say. No
+        // script in this suite records one; the arm keeps the match exhaustive
+        // so a new event kind still cannot slip past it.
+        Event::RunRedriven { .. } => {
+            unreachable!("no script in this suite records a redrive")
+        }
         Event::SleepStarted { wake_at } => RunStatus::Sleeping { wake_at: *wake_at },
         Event::ModelCallRequested { .. } => RunStatus::AwaitingModel,
         Event::ToolCallRequested { effect, .. } => match effect {

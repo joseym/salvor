@@ -88,6 +88,7 @@ async fn seed_graph_run(path: &Path) -> RunId {
             input: json!({"case": "dispute"}),
             labels: None,
             forked_from: None,
+            caller: None,
         },
     );
     store.append(&envelope).await.expect("seed append");

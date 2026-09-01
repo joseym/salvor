@@ -157,6 +157,7 @@ fn graph_head_recording(graph_hash: &str) -> Event {
         input: json!("go"),
         labels: None,
         forked_from: None,
+        caller: None,
     }
 }
 

@@ -330,7 +330,8 @@ impl RunCtx {
     }
 
     /// Sets the name of whoever asked for this drive, stamped on a genuinely
-    /// fresh `RunStarted` and on a `Resumed` this context records live.
+    /// fresh `RunStarted` or `GraphRunStarted` and on a `Resumed` this context
+    /// records live.
     ///
     /// The name comes from the surface that took the request: a server with a
     /// bearer configured passes the token's name, the CLI passes the operating
@@ -338,7 +339,7 @@ impl RunCtx {
     /// this method records no name, which is what a surface with nobody to
     /// name should pass anyway.
     ///
-    /// It plays no part in replay. A recorded `RunStarted` or `Resumed` is
+    /// It plays no part in replay. A recorded head or `Resumed` is
     /// returned as recorded, name included, exactly as `labels` are: the name
     /// says who asked at the moment the event was written, so a later drive
     /// under a different account never rewrites it.
@@ -431,8 +432,9 @@ impl RunCtx {
     /// counterpart of [`begin`](Self::begin).
     ///
     /// Live: records [`salvor_core::Event::GraphRunStarted`] with `input`, the
-    /// labels set through [`with_labels`](Self::with_labels) (if any), and no
-    /// fork origin, then returns `input`. Replayed: verifies `graph_hash`
+    /// labels set through [`with_labels`](Self::with_labels) (if any), the name
+    /// set through [`with_caller`](Self::with_caller) (if any), and no fork
+    /// origin, then returns `input`. Replayed: verifies `graph_hash`
     /// against the recorded head (a changed graph document must not silently
     /// resume an old run) and returns the *recorded* input, which always wins.
     ///
@@ -456,7 +458,7 @@ impl RunCtx {
     ) -> Result<Value, RuntimeError> {
         match self
             .cursor
-            .begin_graph(graph_hash, self.labels.clone(), None)?
+            .begin_graph(graph_hash, self.labels.clone(), None, self.caller.clone())?
         {
             Outcome::Replayed(recorded) => Ok(recorded),
             Outcome::Live(permit) => {

@@ -265,6 +265,16 @@ pub fn derive_state(log: &[EventEnvelope]) -> RunState {
             Event::Resumed { .. } => {
                 state.status = RunStatus::Running;
             }
+            // A redrive marks an act, not a state change, so it folds to
+            // nothing at all: not even to `Running`. A crashed run that is
+            // driven again is still at the step it crashed on until the drive
+            // records something, and a sleeping run whose redrive turns out to
+            // be early is still sleeping. Reading this event as a status change
+            // would be the fold inventing progress no event evidences, and the
+            // whole point of appending it before the drive is that a drive
+            // which records nothing still says who tried. The name it carries
+            // is for a reader of the log; nothing in this projection reads it.
+            Event::RunRedriven { .. } => {}
             // The durable-timer pair. A sleep parks the run under its own
             // status carrying the recorded instant, never `Suspended`: nothing
             // is waiting on a human here. The completion returns the run to
@@ -629,6 +639,46 @@ mod tests {
         assert_eq!(state.status, RunStatus::Running);
     }
 
+    /// A redrive mark changes nothing about where a run stands. A crashed run
+    /// driven again is still at the step it crashed on, and a sleeping run
+    /// redriven before its deadline is still sleeping: the mark records the
+    /// act, and the fold refuses to read progress into it. It still advances
+    /// the next position, because it occupies a real one.
+    #[test]
+    fn a_redrive_changes_no_status() {
+        let wake_at = datetime!(2026-07-16 12:00:00 UTC);
+        let asleep = derive_state(&log(vec![started(), Event::SleepStarted { wake_at }]));
+        let redriven = derive_state(&log(vec![
+            started(),
+            Event::SleepStarted { wake_at },
+            Event::RunRedriven {
+                caller: Some("server:wake".into()),
+            },
+        ]));
+        assert_eq!(redriven.status, asleep.status);
+        assert_eq!(redriven.next_seq, SequenceNumber::new(3));
+
+        // And the same for a crashed run: the dangling intent under the mark
+        // is still the pending call, and the status still refuses to guess.
+        let crashed = derive_state(&log(vec![
+            started(),
+            Event::ToolCallRequested {
+                seq: SequenceNumber::new(1),
+                tool: "charge_card".into(),
+                input: serde_json::json!({"amount": 10}),
+                effect: Effect::Write,
+                idempotency_key: Some("key-1".into()),
+                performed_by: None,
+            },
+            Event::RunRedriven { caller: None },
+        ]));
+        assert_eq!(crashed.status, RunStatus::NeedsReconciliation);
+        assert!(matches!(
+            crashed.pending_call,
+            Some(PendingCall::Tool { ref tool, .. }) if tool == "charge_card"
+        ));
+    }
+
     /// A log ending at a started sleep derives to sleeping, carrying the
     /// recorded wake instant a caller needs in order to know when the run may
     /// be driven again.
@@ -852,6 +902,7 @@ mod tests {
             input: serde_json::json!({"topic": "otters"}),
             labels: None,
             forked_from: None,
+            caller: None,
         }
     }
 

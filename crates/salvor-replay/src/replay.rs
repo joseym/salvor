@@ -335,6 +335,9 @@ pub enum ReplayError {
 /// docs for the full protocol and how `RunCtx` wraps it.
 #[derive(Debug)]
 pub struct ReplayCursor {
+    /// The recorded log with the redrive marks dropped: every event replay has
+    /// to account for, and nothing else. See [`ReplayCursor::new`] for why the
+    /// marks are removed rather than skipped at each step.
     log: Vec<EventEnvelope>,
     /// Index into `log` of the next unconsumed recorded event.
     pos: usize,
@@ -353,6 +356,29 @@ impl ReplayCursor {
     /// for an agent run or [`Event::GraphRunStarted`] for a graph run) at
     /// position 0, all envelopes share one run id, positions are contiguous,
     /// and nothing follows a terminal event.
+    ///
+    /// # The redrive marks are dropped, not stepped over
+    ///
+    /// [`Event::RunRedriven`] records that somebody drove this run again. It is
+    /// an act, not a step: orchestration never requests one, so no method here
+    /// consumes one, and a cursor that met one where it expected a recorded
+    /// step would report a divergence that is not one. So the shape rules above
+    /// are checked against the log exactly as recorded, and the marks are then
+    /// removed from the cursor's copy.
+    ///
+    /// Removing beats skipping at each step because the marks would otherwise
+    /// have to be stepped over in every one of the twenty-odd methods below,
+    /// and the two that ask whether a recorded intent is the log's LAST event
+    /// ([`dangling_intent`](Self::dangling_intent) and
+    /// [`resume_unexecuted_tool_call`](Self::resume_unexecuted_tool_call)) would
+    /// have to ask it past a trailing mark. A crashed run's redrive appends its
+    /// mark right after the dangling intent it is about to re-issue, so that is
+    /// the ordinary case, not a corner of one.
+    ///
+    /// What the removal does not change: the remaining envelopes keep their own
+    /// recorded positions, so correlation seqs are the recorded ones, and the
+    /// first position a live emission takes is one past the log's true last
+    /// event, marks included.
     ///
     /// # Errors
     ///
@@ -409,9 +435,13 @@ impl ReplayCursor {
                 });
             }
         }
+        // Read off the log as recorded, before the marks go: the next live
+        // position is one past the log's true end, whatever kind sits there.
         let next_live_seq = log
             .last()
             .map_or(SequenceNumber::new(0), |last| last.seq.next());
+        let mut log = log;
+        log.retain(|envelope| !matches!(envelope.event, Event::RunRedriven { .. }));
         Ok(Self {
             log,
             pos: 0,
@@ -522,10 +552,11 @@ impl ReplayCursor {
     /// the recorded input. Live: returns a [`GraphBeginPermit`] the caller
     /// redeems with the run's input.
     ///
-    /// `labels` and `forked_from` land on a genuinely fresh
+    /// `labels`, `forked_from`, and `caller` land on a genuinely fresh
     /// [`Event::GraphRunStarted`]; they play no part in replay, exactly as
-    /// [`begin`](ReplayCursor::begin)'s `labels` do. Bounds on `labels` are not
-    /// checked here; a caller enforces them before calling.
+    /// [`begin`](ReplayCursor::begin)'s `labels` and `caller` do, where the
+    /// recorded head wins. Bounds on `labels` are not checked here; a caller
+    /// enforces them before calling.
     ///
     /// # Errors
     ///
@@ -536,6 +567,7 @@ impl ReplayCursor {
         graph_hash: &str,
         labels: Option<BTreeMap<String, String>>,
         forked_from: Option<ForkOrigin>,
+        caller: Option<String>,
     ) -> Result<Outcome<Value, GraphBeginPermit<'_>>, ReplayError> {
         let requested = RequestedStep::BeginGraph {
             graph_hash: graph_hash.to_owned(),
@@ -561,6 +593,7 @@ impl ReplayCursor {
             graph_hash: graph_hash.to_owned(),
             labels,
             forked_from,
+            caller,
             cursor: self,
         }))
     }
@@ -1739,7 +1772,7 @@ impl BeginPermit<'_> {
 ///
 /// Handed out by [`ReplayCursor::begin_graph`] when the log is empty. Redeem it
 /// with the run's input to obtain the [`Event::GraphRunStarted`] to persist.
-/// The `labels` and `forked_from` passed to
+/// The `labels`, `forked_from`, and `caller` passed to
 /// [`begin_graph`](ReplayCursor::begin_graph) ride along and land on the
 /// recorded event unchanged.
 #[derive(Debug)]
@@ -1747,6 +1780,7 @@ pub struct GraphBeginPermit<'c> {
     graph_hash: String,
     labels: Option<BTreeMap<String, String>>,
     forked_from: Option<ForkOrigin>,
+    caller: Option<String>,
     cursor: &'c mut ReplayCursor,
 }
 
@@ -1760,6 +1794,7 @@ impl GraphBeginPermit<'_> {
             input,
             labels: self.labels,
             forked_from: self.forked_from,
+            caller: self.caller,
         };
         self.cursor.emit(event)
     }
@@ -1982,6 +2017,7 @@ fn kind_name(event: &Event) -> &'static str {
         Event::RandomObserved { .. } => "RandomObserved",
         Event::Suspended { .. } => "Suspended",
         Event::Resumed { .. } => "Resumed",
+        Event::RunRedriven { .. } => "RunRedriven",
         Event::SleepStarted { .. } => "SleepStarted",
         Event::SleepCompleted {} => "SleepCompleted",
         Event::BudgetExceeded { .. } => "BudgetExceeded",
@@ -2171,11 +2207,121 @@ mod tests {
                 input: serde_json::json!({"topic": "otters"}),
                 labels: None,
                 forked_from: None,
+                caller: None,
             },
         )];
         let cursor = ReplayCursor::new(log).expect("a graph run head is a legal first event");
         assert_eq!(cursor.run_id(), Some(run_id));
         assert!(cursor.is_replaying());
+    }
+
+    /// A log carrying a redrive mark replays as though the mark were not
+    /// there, and the first live emission still lands one past the mark. The
+    /// mark records an act nothing requests, so no step consumes it, and the
+    /// position it occupies is real and must not be handed out twice.
+    #[test]
+    fn a_redrive_mark_is_replayed_over_and_still_holds_its_position() {
+        let run_id =
+            RunId::from_uuid(Uuid::parse_str("00000000-0000-4000-8000-00000000000a").unwrap());
+        let at = |seq, event| {
+            EventEnvelope::new(
+                run_id,
+                SequenceNumber::new(seq),
+                datetime!(2026-09-01 12:00:00 UTC),
+                event,
+            )
+        };
+        let log = vec![
+            at(
+                0,
+                Event::RunStarted {
+                    agent_def_hash: "sha256:agent".into(),
+                    input: serde_json::json!({"topic": "otters"}),
+                    labels: None,
+                    driven_by: None,
+                    caller: None,
+                },
+            ),
+            at(
+                1,
+                Event::RunRedriven {
+                    caller: Some("ops".into()),
+                },
+            ),
+        ];
+        let mut cursor = ReplayCursor::new(log).expect("a log with a mark is well formed");
+        match cursor.begin("sha256:agent", None, None).expect("begin") {
+            Outcome::Replayed(input) => {
+                assert_eq!(input, serde_json::json!({"topic": "otters"}));
+            }
+            Outcome::Live(_) => panic!("the recorded head must replay"),
+        }
+        assert!(
+            !cursor.is_replaying(),
+            "the mark is not history the cursor has to account for"
+        );
+        let emitted = match cursor.now().expect("now") {
+            Outcome::Live(permit) => permit.record(datetime!(2026-09-01 12:00:01 UTC)),
+            Outcome::Replayed(_) => panic!("nothing is left to replay"),
+        };
+        assert_eq!(
+            emitted.seq,
+            SequenceNumber::new(2),
+            "the first live event lands one past the mark, not on top of it"
+        );
+    }
+
+    /// A crashed run's mark lands right after the intent it is about to
+    /// re-issue, and the intent underneath it is still the dangling one. This
+    /// is the ordinary shape of a redriven crashed run, not a corner case.
+    #[test]
+    fn an_intent_under_a_redrive_mark_is_still_dangling() {
+        let run_id =
+            RunId::from_uuid(Uuid::parse_str("00000000-0000-4000-8000-00000000000b").unwrap());
+        let at = |seq, event| {
+            EventEnvelope::new(
+                run_id,
+                SequenceNumber::new(seq),
+                datetime!(2026-09-01 12:00:00 UTC),
+                event,
+            )
+        };
+        let log = vec![
+            at(
+                0,
+                Event::RunStarted {
+                    agent_def_hash: "sha256:agent".into(),
+                    input: serde_json::json!({}),
+                    labels: None,
+                    driven_by: None,
+                    caller: None,
+                },
+            ),
+            at(
+                1,
+                Event::ToolCallRequested {
+                    seq: SequenceNumber::new(1),
+                    tool: "charge_card".into(),
+                    input: serde_json::json!({"amount": 10}),
+                    effect: Effect::Write,
+                    idempotency_key: Some("key-1".into()),
+                    performed_by: None,
+                },
+            ),
+            at(2, Event::RunRedriven { caller: None }),
+        ];
+        let mut cursor = ReplayCursor::new(log).expect("a log with a mark is well formed");
+        cursor.begin("sha256:agent", None, None).expect("begin");
+        let dangling = cursor
+            .dangling_intent()
+            .expect("the write intent under the mark is still the log's dangling one");
+        match dangling {
+            PendingCall::Tool { seq, tool, .. } => {
+                assert_eq!(seq, SequenceNumber::new(1));
+                assert_eq!(tool, "charge_card");
+            }
+            PendingCall::Model { .. } => panic!("expected the tool intent"),
+        }
     }
 
     /// Driving `begin_graph`, `node_entered`, `node_exited` live emits the graph
@@ -2190,7 +2336,7 @@ mod tests {
         let mut cursor = ReplayCursor::new(vec![]).expect("empty log is a fresh run");
         let mut emitted = Vec::new();
         match cursor
-            .begin_graph("sha256:graph", None, None)
+            .begin_graph("sha256:graph", None, None, None)
             .expect("begin")
         {
             Outcome::Live(permit) => emitted.push(permit.record(serde_json::json!({"t": 1}))),
@@ -2221,7 +2367,7 @@ mod tests {
             .collect();
         let mut replay = ReplayCursor::new(log).expect("emitted log is well formed");
         let input = match replay
-            .begin_graph("sha256:graph", None, None)
+            .begin_graph("sha256:graph", None, None, None)
             .expect("begin")
         {
             Outcome::Replayed(input) => input,
@@ -2248,7 +2394,10 @@ mod tests {
 
         let mut cursor = ReplayCursor::new(vec![]).expect("fresh run");
         let mut emitted = Vec::new();
-        match cursor.begin_graph("sha256:g", None, None).expect("begin") {
+        match cursor
+            .begin_graph("sha256:g", None, None, None)
+            .expect("begin")
+        {
             Outcome::Live(p) => emitted.push(p.record(serde_json::json!({}))),
             Outcome::Replayed(_) => panic!("fresh must be live"),
         }
@@ -2278,7 +2427,9 @@ mod tests {
             })
             .collect();
         let mut replay = ReplayCursor::new(log).expect("well formed");
-        replay.begin_graph("sha256:g", None, None).expect("begin");
+        replay
+            .begin_graph("sha256:g", None, None, None)
+            .expect("begin");
         assert!(matches!(
             replay.branch_taken("route", "high").expect("branch"),
             Outcome::Replayed(())
@@ -2308,6 +2459,7 @@ mod tests {
                     input: serde_json::json!({}),
                     labels: None,
                     forked_from: None,
+                    caller: None,
                 },
             ),
             EventEnvelope::new(
@@ -2321,7 +2473,9 @@ mod tests {
             ),
         ];
         let mut cursor = ReplayCursor::new(log).expect("well formed");
-        cursor.begin_graph("sha256:g", None, None).expect("begin");
+        cursor
+            .begin_graph("sha256:g", None, None, None)
+            .expect("begin");
         let err = cursor
             .branch_taken("route", "low")
             .expect_err("a different case must diverge");
@@ -2346,6 +2500,7 @@ mod tests {
                     input: serde_json::json!({}),
                     labels: None,
                     forked_from: None,
+                    caller: None,
                 },
             ),
             EventEnvelope::new(
@@ -2359,7 +2514,7 @@ mod tests {
         ];
         let mut cursor = ReplayCursor::new(log).expect("well formed");
         cursor
-            .begin_graph("sha256:graph", None, None)
+            .begin_graph("sha256:graph", None, None, None)
             .expect("begin");
         let err = cursor
             .node_entered("publish")
@@ -2379,7 +2534,10 @@ mod tests {
 
         let mut cursor = ReplayCursor::new(vec![]).expect("fresh run");
         let mut emitted = Vec::new();
-        match cursor.begin_graph("sha256:g", None, None).expect("begin") {
+        match cursor
+            .begin_graph("sha256:g", None, None, None)
+            .expect("begin")
+        {
             Outcome::Live(p) => emitted.push(p.record(serde_json::json!({}))),
             Outcome::Replayed(_) => panic!("fresh must be live"),
         }
@@ -2418,7 +2576,9 @@ mod tests {
             })
             .collect();
         let mut replay = ReplayCursor::new(log).expect("well formed");
-        replay.begin_graph("sha256:g", None, None).expect("begin");
+        replay
+            .begin_graph("sha256:g", None, None, None)
+            .expect("begin");
         assert!(matches!(
             replay.node_entered("fanout").expect("enter"),
             Outcome::Replayed(())
@@ -2473,6 +2633,7 @@ mod tests {
                     input: serde_json::json!({}),
                     labels: None,
                     forked_from: None,
+                    caller: None,
                 },
             ),
             EventEnvelope::new(
@@ -2487,7 +2648,9 @@ mod tests {
             ),
         ];
         let mut cursor = ReplayCursor::new(log).expect("well formed");
-        cursor.begin_graph("sha256:g", None, None).expect("begin");
+        cursor
+            .begin_graph("sha256:g", None, None, None)
+            .expect("begin");
         // A different (fork-re-derived) child id still replays: node + index pin
         // the position, and the recorded id stands.
         assert!(matches!(
@@ -2507,6 +2670,7 @@ mod tests {
                     input: serde_json::json!({}),
                     labels: None,
                     forked_from: None,
+                    caller: None,
                 },
             ),
             EventEnvelope::new(
@@ -2521,7 +2685,9 @@ mod tests {
             ),
         ])
         .expect("well formed");
-        cursor.begin_graph("sha256:g", None, None).expect("begin");
+        cursor
+            .begin_graph("sha256:g", None, None, None)
+            .expect("begin");
         let err = cursor
             .map_iteration_started("fanout", 1, "sha256:origin-derived")
             .expect_err("a different index must diverge");
@@ -2543,6 +2709,7 @@ mod tests {
                     input: serde_json::json!({}),
                     labels: None,
                     forked_from: None,
+                    caller: None,
                 },
             ),
             EventEnvelope::new(
@@ -2564,7 +2731,10 @@ mod tests {
 
         let mut cursor = ReplayCursor::new(vec![]).expect("fresh run");
         let mut emitted = Vec::new();
-        match cursor.begin_graph("sha256:g", None, None).expect("begin") {
+        match cursor
+            .begin_graph("sha256:g", None, None, None)
+            .expect("begin")
+        {
             Outcome::Live(p) => emitted.push(p.record(serde_json::json!({}))),
             Outcome::Replayed(_) => panic!("fresh must be live"),
         }
@@ -2599,7 +2769,9 @@ mod tests {
             })
             .collect();
         let mut replay = ReplayCursor::new(log).expect("well formed");
-        replay.begin_graph("sha256:g", None, None).expect("begin");
+        replay
+            .begin_graph("sha256:g", None, None, None)
+            .expect("begin");
         assert!(matches!(
             replay.node_entered("refine").expect("enter"),
             Outcome::Replayed(())
@@ -2647,7 +2819,9 @@ mod tests {
 
         let mut cursor =
             ReplayCursor::new(head_then(run_id, recorded.clone())).expect("well formed");
-        cursor.begin_graph("sha256:g", None, None).expect("begin");
+        cursor
+            .begin_graph("sha256:g", None, None, None)
+            .expect("begin");
         let err = cursor
             .fold_iteration_started("refine", 1)
             .expect_err("a different index must diverge");
@@ -2656,7 +2830,9 @@ mod tests {
         );
 
         let mut cursor = ReplayCursor::new(head_then(run_id, recorded)).expect("well formed");
-        cursor.begin_graph("sha256:g", None, None).expect("begin");
+        cursor
+            .begin_graph("sha256:g", None, None, None)
+            .expect("begin");
         let err = cursor
             .fold_iteration_started("polish", 0)
             .expect_err("a different node must diverge");
@@ -2677,7 +2853,9 @@ mod tests {
 
         let mut cursor =
             ReplayCursor::new(head_then(run_id, recorded.clone())).expect("well formed");
-        cursor.begin_graph("sha256:g", None, None).expect("begin");
+        cursor
+            .begin_graph("sha256:g", None, None, None)
+            .expect("begin");
         let err = cursor
             .fold_iteration_joined("polish", 2)
             .expect_err("a different node must diverge");
@@ -2686,7 +2864,9 @@ mod tests {
         );
 
         let mut cursor = ReplayCursor::new(head_then(run_id, recorded)).expect("well formed");
-        cursor.begin_graph("sha256:g", None, None).expect("begin");
+        cursor
+            .begin_graph("sha256:g", None, None, None)
+            .expect("begin");
         let err = cursor
             .fold_iteration_joined("refine", 0)
             .expect_err("a different index must diverge");
@@ -2710,7 +2890,9 @@ mod tests {
 
         let mut cursor =
             ReplayCursor::new(head_then(run_id, recorded.clone())).expect("well formed");
-        cursor.begin_graph("sha256:g", None, None).expect("begin");
+        cursor
+            .begin_graph("sha256:g", None, None, None)
+            .expect("begin");
         let err = cursor
             .fold_converged("refine", 0, "stop predicate fired")
             .expect_err("a different winner must diverge");
@@ -2719,7 +2901,9 @@ mod tests {
         );
 
         let mut cursor = ReplayCursor::new(head_then(run_id, recorded)).expect("well formed");
-        cursor.begin_graph("sha256:g", None, None).expect("begin");
+        cursor
+            .begin_graph("sha256:g", None, None, None)
+            .expect("begin");
         let err = cursor
             .fold_converged("refine", 1, "iteration bound reached")
             .expect_err("a different reason must diverge");
