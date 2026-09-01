@@ -44,12 +44,34 @@
 //!
 //! `Last-Event-ID` wins when both are present. With neither, the stream starts
 //! at sequence 0, a full replay.
+//!
+//! # Revocation ends an open stream
+//!
+//! Auth checks a request once, on the way in, and a stream can outlive that
+//! check by hours. So the stream re-checks: the handler captures the caller's
+//! [`StreamCredential`] (a name and the bearer's SHA-256, never the bearer)
+//! and the producer verifies it at the top of every poll pass, before it reads
+//! the log. The cadence is therefore the stream poll interval,
+//! [`AppState::poll_interval`], 50ms by default, and a revoked token ends its
+//! streams within one pass. The check is a digest comparison over a token
+//! file the auth layer already stats once per request, and a pass already
+//! reads the whole log, so it is not what the pass costs.
+//!
+//! A credential that no longer verifies ends the stream the way every other
+//! ending works, with a final `event: end` frame. That frame carries a
+//! `reason` of `unauthorized` and an `error` saying to re-authenticate and
+//! open a fresh stream. The run is untouched: it goes on being driven, and a
+//! stream opened with a token that verifies picks its events up from the
+//! cursor.
+//!
+//! A pass-through server, with no bearer configured, captures nothing and
+//! checks nothing, and streams exactly as it did.
 
 use std::convert::Infallible;
 use std::time::Duration;
 
 use axum::extract::{Path, Query, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, header};
 use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use salvor_core::{RunId, RunStatus, derive_state};
@@ -59,6 +81,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
+use crate::auth::StreamCredential;
 use crate::error::ApiError;
 use crate::json;
 use crate::state::AppState;
@@ -100,10 +123,11 @@ pub async fn stream(
         )));
     }
 
+    let credential = credential(&state, &headers)?;
     let start = cursor(&headers, params.from_seq);
     let poll = state.poll_interval();
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(64);
-    tokio::spawn(produce(state, run_id, start, poll, tx));
+    tokio::spawn(produce(state, run_id, start, poll, credential, tx));
 
     Ok(Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default()))
 }
@@ -121,18 +145,64 @@ fn cursor(headers: &HeaderMap, from_seq: Option<u64>) -> u64 {
     from_seq.unwrap_or(0)
 }
 
+/// The credential this stream re-checks, or `None` on a pass-through server,
+/// where no bearer is configured and there is nothing to re-check.
+///
+/// # Errors
+///
+/// [`ApiError::Unauthorized`] when a bearer is configured and the request's
+/// own value does not verify. [`require_bearer`](crate::auth::require_bearer)
+/// refused that request already, so this answers a case the layer above makes
+/// unreachable rather than opening a stream nothing re-checks if it ever
+/// stopped being unreachable.
+fn credential(state: &AppState, headers: &HeaderMap) -> Result<Option<StreamCredential>, ApiError> {
+    let Some(auth) = state.auth() else {
+        return Ok(None);
+    };
+    let presented = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok());
+    auth.capture(presented)
+        .map(Some)
+        .ok_or(ApiError::Unauthorized)
+}
+
 /// Reads the log from `start`, sends each event, then polls for new ones until
 /// the run rests, and sends a final `end` frame.
+///
+/// `credential` is re-checked at the top of every pass; see the module docs.
 async fn produce(
     state: AppState,
     run_id: RunId,
     start: u64,
     poll: Duration,
+    credential: Option<StreamCredential>,
     tx: mpsc::Sender<Result<Event, Infallible>>,
 ) {
     let store = state.store();
     let mut next = start;
     loop {
+        if let (Some(credential), Some(auth)) = (credential.as_ref(), state.auth())
+            && !credential.still_verifies(auth)
+        {
+            tracing::info!(
+                caller = %credential.name(),
+                run = %run_id.as_uuid(),
+                reason = "token_revoked",
+                "event stream ended: the bearer it opened under no longer verifies"
+            );
+            let frame = Event::default().event("end").data(
+                json!({
+                    "error": "the bearer this stream opened under no longer verifies; \
+                              re-authenticate and open a fresh stream",
+                    "reason": "unauthorized",
+                })
+                .to_string(),
+            );
+            let _ = tx.send(Ok(frame)).await;
+            return;
+        }
+
         let log = match store.read_log(run_id).await {
             Ok(log) => log,
             Err(error) => {
