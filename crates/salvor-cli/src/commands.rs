@@ -199,7 +199,7 @@ pub async fn resume(store_path: &Path, caller: Option<&str>, args: ResumeArgs) -
     let store = open_store(store_path)?;
     let log = store.read_log(run_id).await?;
     if log.is_empty() {
-        bail!("no run {uuid} in this store");
+        return Err(no_run(&uuid, store_path));
     }
     let state = derive_state(&log);
 
@@ -225,6 +225,7 @@ pub async fn resume(store_path: &Path, caller: Option<&str>, args: ResumeArgs) -
                     &uuid,
                     state.pending_call.as_ref(),
                     recorded_at,
+                    Some(store_path),
                     render::DEFAULT_REPORT_WIDTH,
                 )
             );
@@ -1018,7 +1019,7 @@ pub async fn fork(store_path: &Path, args: ForkArgs) -> Result<u8> {
     let store = open_store(store_path)?;
     let origin_log = store.read_log(origin_id).await?;
     if origin_log.is_empty() {
-        bail!("no run {origin_uuid} in this store");
+        return Err(no_run(&origin_uuid, store_path));
     }
 
     // An origin parked at a dangling write must be resolved first.
@@ -1148,7 +1149,7 @@ pub async fn resolve(store_path: &Path, caller: Option<&str>, args: ResolveArgs)
     let store = open_store(store_path)?;
     let log = store.read_log(run_id).await?;
     if log.is_empty() {
-        bail!("no run {uuid} in this store");
+        return Err(no_run(&uuid, store_path));
     }
     // Read off the log itself, not off whether `--graph` happened to be
     // passed: an operator can resolve a graph run without supplying it, and
@@ -1211,7 +1212,7 @@ pub async fn abandon(store_path: &Path, caller: Option<&str>, args: AbandonArgs)
     let uuid = run_id.as_uuid().to_string();
     let store = open_store(store_path)?;
     if store.read_log(run_id).await?.is_empty() {
-        bail!("no run {uuid} in this store");
+        return Err(no_run(&uuid, store_path));
     }
 
     let runtime = with_caller(Runtime::new(store.clone()), caller);
@@ -1883,7 +1884,7 @@ pub async fn list(store_path: &Path, args: ListArgs) -> Result<u8> {
 /// `salvor history`: the pretty event log, or raw JSON envelopes with `--json`.
 ///
 /// The store is read, never created: against a store this command had just
-/// made, every run id in the world reads back as `no run <id> in this store`,
+/// made, every run id in the world reads back as `no run <id> in <path>`,
 /// which is a typo in `--store` wearing the words of a missing run.
 pub async fn history(store_path: &Path, args: HistoryArgs) -> Result<u8> {
     let run_id = parse_run_id(&args.run_id)?;
@@ -1896,7 +1897,7 @@ pub async fn history(store_path: &Path, args: HistoryArgs) -> Result<u8> {
     };
     let log = store.read_log(run_id).await?;
     if log.is_empty() {
-        bail!("no run {} in this store", run_id.as_uuid());
+        return Err(no_run(&run_id.as_uuid().to_string(), store_path));
     }
     if args.json {
         println!("{}", serde_json::to_string_pretty(&log)?);
@@ -1928,7 +1929,7 @@ pub async fn replay(store_path: &Path, args: ReplayArgs) -> Result<u8> {
     };
     let log = store.read_log(run_id).await?;
     if log.is_empty() {
-        bail!("no run {} in this store", run_id.as_uuid());
+        return Err(no_run(&run_id.as_uuid().to_string(), store_path));
     }
     let state = derive_state(&log);
     print!("{}", render::replay_summary(&state));
@@ -3317,6 +3318,28 @@ pub(crate) async fn close_servers(servers: Vec<salvor_tools::mcp::McpServer>) {
             tracing::warn!(%error, "MCP server did not shut down cleanly");
         }
     }
+}
+
+/// The store path an invocation that named no `--store` reads, which is
+/// [`crate::cli::Cli`]'s own default value for the flag.
+const DEFAULT_STORE: &str = "./salvor.db";
+
+/// The refusal for a run id the store holds no history for: which id, and
+/// which store was read looking for it.
+///
+/// Naming the path is what separates a run that is genuinely gone from a run
+/// that is in another database. An invocation that named no `--store` read the
+/// default, which is the case where the id is most likely fine and the store
+/// is wrong, so that case also names the flag that points elsewhere.
+fn no_run(uuid: &str, store_path: &Path) -> anyhow::Error {
+    let mut message = format!("no run {uuid} in {}", store_path.display());
+    if store_path == Path::new(DEFAULT_STORE) {
+        message.push_str(
+            "; that is the default store, so pass --store <PATH> if the run was recorded in \
+             another one",
+        );
+    }
+    anyhow!(message)
 }
 
 /// Opens the SQLite store, wrapped as the trait object the runtime holds.

@@ -289,6 +289,9 @@ pub fn sleeping_report(
 /// done externally, and the two honest ways forward, each written out as the
 /// exact command to type. `recorded_at` is the timestamp of the intent
 /// envelope; the caller finds it in the log. Printed before a non-zero exit.
+/// `store` is the resolved store path the printed `resolve` carries (or `None`
+/// for the `<STORE>` placeholder, see [`store_flag`]), so the command a reader
+/// pastes reads the same store this run was found in rather than the default.
 /// `width` is the column count its prose wraps to; the two command lines and
 /// the recorded-intent block never wrap, see [`wrap`].
 #[must_use]
@@ -296,6 +299,7 @@ pub fn reconciliation_report(
     run_uuid: &str,
     pending: Option<&PendingCall>,
     recorded_at: Option<OffsetDateTime>,
+    store: Option<&Path>,
     width: usize,
 ) -> String {
     let mut out = wrap(
@@ -354,7 +358,8 @@ pub fn reconciliation_report(
         "     ",
     ));
     out.push_str(&format!(
-        "\n       salvor resolve {run_uuid} --output '<json the tool returned>'\n"
+        "\n       salvor resolve {run_uuid}{} --output '<json the tool returned>'\n",
+        store_flag(store)
     ));
     out.push_str(&wrap(
         "The write did not take effect and still needs to happen. Perform it yourself first, \
@@ -1149,8 +1154,20 @@ mod tests {
     /// same thing: only line breaks may move, never words.
     #[test]
     fn same_words_at_width_40_and_width_100() {
-        let narrow = reconciliation_report(UUID, Some(&sample_pending()), sample_recorded_at(), 40);
-        let wide = reconciliation_report(UUID, Some(&sample_pending()), sample_recorded_at(), 100);
+        let narrow = reconciliation_report(
+            UUID,
+            Some(&sample_pending()),
+            sample_recorded_at(),
+            Some(sample_store()),
+            40,
+        );
+        let wide = reconciliation_report(
+            UUID,
+            Some(&sample_pending()),
+            sample_recorded_at(),
+            Some(sample_store()),
+            100,
+        );
         assert_eq!(words(&narrow), words(&wide));
 
         let narrow = parked_report(
@@ -1207,10 +1224,19 @@ mod tests {
     /// lines, no matter how narrow the requested width is.
     #[test]
     fn command_examples_are_never_split() {
-        let report = reconciliation_report(UUID, Some(&sample_pending()), sample_recorded_at(), 40);
+        let report = reconciliation_report(
+            UUID,
+            Some(&sample_pending()),
+            sample_recorded_at(),
+            Some(sample_store()),
+            40,
+        );
         assert!(
             report.lines().any(|line| line
-                == format!("       salvor resolve {UUID} --output '<json the tool returned>'")),
+                == format!(
+                    "       salvor resolve {UUID} --store {} --output '<json the tool returned>'",
+                    sample_store().display()
+                )),
             "the resolve command must survive on one line:\n{report}"
         );
 
@@ -1326,8 +1352,13 @@ mod tests {
              idempotency key: key-123\n  \
              input:\n    {\n      \"to\": \"ops@example.com\"\n    }\n";
         for width in [40, 100] {
-            let report =
-                reconciliation_report(UUID, Some(&sample_pending()), sample_recorded_at(), width);
+            let report = reconciliation_report(
+                UUID,
+                Some(&sample_pending()),
+                sample_recorded_at(),
+                Some(sample_store()),
+                width,
+            );
             assert!(
                 report.contains(block),
                 "the recorded-intent block at width {width} was reflowed:\n{report}"
@@ -1358,8 +1389,14 @@ mod tests {
         };
 
         let reports = [
-            reconciliation_report(UUID, Some(&sample_pending()), sample_recorded_at(), WIDTH),
-            reconciliation_report(UUID, None, None, WIDTH),
+            reconciliation_report(
+                UUID,
+                Some(&sample_pending()),
+                sample_recorded_at(),
+                Some(sample_store()),
+                WIDTH,
+            ),
+            reconciliation_report(UUID, None, None, Some(sample_store()), WIDTH),
             resolved_report(
                 UUID,
                 &[PathBuf::from("agent.toml")],
