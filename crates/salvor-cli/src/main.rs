@@ -7,8 +7,8 @@
 
 use std::process::ExitCode;
 
-use clap::Parser;
-use salvor_cli::cli::Cli;
+use clap::FromArgMatches;
+use salvor_cli::cli::{self, Cli};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -20,7 +20,14 @@ async fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     salvor_cli::init_tracing();
-    let cli = Cli::parse();
+    // Not `Cli::parse()`: the tree is built first so the two global options
+    // can be hidden from the one verb that cannot act on either. Parsing is
+    // otherwise unchanged, and both options still parse everywhere.
+    let matches = cli::command_hiding_unusable_globals().get_matches();
+    let cli = match Cli::from_arg_matches(&matches) {
+        Ok(cli) => cli,
+        Err(error) => error.exit(),
+    };
     match salvor_cli::dispatch(cli).await {
         Ok(code) => ExitCode::from(code),
         Err(error) => {

@@ -4,7 +4,8 @@
 //! `salvor_cli::commands`) means the shape of the CLI reads top to bottom here,
 //! and the handlers take already-parsed, typed arguments. The two global
 //! options, `--store` and `--caller`, are defined once and shared by every
-//! subcommand.
+//! subcommand; [`command_hiding_unusable_globals`] keeps them out of the help
+//! of the one verb that reads no store and writes no event.
 
 use std::path::PathBuf;
 
@@ -992,4 +993,104 @@ pub struct ServeArgs {
     /// `salvor_server::client_tools` for the argument in full.
     #[arg(long = "client-tool", value_name = "FILE")]
     pub client_tools: Vec<PathBuf>,
+}
+
+/// The global options `token new` parses and cannot act on.
+const HIDDEN_UNDER_TOKEN_NEW: [&str; 2] = ["store", "caller"];
+
+/// The parse tree with the global options hidden from the help of the verbs
+/// they mean nothing to.
+///
+/// `--store` and `--caller` are global, so clap lists them under every
+/// subcommand, `token new` included. That verb opens no store and writes no
+/// event, so both lines describe something it cannot do. clap has no per-verb
+/// hiding of a global, and defining the two per subcommand instead would
+/// repeat them across every other verb, so the tree is built first and the
+/// copies clap propagated into `token new` are hidden after the fact: the
+/// flags still parse there, exactly as they parse anywhere else, and only the
+/// help text loses two lines that could not be acted on.
+///
+/// The rewrite goes through `mut_args`, which maps every argument of that one
+/// subcommand in place. `mut_arg`, which names a single argument, removes it
+/// and pushes it back on the end, and the lookup table a built command holds
+/// indexes arguments by position, so the one name it moves takes every name
+/// after it out of that table with it.
+#[must_use]
+pub fn command_hiding_unusable_globals() -> clap::Command {
+    use clap::CommandFactory;
+
+    let mut command = Cli::command();
+    // Builds the whole tree, which is what copies a global option down into
+    // each subcommand; before this, `token new` carries neither name.
+    command.build();
+    command.mut_subcommand("token", |token| {
+        token.mut_subcommand("new", |new| {
+            new.mut_args(|arg| {
+                if HIDDEN_UNDER_TOKEN_NEW.contains(&arg.get_id().as_str()) {
+                    arg.hide(true)
+                } else {
+                    arg
+                }
+            })
+        })
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `token new --help` lists what that verb can act on, and the two global
+    /// options are not among them.
+    #[test]
+    fn token_new_help_hides_the_globals_it_cannot_act_on() {
+        let mut command = command_hiding_unusable_globals();
+        let help = command
+            .find_subcommand_mut("token")
+            .expect("the token verb")
+            .find_subcommand_mut("new")
+            .expect("the new verb")
+            .render_help()
+            .to_string();
+        assert!(!help.contains("--store"), "{help}");
+        assert!(!help.contains("--caller"), "{help}");
+        assert!(help.contains("--file"), "the verb's own flags stay: {help}");
+        assert!(help.contains("--stdin"), "{help}");
+    }
+
+    /// Hiding is a help-text change only: both options still parse there, and
+    /// every other verb still lists them.
+    #[test]
+    fn the_hidden_globals_still_parse_and_still_show_elsewhere() {
+        use clap::FromArgMatches;
+
+        let matches = command_hiding_unusable_globals()
+            .try_get_matches_from(["salvor", "token", "new", "ci", "--file", "tokens.toml"])
+            .expect("the verb parses with no global at all");
+        assert!(matches.subcommand().is_some());
+        let matches = command_hiding_unusable_globals()
+            .try_get_matches_from([
+                "salvor",
+                "token",
+                "new",
+                "ci",
+                "--file",
+                "tokens.toml",
+                "--store",
+                "other.db",
+            ])
+            .expect("--store still parses under token new");
+        let cli = Cli::from_arg_matches(&matches).expect("the matches build a Cli");
+        assert_eq!(cli.store, PathBuf::from("other.db"));
+        assert!(matches!(cli.command, Command::Token { .. }));
+
+        let mut command = command_hiding_unusable_globals();
+        let help = command
+            .find_subcommand_mut("resume")
+            .expect("the resume verb")
+            .render_help()
+            .to_string();
+        assert!(help.contains("--store"), "{help}");
+        assert!(help.contains("--caller"), "{help}");
+    }
 }
