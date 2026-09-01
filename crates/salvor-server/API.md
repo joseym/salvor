@@ -40,10 +40,12 @@ they union, so a request matching either one is let through:
 
 Verification hashes the presented bearer with SHA-256 and compares the digest
 against a stored one in constant time. A token that verifies is attributed to
-the name its `[tokens.<name>]` table carries, or to `token` for the
-`--auth-token` shared secret; that name reaches handlers in the request
-extensions and appears in the server's log. It grants nothing different: any
-token that verifies reads and drives every run in the store.
+the name its `[tokens.<name>]` table carries, or to `shared:token` for the
+`--auth-token` shared secret; the colon puts that name outside the
+`[a-z0-9-]` a minted name is held to, so a named token can never record the
+same caller. That name reaches handlers in the request extensions and appears
+in the server's log. It grants nothing different: any token that verifies
+reads and drives every run in the store.
 
 **The name is stamped into the log.** Every endpoint that appends a run's
 start, its resume, its abandonment, or a hand-recorded completion writes that

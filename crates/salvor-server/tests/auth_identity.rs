@@ -124,7 +124,7 @@ async fn a_named_token_reaches_the_handler_as_its_name() {
 }
 
 #[tokio::test]
-async fn the_shared_secret_names_its_caller_token() {
+async fn the_shared_secret_names_its_caller_shared_token() {
     let state = AppState::new(store(), no_agents()).with_auth_token("a-secret-of-real-length");
     let base = spawn(state).await;
     let client = reqwest::Client::new();
@@ -135,6 +135,10 @@ async fn the_shared_secret_names_its_caller_token() {
         body,
         salvor_server::auth::SINGLE_TOKEN_CALLER,
         "the env-var secret has no name of its own, so it gets this one"
+    );
+    assert_eq!(
+        body, "shared:token",
+        "the colon puts it outside `[a-z0-9-]`, the class a minted name is held to"
     );
 }
 
