@@ -53,10 +53,11 @@ verified name onto the event: `caller` on `RunStarted`, `Resumed`, and
 `RunAbandoned`, and `settled_caller` beside `settled_by` on the
 `ToolCallCompleted` that `resolve` records. The server takes the name from the
 token it verified and never from a request body, so no request can name itself
-something else, and no body field on any of these endpoints carries a caller.
-A server running with no bearer configured has no verified name to record and
-stamps nothing, which is what every event recorded before this field existed
-carries too.
+something else. A body that carries `caller` or `settled_caller` is answered
+`400 bad_request` naming the field, rather than accepted with the field
+ignored; every other unknown key is still ignored. A server running with no
+bearer configured has no verified name to record and stamps nothing, which is
+what every event recorded before this field existed carries too.
 
 A refusal logs one `WARN` naming the source address and the outcome
 (`missing_header`, `bad_scheme`, `unknown_token`), never the presented value,
@@ -234,8 +235,8 @@ send `{}` unless an explicit empty set is genuinely what is meant.
 
 The run's `RunStarted` also records `caller`, the name of the token this
 request came in under, stamped by the server (see [Auth](#auth)). It is not a
-body field: there is no way to ask for a different name, and a server with no
-bearer configured records none.
+body field: a body carrying `caller` is refused `400 bad_request`, and a
+server with no bearer configured records none.
 
 - Response `201`:
 
@@ -526,9 +527,9 @@ the same mapping `salvor resume` uses:
 ```
 
 A resume that records a `Resumed` event stamps `caller` on it, the name of the
-token the request came in under (see [Auth](#auth)); the body cannot supply
-one. A crashed or sleeping run recovers rather than resuming, records no
-`Resumed`, and so records no caller either.
+token the request came in under (see [Auth](#auth)); a body carrying one is
+refused `400 bad_request`. A crashed or sleeping run recovers rather than
+resuming, records no `Resumed`, and so records no caller either.
 
 - Response `202` for a run now driving:
 
@@ -663,7 +664,9 @@ own completions omit the key entirely.
 
 Beside it rides `settled_caller`, the name of the person: the token this
 request came in under (see [Auth](#auth)), stamped by the server and never
-taken from the body. The two answer different questions and a reader wants
+taken from the body, on this endpoint and on the client-driven
+`POST /v1/client-runs/{id}/resolve` alike; a body carrying it is refused
+`400 bad_request` on both. The two answer different questions and a reader wants
 both. `settled_by` says a person recorded this completion rather than the run;
 `settled_caller` says which one. A server with no bearer configured records
 `settled_by` alone, and `salvor log` renders that as the same `[Operator]` it

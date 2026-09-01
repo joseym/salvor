@@ -1542,7 +1542,11 @@ pub async fn resolve(
 ) -> Result<Json<Value>, ApiError> {
     let run_id = parse_run_id(&run_id_text)?;
     let lease = authorize_drive(&state, run_id, &headers)?;
-    let request: ResolveRequest = parse_body(&body)?;
+    // Read through the operator resolve's own parser: this endpoint stamps
+    // `settled_caller` from the token it verified too, so a body naming that
+    // field, or `caller`, is refused here for the same reason and in the same
+    // words.
+    let request: ResolveRequest = crate::runs::parse_body(&body)?;
 
     // The same declaration check the operator's resolve endpoint makes, through
     // the same helper, so a hand-recorded output meets one set of rules however
