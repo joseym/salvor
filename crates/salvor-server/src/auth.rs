@@ -24,6 +24,15 @@
 //! the shared secret and a named token never record one caller. Handlers read
 //! it with `Extension<Caller>`.
 //!
+//! # A check that outlives the request
+//!
+//! The middleware checks once, on the way in, which is the whole story for a
+//! request that answers and closes. A handler that holds a connection open
+//! for hours needs the check again: [`Auth::capture`] hands it a
+//! [`StreamCredential`], and [`StreamCredential::still_verifies`] re-runs
+//! [`Auth::verify`] over the token file as it reads at that moment. The event
+//! stream is the one caller today; see [`crate::sse`] for its cadence.
+//!
 //! # What a refusal costs
 //!
 //! Every refusal logs one `WARN` with the source address and an outcome, and
@@ -183,32 +192,57 @@ impl Auth {
     /// Checks a presented `Authorization` header value, naming the caller on
     /// a match.
     ///
-    /// The named-token file is consulted first so a request that matches both
-    /// a named token and the shared secret is attributed to the name, which is
-    /// the more specific answer.
-    ///
     /// # Errors
     ///
     /// The [`Refusal`] to log and answer `401` with.
     pub fn check(&self, presented: Option<&str>) -> Result<Caller, Refusal> {
-        let Some(value) = presented else {
-            return Err(Refusal::MissingHeader);
-        };
-        let Some(token) = value.strip_prefix("Bearer ") else {
-            return Err(Refusal::BadScheme);
-        };
-        let digest = tokens::digest(token);
+        self.verify(&bearer_digest(presented)?)
+    }
+
+    /// Checks a bearer's digest against every configured bearer, naming the
+    /// caller on a match.
+    ///
+    /// The named-token file is consulted first so a digest that matches both
+    /// a named token and the shared secret is attributed to the name, which is
+    /// the more specific answer.
+    ///
+    /// This is the one place a digest is compared. [`check`](Self::check)
+    /// runs it for a request, and [`StreamCredential::still_verifies`] runs
+    /// it again for a stream that is already open, so both read the same
+    /// token file through the same constant-time comparison.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::UnknownToken`], the only refusal a digest can earn: it was
+    /// never valid, or it was revoked.
+    pub fn verify(&self, digest: &[u8; 32]) -> Result<Caller, Refusal> {
         if let Some(store) = &self.tokens
-            && let Some(name) = store.current().match_name(&digest)
+            && let Some(name) = store.current().match_name(digest)
         {
             return Ok(Caller::new(name));
         }
         if let Some(single) = &self.single
-            && tokens::digests_equal(single, &digest)
+            && tokens::digests_equal(single, digest)
         {
             return Ok(Caller::new(SINGLE_TOKEN_CALLER));
         }
         Err(Refusal::UnknownToken)
+    }
+
+    /// Captures the credential behind a request, for a handler that holds a
+    /// connection open past the one check the middleware ran on the way in.
+    ///
+    /// `None` when the value does not verify, which is a request
+    /// [`require_bearer`] already refused, so a handler behind that layer
+    /// always gets a credential.
+    #[must_use]
+    pub fn capture(&self, presented: Option<&str>) -> Option<StreamCredential> {
+        let digest = bearer_digest(presented).ok()?;
+        let caller = self.verify(&digest).ok()?;
+        Some(StreamCredential {
+            name: caller.name,
+            digest,
+        })
     }
 
     /// Records a refusal from `source` and returns how long to hold the `401`.
@@ -238,6 +272,63 @@ impl Auth {
             .lock()
             .expect("auth failure counters lock")
             .remove(&source);
+    }
+}
+
+/// The SHA-256 of the bearer in an `Authorization` header value.
+///
+/// # Errors
+///
+/// [`Refusal::MissingHeader`] for no header at all and
+/// [`Refusal::BadScheme`] for a value that is not a `Bearer <token>`.
+fn bearer_digest(presented: Option<&str>) -> Result<[u8; 32], Refusal> {
+    let Some(value) = presented else {
+        return Err(Refusal::MissingHeader);
+    };
+    let Some(token) = value.strip_prefix("Bearer ") else {
+        return Err(Refusal::BadScheme);
+    };
+    Ok(tokens::digest(token))
+}
+
+/// The credential an open stream re-checks, so revoking a token ends the
+/// streams that token opened.
+///
+/// A stream that lives for hours holds the caller's name and the SHA-256 of
+/// the bearer that verified, and never the bearer itself: the same 32 bytes
+/// [`Auth::verify`] compares a request against, and no plaintext.
+///
+/// Only the token file can make a captured credential stop verifying while
+/// the process runs. The `--auth-token` shared secret is hashed once at
+/// startup and never re-read, so its digest goes on matching for as long as
+/// the server is up, and revoking it is a restart, which ends every stream on
+/// its own. Both follow the one rule below; in practice the rule is about the
+/// token file.
+#[derive(Debug, Clone)]
+pub struct StreamCredential {
+    /// The token name this stream opened under.
+    name: String,
+    /// The SHA-256 of the bearer that verified.
+    digest: [u8; 32],
+}
+
+impl StreamCredential {
+    /// The token name the stream opened under.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Whether the credential still verifies against the tokens configured
+    /// now.
+    ///
+    /// A token file re-read that dropped this token's entry makes this
+    /// `false`, which is what ends the stream. The comparison is
+    /// [`Auth::verify`], so a re-check costs what a request's check costs and
+    /// reads the file through the same stat-and-reload path.
+    #[must_use]
+    pub fn still_verifies(&self, auth: &Auth) -> bool {
+        auth.verify(&self.digest).is_ok()
     }
 }
 
@@ -391,6 +482,60 @@ mod tests {
         assert_eq!(auth.record_failure(source), Duration::from_millis(200));
         auth.clear_failures(source);
         assert_eq!(auth.record_failure(source), FIRST_DELAY);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_captured_credential_stops_verifying_once_the_file_drops_it() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("tokens.toml");
+        let write = |entries: &[(&str, &str)]| {
+            let mut file = std::fs::File::create(&path).expect("create");
+            for (name, token) in entries {
+                write!(file, "[tokens.{name}]\nhash = \"{}\"\n\n", hex(token)).expect("write");
+            }
+            drop(file);
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+        };
+
+        write(&[("ci", "one"), ("ops", "two")]);
+        let mut auth = Auth::new();
+        auth.set_token_file(TokenStore::load(&path).expect("load"));
+
+        let kept = auth.capture(Some("Bearer one")).expect("captured");
+        let revoked = auth.capture(Some("Bearer two")).expect("captured");
+        assert_eq!(revoked.name(), "ops", "the credential holds the name");
+        assert!(revoked.still_verifies(&auth));
+
+        // Revoking is deleting the entry, and the file is shorter for it, so
+        // the store's stamp differs and the next check re-reads.
+        write(&[("ci", "one")]);
+        assert!(
+            !revoked.still_verifies(&auth),
+            "the dropped entry no longer verifies"
+        );
+        assert!(
+            kept.still_verifies(&auth),
+            "the entry the rewrite kept still does"
+        );
+    }
+
+    #[test]
+    fn the_shared_secrets_credential_verifies_for_the_life_of_the_process() {
+        let mut auth = Auth::new();
+        auth.set_single("a-long-enough-secret");
+        let credential = auth
+            .capture(Some("Bearer a-long-enough-secret"))
+            .expect("captured");
+        assert_eq!(credential.name(), SINGLE_TOKEN_CALLER);
+        // Hashed once at startup and never re-read: nothing short of a
+        // restart changes this answer.
+        assert!(credential.still_verifies(&auth));
+        assert!(auth.capture(Some("Bearer something-else")).is_none());
+        assert!(auth.capture(None).is_none());
     }
 
     #[test]
