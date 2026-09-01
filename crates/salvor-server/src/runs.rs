@@ -548,7 +548,7 @@ pub async fn resume(
 
 /// The name the auth layer attached to a verified request, or `None` on a
 /// server running the pass-through posture, where there is no caller to name.
-fn caller_name(caller: Option<&Extension<Caller>>) -> Option<String> {
+pub(crate) fn caller_name(caller: Option<&Extension<Caller>>) -> Option<String> {
     caller.map(|Extension(caller)| caller.name().to_owned())
 }
 
@@ -578,11 +578,24 @@ fn runtime_as(state: &AppState, caller: Option<&Extension<Caller>>) -> salvor_ru
 /// the engine, resolving its document by the hash the log records; an agent run
 /// rebuilds its agent and continues the built-in loop.
 ///
+/// # It records who asked, first
+///
+/// A `RunRedriven` naming the caller is appended before the drive is spawned,
+/// and after the agent is rebuilt. Before the drive, because a recover records
+/// no `Resumed` and a drive that records nothing at all (an early wake, a lost
+/// position race) must still say who reached for the run. After the rebuild,
+/// because a redrive this server cannot perform is a refusal, not an act: the
+/// sweeper meets the same unregistered agent every pass, and a mark per pass
+/// would fill the run's log with attempts that never drove anything. The graph
+/// branch appends at the same point on its own side, after its document and
+/// agents resolve; see [`crate::graph::drive_resume`].
+///
 /// # Errors
 ///
 /// [`ApiError::UnknownAgent`] when the agent the run started under is not
-/// registered here, [`ApiError::UnknownGraph`] for the graph equivalent, or
-/// whatever building the agent reports.
+/// registered here, [`ApiError::UnknownGraph`] for the graph equivalent,
+/// whatever building the agent reports, or whatever recording the redrive
+/// reports.
 pub(crate) async fn redrive(
     state: AppState,
     run_id: RunId,
@@ -593,8 +606,48 @@ pub(crate) async fn redrive(
         return crate::graph::drive_resume(state, run_id, log, None, caller).await;
     }
     let built = rebuild_agent(&state, log).await?;
+    // Close the sessions the rebuild just opened before refusing, exactly as
+    // `start` does when it refuses after building.
+    if let Err(error) = record_redrive(&state, run_id, caller.clone()).await {
+        close_servers(built.servers).await;
+        return Err(error);
+    }
     spawn_drive(state, run_id, built, DriveVerb::Recover, caller);
     Ok(driving(run_id).into_response())
+}
+
+/// Appends the `RunRedriven` that says a crashed or sleeping run is about to be
+/// driven again, and who asked for it.
+///
+/// One function for both drive paths, so the agent branch of [`redrive`] and
+/// the graph branch in [`crate::graph::drive_resume`] record the act
+/// identically, and so the wake sweeper records it through the same code an
+/// operator's resume does.
+///
+/// # Errors
+///
+/// [`ApiError::UnknownRun`] for a run with no history, [`ApiError::WrongState`]
+/// for one that already reached a terminal, and [`ApiError::Internal`] for a
+/// store failure, which includes another driver having taken the position
+/// first.
+pub(crate) async fn record_redrive(
+    state: &AppState,
+    run_id: RunId,
+    caller: Option<String>,
+) -> Result<(), ApiError> {
+    let runtime = match caller {
+        Some(name) => state.runtime().with_caller(name),
+        None => state.runtime(),
+    };
+    match runtime.record_redrive(run_id).await {
+        Ok(_) => Ok(()),
+        Err(RuntimeError::UnknownRun { .. }) => Err(unknown_run(run_id)),
+        Err(RuntimeError::AlreadyTerminal { status, .. }) => Err(ApiError::WrongState(format!(
+            "run {} is already terminal (status: {status}); there is nothing left to drive",
+            run_id.as_uuid()
+        ))),
+        Err(error) => Err(ApiError::Internal(error.to_string())),
+    }
 }
 
 /// `POST /v1/runs/{id}/resolve`: record a dangling write's completion by hand.
@@ -790,7 +843,9 @@ fn spawn_drive(
         // Who asked for this drive, read off the verified request before the
         // task was spawned. The runtime stamps it on whatever this drive
         // records on their behalf: the `RunStarted` of a start, the `Resumed`
-        // of a resume. A recover records neither, so it records no name.
+        // of a resume. A recover records neither, so it records no name here;
+        // its name is on the `RunRedriven` appended before this task was
+        // spawned (see `redrive`).
         if let Some(caller) = caller {
             runtime = runtime.with_caller(caller);
         }
@@ -933,9 +988,15 @@ fn recorded_labels(log: &[EventEnvelope]) -> Option<BTreeMap<String, String>> {
         .filter(|labels: &BTreeMap<String, String>| !labels.is_empty())
 }
 
-/// The caller recorded in a run's `RunStarted` event, when one was named.
-/// Read off the same `RunStarted` `recorded_labels` reads, off the same
-/// in-memory log; no second read or second fold.
+/// The caller recorded at the head of a run's log, when one was named: on the
+/// `RunStarted` of an agent run or the `GraphRunStarted` of a graph run. Read
+/// off the same head `recorded_labels` reads, off the same in-memory log; no
+/// second read or second fold.
+///
+/// Both heads are read because both record the field and both answer the same
+/// question. A graph run is asked for exactly as an agent run is, so reporting
+/// a name for one and nothing for the other would make the API's answer depend
+/// on which kind of run it was rather than on whether anybody was named.
 ///
 /// `None` follows the same absence rule the labels do: a run whose start named
 /// nobody carries no key at all rather than a `null` or an invented name, and
@@ -944,7 +1005,9 @@ fn recorded_labels(log: &[EventEnvelope]) -> Option<BTreeMap<String, String>> {
 fn recorded_caller(log: &[EventEnvelope]) -> Option<String> {
     log.iter()
         .find_map(|envelope| match &envelope.event {
-            Event::RunStarted { caller, .. } => Some(caller.clone()),
+            Event::RunStarted { caller, .. } | Event::GraphRunStarted { caller, .. } => {
+                Some(caller.clone())
+            }
             _ => None,
         })
         .flatten()

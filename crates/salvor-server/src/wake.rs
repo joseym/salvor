@@ -56,12 +56,15 @@
 //!
 //! Nobody asked for a wake: a deadline passed. So the name this sweep hands
 //! the drive is [`SWEEPER_CALLER`], not a person, and a reader of the log can
-//! tell a timer firing apart from an operator answering a gate. In practice it
-//! reaches no event today: waking a run is a recover (see
-//! [`crate::runs::redrive`]), and a recover records no `RunStarted`, `Resumed`,
-//! or `RunAbandoned`, which are the only events with a caller field. The name
-//! travels with the drive so that stays true by construction rather than by
-//! nobody having passed one.
+//! tell a timer firing apart from an operator answering a gate.
+//!
+//! It reaches the log on the `RunRedriven` [`crate::runs::redrive`] appends
+//! before every drive it starts. Waking a run is a recover, which supplies
+//! nothing and so records no `Resumed`; the redrive mark is the event that
+//! carries the name, and it is written whether or not the drive that follows
+//! goes on to record anything. A run woken by this sweeper therefore reads
+//! `server:wake` in its log where a run an operator resumed reads that
+//! operator.
 //!
 //! # One bad run does not stop the sweep
 //!

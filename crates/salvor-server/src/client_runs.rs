@@ -18,8 +18,8 @@
 //! This surface carries only the control and deterministic-context events the
 //! client's cursor emits itself and that hold no secret and no side effect:
 //! `RunStarted`, `NowObserved`, `RandomObserved`, `Suspended`, `Resumed`,
-//! `SleepStarted`, `SleepCompleted`, `BudgetExceeded`, `RunCompleted`,
-//! `RunFailed`. The side-effecting steps (the model call and the tool call) are
+//! `RunRedriven`, `SleepStarted`, `SleepCompleted`, `BudgetExceeded`,
+//! `RunCompleted`, `RunFailed`. The side-effecting steps (the model call and the tool call) are
 //! not supported here, so a model or tool event is refused with a clear error.
 //! Each has its own endpoint pair instead: [`model_step`] and [`tool_step`] for
 //! a call this server performs because it holds the key or the binary, and
@@ -2624,11 +2624,19 @@ fn is_sleeping(log: &[EventEnvelope]) -> bool {
 /// `None` clears the field rather than leaving it alone: a server running the
 /// pass-through posture verified no name, and a name it did not verify is
 /// worse than no name at all. An event with no caller field is untouched,
-/// which is every kind this endpoint accepts apart from these three.
+/// which is every kind this endpoint accepts apart from these five.
+///
+/// Every kind that grows a caller field belongs here the day it grows one. The
+/// generic append accepts every kind but the four side-effecting ones, so a
+/// field this function does not overwrite is a field the client fills in, and
+/// the guarantee that a stored `caller` is a name this server verified would
+/// hold only for the kinds that were listed when it was written.
 fn stamp_caller(event: &mut Event, caller: Option<&str>) {
     let field = match event {
         Event::RunStarted { caller, .. }
+        | Event::GraphRunStarted { caller, .. }
         | Event::Resumed { caller, .. }
+        | Event::RunRedriven { caller, .. }
         | Event::RunAbandoned { caller, .. } => caller,
         _ => return,
     };

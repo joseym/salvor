@@ -43,7 +43,7 @@ use std::collections::HashMap;
 
 use axum::Json;
 use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use salvor_core::{Event, EventEnvelope, PendingCall, RunId, RunStatus, derive_state};
@@ -62,6 +62,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
+use crate::auth::Caller;
 use crate::error::ApiError;
 use crate::state::{AppState, BuiltAgent};
 use crate::tool_registry::ToolRegistry;
@@ -112,18 +113,23 @@ struct ForkRequest {
 /// Which verb a graph driver task runs. Mirrors the built-in loop's start /
 /// resume / recover, but over the engine rather than the agent loop.
 enum GraphVerb {
+    /// Open a fresh run, recording who asked for it on the `GraphRunStarted`
+    /// at its head, exactly as an agent run records it on its `RunStarted`.
     Start {
         input: Value,
         labels: Option<BTreeMap<String, String>>,
+        caller: Option<String>,
     },
-    /// Continue a parked run with this input, recording who supplied it. The
-    /// name rides on the verb rather than beside it because a resume is the
-    /// only graph verb that records an event with a place to put one: a graph
-    /// run's head is a `GraphRunStarted`, which carries no caller.
+    /// Continue a parked run with this input, recording who supplied it on the
+    /// `Resumed` the drive writes.
     Resume {
         input: Value,
         caller: Option<String>,
     },
+    /// Drive a crashed or due run again with nothing supplied. It carries no
+    /// name because it writes no event that could hold one: the `RunRedriven`
+    /// that says who asked is appended before the drive is spawned, by
+    /// `crate::runs::record_redrive`.
     Recover,
 }
 
@@ -231,6 +237,7 @@ pub async fn validate_only(body: Bytes) -> impl IntoResponse {
 /// supply. Only once everything resolves is the run spawned.
 pub async fn start_run(
     State(state): State<AppState>,
+    caller: Option<Extension<Caller>>,
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
     let request: StartRunRequest = parse_body(&body)?;
@@ -272,6 +279,7 @@ pub async fn start_run(
         GraphVerb::Start {
             input: request.input,
             labels: request.labels,
+            caller: crate::runs::caller_name(caller.as_ref()),
         },
     );
     Ok((
@@ -584,7 +592,21 @@ pub async fn drive_resume(
 
     let verb = match input {
         Some(input) => GraphVerb::Resume { input, caller },
-        None => GraphVerb::Recover,
+        None => {
+            // A redrive: nothing is supplied, so no `Resumed` will be written
+            // and this mark is the only durable record of who reached for the
+            // run. Appended here, after the document, its tools, and its agents
+            // all resolved, so a run this server cannot drive is refused
+            // without a mark rather than collecting one per sweep; and before
+            // the drive is spawned, so a drive that records nothing still says
+            // who tried. The agent branch appends at the same point on its own
+            // side; see `crate::runs::redrive`.
+            if let Err(error) = crate::runs::record_redrive(&state, run_id, caller).await {
+                close_servers(servers).await;
+                return Err(error);
+            }
+            GraphVerb::Recover
+        }
     };
     spawn_graph_drive(state, run_id, graph, agents, servers, registry, verb);
     Ok(driving(run_id).into_response())
@@ -734,16 +756,27 @@ async fn drive_graph(
         .map_err(salvor_runtime::RuntimeError::Store)?;
     let mut ctx: RunCtx = state.run_ctx(run_id, log)?;
     let input = match verb {
-        GraphVerb::Start { input, labels } => {
+        GraphVerb::Start {
+            input,
+            labels,
+            caller,
+        } => {
             if let Some(labels) = labels {
                 ctx = ctx.with_labels(labels);
+            }
+            // Who asked for the run, recorded on the `GraphRunStarted` this
+            // drive is about to write, the same field and the same rule an
+            // agent run's `RunStarted` carries.
+            if let Some(caller) = caller {
+                ctx = ctx.with_caller(caller);
             }
             input
         }
         GraphVerb::Resume { input, caller } => {
             // Who supplied the input, recorded on the `Resumed` this drive is
-            // about to write. A start or a recover records no name because it
-            // records no event with anywhere to put one.
+            // about to write. A recover records no name here because it records
+            // no event with anywhere to put one; its `RunRedriven` was appended
+            // before this task was spawned.
             if let Some(caller) = caller {
                 ctx = ctx.with_caller(caller);
             }
