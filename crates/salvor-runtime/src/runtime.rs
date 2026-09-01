@@ -143,9 +143,10 @@ impl Runtime {
 
     /// Sets the name of whoever asked for the work this runtime does, stamped
     /// on every event it records on their behalf: `caller` on a fresh
-    /// `RunStarted`, on a live `Resumed`, and on the terminal
-    /// [`abandon`](Self::abandon) appends, and `settled_caller` on the
-    /// completion [`resolve`](Self::resolve) records.
+    /// `RunStarted` or `GraphRunStarted`, on a live `Resumed`, on the
+    /// `RunRedriven` [`record_redrive`](Self::record_redrive) appends, and on
+    /// the terminal [`abandon`](Self::abandon) appends, and `settled_caller` on
+    /// the completion [`resolve`](Self::resolve) records.
     ///
     /// The surface that took the request supplies the name: a server with a
     /// bearer configured passes the token's name, the CLI passes the operating
@@ -206,6 +207,65 @@ impl Runtime {
         let log = self.read_existing(run_id).await?;
         let mut ctx = self.ctx(run_id, log)?;
         finish(run_id, driver::drive(&mut ctx, agent, &Value::Null).await?)
+    }
+
+    /// Records that a crashed or sleeping run is about to be driven again,
+    /// naming whoever asked. Appends exactly one [`Event::RunRedriven`] and
+    /// drives nothing.
+    ///
+    /// Every redrive path calls this immediately before it drives: the server's
+    /// resume endpoint on a crashed or due run, the wake sweeper, `salvor
+    /// resume`, and `salvor wake`. A redrive is otherwise invisible. Recovering
+    /// and waking both continue with nothing supplied, so neither writes a
+    /// `Resumed`, and every event the drive goes on to record belongs to the
+    /// run's own work rather than to whoever reached for it. Appending before
+    /// the drive is what makes a drive that records nothing (an early wake, a
+    /// lost position race) still say who tried.
+    ///
+    /// The name is [`with_caller`](Self::with_caller)'s, so a pass-through
+    /// server and a CLI with no account to read record the act with no name
+    /// rather than an invented one.
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeError::UnknownRun`] when the id has no history;
+    /// [`RuntimeError::AlreadyTerminal`] when the run already reached a
+    /// terminal event, so there is nothing left to drive;
+    /// [`RuntimeError::Store`] when the append fails, which includes a
+    /// `Conflict` when another driver reached the same position first.
+    pub async fn record_redrive(&self, run_id: RunId) -> Result<RunId, RuntimeError> {
+        let log = self.read_existing(run_id).await?;
+        let state = derive_state(&log);
+        // A terminal log is closed: an event after `RunCompleted`, `RunFailed`,
+        // or `RunAbandoned` is malformed, and replay refuses such a log outright.
+        // No caller reaches here with one (each classifies the run first), so
+        // this guards a bug rather than an ordinary path.
+        if matches!(
+            state.status,
+            RunStatus::Completed { .. } | RunStatus::Failed { .. } | RunStatus::Abandoned { .. }
+        ) {
+            return Err(RuntimeError::AlreadyTerminal {
+                run_id,
+                status: status_name(&state.status).to_owned(),
+            });
+        }
+        let event = Event::RunRedriven {
+            caller: self.caller.clone(),
+        };
+        let envelope = EventEnvelope::new(run_id, state.next_seq, (self.clock)(), event);
+        self.store.append(&envelope).await?;
+        // The shipped log carries the redrive too, and names the caller as a
+        // field rather than inside a message, so an operator can filter on it.
+        // This line stands in for the `emit_step` every other append makes: a
+        // redrive is not a step of the run's work, and one record per redrive
+        // is the whole of what a reader needs.
+        tracing::info!(
+            run_id = %run_id.as_uuid(),
+            seq = envelope.seq.get(),
+            caller = self.caller.as_deref().unwrap_or("<unnamed>"),
+            "driving this run again"
+        );
+        Ok(run_id)
     }
 
     /// Resumes a parked run with `input`.
