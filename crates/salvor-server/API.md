@@ -236,7 +236,9 @@ send `{}` unless an explicit empty set is genuinely what is meant.
 The run's `RunStarted` also records `caller`, the name of the token this
 request came in under, stamped by the server (see [Auth](#auth)). It is not a
 body field: a body carrying `caller` is refused `400 bad_request`, and a
-server with no bearer configured records none.
+server with no bearer configured records none. The name is attribution to the
+token or the operating system account, worth exactly what control of that
+credential is worth, and no more; see SECURITY.md.
 
 - Response `201`:
 
@@ -304,7 +306,10 @@ started through this API, the operating system user for one started by
 `salvor run`. It is omitted under the same absence rule as `labels`: a run
 that recorded no caller (one a pass-through server started, one from before
 the field existed) carries no key at all rather than a `null` or an invented
-name.
+name. It names a credential, not a person: `caller` is recorded like any
+other field, so it carries no more trust than write access to the store
+grants, and an attacker able to rewrite a run's history can rewrite the name
+on it too; see SECURITY.md.
 
 **Liveness evidence: `driver`.** `driver` reports whether a driver is currently
 running the run: `"attached"` or `"none"`. It reads no log. It consults only
@@ -375,7 +380,9 @@ hand-recorded completion over its life reports the last. A run never resolved
 by hand carries no `resolution` key at all, the same absence rule `caller`
 follows above. Not carried by [`GET /v1/runs`](#get-v1runs): a hand-recorded
 resolution is rare enough that a full-history read for it is only worth doing
-for one run at a time.
+for one run at a time. `resolution.settled_caller` carries the same trust
+limit `caller` does above: a name recorded like any other field, worth what
+control of that credential is worth; see SECURITY.md.
 
 `driver` is the same liveness evidence [`GET /v1/runs`](#get-v1runs) carries,
 under the same rules: `"attached"` / `"none"` for a non-terminal run, omitted
