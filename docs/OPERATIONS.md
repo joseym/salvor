@@ -299,6 +299,13 @@ table is gone from the file fails closed on the next request that
 presents it, with no restart and no grace period; there is no separate
 revocation list and no expiry field.
 
+Revoking also ends the live event streams that token opened: an open
+`GET /v1/runs/<id>/events` re-checks the credential it opened under on
+every poll pass, so a revoked token's streams end within one stream
+poll interval (50ms by default) with a final `event: end` frame
+carrying `"reason": "unauthorized"`, and the run itself goes on being
+driven.
+
 Every reload that changes the set logs one line naming what changed, by
 name and never by hash:
 
