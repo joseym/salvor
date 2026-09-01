@@ -165,9 +165,12 @@ hash = "60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752"
 ```
 
 One `[tokens.<name>]` table per token. `hash` is 64 lowercase hex
-characters, exactly what `sha256sum` prints. `role` is reserved for a
-later build and loads clean today; any other per-token key is ignored
-with a warning naming it, so a misspelled `hash` is visible in the log.
+characters, exactly what `sha256sum` prints; an entry that gives no
+`hash`, or gives one that is not a quoted string, is refused by a
+message naming the entry and the key. `role` is reserved for a later
+build and loads clean today; any other per-token key is ignored with a
+warning naming it, so a misspelling alongside a good `hash` is visible
+in the log.
 
 A token `salvor token new` (below) mints is `sv_` then 43 base62
 characters (32 bytes from the OS CSPRNG) then `_` then a 6-character
@@ -202,8 +205,8 @@ only copy.
 
 The server refuses to start, before it binds the port, on a file that
 is readable by group or other, is owned by another user, is not valid
-TOML, gives a hash that is not 64 lowercase hex, or declares no tokens
-at all.
+TOML, has an entry with no `hash` key, gives a hash that is not 64
+lowercase hex, or declares no tokens at all.
 
 Both flags together are the usual shape while a shared secret is being
 retired: `--auth-token` keeps the old callers working and
