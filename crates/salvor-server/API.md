@@ -48,16 +48,17 @@ in the server's log. It grants nothing different: any token that verifies
 reads and drives every run in the store.
 
 **The name is stamped into the log.** Every endpoint that appends a run's
-start, its resume, its abandonment, or a hand-recorded completion writes that
-verified name onto the event: `caller` on `RunStarted`, `Resumed`, and
-`RunAbandoned`, and `settled_caller` beside `settled_by` on the
-`ToolCallCompleted` that `resolve` records. The server takes the name from the
-token it verified and never from a request body, so no request can name itself
-something else. A body that carries `caller` or `settled_caller` is answered
-`400 bad_request` naming the field, rather than accepted with the field
-ignored; every other unknown key is still ignored. A server running with no
-bearer configured has no verified name to record and stamps nothing, which is
-what every event recorded before this field existed carries too.
+start, its resume, its redrive, its abandonment, or a hand-recorded completion
+writes that verified name onto the event: `caller` on `RunStarted`,
+`GraphRunStarted`, `Resumed`, `RunRedriven`, and `RunAbandoned`, and
+`settled_caller` beside `settled_by` on the `ToolCallCompleted` that `resolve`
+records. The server takes the name from the token it verified and never from a
+request body, so no request can name itself something else. A body that carries
+`caller` or `settled_caller` is answered `400 bad_request` naming the field,
+rather than accepted with the field ignored; every other unknown key is still
+ignored. A server running with no bearer configured has no verified name to
+record and stamps nothing, which is what every event recorded before this field
+existed carries too.
 
 A refusal logs one `WARN` naming the source address and the outcome
 (`missing_header`, `bad_scheme`, `unknown_token`), never the presented value,
@@ -300,16 +301,17 @@ emits `"labels": {}`, because an empty map is not a fact worth asserting any
 more than an unknown count is. A run that recorded at least one label reports
 exactly what was recorded.
 
-**Who asked for the run: `caller`.** `caller` is the name recorded on the
-run's `RunStarted`, read from the same fold: the token's name for a run
-started through this API, the operating system user for one started by
-`salvor run`. It is omitted under the same absence rule as `labels`: a run
-that recorded no caller (one a pass-through server started, one from before
-the field existed) carries no key at all rather than a `null` or an invented
-name. It names a credential, not a person: `caller` is recorded like any
-other field, so it carries no more trust than write access to the store
-grants, and an attacker able to rewrite a run's history can rewrite the name
-on it too; see SECURITY.md.
+**Who asked for the run: `caller`.** `caller` is the name recorded at the head
+of the run's log, read from the same fold: on the `RunStarted` of an agent run
+or the `GraphRunStarted` of a graph run, either way the token's name for a run
+started through this API and the operating system user for one started by
+`salvor run` or `salvor graph run`. It is omitted under the same absence rule
+as `labels`: a run that recorded no caller (one a pass-through server started,
+one from before the field existed) carries no key at all rather than a `null`
+or an invented name. It names a credential, not a person: `caller` is recorded
+like any other field, so it carries no more trust than write access to the
+store grants, and an attacker able to rewrite a run's history can rewrite the
+name on it too; see SECURITY.md.
 
 **Liveness evidence: `driver`.** `driver` reports whether a driver is currently
 running the run: `"attached"` or `"none"`. It reads no log. It consults only
@@ -549,8 +551,19 @@ the same mapping `salvor resume` uses:
 
 A resume that records a `Resumed` event stamps `caller` on it, the name of the
 token the request came in under (see [Auth](#auth)); a body carrying one is
-refused `400 bad_request`. A crashed or sleeping run recovers rather than
-resuming, records no `Resumed`, and so records no caller either.
+refused `400 bad_request`.
+
+A crashed or due run recovers rather than resuming: nothing is supplied, so no
+`Resumed` is written. It records a `RunRedriven` instead, carrying the same
+verified name, appended before the drive starts and after the agent (or the
+graph and its agents) resolves. So a run this server cannot drive is refused
+with its log untouched, and a drive that goes on to record nothing at all still
+says who reached for the run. The wake sweeper redrives through the same path
+and records `server:wake`, which is a machine and says so.
+
+`RunRedriven` marks the act, not a state change: the run is where its earlier
+events left it, both before the event and after it, and the status this endpoint
+reports is unchanged by it.
 
 - Response `202` for a run now driving:
 
@@ -1132,9 +1145,9 @@ client has re-opened anything.
 The generic append carries only the control and deterministic-context events the
 client's cursor emits itself, which hold no secret and no side effect:
 `RunStarted`, `NowObserved`, `RandomObserved`, `Suspended`, `Resumed`,
-`SleepStarted`, `SleepCompleted`, `BudgetExceeded`, `RunCompleted`,
-`RunFailed`. The side-effecting steps, which the server must perform because it
-holds the key or the binary, have their own endpoints: the model call is the model-step endpoint and the tool call is the
+`RunRedriven`, `SleepStarted`, `SleepCompleted`, `BudgetExceeded`,
+`RunCompleted`, `RunFailed`. The side-effecting steps, which the server must
+perform because it holds the key or the binary, have their own endpoints: the model call is the model-step endpoint and the tool call is the
 tool-step endpoint below, and a model or tool event is still refused on the
 generic append. A step the CLIENT performs in its own process, with its own
 secrets, has its own endpoint pair for the same reason: `client-tool-intent`
@@ -1381,8 +1394,9 @@ durably; a caller cannot set the marker anywhere else. The stamp happens before
 the retry comparison below, so re-appending the same `RunStarted` bytes is
 still the byte-identical no-op it was.
 
-A `RunStarted`, `Resumed`, or `RunAbandoned` event in the batch is stamped the
-same way with `caller`, the name of the token the batch came in under (see
+A `RunStarted`, `GraphRunStarted`, `Resumed`, `RunRedriven`, or `RunAbandoned`
+event in the batch is stamped the same way with `caller`, the name of the token
+the batch came in under (see
 [Auth](#auth)), whatever the submitted event carried in that field. A client
 drives its own loop, but the name on these events is this server's to record,
 from the bearer it verified: a client cannot name itself. A server with no

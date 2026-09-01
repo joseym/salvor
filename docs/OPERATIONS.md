@@ -362,11 +362,19 @@ is ever shut out of their own server by someone else's traffic.
 The `INFO` line above is per request and lives as long as the log file
 does. The durable answer is on the events themselves. With a bearer
 configured, the server stamps the verified token's name onto every event
-a caller acts through: `caller` on `RunStarted`, `Resumed`, and
-`RunAbandoned`, and `settled_caller` beside `settled_by` on the
-completion `resolve` records. `salvor run`, `salvor resume`, `salvor
-resolve`, and `salvor abandon` stamp the operating system user instead,
-or whatever `--caller <NAME>` (or `SALVOR_CALLER`) names.
+a caller acts through: `caller` on `RunStarted`, `GraphRunStarted`,
+`Resumed`, `RunRedriven`, and `RunAbandoned`, and `settled_caller` beside
+`settled_by` on the completion `resolve` records. `salvor run`, `salvor
+graph run`, `salvor resume`, `salvor wake`, `salvor resolve`, and `salvor
+abandon` stamp the operating system user instead, or whatever `--caller
+<NAME>` (or `SALVOR_CALLER`) names.
+
+`RunRedriven` is the one to reach for when the question is who drove a
+crashed or sleeping run again. A redrive supplies nothing, so it records
+no `Resumed`; the mark is appended before the drive starts, so a drive
+that goes on to record nothing at all still names whoever tried. A run
+the server's wake sweeper picked up reads `server:wake` there, which
+names a machine rather than a person.
 
 Read it back a run at a time with `salvor history <run-id> --store
 <path>`, which renders the name in the same bracketed register the
