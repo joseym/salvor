@@ -604,14 +604,14 @@ pub fn parse_argv_to_json(argv_json: &str) -> Result<String, CliError> {
 /// The command a help path names, built and ready to render.
 ///
 /// `path` is a space-separated subcommand path: `""` for the root, `"list"` for
-/// a verb, `"graph validate"` for a nested one. The root is built before the
-/// walk so the global `--store` option and the generated `--help`/`--version`
-/// flags have been propagated down the tree, which is what makes a subcommand's
-/// rendered help match what `salvor <verb> --help` prints rather than a bare
+/// a verb, `"graph validate"` for a nested one. The tree comes from
+/// [`salvor_cli_core::cli::command_hiding_unusable_globals`], which builds it,
+/// so the global `--store` option and the generated `--help`/`--version` flags
+/// have been propagated down it and a subcommand's rendered help matches what
+/// `salvor <verb> --help` prints, hidden options included, rather than a bare
 /// shell of it.
 fn command_at(path: &str) -> Result<clap::Command, CliError> {
-    let mut command = <Cli as clap::CommandFactory>::command();
-    command.build();
+    let mut command = salvor_cli_core::cli::command_hiding_unusable_globals();
     for segment in path.split_whitespace() {
         command = command.find_subcommand(segment).cloned().ok_or_else(|| {
             CliError::UnknownSubcommand {
