@@ -28,8 +28,8 @@ use common::{
 };
 use reqwest::StatusCode;
 use salvor_core::{Effect, Event, EventEnvelope, RunId, SequenceNumber};
-use salvor_server::{AgentFactory, TokenStore};
-use serde_json::json;
+use salvor_server::{AgentFactory, ClientToolDecl, ClientToolRegistry, TokenStore};
+use serde_json::{Value, json};
 use time::macros::datetime;
 use uuid::Uuid;
 
@@ -306,6 +306,159 @@ async fn a_hand_recorded_completion_names_the_token_that_settled_it() {
         settled_caller.as_deref(),
         Some("ci"),
         "and the person: the token the request came in under"
+    );
+}
+
+/// A client-performed write declaration, so the client-driven run below can
+/// declare an intent through `client-tool-intent` and leave it dangling: an
+/// unset `output_schema` and no pinned fields, since the resolution this test
+/// checks needs no schema of its own to satisfy.
+fn charge_card_decl() -> ClientToolDecl {
+    ClientToolDecl {
+        name: "charge_card".to_owned(),
+        effect: Effect::Write,
+        input_schema: json!({
+            "type": "object",
+            "required": ["amount_cents"],
+            "properties": { "amount_cents": { "type": "integer" } }
+        }),
+        output_schema: None,
+        trust_completion: false,
+        require_equal: Vec::new(),
+        idempotency_key: Vec::new(),
+    }
+}
+
+/// A `POST` to a client-runs endpoint, carrying both the bearer and the drive
+/// token: neither `post_json` (no drive token) nor `client_tool.rs`'s local
+/// `post` (no bearer) covers a client-driven request on a server with a
+/// bearer configured, which every request here is.
+async fn drive_post(
+    client: &reqwest::Client,
+    url: &str,
+    drive_token: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let response = client
+        .post(url)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .header("x-drive-token", drive_token)
+        .bearer_auth(CI_TOKEN)
+        .body(body.to_string())
+        .send()
+        .await
+        .expect("request sends");
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    (status, serde_json::from_str(&text).unwrap_or(Value::Null))
+}
+
+/// The detail endpoint's `resolution`: absent on a client-driven run with a
+/// dangling write nobody has settled, then present with the settling token's
+/// name once an operator resolves it by hand.
+#[tokio::test]
+async fn a_client_runs_hand_recorded_resolution_names_the_settler_on_the_detail_endpoint() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let model = ScriptedModel::mount(vec![]).await;
+    let factory = agent_factory(
+        model.uri(),
+        "record",
+        Effect::Read,
+        CountBehavior::Record,
+        counter(),
+    );
+    Box::leak(Box::new(model));
+    let mut client_tools = ClientToolRegistry::new();
+    client_tools.declare(charge_card_decl());
+    let state = app_state(memory_store(), factory)
+        .with_token_file(TokenStore::load(&token_file(dir.path())).expect("load the token file"))
+        .with_client_tools(Arc::new(client_tools));
+    let server = TestServer::spawn(state).await;
+    let client = reqwest::Client::new();
+
+    // Open a client-driven run under the named token and append its
+    // `RunStarted`.
+    let (status, body) = post_json(
+        &client,
+        &format!("{}/v1/client-runs", server.base),
+        json!({}),
+        Some(CI_TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "open: {body}");
+    let run = body["run"].as_str().expect("run id").to_owned();
+    let drive_token = body["drive_token"]
+        .as_str()
+        .expect("drive token")
+        .to_owned();
+    let run_id = RunId::from_uuid(Uuid::parse_str(&run).expect("run id parses"));
+
+    let started_envelope = serde_json::to_value(EventEnvelope::new(
+        run_id,
+        SequenceNumber::new(0),
+        datetime!(2026-07-12 12:00:00 UTC),
+        started(),
+    ))
+    .expect("serialize the envelope");
+    let (status, body) = drive_post(
+        &client,
+        &format!("{}/v1/client-runs/{run}/events", server.base),
+        &drive_token,
+        json!({ "events": [started_envelope] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "RunStarted append: {body}");
+
+    // The detail endpoint carries no `resolution` before there is even a
+    // dangling write to resolve.
+    let (status, body) = get_json(
+        &client,
+        &format!("{}/v1/runs/{run}", server.base),
+        Some(CI_TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "get run: {body}");
+    assert_eq!(
+        body.get("resolution"),
+        None,
+        "a run never resolved by hand carries no resolution key: {body}"
+    );
+
+    // The client declares a write intent and never comes back to report it,
+    // leaving the run parked at a dangling write.
+    let (status, body) = drive_post(
+        &client,
+        &format!("{}/v1/client-runs/{run}/client-tool-intent", server.base),
+        &drive_token,
+        json!({ "seq": 1, "tool": "charge_card", "input": { "amount_cents": 500 } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "intent: {body}");
+
+    // An operator resolves it by hand, over the client's own drive token, the
+    // client-driven resolve path.
+    let (status, body) = drive_post(
+        &client,
+        &format!("{}/v1/client-runs/{run}/resolve", server.base),
+        &drive_token,
+        json!({ "output": { "charge_id": "po_1" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "resolve: {body}");
+
+    // The detail endpoint now names the mechanism, the settler, and the
+    // settled call.
+    let (status, body) = get_json(
+        &client,
+        &format!("{}/v1/runs/{run}", server.base),
+        Some(CI_TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "get run: {body}");
+    assert_eq!(
+        body["resolution"],
+        json!({ "settled_by": "operator", "settled_caller": "ci", "seq": 1 }),
+        "resolution names the mechanism, the settler, and the settled call: {body}"
     );
 }
 
