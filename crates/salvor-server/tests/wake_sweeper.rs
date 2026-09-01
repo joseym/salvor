@@ -191,6 +191,33 @@ async fn a_pass_drives_the_due_run_and_leaves_the_rest_alone() {
     );
 }
 
+/// A woken run's log says the sweeper woke it. Waking supplies nothing, so no
+/// `Resumed` is written and the `RunRedriven` the redrive appends is the only
+/// record of who reached for the run. The name is `server:wake`, which is a
+/// machine and says so: a reader can tell a timer firing apart from an operator
+/// resuming a run by hand.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_woken_run_records_the_sweeper_as_its_caller() {
+    let store = memory_store();
+    let (state, _builds, _model) = state_with_counter(store.clone()).await;
+    let server = TestServer::spawn(state.clone()).await;
+    let client = reqwest::Client::new();
+    let agent = register_agent(&client, &server.base, sample_toml(), None).await;
+
+    let due = seed_sleeping(&store, &agent, NOW - time::Duration::days(1)).await;
+    assert_eq!(salvor_server::sweep(&state).await, vec![due]);
+
+    let log = store.read_log(due).await.expect("log reads");
+    let redriven = log
+        .iter()
+        .find_map(|envelope| match &envelope.event {
+            Event::RunRedriven { caller } => Some(caller.clone()),
+            _ => None,
+        })
+        .expect("the sweep records the redrive before it drives");
+    assert_eq!(redriven.as_deref(), Some("server:wake"));
+}
+
 /// A run a driver in this process is already on is skipped, however overdue it
 /// is. Two drivers on one run would both be replaying and appending to the same
 /// log, which is the one thing the active set exists to prevent.

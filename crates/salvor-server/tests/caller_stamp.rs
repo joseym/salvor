@@ -24,7 +24,7 @@ use std::sync::atomic::AtomicUsize;
 
 use common::{
     CountBehavior, ScriptedModel, TestServer, agent_factory, app_state, counter, get_json,
-    memory_store, post_json,
+    memory_store, post_json, register_agent, sample_toml,
 };
 use reqwest::StatusCode;
 use salvor_core::{Effect, Event, EventEnvelope, RunId, SequenceNumber};
@@ -94,7 +94,9 @@ async fn log_of(state: &salvor_server::AppState, run: RunId) -> Vec<EventEnvelop
 fn caller_of(event: &Event) -> Option<&str> {
     match event {
         Event::RunStarted { caller, .. }
+        | Event::GraphRunStarted { caller, .. }
         | Event::Resumed { caller, .. }
+        | Event::RunRedriven { caller, .. }
         | Event::RunAbandoned { caller, .. } => caller.as_deref(),
         _ => None,
     }
@@ -130,6 +132,89 @@ async fn an_abandonment_records_the_token_that_asked_for_it() {
         caller_of(last),
         Some("ci"),
         "the abandonment names the token it came in under"
+    );
+}
+
+/// Resuming a run that crashed mid-step records who asked, on a `RunRedriven`.
+///
+/// A crashed run recovers rather than resumes: nothing is supplied, so no
+/// `Resumed` is written, and without this event the drive would leave no record
+/// of who reached for it. The agent is registered over HTTP because the redrive
+/// rebuilds it before the mark is appended, which is the ordering under test as
+/// much as the name is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resuming_a_crashed_run_records_the_token_that_asked_for_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let model = ScriptedModel::mount(vec![]).await;
+    let state = app_state(
+        memory_store(),
+        agent_factory(
+            model.uri(),
+            "noop",
+            Effect::Read,
+            CountBehavior::Record,
+            counter(),
+        ),
+    )
+    .with_token_file(TokenStore::load(&token_file(dir.path())).expect("load the token file"));
+    let server = TestServer::spawn(state).await;
+    let client = reqwest::Client::new();
+    let agent = register_agent(&client, &server.base, sample_toml(), Some(CI_TOKEN)).await;
+
+    // A run that died between a model call's intent and its completion: the
+    // fold reads it as awaiting the model, which the resume endpoint recovers.
+    let run = RunId::from_uuid(Uuid::new_v4());
+    for (seq, event) in [
+        Event::RunStarted {
+            agent_def_hash: agent.clone(),
+            input: json!({ "topic": "otters" }),
+            labels: None,
+            driven_by: None,
+            caller: None,
+        },
+        Event::ModelCallRequested {
+            seq: SequenceNumber::new(1),
+            request_hash: "sha256:req".into(),
+            request_body: None,
+            performed_by: None,
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        server
+            .state
+            .store()
+            .append(&env(run, seq as u64, event))
+            .await
+            .expect("seed the crashed run");
+    }
+
+    let (status, body) = post_json(
+        &client,
+        &format!("{}/v1/runs/{}/resume", server.base, run.as_uuid()),
+        json!({}),
+        Some(CI_TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "resume: {body}");
+
+    // The mark is appended before the driver task is spawned, so it is in the
+    // log the moment the endpoint answers, whatever the drive goes on to do.
+    let log = log_of(&server.state, run).await;
+    let mark = log
+        .iter()
+        .find(|envelope| matches!(envelope.event, Event::RunRedriven { .. }))
+        .expect("the recover path records the redrive");
+    assert_eq!(
+        caller_of(&mark.event),
+        Some("ci"),
+        "the redrive names the token it came in under"
+    );
+    assert_eq!(
+        mark.seq,
+        SequenceNumber::new(2),
+        "and it takes the position after the dangling intent, leaving it dangling"
     );
 }
 
