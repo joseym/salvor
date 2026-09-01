@@ -17,10 +17,12 @@
 //! ```
 //!
 //! One table per token, the table's key is the name. `hash` is 64 lowercase
-//! hex characters, the SHA-256 of the whole presented bearer string. `role` is
-//! reserved: a file that carries one loads clean today and the key keeps its
-//! meaning when a later build reads it. Any other per-token key is ignored
-//! with a warning naming it, so a typo in `hash` is visible in the log rather
+//! hex characters, the SHA-256 of the whole presented bearer string, and an
+//! entry that gives no `hash`, or gives one that is not a string, is refused
+//! by a message naming that entry and that key. `role` is reserved: a file
+//! that carries one loads clean today and the key keeps its meaning when a
+//! later build reads it. Any other per-token key is ignored with a warning
+//! naming it, so a typo alongside a good `hash` is visible in the log rather
 //! than silent.
 //!
 //! # Token wire format
@@ -279,6 +281,23 @@ pub enum TokenFileError {
         /// The parser's own message, which names the line and column.
         source: toml::de::Error,
     },
+    /// An entry has no usable `hash` key: it is missing, it holds something
+    /// that is not a string, or the entry is not a table at all. Told apart
+    /// from [`Parse`](Self::Parse) so a file whose TOML is well formed and
+    /// whose entry is wrong is named as the entry it is, rather than as a
+    /// syntax error at a line and column.
+    #[error(
+        "token file {path} gives token `{name}` {problem}; `hash` is 64 lowercase hex characters \
+         in quotes, the SHA-256 of the whole token, as `sha256sum` prints it"
+    )]
+    HashKey {
+        /// The file named on the command line.
+        path: PathBuf,
+        /// The token name whose entry is wrong.
+        name: String,
+        /// What the entry gives instead of a `hash` string.
+        problem: String,
+    },
     /// An entry's `hash` is not 64 lowercase hex characters.
     #[error(
         "token file {path} gives token `{name}` a hash of {len} characters that is not 64 \
@@ -331,19 +350,29 @@ pub struct TokenSet {
     entries: Vec<Named>,
 }
 
-/// One `[tokens.<name>]` table as TOML hands it over.
-#[derive(Debug, Deserialize)]
-struct RawEntry {
-    hash: String,
-    #[serde(flatten)]
-    other: BTreeMap<String, toml::Value>,
-}
-
-/// The whole document.
+/// The whole document, read in two steps: TOML first, then the fields of each
+/// entry. Every entry arrives as a raw value and is taken apart in
+/// [`TokenSet::parse`], so an entry with no `hash`, or a `hash` holding a
+/// number, is refused by a message naming that entry and that key instead of
+/// by the TOML parser reporting a struct field it could not fill as a syntax
+/// error.
 #[derive(Debug, Deserialize)]
 struct RawFile {
     #[serde(default)]
-    tokens: BTreeMap<String, RawEntry>,
+    tokens: BTreeMap<String, toml::Value>,
+}
+
+/// What a TOML value is, for [`TokenFileError::HashKey`]'s message.
+fn value_kind(value: &toml::Value) -> &'static str {
+    match value {
+        toml::Value::String(_) => "a string",
+        toml::Value::Integer(_) => "an integer",
+        toml::Value::Float(_) => "a float",
+        toml::Value::Boolean(_) => "a boolean",
+        toml::Value::Datetime(_) => "a datetime",
+        toml::Value::Array(_) => "an array",
+        toml::Value::Table(_) => "a table",
+    }
 }
 
 impl TokenSet {
@@ -352,9 +381,10 @@ impl TokenSet {
     /// # Errors
     ///
     /// [`TokenFileError::Parse`] for text that is not valid TOML (a repeated
-    /// token name included), [`TokenFileError::BadHash`] for a `hash` that is
-    /// not 64 lowercase hex, and [`TokenFileError::Empty`] for a file that
-    /// declares no tokens.
+    /// token name included), [`TokenFileError::HashKey`] for an entry with no
+    /// `hash` key or a `hash` that is not a string,
+    /// [`TokenFileError::BadHash`] for a `hash` that is not 64 lowercase hex,
+    /// and [`TokenFileError::Empty`] for a file that declares no tokens.
     pub fn parse(path: &Path, text: &str) -> Result<Self, TokenFileError> {
         let raw: RawFile = toml::from_str(text).map_err(|source| TokenFileError::Parse {
             path: path.to_path_buf(),
@@ -367,18 +397,37 @@ impl TokenSet {
         }
         let mut entries = Vec::with_capacity(raw.tokens.len());
         for (name, entry) in raw.tokens {
-            let Some(hash) = parse_hash(&entry.hash) else {
+            let bad_key = |problem: String| TokenFileError::HashKey {
+                path: path.to_path_buf(),
+                name: name.clone(),
+                problem,
+            };
+            let Some(table) = entry.as_table() else {
+                return Err(bad_key(format!(
+                    "{} where a [tokens.{name}] table with a `hash` key belongs",
+                    value_kind(&entry)
+                )));
+            };
+            let Some(value) = table.get("hash") else {
+                return Err(bad_key("no `hash` key".to_owned()));
+            };
+            let Some(hash_text) = value.as_str() else {
+                return Err(bad_key(format!(
+                    "a `hash` that is {}, not a string",
+                    value_kind(value)
+                )));
+            };
+            let Some(hash) = parse_hash(hash_text) else {
                 return Err(TokenFileError::BadHash {
                     path: path.to_path_buf(),
                     name,
-                    len: entry.hash.chars().count(),
+                    len: hash_text.chars().count(),
                 });
             };
-            let ignored: Vec<&str> = entry
-                .other
+            let ignored: Vec<&str> = table
                 .keys()
                 .map(String::as_str)
-                .filter(|key| !RESERVED_KEYS.contains(key))
+                .filter(|key| *key != "hash" && !RESERVED_KEYS.contains(key))
                 .collect();
             if !ignored.is_empty() {
                 tracing::warn!(
@@ -797,6 +846,56 @@ mod tests {
                 "says what a hash is: {message}"
             );
         }
+    }
+
+    #[test]
+    fn an_entry_with_no_hash_key_names_the_entry_and_the_key() {
+        let error = TokenSet::parse(Path::new("tokens.toml"), "[tokens.ci]\nrole = \"admin\"\n")
+            .expect_err("refused");
+        let message = error.to_string();
+        assert!(message.contains("tokens.toml"), "names the file: {message}");
+        assert!(message.contains("`ci`"), "names the entry: {message}");
+        assert!(
+            message.contains("no `hash` key"),
+            "names the key: {message}"
+        );
+        assert!(
+            !message.contains("TOML parse error"),
+            "a well-formed file with a wrong entry is not a syntax error: {message}"
+        );
+    }
+
+    #[test]
+    fn an_entry_whose_hash_is_not_a_string_names_the_type_it_carries() {
+        let error = TokenSet::parse(Path::new("tokens.toml"), "[tokens.ci]\nhash = 12345\n")
+            .expect_err("refused");
+        let message = error.to_string();
+        assert!(message.contains("tokens.toml"), "names the file: {message}");
+        assert!(message.contains("`ci`"), "names the entry: {message}");
+        assert!(
+            message.contains("a `hash` that is an integer, not a string"),
+            "names the key and what it holds: {message}"
+        );
+        assert!(
+            message.contains("64 lowercase hex"),
+            "says what a hash is: {message}"
+        );
+        assert!(
+            !message.contains("TOML parse error"),
+            "a well-formed file with a wrong entry is not a syntax error: {message}"
+        );
+    }
+
+    #[test]
+    fn an_entry_that_is_not_a_table_names_the_table_it_should_be() {
+        let error =
+            TokenSet::parse(Path::new("tokens.toml"), "[tokens]\nci = 5\n").expect_err("refused");
+        let message = error.to_string();
+        assert!(message.contains("`ci`"), "names the entry: {message}");
+        assert!(
+            message.contains("[tokens.ci] table"),
+            "names the table it should be: {message}"
+        );
     }
 
     #[test]
