@@ -9,8 +9,9 @@
 //!
 //! Every refusal this verb documents gets its own test: a missing file
 //! without `--create`, a file readable by group or other, a name already
-//! present, a name outside `[a-z0-9-]{1,64}`, and a `--stdin` value under the
-//! 16-byte floor. The checksum a minted token carries is not checked anywhere
+//! present, a name outside `[a-z0-9-]{1,64}`, a `--stdin` value under the
+//! 16-byte floor, and a `--stdin` value carrying bytes an `Authorization`
+//! header cannot. The checksum a minted token carries is not checked anywhere
 //! outside `mint` itself (verification hashes the whole string; see
 //! `salvor_server::tokens`'s module docs), so there is no second place here
 //! to prove a corrupted checksum is rejected. What IS tested, in
@@ -319,6 +320,52 @@ fn stdin_under_the_entropy_floor_is_refused_and_never_echoed() {
     assert!(!stderr.contains("short"), "never the value: {stderr}");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(!stdout.contains("short"), "never the value: {stdout}");
+}
+
+#[test]
+fn stdin_carrying_what_a_header_cannot_is_refused_and_appends_nothing() {
+    // Each shape a value can arrive in that no `Authorization` header can
+    // carry: a newline inside the value (a heredoc, a wrapped paste), spaces
+    // (the scheme is split on one), and a tab beside a control byte.
+    for (label, raw, class) in [
+        (
+            "newline",
+            "sv_first_half_of_it\nsecond_half_of_it\n",
+            "a newline",
+        ),
+        ("spaces", "sv_two words in a token here\n", "a space"),
+        ("tab and control", "sv_tab\there\u{1}and_more\n", "a tab"),
+    ] {
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("tokens.toml");
+
+        let mut command = token_new(&[
+            "ci",
+            "--file",
+            file.to_str().unwrap(),
+            "--create",
+            "--stdin",
+        ]);
+        command.write_stdin(raw);
+        let output = command.output().expect("runs");
+
+        assert!(!output.status.success(), "{label}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(class), "{label}: {stderr}");
+        assert!(
+            stderr.contains("`Authorization` header"),
+            "{label} says why: {stderr}"
+        );
+        assert!(
+            stderr.contains("0x21 to 0x7e"),
+            "{label} says what a token may hold: {stderr}"
+        );
+        let contents = fs::read_to_string(&file).expect("read");
+        assert!(
+            !contents.contains("[tokens.ci]"),
+            "{label}: nothing is appended: {contents}"
+        );
+    }
 }
 
 #[test]

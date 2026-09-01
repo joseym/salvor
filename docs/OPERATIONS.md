@@ -181,7 +181,10 @@ checksum included, so verification never decodes a token to check it.
 token pasted straight into the file by hand (its hash computed
 separately) has no shape check at all; `token new --stdin` imports one
 minted elsewhere and holds it to the same 16-byte floor `--auth-token`
-checks.
+checks, and to the bytes an `Authorization` header can carry: printable
+ASCII, `0x21` to `0x7e`, and no space. A value with an embedded newline
+or a space appends fine and is then a credential no request can present,
+so it is refused at import.
 
 The file must be mode `0600` or tighter and owned by the user serving.
 Both are checked at startup and again on every read, so a file loosened

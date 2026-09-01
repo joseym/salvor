@@ -204,7 +204,8 @@ pub struct TokenNewArgs {
     /// Read the token from stdin instead of minting one, for importing a
     /// token minted elsewhere (a value another tool generated, or one moved
     /// from another token file). Held to the same 16-byte floor
-    /// `--auth-token` checks; trailing newline is trimmed.
+    /// `--auth-token` checks, and to printable ASCII with no space, which is
+    /// what an `Authorization` header can carry; trailing newline is trimmed.
     #[arg(long)]
     pub stdin: bool,
 }
