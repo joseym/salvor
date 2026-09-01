@@ -206,6 +206,11 @@ The token itself prints once, to stdout, and nowhere else; only its
 SHA-256 goes into the file, so losing the terminal scrollback loses the
 only copy.
 
+A token lost before it reached the caller it was minted for is
+recovered the same way any lost token is: delete its entry from the
+file, mint a new name, and hand that one out. Nothing else ever held a
+copy of the one that was lost, so nothing else needs to change.
+
 The server refuses to start, before it binds the port, on a file that
 is readable by group or other, is owned by another user, is not valid
 TOML, has an entry with no `hash` key, gives a hash that is not 64
@@ -222,6 +227,12 @@ minted name is held to, so a token file entry can never record the same
 caller. A demo or a single-caller box served with `--auth-token` alone
 is therefore the shape where every stamped event carries
 `caller: shared:token`, one name for whoever holds that secret.
+
+Mint one token per service, not one shared across several: a token
+names a credential, and two services on one token record one name
+forever, with no way to split it back apart. Sharing still shows up in
+the shipped log, where one caller name accepted from two source
+addresses is the pattern to look for.
 
 ### Calling an authenticated server
 
@@ -304,7 +315,9 @@ Revoking also ends the live event streams that token opened: an open
 every poll pass, so a revoked token's streams end within one stream
 poll interval (50ms by default) with a final `event: end` frame
 carrying `"reason": "unauthorized"`, and the run itself goes on being
-driven.
+driven. A client that reconnects afterward meets the same `401` any
+other request under that token gets: nothing about the stream's end is
+special, it is the ordinary refusal every other route already gives.
 
 Every reload that changes the set logs one line naming what changed, by
 name and never by hash:
@@ -329,6 +342,11 @@ captures the container's stderr, so nothing in salvor needs to change
 to keep it. The reload lines above and the bearer accept and refusal
 lines are the ones an audit wants kept for twelve months, whichever
 mechanism carries them off the box.
+
+Write the token file atomically when editing it by hand: write the new
+contents to a temporary file in the same directory, then rename that
+file over the old one. A rename replaces the file in one step, so a
+reader never meets a half-written file mid-save.
 
 A version of the file that will not load (a half-written save, a
 mistyped hash) keeps the last set that loaded in force and logs one
@@ -363,6 +381,12 @@ Repeated refusals from one source address are held before the `401`:
 for a minute starts over at 100ms, and a token that verifies drops that
 source's count immediately. There is no lockout at any count, so nobody
 is ever shut out of their own server by someone else's traffic.
+
+Two shapes in this log are worth alerting on: a burst of `bearer
+refused` lines from one `source`, a token being guessed at; and one
+`caller` accepted from a `source` it has never presented from before, a
+token in use somewhere new. Both read straight off the fields the
+lines already carry: `caller`, `source`, and `outcome`.
 
 ### Reading who asked for a run
 
@@ -963,6 +987,13 @@ at all. See SECURITY.md.
 ## Runs waiting on a person
 
 A run waiting on a person, whether at a dangling write, a gate, or a budget ceiling, stays where it is until someone acts. Nothing times out and nothing escalates on its own. `salvor list --store <path> --group waiting` lists such runs; that is what to alert on.
+
+Rehearse the crash-and-resolve drill on a scratch store made just for
+it, using `examples/reconciliation`, which walks the crash, the
+refusal, and the resolve end to end. Never run it against a store that
+carries other callers' runs: `salvor serve` is one process for the
+whole store, so stranding a write there for the length of the drill
+means stopping that whole server, other callers' runs included.
 
 ## Waking sleeping runs
 
