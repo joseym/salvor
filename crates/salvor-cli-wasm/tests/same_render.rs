@@ -32,7 +32,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use clap::{CommandFactory, Parser};
+use clap::Parser;
 use salvor_cli_core::agent_config::AgentConfig;
 use salvor_cli_core::cli::Cli;
 use salvor_cli_core::render;
@@ -215,13 +215,15 @@ fn reference_help_paths() -> Vec<(&'static str, &'static str)> {
 
 /// The help page for a path, built by driving `salvor-cli-core`'s own clap tree
 /// directly. This is the reference the wasm-facing function is measured
-/// against, so it repeats the incantation rather than calling the crate under
-/// test: `build()` first, so the global `--store` and the generated
-/// `--help`/`--version` have been propagated, then the long form, which is what
+/// against, so it walks the tree here rather than calling the crate under
+/// test: the built tree the binary itself parses with, so the global `--store`
+/// and the generated `--help`/`--version` have been propagated and the two
+/// options `token new` hides are hidden, then the long form, which is what
 /// `--help` prints (`-h` prints the short one).
 fn core_help(path: &str, ansi: bool) -> String {
-    let mut command = <Cli as CommandFactory>::command();
-    command.build();
+    // The same tree `salvor --help` renders: built, with the two globals
+    // hidden from the verb that cannot act on either.
+    let mut command = salvor_cli_core::cli::command_hiding_unusable_globals();
     for segment in path.split_whitespace() {
         command = command
             .find_subcommand(segment)

@@ -10,28 +10,11 @@ Add a named bearer token to a token file: mint one from the OS CSPRNG (or read o
       [1m--file[0m <FILE>
           The token file to append to (the same file `--token-file` names). Refused unless it is mode 0600 or tighter and owned by the user running this command, the same rules `salvor serve --token-file` checks on every read
 
-      [1m--store[0m <PATH>
-          Path to the SQLite event store.
-          
-          The precedence is flag, then the `SALVOR_STORE` environment variable, then the default: an explicit `--store` wins, else `SALVOR_STORE`, else `./salvor.db`.
-          
-          [env: SALVOR_STORE=]
-          [default: ./salvor.db]
-
-      [1m--caller[0m <NAME>
-          The name to record as the caller on the events this command writes.
-          
-          A verb that starts, resumes, resolves, or abandons a run records who asked for it. Left unset, that is the operating system user this process runs as; this flag names someone else, for a wrapper script or a job runner that knows better than the account it happens to run under. The precedence is the flag, then `SALVOR_CALLER`, then the operating system user, which `salvor_cli::caller_name` resolves.
-          
-          It is a label on the events, never a credential: nothing checks it and nothing is granted by it. A store written by whoever can write the file carries whatever name they chose, which is why the server takes its own name from a verified token instead.
-          
-          [env: SALVOR_CALLER=]
-
       [1m--create[0m
           Create `--file` at mode 0600 if it does not already exist, rather than refusing on a missing file
 
       [1m--stdin[0m
-          Read the token from stdin instead of minting one, for importing a token minted elsewhere (a value another tool generated, or one moved from another token file). Held to the same 16-byte floor `--auth-token` checks; trailing newline is trimmed
+          Read the token from stdin instead of minting one, for importing a token minted elsewhere (a value another tool generated, or one moved from another token file). Held to the same 16-byte floor `--auth-token` checks, and to printable ASCII with no space, which is what an `Authorization` header can carry; trailing newline is trimmed
 
   [1m-h[0m, [1m--help[0m
           Print help (see a summary with '-h')
