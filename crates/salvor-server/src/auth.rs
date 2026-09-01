@@ -18,9 +18,11 @@
 //! # What a caller gets on the way in
 //!
 //! A request that is let through carries a [`Caller`] in its extensions,
-//! holding the name the token was declared under, or [`SINGLE_TOKEN_CALLER`]
-//! for the `--auth-token` secret, which has no name of its own. Handlers read
-//! it with `Extension<Caller>`. Nothing is stamped into any event yet.
+//! holding the name the token was declared under, or [`SINGLE_TOKEN_CALLER`],
+//! `shared:token`, for the `--auth-token` secret, which has no name of its
+//! own. That name sits outside the `[a-z0-9-]` a minted name is held to, so
+//! the shared secret and a named token never record one caller. Handlers read
+//! it with `Extension<Caller>`.
 //!
 //! # What a refusal costs
 //!
@@ -56,7 +58,14 @@ use crate::tokens::{self, TokenStore};
 
 /// The caller name recorded for the `--auth-token` shared secret, which is
 /// configured by location rather than by name.
-pub const SINGLE_TOKEN_CALLER: &str = "token";
+///
+/// The colon is what keeps this name to itself. A name in a token file is
+/// minted by `salvor token new`, which holds a name to `[a-z0-9-]{1,64}`, so
+/// no colon can appear in one and no minted token can ever record the same
+/// caller as the shared secret. A bare `token` was reachable: `salvor token
+/// new token` is a legal name, and two credentials then wrote one name into
+/// the log.
+pub const SINGLE_TOKEN_CALLER: &str = "shared:token";
 
 /// How long the first refusal from a source is held before its `401`.
 pub const FIRST_DELAY: Duration = Duration::from_millis(100);
@@ -348,6 +357,19 @@ mod tests {
         assert_eq!(
             auth.check(Some("Bearer shared")).expect("accepted").name(),
             "ci"
+        );
+    }
+
+    #[test]
+    fn the_shared_secrets_name_is_outside_the_class_a_minted_name_is_held_to() {
+        // `salvor token new` holds a name to `[a-z0-9-]{1,64}`, so a name
+        // carrying anything else is one no token file entry can be given.
+        assert_eq!(SINGLE_TOKEN_CALLER, "shared:token");
+        assert!(
+            SINGLE_TOKEN_CALLER
+                .bytes()
+                .any(|b| !(b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')),
+            "no minted name can collide with {SINGLE_TOKEN_CALLER}"
         );
     }
 

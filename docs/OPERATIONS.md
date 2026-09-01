@@ -215,7 +215,11 @@ Both flags together are the usual shape while a shared secret is being
 retired: `--auth-token` keeps the old callers working and
 `--token-file` names the new ones. A request matching a named token is
 attributed to that name; one matching the shared secret is attributed
-to `token`.
+to `shared:token`. The colon puts that name outside the `[a-z0-9-]` a
+minted name is held to, so a token file entry can never record the same
+caller. A demo or a single-caller box served with `--auth-token` alone
+is therefore the shape where every stamped event carries
+`caller: shared:token`, one name for whoever holds that secret.
 
 ### Rotating a token, with no restart
 
