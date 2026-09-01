@@ -39,9 +39,11 @@
 //! which stamps it on the event. The name comes from the token and never from
 //! a request body: no body type in this module has a caller field, and none
 //! may grow one, because a request that could name itself would make the
-//! recorded name worth nothing. A server running the pass-through posture
-//! attaches no `Caller`, so the extractor is `Option`, and those events record
-//! no name at all.
+//! recorded name worth nothing. A body that names one anyway is answered
+//! `400` by [`refuse_stamped_fields`] rather than accepted with the field
+//! dropped, so a client asking for a name it will not get is told so. A server
+//! running the pass-through posture attaches no `Caller`, so the extractor is
+//! `Option`, and those events record no name at all.
 
 use std::collections::BTreeMap;
 
@@ -977,9 +979,47 @@ async fn close_servers(servers: Vec<salvor_tools::mcp::McpServer>) {
     }
 }
 
-/// Parses a JSON body into `T`, mapping a decode failure to a `400`.
-fn parse_body<T: for<'de> Deserialize<'de>>(body: &Bytes) -> Result<T, ApiError> {
-    serde_json::from_slice(body)
+/// The body keys this module refuses outright: the two the server stamps from
+/// the token it verified.
+const STAMPED_FIELDS: [&str; 2] = ["caller", "settled_caller"];
+
+/// Refuses a body carrying one of [`STAMPED_FIELDS`].
+///
+/// A narrow check, and deliberately not `deny_unknown_fields`: every other key
+/// a body carries is still ignored, so a client written against a later build
+/// keeps working against this one. These two are different. A caller that
+/// submits one is asking for a name the server will not honour, and the
+/// request would otherwise be answered `201` with the token's name recorded
+/// instead, which is a difference nothing on the wire tells them about.
+fn refuse_stamped_fields(body: &Value) -> Result<(), ApiError> {
+    let Some(map) = body.as_object() else {
+        return Ok(());
+    };
+    for field in STAMPED_FIELDS {
+        if map.contains_key(field) {
+            return Err(ApiError::BadRequest(format!(
+                "`{field}` is stamped by the server from the token the request came in under, so \
+                 a request body may not carry it; drop the field and the recorded name is the \
+                 token's own"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Parses a JSON body into `T`, mapping a decode failure to a `400` and
+/// refusing a body that names a server-stamped field.
+///
+/// `pub(crate)` for one caller outside this module: the client-driven resolve
+/// in [`crate::client_runs`] stamps `settled_caller` from the same verified
+/// token, so it reads a body under the same rule rather than a second copy of
+/// it.
+pub(crate) fn parse_body<T: for<'de> Deserialize<'de>>(body: &Bytes) -> Result<T, ApiError> {
+    let value: Value = serde_json::from_slice(body).map_err(|error| {
+        ApiError::BadRequest(format!("request body is not valid JSON: {error}"))
+    })?;
+    refuse_stamped_fields(&value)?;
+    serde_json::from_value(value)
         .map_err(|error| ApiError::BadRequest(format!("request body is not valid JSON: {error}")))
 }
 
