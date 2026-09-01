@@ -953,8 +953,59 @@ async fn a_scheduled_wake_says_it_is_waking_a_sleeping_run() {
     );
     assert_eq!(
         log_len(&store, &agent_run).await,
-        2,
-        "the agent run's drive appended nothing, so it is still due"
+        3,
+        "the drive appended only its redrive mark, and nothing of the run's own work"
+    );
+}
+
+/// A woken run's log says who woke it, under the operating system account the
+/// sweep ran as. Waking supplies nothing, so no `Resumed` is written and the
+/// `RunRedriven` the redrive appends is the only record of who reached for the
+/// run: for a cron entry that is the account the crontab belongs to.
+///
+/// The mark changes no status, so the run this drive could not carry forward is
+/// still sleeping and still due, which the second sweep here checks directly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_wake_records_the_account_the_sweep_ran_as() {
+    let dir = tempdir().expect("tempdir");
+    let store = dir.path().join("salvor.db");
+    let now = OffsetDateTime::now_utc();
+
+    let agent = dir.path().join("agent.toml");
+    std::fs::write(&agent, "model = \"claude-test-model\"\n").expect("write agent toml");
+    let uuid = seed_sleeping(&store, agent_head(), now - Duration::hours(1)).await;
+
+    let agent_arg = agent.to_str().expect("a utf-8 path").to_owned();
+    let store_arg = store.clone();
+    tokio::task::spawn_blocking(move || {
+        common::salvor(&store_arg)
+            .args(["wake", "--agent", &agent_arg])
+            .env("USER", "cron-bot")
+            .env("USERNAME", "cron-bot")
+            .output()
+            .expect("salvor runs")
+    })
+    .await
+    .expect("blocking task joins");
+
+    let opened = SqliteStore::open(&store).expect("store opens");
+    let run_id = RunId::from_uuid(uuid.parse().expect("a uuid"));
+    let log = opened.read_log(run_id).await.expect("log reads");
+    let redriven = log
+        .iter()
+        .find_map(|envelope| match &envelope.event {
+            Event::RunRedriven { caller } => Some(caller.clone()),
+            _ => None,
+        })
+        .expect("the sweep records the redrive before it drives");
+    assert_eq!(redriven.as_deref(), Some("cron-bot"));
+
+    // The mark records an act, not progress: the run is still asleep and still
+    // due, so a later sweep with a definition that fits gets another chance.
+    let again = run_salvor(&store, &["wake", "--dry-run"]).await;
+    assert!(
+        String::from_utf8_lossy(&again.stdout).contains(&uuid),
+        "a redriven run that recorded nothing of its own is still due"
     );
 }
 
