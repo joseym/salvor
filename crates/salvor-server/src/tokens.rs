@@ -110,6 +110,56 @@ pub fn check_single_token(token: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The lowest byte a token may carry, `!`.
+const FIRST_PRINTABLE: u8 = 0x21;
+
+/// The highest byte a token may carry, `~`.
+const LAST_PRINTABLE: u8 = 0x7e;
+
+/// Checks that every byte of a token can travel in an `Authorization` header.
+///
+/// A bearer is presented verbatim as `Authorization: Bearer <token>`, so the
+/// token is bounded by what a header value holds and by how the scheme is
+/// split off the front of it: printable ASCII, [`FIRST_PRINTABLE`] through
+/// [`LAST_PRINTABLE`], and no space. A value carrying anything else can be
+/// written into a token file and can never be presented, so it is refused
+/// where it is imported rather than at the wire on every request after.
+///
+/// # Errors
+///
+/// A message naming the class of byte and the offset it sits at, what a token
+/// may carry, and the header the rule comes from. The value itself is never
+/// part of the message.
+pub fn check_header_safe(token: &str) -> Result<(), String> {
+    for (offset, byte) in token.bytes().enumerate() {
+        if (FIRST_PRINTABLE..=LAST_PRINTABLE).contains(&byte) {
+            continue;
+        }
+        return Err(format!(
+            "the token carries {} at byte {offset}, which an `Authorization` header cannot carry; \
+             a token holds printable ASCII only, 0x{FIRST_PRINTABLE:02x} to \
+             0x{LAST_PRINTABLE:02x}, and no space, because it is presented as `Authorization: \
+             Bearer <token>` and the scheme is split off on the space",
+            byte_class(byte)
+        ));
+    }
+    Ok(())
+}
+
+/// What kind of byte this is, for [`check_header_safe`]'s message. A class,
+/// never the byte's own value, so a message about a secret names the shape of
+/// the problem and no part of the secret.
+fn byte_class(byte: u8) -> &'static str {
+    match byte {
+        b'\n' => "a newline",
+        b'\r' => "a carriage return",
+        b'\t' => "a tab",
+        b' ' => "a space",
+        0x00..=0x1f | 0x7f => "a control character",
+        _ => "a byte outside ASCII",
+    }
+}
+
 /// Per-token keys this build reads but does not act on. `role` is reserved
 /// for the build that gives a token a role, so a file written against that
 /// build loads here without a warning about a key on its way in.
@@ -1098,6 +1148,39 @@ mod tests {
         );
         assert!(!message.contains(short), "never the value: {message}");
         check_single_token(&"x".repeat(MIN_SINGLE_TOKEN_BYTES)).expect("the floor itself passes");
+    }
+
+    #[test]
+    fn a_token_carrying_what_a_header_cannot_is_refused_by_class_and_offset() {
+        for (token, class) in [
+            ("sv_first\nsecond_half_of_it", "a newline"),
+            ("sv_two words in a token here", "a space"),
+            ("sv_tab\there_and_more_bytes", "a tab"),
+            ("sv_control\u{1}here_and_more", "a control character"),
+            ("sv_wide\u{e9}_and_more_bytes", "a byte outside ASCII"),
+        ] {
+            let message = check_header_safe(token).expect_err("refused");
+            assert!(message.contains(class), "{token:?}: {message}");
+            assert!(
+                message.contains("`Authorization` header"),
+                "says why: {message}"
+            );
+            assert!(
+                message.contains("0x21 to 0x7e"),
+                "says what a token may hold: {message}"
+            );
+            assert!(!message.contains(token), "never the value: {message}");
+        }
+    }
+
+    #[test]
+    fn every_byte_a_mint_produces_is_one_a_header_can_carry() {
+        let token = mint().expect("the OS CSPRNG is available in a test process");
+        check_header_safe(&token).expect("a minted token is presentable");
+        // The two boundary bytes of the class, and the two just outside it.
+        check_header_safe("!~").expect("the ends of the printable range pass");
+        assert!(check_header_safe(" ").is_err(), "a space is out");
+        assert!(check_header_safe("\u{7f}").is_err(), "delete is out");
     }
 
     #[test]

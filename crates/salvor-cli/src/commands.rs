@@ -2179,6 +2179,14 @@ fn load_client_tool(path: &Path) -> Result<ClientToolDecl> {
 /// file, minted from the OS CSPRNG or, with `--stdin`, read in from another
 /// source.
 ///
+/// An imported value meets two rules a minted one meets by construction: the
+/// 16-byte floor `--auth-token` checks, and the bytes an `Authorization`
+/// header can carry
+/// ([`check_header_safe`](salvor_server::tokens::check_header_safe)). Both are
+/// checked before the entry is appended, because a token file entry is the one
+/// place a value that cannot be presented would sit unnoticed until every
+/// request carrying it was refused at the wire.
+///
 /// Every refusal here is checked before the token itself is obtained, so a
 /// bad name or a bad file never costs a mint or a stdin read: the name's
 /// shape first (the cheapest check), then the file (missing without
@@ -2228,6 +2236,12 @@ pub fn token_new(args: TokenNewArgs) -> Result<u8> {
             .context("reading a token from stdin")?;
         let trimmed = raw.trim_end_matches(['\n', '\r']);
         salvor_server::tokens::check_single_token(trimmed)
+            .map_err(|detail| anyhow!("--stdin: {detail}"))?;
+        // The floor says the value is long enough; this says it can be
+        // presented at all. A value carrying a newline, a tab, a space, or any
+        // other byte outside printable ASCII appends to the file and is then a
+        // credential no request can ever carry, so it is refused here.
+        salvor_server::tokens::check_header_safe(trimmed)
             .map_err(|detail| anyhow!("--stdin: {detail}"))?;
         trimmed.to_owned()
     } else {
