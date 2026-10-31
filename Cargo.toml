@@ -207,7 +207,7 @@ process-wrap = { version = "=9.1.0", features = ["tokio1"] }
 # still needs routine, deliberate bumps: wasmtime has had CVEs, and staying
 # current is part of the sandbox's security story. All of it stays isolated in
 # salvor-wasm, so a bump touches one crate.
-wasmtime = { version = "=46.0.1", default-features = false, features = [
+wasmtime = { version = "=48.0.7", default-features = false, features = [
     # The trimmed feature set for a sync component host: compile (cranelift)
     # and run (runtime) WebAssembly components, with std for file loading.
     # Deliberately absent: async (calls are sync under spawn_blocking), gc,
